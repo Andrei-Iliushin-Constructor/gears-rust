@@ -32,7 +32,8 @@ fn openapi_spec_hash(spec: &str) -> String {
 
 // Re-export all types from contracts - this is the single source of truth
 pub use cf_system_sdks::directory::{
-    DirectoryClient, RegisterInstanceInfo, ServiceEndpoint, ServiceInstanceInfo,
+    DirectoryClient, DirectoryInvalidArgument, DirectoryNotFound, GrpcServiceInfo,
+    RegisterInstanceInfo, ServiceEndpoint, ServiceInstanceInfo,
 };
 
 /// Local implementation of `DirectoryClient` that delegates to `GearManager`
@@ -90,6 +91,14 @@ impl DirectoryClient for LocalDirectoryClient {
                         .map(|ep| ServiceEndpoint::new(ep.uri.clone())),
                     openapi_spec_hash: inst.openapi_spec.as_deref().map(openapi_spec_hash),
                     openapi_spec: inst.openapi_spec.clone(),
+                    // Carry every published gRPC service back so the
+                    // directory-register phase can augment (not clobber) this
+                    // instance when it adds a REST endpoint.
+                    grpc_services: inst
+                        .grpc_services
+                        .iter()
+                        .map(|(name, e)| (name.clone(), ServiceEndpoint::new(e.uri.clone())))
+                        .collect(),
                 });
             }
         }
@@ -131,6 +140,15 @@ impl DirectoryClient for LocalDirectoryClient {
                     // changes and skip the fetch + rebuild when unchanged.
                     openapi_spec_hash: inst.openapi_spec.as_deref().map(openapi_spec_hash),
                     openapi_spec: None,
+                    // Same rationale as `list_instances`: carry the published
+                    // gRPC services so a later register can augment rather than
+                    // clobber them. Available here because this reads the live
+                    // `GearInstance`.
+                    grpc_services: inst
+                        .grpc_services
+                        .iter()
+                        .map(|(name, e)| (name.clone(), ServiceEndpoint::new(e.uri.clone())))
+                        .collect(),
                 }
             })
             .collect();

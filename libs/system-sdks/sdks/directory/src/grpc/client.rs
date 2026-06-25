@@ -304,6 +304,11 @@ fn proto_instance_to_domain(proto: InstanceInfo) -> ServiceInstanceInfo {
         rest_endpoint: proto.rest_endpoint_uri.map(ServiceEndpoint::new),
         openapi_spec: proto.openapi_spec,
         openapi_spec_hash: proto.openapi_spec_hash,
+        // The list-instances proto response does not break the instance down
+        // per gRPC service, so nothing to carry back over the OoP directory
+        // transport. The in-process `LocalDirectoryClient` populates this from
+        // the live `GearInstance`.
+        grpc_services: Vec::new(),
     }
 }
 

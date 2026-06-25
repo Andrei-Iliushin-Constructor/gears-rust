@@ -957,6 +957,7 @@ mod tests {
             rest_endpoint: Some(ServiceEndpoint::new(uri)),
             openapi_spec: None,
             openapi_spec_hash: hash.map(ToOwned::to_owned),
+            grpc_services: Vec::new(),
         }
     }
 
