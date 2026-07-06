@@ -72,7 +72,7 @@ Explicit pub/sub messaging is excluded. The event broker gear provides reliable 
 | ADR | Summary |
 |-----|---------|
 | `cpt-cf-clst-adr-provider-compat-perf` (ADR-001) | Provider compatibility and performance analysis — per-primitive routing as operator config, per-backend characteristics, prefix-based routing, subscriber leases as cache not locks |
-| `cpt-cf-clst-adr-async-boundary-no-remote-critical` (ADR-002) | Async boundary and no remote I/O in critical sections — no-op `Drop` with explicit async release, fencing tokens removed from public API, dylint enforcement (cluster-trait-scoped) |
+| `cpt-cf-clst-adr-async-boundary-no-remote-critical` (ADR-002) | Async boundary and no remote I/O in critical sections — no-op `Drop` with explicit async release, fencing tokens removed from public API, `cargo gears lint` enforcement (cluster-trait-scoped) |
 | `cpt-cf-clst-adr-watch-event-lifecycle-contract` (ADR-003) | Watch event lifecycle contract for all three watches — union-type `*WatchEvent { value-variant, Lagged, Reset, Closed }` instead of `Result`-based signaling, applied to cache, leader, and service-discovery watches; lightweight key-only cache events as the contract twin of `Lagged`/`Reset` |
 | `cpt-cf-clst-adr-observability-contract` (ADR-004) | Observability as a versioned naming contract — spans, metrics, log events are part of the SDK contract; cardinality rule forbids keys/names as metric labels |
 | `cpt-cf-clst-adr-facade-backend-pattern` (ADR-005) | Per-primitive facade-plus-backend-trait pattern, per-primitive `*V1` versioning, no root `Cluster` trait |
@@ -87,8 +87,8 @@ Explicit pub/sub messaging is excluded. The event broker gear provides reliable 
 | NFR Summary | Allocated To | Design Response | Verification Approach |
 |-------------|--------------|-----------------|----------------------|
 | At most one leader per election name (when bound to `Linearizable` cache) | All backends + SDK defaults | Trait contract enforces single-leader guarantee; capability validation rejects `EventuallyConsistent` cache without explicit opt-in | Multi-task contention smoke tests against `MemCacheBackend`; per-backend integration tests in plugin follow-ups |
-| Bounded lock holding (no stale writers) | Consumers + dylint rule | Async + timeouts bound critical section; dylint forbids remote I/O inside `try_lock`/`release` scopes (lint scope is initially restricted to the four cluster backend traits; DB-tx enforcement is a follow-up rule extension) | Dylint rule check; smoke tests for lock release-on-timeout |
-| No serde in contract types | SDK crate | Dylint layer rules enforce no serde in trait definitions | `make check` (dylint lints) |
+| Bounded lock holding (no stale writers) | Consumers + architecture lint rule | Async + timeouts bound critical section; `cargo gears lint` forbids remote I/O inside `try_lock`/`release` scopes (lint scope is initially restricted to the four cluster backend traits; DB-tx enforcement is a follow-up rule extension) | Architecture lint rule check; smoke tests for lock release-on-timeout |
+| No serde in contract types | SDK crate | `cargo gears lint` layer rules enforce no serde in trait definitions | `make check` (architecture lints) |
 | Watch event delivery — at-most-once with per-key ordering and lifecycle signals | All backends | Union-type events (`*WatchEvent`) carry `Lagged{dropped}`, `Reset`, `Closed(err)` so consumers recover from missed events explicitly | Smoke tests across all three watches verifying each variant is observable |
 | Backend trait dyn-compatibility | SDK crate | Compile-time assertions (`fn _assert_dyn_compat(_: Arc<dyn _Backend>) {}`) per trait | Build fails if dyn-compat is broken |
 
@@ -230,13 +230,13 @@ All three watch event types (`CacheWatchEvent`, `LeaderWatchEvent`, `ServiceWatc
 
 - [x] `p1` - **ID**: `cpt-cf-clst-constraint-no-serde`
 
-The `cf-cluster-sdk` crate MUST NOT depend on serde. Serialization concerns belong in plugin implementations. Enforced by dylint lints in the workspace.
+The `cf-cluster-sdk` crate MUST NOT depend on serde. Serialization concerns belong in plugin implementations. Enforced by architecture lints in the workspace.
 
 #### No Remote I/O in Cluster Critical Sections
 
 - [x] `p1` - **ID**: `cpt-cf-clst-constraint-no-remote-in-critical-section`
 
-Code protected by a `LockGuard` MUST NOT make additional remote calls. Remote effects MUST occur before `try_lock` or after `release`, never between them. Together with async + timeouts, this eliminates the Kleppmann fencing scenario at the architectural level. Enforced by a workspace dylint rule scoped to the four cluster backend traits within `try_lock`/`release` scopes; DB-tx enforcement is a follow-up rule extension once the wiring crate and consumer migrations land. See ADR-002.
+Code protected by a `LockGuard` MUST NOT make additional remote calls. Remote effects MUST occur before `try_lock` or after `release`, never between them. Together with async + timeouts, this eliminates the Kleppmann fencing scenario at the architectural level. Enforced by a workspace architecture lint rule scoped to the four cluster backend traits within `try_lock`/`release` scopes; DB-tx enforcement is a follow-up rule extension once the wiring crate and consumer migrations land. See ADR-002.
 
 #### Backend Trait Dyn-Compatibility
 
