@@ -109,7 +109,7 @@ Each functional requirement from the PRD maps to the SDK surface and design sect
 | `cpt-cf-clst-fr-leader-advisory` | Advisory semantics documented on the facade contract (§3.3, §4.1) |
 | `cpt-cf-clst-fr-lock-acquire` | `DistributedLockV1` acquire-or-fail and acquire-with-wait (§3.3) |
 | `cpt-cf-clst-fr-lock-release` | Explicit async release with TTL safety net; no-op `Drop` (§2.2 no-remote-in-critical-section, §3.3) |
-| `cpt-cf-clst-fr-lock-no-remote` | Dylint rule forbidding remote I/O inside lock critical sections (§2.2, §3.10) |
+| `cpt-cf-clst-fr-lock-no-remote` | Architecture lint rule forbidding remote I/O inside lock critical sections (§2.2, §3.10) |
 | `cpt-cf-clst-fr-sd-register` | `ServiceDiscoveryV1` instance registration with metadata (§3.3) |
 | `cpt-cf-clst-fr-sd-discover` | State- and metadata-filtered instance listing (§3.3) |
 | `cpt-cf-clst-fr-sd-watch` | Topology `ServiceDiscoveryWatchEvent` with lifecycle signals (§3.9) |
@@ -135,7 +135,7 @@ Each non-functional requirement from the PRD maps to its design response and ver
 | Requirement | Design Response |
 |-------------|-----------------|
 | `cpt-cf-clst-nfr-leader-guarantee` | Single-leader contract bound to `Linearizable` cache; weak-consistency requires explicit opt-in (§3.10, ADR-009) |
-| `cpt-cf-clst-nfr-bounded-critical-section` | Async + timeouts plus dylint no-remote-I/O rule bound the critical section (§2.2, §3.10) |
+| `cpt-cf-clst-nfr-bounded-critical-section` | Async + timeouts plus architecture lint no-remote-I/O rule bound the critical section (§2.2, §3.10) |
 | `cpt-cf-clst-nfr-watch-delivery` | At-most-once, per-key-ordered delivery with explicit `Lagged`/`Reset`/`Closed` recovery (§3.9, ADR-003) |
 | `cpt-cf-clst-nfr-observability` | Versioned spans/metrics/log-event naming contract; cardinality rule (§3.10, ADR-004) |
 | `cpt-cf-clst-nfr-capability-validation` | Capability requirements validated at resolution/startup (§3.10) |
