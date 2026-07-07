@@ -549,6 +549,31 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}  # Uncomment if required for private repos
 
+  lint:
+    name: Architecture Lints (cargo gears lint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # stable
+        with:
+          toolchain: stable
+
+      - name: Install cargo-gears
+        run: cargo install --locked cargo-gears
+
+      - name: Run architecture lints
+        run: cargo gears lint --dylint
+
   shear:
     name: Unused Deps (cargo-shear)
     needs: changes

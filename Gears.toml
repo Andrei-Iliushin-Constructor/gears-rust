@@ -1,0 +1,18 @@
+# Gears manifest — used by `cargo gears` CLI for linting and other tasks.
+# See https://github.com/constructorfabric/cf-cli for documentation.
+
+[apps.gears-rust.dev]
+config = "lint.yml"
+gears = []
+
+[apps.gears-rust.dev.lint]
+fmt = false       # already handled by `make fmt`
+clippy = false    # already handled by `make clippy`
+
+[apps.gears-rust.dev.lint.dylint]
+enabled = true
+# Lints added in cargo-gears-lints but not yet addressed in this repo.
+# Remove entries as violations are fixed.
+skip = [
+    "de0504_client_versioning",
+]
