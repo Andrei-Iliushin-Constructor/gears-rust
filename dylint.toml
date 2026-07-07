@@ -4,6 +4,12 @@
 
 [cargo-gears-lints]
 
+# DE0708: Non-FIPS hasher allow-list.
+# Paths where direct sha2/sha1/md5 imports are permitted (substring-matched).
+hasher_allowed_paths = [
+    "gears/file-storage/file-storage/src/infra/content/hash.rs",
+]
+
 # DE1101: Tests must be in separate files.
 # Maximum number of inline test lines allowed before the lint enforces splitting
 # into a separate `*_tests.rs` file. Set to 0 to always require separation.
