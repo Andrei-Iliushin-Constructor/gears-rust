@@ -29,6 +29,7 @@ tokio-util = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 rand = { workspace = true }
 cf-gears-standalone-cluster-plugin = { path = "../plugins/standalone-cluster-plugin", version = "0.1.3" }
+cf-postgres-cluster-plugin = { path = "../plugins/postgres-cluster-plugin", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
