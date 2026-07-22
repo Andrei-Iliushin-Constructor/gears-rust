@@ -613,7 +613,6 @@ jobs:
           toolchain: ${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}
           components: llvm-tools-preview,rustc-dev
 
-<<<<<<< HEAD
       # Override rust-toolchain.toml (which pins stable) for all cargo
       # commands in this job.
       - name: Pin nightly for all cargo commands
@@ -639,11 +638,6 @@ jobs:
             echo "sccache failed, falling back to plain rustc"
           fi
 
-      - name: Install dylint-link from source
-        run: cargo install --locked dylint-link
-
-=======
->>>>>>> e7e6a70b (Remove dylint from CI)
       - name: Install cargo-shear
         uses: taiki-e/install-action@6ef672efc2b5aabc787a9e94baf4989aa02a97df # v2.70.3
         with:

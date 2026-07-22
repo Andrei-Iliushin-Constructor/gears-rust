@@ -601,7 +601,7 @@ One platform-wide error vocabulary, aligned with the **16 gRPC categories**:
 - **Type-safe REST** — `OperationBuilder` prevents half-wired routes at compile time
 - **OpenAPI auto-generated** from the same route declarations that run the service
 - **`GET /cw/docs`** live Swagger UI on the example server
-- **Architectural architecture lints** enforce design rules and patterns at build time
+- **Architecture lints** enforce design rules and patterns at build time
 - **Rich docs**: `docs/toolkit_unified_system/` (13 topic files) + per-gear specs
 
 ---
