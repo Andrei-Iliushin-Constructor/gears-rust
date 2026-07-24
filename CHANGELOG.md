@@ -9,6 +9,36 @@ release-plz updates this file in the Release PR.
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/constructorfabric/gears-rust/compare/cf-gears-static-idp-plugin-v0.1.2...cf-gears-static-idp-plugin-v0.1.3) - 2026-07-24
+
+### Added
+
+- *(account-management)* add `update_user` (by @fluiderson)
+
+### Contributors
+
+* @fluiderson
+
+## [0.3.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-account-management-v0.3.0...cf-gears-account-management-v0.3.1) - 2026-07-24
+
+### Added
+
+- *(account-management)* add `update_user` (by @fluiderson)
+
+### Contributors
+
+* @fluiderson
+
+## [0.4.0](https://github.com/constructorfabric/gears-rust/compare/cf-gears-account-management-sdk-v0.3.0...cf-gears-account-management-sdk-v0.4.0) - 2026-07-24
+
+### Added
+
+- *(account-management)* add `update_user` (by @fluiderson)
+
+### Contributors
+
+* @fluiderson
+
 ## [0.1.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-noop-usage-collector-plugin-v0.1.0...cf-gears-noop-usage-collector-plugin-v0.1.1) - 2026-07-24
 
 ### Added
