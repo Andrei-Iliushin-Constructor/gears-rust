@@ -9,6 +9,90 @@ release-plz updates this file in the Release PR.
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-noop-usage-collector-plugin-v0.1.1...cf-gears-noop-usage-collector-plugin-v0.1.2) - 2026-07-27
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit, cf-gears-types-registry, cf-gears-usage-collector-sdk
+
+## [0.2.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-usage-collector-v0.2.0...cf-gears-usage-collector-v0.2.1) - 2026-07-27
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit, cf-gears-authz-resolver-sdk, cf-gears-types-registry, cf-gears-authz-resolver, cf-gears-usage-collector-sdk
+
+## [0.2.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-usage-collector-sdk-v0.2.0...cf-gears-usage-collector-sdk-v0.2.1) - 2026-07-27
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit
+
+## [0.1.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-cluster-conformance-v0.1.0...cf-gears-cluster-conformance-v0.1.1) - 2026-07-27
+
+### Other
+
+- updated the following local packages: cf-gears-cluster-sdk
+
+## [0.1.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-cluster-v0.1.0...cf-gears-cluster-v0.1.1) - 2026-07-27
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit, cf-gears-cluster-sdk, cf-gears-standalone-cluster-plugin
+
+## [0.1.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-standalone-cluster-plugin-v0.1.0...cf-gears-standalone-cluster-plugin-v0.1.1) - 2026-07-27
+
+### Other
+
+- updated the following local packages: cf-gears-cluster-sdk
+
+## [0.1.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-cluster-sdk-v0.1.0...cf-gears-cluster-sdk-v0.1.1) - 2026-07-27
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit
+
+## [0.1.6](https://github.com/constructorfabric/gears-rust/compare/cf-gears-tr-authz-plugin-v0.1.5...cf-gears-tr-authz-plugin-v0.1.6) - 2026-07-27
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit, cf-gears-tenant-resolver-sdk, cf-gears-authz-resolver-sdk, cf-gears-types-registry, cf-gears-tenant-resolver
+
+## [0.1.24](https://github.com/constructorfabric/gears-rust/compare/cf-gears-static-tr-plugin-v0.1.23...cf-gears-static-tr-plugin-v0.1.24) - 2026-07-27
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit, cf-gears-tenant-resolver-sdk, cf-gears-types-registry
+
+## [0.1.21](https://github.com/constructorfabric/gears-rust/compare/cf-gears-static-credstore-plugin-v0.1.20...cf-gears-static-credstore-plugin-v0.1.21) - 2026-07-27
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit, cf-gears-types-registry, cf-gears-credstore-sdk
+
+## [0.1.23](https://github.com/constructorfabric/gears-rust/compare/cf-gears-static-authz-plugin-v0.1.22...cf-gears-static-authz-plugin-v0.1.23) - 2026-07-27
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit, cf-gears-authz-resolver-sdk, cf-gears-types-registry
+
+## [0.3.3](https://github.com/constructorfabric/gears-rust/compare/cf-gears-static-authn-plugin-v0.3.2...cf-gears-static-authn-plugin-v0.3.3) - 2026-07-27
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit, cf-gears-types-registry, cf-gears-authn-resolver-sdk
+
+## [0.1.25](https://github.com/constructorfabric/gears-rust/compare/cf-gears-single-tenant-tr-plugin-v0.1.24...cf-gears-single-tenant-tr-plugin-v0.1.25) - 2026-07-27
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit, cf-gears-tenant-resolver-sdk, cf-gears-types-registry
+
+## [0.1.6](https://github.com/constructorfabric/gears-rust/compare/cf-gears-rg-tr-plugin-v0.1.5...cf-gears-rg-tr-plugin-v0.1.6) - 2026-07-27
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit, cf-gears-resource-group, cf-gears-tenant-resolver-sdk, cf-gears-types-registry
+
 ## [0.1.3](https://github.com/constructorfabric/gears-rust/compare/cf-gears-static-idp-plugin-v0.1.2...cf-gears-static-idp-plugin-v0.1.3) - 2026-07-24
 
 ### Added
