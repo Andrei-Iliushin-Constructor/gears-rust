@@ -204,7 +204,14 @@ setup: .setup-stamp
 # |             | - Use 'make dylint-list' to see all available custom lints           |
 # +-------------+----------------------------------------------------------------------+
 
-.PHONY: fmt clippy clippy-deep lychee docs-preview kani geiger safety lint dylint dylint-list dylint-test shear gts-docs cfs-ensure cfs-repair cfs-validate cfs-validate-kits cfs-validate-kit-local cfs-spec-coverage
+.PHONY: fmt clippy clippy-deep lychee docs-preview kani geiger safety lint dylint dylint-list dylint-test shear gts-docs cfs-ensure cfs-repair cfs-validate cfs-validate-kits cfs-validate-kit-local cfs-spec-coverage ensure-submodules
+
+## Initialize/update git submodules (e.g. guidelines/DNA) if not already checked out.
+ensure-submodules:
+	@if git submodule status --recursive 2>/dev/null | grep -q '^-'; then \
+		echo "Uninitialized git submodules detected; running 'git submodule update --init --recursive'..."; \
+		git submodule update --init --recursive; \
+	fi
 
 # Check code formatting
 fmt:
@@ -246,7 +253,7 @@ clippy-deep:
 	cargo hack clippy --workspace --all-targets --each-feature $(CLIPPY_FLAGS)
 
 # Run markdown checks with 'lychee'
-lychee:
+lychee: ensure-submodules
 	$(call check_tool,lychee)
 	lychee --exclude-path 'docs/web-docs' docs examples tools/dylint_lints guidelines
 
