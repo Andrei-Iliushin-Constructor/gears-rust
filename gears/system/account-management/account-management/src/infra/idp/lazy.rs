@@ -52,7 +52,8 @@ use std::sync::Arc;
 use account_management_sdk::{
     IdpDeprovisionFailure, IdpDeprovisionTenantRequest, IdpDeprovisionUserRequest,
     IdpListUsersRequest, IdpPluginClient, IdpPluginSpecV1, IdpProvisionFailure, IdpProvisionResult,
-    IdpProvisionTenantRequest, IdpProvisionUserRequest, IdpUser, IdpUserOperationFailure,
+    IdpProvisionTenantRequest, IdpProvisionUserRequest, IdpUpdateUserRequest, IdpUser,
+    IdpUserOperationFailure,
 };
 use async_trait::async_trait;
 use toolkit::ClientHub;
@@ -254,6 +255,26 @@ impl IdpPluginClient for LazyIdpProvider {
             })
         } else {
             self.fallback.deprovision_user(ctx, req).await
+        }
+    }
+
+    async fn update_user(
+        &self,
+        ctx: &SecurityContext,
+        req: &IdpUpdateUserRequest,
+    ) -> Result<IdpUser, IdpUserOperationFailure> {
+        if let Some(plugin) = self.resolve().await {
+            return plugin.update_user(ctx, req).await;
+        }
+        if self.required {
+            Err(IdpUserOperationFailure::Unavailable {
+                detail: format!(
+                    "idp provider plugin (vendor `{}`) not yet resolvable",
+                    self.vendor
+                ),
+            })
+        } else {
+            self.fallback.update_user(ctx, req).await
         }
     }
 
