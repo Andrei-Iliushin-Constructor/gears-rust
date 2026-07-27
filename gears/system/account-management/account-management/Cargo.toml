@@ -84,9 +84,9 @@ authz-resolver = { workspace = true }
 [features]
 # Gates the Postgres-backed real-DB integration tests. Disabled by
 # default because they spin up a `testcontainers` Docker container
-# per test; enable with `--features postgres` when Docker is
+# per test; enable with `--features integration` when Docker is
 # available locally or in CI.
-postgres = []
+integration = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
@@ -105,7 +105,7 @@ opentelemetry_sdk = { workspace = true, features = ["testing"] }
 # Postgres bring-up for the integration suite. Pulled in
 # unconditionally because `[dev-dependencies]` cannot be made
 # `optional`, but every reference to these crates is gated behind
-# `#[cfg(feature = "postgres")]` so a default `cargo test` does
+# `#[cfg(feature = "integration")]` so a default `cargo test` does
 # not require Docker.
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }

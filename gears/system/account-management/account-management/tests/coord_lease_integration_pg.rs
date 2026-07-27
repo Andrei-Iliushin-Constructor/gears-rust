@@ -23,12 +23,12 @@
 //!   `SQLite` single-writer interference that would block the
 //!   heartbeat behind any in-flight writer-tx.
 //!
-//! Gated behind `#[cfg(feature = "postgres")]` so the default
+//! Gated behind `#[cfg(feature = "integration")]` so the default
 //! `cargo test` run does not require Docker. Enable explicitly:
-//! `cargo test -p cf-gears-account-management --features postgres
+//! `cargo test -p cf-gears-account-management --features integration
 //!  --test coord_lease_integration_pg`.
 
-#![cfg(feature = "postgres")]
+#![cfg(feature = "integration")]
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![cfg_attr(coverage_nightly, coverage(off))]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
