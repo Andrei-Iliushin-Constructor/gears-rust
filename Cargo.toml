@@ -44,6 +44,7 @@ members = [
     "libs/toolkit-security",
     "libs/toolkit-odata",
     "libs/toolkit-node-info",
+    "libs/toolkit-stable-hash",
     "libs/toolkit-transport-grpc",
     "libs/toolkit-utils",
     "libs/rustls-corecrypto-provider",
@@ -108,6 +109,7 @@ members = [
     "gears/bss/ledger/ledger",
     "gears/bss/ledger/ledger-sdk",
     "gears/bss/libs/coord",
+    "gears/system/event-broker/event-broker-sdk",
 ]
 exclude = ["tools/fuzz"]
 resolver = "3"
@@ -256,6 +258,7 @@ toolkit-odata = { package = "cf-gears-toolkit-odata", version = "0.8.3", path = 
 toolkit-odata-macros = { package = "cf-gears-toolkit-odata-macros", version = "0.6.8", path = "libs/toolkit-odata-macros" }
 toolkit-sdk = { package = "cf-gears-toolkit-sdk", version = "0.7.1", path = "libs/toolkit-sdk" }
 toolkit-security = { package = "cf-gears-toolkit-security", version = "0.7.3", path = "libs/toolkit-security" }
+toolkit-stable-hash = { package = "cf-gears-toolkit-stable-hash", version = "0.1.0", path = "libs/toolkit-stable-hash" }
 toolkit-transport-grpc = { package = "cf-gears-toolkit-transport-grpc", version = "0.7.0", path = "libs/toolkit-transport-grpc" }
 toolkit-utils = { package = "cf-gears-toolkit-utils", version = "0.6.4", path = "libs/toolkit-utils" }
 rustls-corecrypto-provider = { package = "cf-gears-rustls-corecrypto-provider", version = "0.1.1", path = "libs/rustls-corecrypto-provider" }
@@ -602,7 +605,7 @@ gts = "0.11.0"
 gts-macros = "0.11.0"
 
 [workspace.metadata.cargo-shear]
-ignored-paths = ["**/tests/ui/**"]
+ignored-paths = ["**/tests/ui/**", "**/tests/trybuild/**"]
 # Gear crate deps only consumed by macro-generated re-exports in #[toolkit::gear(deps = [...])].
 # cargo-shear cannot trace usage through proc-macro expansion, so these appear unused.
 ignored = [
