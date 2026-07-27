@@ -34,6 +34,14 @@ logs
 # Code coverage reports
 /coverage/
 
+# Frontend build artifacts (apps/admin-panel SPA); unanchored, so they match at any depth
+# npm dependency tree
+node_modules/
+# Vite build output (outDir: "dist")
+dist/
+# tsc -b incremental cache
+*.tsbuildinfo
+
 # Fuzzing artifacts
 /fuzz/target/
 /fuzz/artifacts/
