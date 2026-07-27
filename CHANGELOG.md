@@ -36,6 +36,53 @@ release-plz updates this file in the Release PR.
 
 * @Qilin101
 
+## [0.2.0](https://github.com/constructorfabric/gears-rust/compare/cf-gears-static-credstore-plugin-v0.1.21...cf-gears-static-credstore-plugin-v0.2.0) - 2026-07-27
+
+### Added
+
+- *(credstore)* stateful credential-storage gear with registry-driven secret types (by @diffora)
+
+### Contributors
+
+* @diffora
+
+## [0.4.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-account-management-v0.4.0...cf-gears-account-management-v0.4.1) - 2026-07-27
+
+### Other
+
+- Merge pull request #4273 from constructorfabric/release-plz-2026-07-27T11-40-22Z (by @Artifizer) - #4273
+
+### Contributors
+
+* @Artifizer
+
+## [0.1.0](https://github.com/constructorfabric/gears-rust/releases/tag/cf-gears-event-broker-sdk-v0.1.0) - 2026-07-27
+
+### Other
+
+- *(event-broker)* gear design + SDK (by @striped-zebra-dev)
+
+### Contributors
+
+* @striped-zebra-dev
+
+## [0.1.0](https://github.com/constructorfabric/gears-rust/releases/tag/cf-gears-llm-gateway-sdk-v0.1.0) - 2026-07-27
+
+### Added
+
+- *(llm-gateway)* Add llm-gateway sdk (by @Qilin101)
+
+### Other
+
+- Fix linters (by @Qilin101) - #4236
+- Fix review comments (by @Qilin101) - #4236
+- Fix gts_id usage (by @Qilin101) - #4236
+- mass renaming - Cyber Fabric -> Constructor Fabric
+
+### Contributors
+
+* @Qilin101
+
 ## [0.1.0](https://github.com/constructorfabric/gears-rust/releases/tag/cf-gears-toolkit-stable-hash-v0.1.0) - 2026-07-27
 
 ### Other
