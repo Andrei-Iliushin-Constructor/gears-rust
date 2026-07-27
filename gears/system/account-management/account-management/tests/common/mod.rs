@@ -13,7 +13,7 @@
 //!   dangling closure rows) are reachable via plain `SecureORM`
 //!   inserts without DDL acrobatics.
 //! * [`pg::bring_up_postgres`] — real Postgres via `testcontainers`,
-//!   gated behind `#[cfg(feature = "postgres")]`. The Postgres schema
+//!   gated behind `#[cfg(feature = "integration")]`. The Postgres schema
 //!   enforces FKs, the `ux_tenants_single_root` partial unique index,
 //!   and `ck_tenants_root_depth`, so seeding deliberately-broken
 //!   shapes requires the DDL-bypass helpers in [`pg`]. The auxiliary
@@ -1336,12 +1336,12 @@ pub async fn seed_active_child(
 // Postgres bring-up (testcontainers).
 // ---------------------------------------------------------------------
 //
-// Gated behind `#[cfg(feature = "postgres")]` because pulling up a
+// Gated behind `#[cfg(feature = "integration")]` because pulling up a
 // container per test requires Docker on the host and is therefore not
 // part of the default test run. Enable explicitly with
-// `cargo test -p cf-gears-account-management --features postgres ...`.
+// `cargo test -p cf-gears-account-management --features integration ...`.
 
-#[cfg(feature = "postgres")]
+#[cfg(feature = "integration")]
 pub mod pg {
     //! Postgres `testcontainers` harness. Mirrors the in-memory
     //! `SQLite` shape (`provider`, `repo`) and adds an auxiliary

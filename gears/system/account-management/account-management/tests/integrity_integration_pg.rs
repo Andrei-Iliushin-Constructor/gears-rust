@@ -38,12 +38,12 @@
 //! file and are NOT duplicated here — running them on Postgres would
 //! just cost a container per case without surfacing new behaviour.
 //!
-//! Gated behind `#[cfg(feature = "postgres")]` so the default
+//! Gated behind `#[cfg(feature = "integration")]` so the default
 //! `cargo test` run does not require Docker. Enable explicitly:
-//! `cargo test -p cf-gears-account-management --features postgres
+//! `cargo test -p cf-gears-account-management --features integration
 //!  --test integrity_integration_pg`.
 
-#![cfg(feature = "postgres")]
+#![cfg(feature = "integration")]
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![cfg_attr(coverage_nightly, coverage(off))]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
