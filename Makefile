@@ -301,7 +301,7 @@ NEXTEST_MIN_VERSION := 0.9.130
 
 install-tools:
 	@NEXTEST_VERSION=$$(cargo nextest --version 2>/dev/null | awk '/^cargo-nextest/ {print $$2}'); \
-	if [ -z "$$NEXTEST_VERSION" ] || [ "$$(printf '%s\n%s\n' "$(NEXTEST_MIN_VERSION)" "$$NEXTEST_VERSION" | sort -V | head -n1)" != "$(NEXTEST_MIN_VERSION)" ]; then \
+	if [ -z "$$NEXTEST_VERSION" ] || ! $(PYTHON) -c "import sys; sys.exit(0 if tuple(map(int, '$$NEXTEST_VERSION'.split('.'))) >= tuple(map(int, '$(NEXTEST_MIN_VERSION)'.split('.'))) else 1)" 2>/dev/null; then \
 		echo "Installing/upgrading cargo-nextest (>= $(NEXTEST_MIN_VERSION) required for CARGO_BIN_EXE_* support)..."; \
 		cargo install --locked cargo-nextest; \
 	fi
