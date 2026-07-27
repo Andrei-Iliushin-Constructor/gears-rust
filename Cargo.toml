@@ -288,9 +288,9 @@ authn-resolver = { package = "cf-gears-authn-resolver", version = "0.2.20", path
 authz-resolver = { package = "cf-gears-authz-resolver", version = "0.1.27", path = "gears/system/authz-resolver/authz-resolver" }
 tenant-resolver = { package = "cf-gears-tenant-resolver", version = "0.1.24", path = "gears/system/tenant-resolver/tenant-resolver" }
 resource-group = { package = "cf-gears-resource-group", version = "0.2.1", path = "gears/system/resource-group/resource-group" }
-credstore = { package = "cf-gears-credstore", version = "0.1.26", path = "gears/credstore/credstore" }
-oagw = { package = "cf-gears-oagw", version = "0.3.0", path = "gears/system/oagw/oagw" }
-account-management = { package = "cf-gears-account-management", version = "0.4.0", path = "gears/system/account-management/account-management" }
+credstore = { package = "cf-gears-credstore", version = "0.2.0", path = "gears/credstore/credstore" }
+oagw = { package = "cf-gears-oagw", version = "0.3.1", path = "gears/system/oagw/oagw" }
+account-management = { package = "cf-gears-account-management", version = "0.4.1", path = "gears/system/account-management/account-management" }
 usage-collector = { package = "cf-gears-usage-collector", version = "0.2.1", path = "gears/system/usage-collector/usage-collector" }
 
 cf-gears-cluster-sdk = { version = "0.1.1", path = "gears/system/cluster/cluster-sdk" }
@@ -313,7 +313,7 @@ coord = { path = "gears/bss/libs/coord" }
 aws-lc-rs = "1.17"
 
 # credstore
-credstore-sdk = { package = "cf-gears-credstore-sdk", version = "0.1.28", path = "gears/credstore/credstore-sdk" }
+credstore-sdk = { package = "cf-gears-credstore-sdk", version = "0.2.0", path = "gears/credstore/credstore-sdk" }
 
 # mini-chat
 mini-chat-sdk = { package = "cf-gears-mini-chat-sdk", version = "0.10.10", path = "gears/mini-chat/mini-chat-sdk" }
