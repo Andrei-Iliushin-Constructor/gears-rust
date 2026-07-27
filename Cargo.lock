@@ -1382,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "cf-chat-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1515,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-api-gateway"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1560,7 +1560,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-authn-resolver"
-version = "0.2.19"
+version = "0.2.20"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-authn-resolver-sdk"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit",
@@ -1595,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-authz-resolver"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1614,7 +1614,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-authz-resolver-sdk"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "async-trait",
  "cf-gears-tenant-resolver-sdk",
@@ -1634,7 +1634,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-cluster"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1656,7 +1656,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-cluster-conformance"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "cf-gears-cluster-sdk",
@@ -1667,7 +1667,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-cluster-sdk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit",
@@ -1686,7 +1686,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-credstore"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1709,7 +1709,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-credstore-sdk"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "async-trait",
  "cf-gears-tenant-resolver-sdk",
@@ -1770,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-file-parser"
-version = "0.1.29"
+version = "0.1.30"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1873,7 +1873,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-gear-orchestrator"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1895,7 +1895,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-grpc-hub"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1919,7 +1919,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-mini-chat"
-version = "0.1.33"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1975,7 +1975,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-mini-chat-sdk"
-version = "0.10.9"
+version = "0.10.10"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit",
@@ -2009,7 +2009,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-nodes-registry"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2044,7 +2044,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-noop-usage-collector-plugin"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2066,7 +2066,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-oagw"
-version = "0.2.28"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2157,7 +2157,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-oidc-authn-plugin"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2197,7 +2197,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-resource-group"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2253,7 +2253,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-rg-tr-plugin"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2349,7 +2349,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-single-tenant-tr-plugin"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2368,7 +2368,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-standalone-cluster-plugin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "cf-gears-cluster-sdk",
@@ -2381,7 +2381,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-static-authn-plugin"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2401,7 +2401,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-static-authz-plugin"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2422,7 +2422,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-static-credstore-plugin"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2467,7 +2467,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-static-tr-plugin"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2486,7 +2486,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-system-sdk-directory"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2501,14 +2501,14 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-system-sdks"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "cf-gears-system-sdk-directory",
 ]
 
 [[package]]
 name = "cf-gears-tenant-resolver"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2529,7 +2529,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-tenant-resolver-sdk"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit",
@@ -2545,7 +2545,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2664,7 +2664,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-db"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2900,7 +2900,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-transport-grpc"
-version = "0.6.7"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "cf-gears-toolkit-security",
@@ -2928,7 +2928,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-tr-authz-plugin"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2951,7 +2951,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-types-registry"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2990,7 +2990,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-usage-collector"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3026,7 +3026,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-usage-collector-sdk"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "bigdecimal",
