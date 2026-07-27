@@ -1437,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-account-management"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2036,7 +2036,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-model-registry-sdk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit-gts",

@@ -9,6 +9,53 @@ release-plz updates this file in the Release PR.
 
 ## [Unreleased]
 
+## [0.1.0](https://github.com/constructorfabric/gears-rust/releases/tag/cf-gears-event-broker-sdk-v0.1.0) - 2026-07-27
+
+### Other
+
+- *(event-broker)* gear design + SDK (by @striped-zebra-dev)
+
+### Contributors
+
+* @striped-zebra-dev
+
+## [0.1.0](https://github.com/constructorfabric/gears-rust/releases/tag/cf-gears-llm-gateway-sdk-v0.1.0) - 2026-07-27
+
+### Added
+
+- *(llm-gateway)* Add llm-gateway sdk (by @Qilin101)
+
+### Other
+
+- Fix linters (by @Qilin101) - #4236
+- Fix review comments (by @Qilin101) - #4236
+- Fix gts_id usage (by @Qilin101) - #4236
+- mass renaming - Cyber Fabric -> Constructor Fabric
+
+### Contributors
+
+* @Qilin101
+
+## [0.1.0](https://github.com/constructorfabric/gears-rust/releases/tag/cf-gears-toolkit-stable-hash-v0.1.0) - 2026-07-27
+
+### Other
+
+- *(event-broker)* gear design + SDK (by @striped-zebra-dev)
+
+### Contributors
+
+* @striped-zebra-dev
+
+## [0.4.0](https://github.com/constructorfabric/gears-rust/compare/cf-gears-account-management-v0.3.1...cf-gears-account-management-v0.4.0) - 2026-07-27
+
+### Other
+
+- *(account-management)* rename the postgres test feature to integration (by @ffedoroff)
+
+### Contributors
+
+* @ffedoroff
+
 ## [0.1.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-noop-usage-collector-plugin-v0.1.1...cf-gears-noop-usage-collector-plugin-v0.1.2) - 2026-07-27
 
 ### Other
