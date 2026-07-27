@@ -290,7 +290,7 @@ tenant-resolver = { package = "cf-gears-tenant-resolver", version = "0.1.24", pa
 resource-group = { package = "cf-gears-resource-group", version = "0.2.1", path = "gears/system/resource-group/resource-group" }
 credstore = { package = "cf-gears-credstore", version = "0.1.26", path = "gears/credstore/credstore" }
 oagw = { package = "cf-gears-oagw", version = "0.3.0", path = "gears/system/oagw/oagw" }
-account-management = { package = "cf-gears-account-management", version = "0.3.1", path = "gears/system/account-management/account-management" }
+account-management = { package = "cf-gears-account-management", version = "0.4.0", path = "gears/system/account-management/account-management" }
 usage-collector = { package = "cf-gears-usage-collector", version = "0.2.1", path = "gears/system/usage-collector/usage-collector" }
 
 cf-gears-cluster-sdk = { version = "0.1.1", path = "gears/system/cluster/cluster-sdk" }
