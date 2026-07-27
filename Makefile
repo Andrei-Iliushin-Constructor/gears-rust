@@ -295,8 +295,16 @@ gts-docs:
 		--exclude "**/helm/*/templates/*" \
 		docs gears libs examples
 
+# cli_smoke_tests.rs / migrate_command_tests.rs rely on CARGO_BIN_EXE_<name> being
+# set at test runtime, which cargo-nextest only supports from 0.9.130 onward.
+NEXTEST_MIN_VERSION := 0.9.130
+
 install-tools:
-	@command -v cargo-nextest >/dev/null 2>&1 || cargo install --locked cargo-nextest
+	@NEXTEST_VERSION=$$(cargo nextest --version 2>/dev/null | awk '/^cargo-nextest/ {print $$2}'); \
+	if [ -z "$$NEXTEST_VERSION" ] || [ "$$(printf '%s\n%s\n' "$(NEXTEST_MIN_VERSION)" "$$NEXTEST_VERSION" | sort -V | head -n1)" != "$(NEXTEST_MIN_VERSION)" ]; then \
+		echo "Installing/upgrading cargo-nextest (>= $(NEXTEST_MIN_VERSION) required for CARGO_BIN_EXE_* support)..."; \
+		cargo install --locked cargo-nextest; \
+	fi
 
 ## List all custom project compliance lints (see tools/dylint_lints/README.md)
 dylint-list:
