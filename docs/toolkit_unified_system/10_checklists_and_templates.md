@@ -322,6 +322,7 @@ async fn main() -> anyhow::Result<()> {
         verbose: 0,
         print_config: false,
         heartbeat_interval_secs: 5,
+        version: None,
     };
 
     run_oop_with_options(opts).await
