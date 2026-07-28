@@ -1,7 +1,7 @@
 [package]
 name = "cf-gears-oagw"
 description = "OAGW module - discovers and routes to plugins"
-version = "0.2.28"
+version = "0.3.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -21,6 +21,7 @@ path = "src/lib.rs"
 fips = ["toolkit-http/fips"]
 test-utils = [
     "axum/ws",
+    "credstore-sdk/test-util",
     "toolkit/bootstrap",
     "dep:async-stream",
     "dep:tower",
@@ -95,6 +96,7 @@ rcgen = { workspace = true, optional = true }
 
 [dev-dependencies]
 cf-gears-oagw = { path = ".", features = ["test-utils"] }
+credstore-sdk = { workspace = true, features = ["test-util"] }
 toolkit = { workspace = true, features = ["bootstrap"] }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 types-registry-sdk = { workspace = true, features = ["test-util"] }

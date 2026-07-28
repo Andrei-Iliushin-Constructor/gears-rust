@@ -10,12 +10,12 @@
 //! `dod-tenant-metadata-cascade-delete` end-to-end on the production
 //! engine.
 //!
-//! Gated behind `#[cfg(feature = "postgres")]` so the default
+//! Gated behind `#[cfg(feature = "integration")]` so the default
 //! `cargo test` run does not require Docker. Enable explicitly:
-//! `cargo test -p cf-account-management --features postgres
+//! `cargo test -p cf-account-management --features integration
 //!  --test metadata_integration_pg`.
 
-#![cfg(feature = "postgres")]
+#![cfg(feature = "integration")]
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![cfg_attr(coverage_nightly, coverage(off))]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::too_many_lines)]
