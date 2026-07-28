@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use toolkit_security::SecurityContext;
 
-use crate::api::{EventBroker, ProducerMode};
+use crate::api::{EventBrokerApi, ProducerMode};
 use crate::error::EventBrokerError;
 use crate::ids::ProducerId;
 use crate::models::{ProducerMeta, ResetScope};
@@ -33,7 +33,7 @@ pub struct DbProducerBuilder<
     Topics = Missing,
     Patterns = Missing,
 > {
-    broker: Option<Arc<dyn EventBroker>>,
+    broker: Option<Arc<dyn EventBrokerApi>>,
     db: Option<toolkit_db::Db>,
     ctx: Option<SecurityContext>,
     identity: Option<ProducerIdentity>,
@@ -62,7 +62,10 @@ impl DbProducerBuilder {
 
 impl<B, Db, C, I, D, T, P> DbProducerBuilder<B, Db, C, I, D, T, P> {
     #[must_use]
-    pub fn broker(self, broker: Arc<dyn EventBroker>) -> DbProducerBuilder<Has, Db, C, I, D, T, P> {
+    pub fn broker(
+        self,
+        broker: Arc<dyn EventBrokerApi>,
+    ) -> DbProducerBuilder<Has, Db, C, I, D, T, P> {
         DbProducerBuilder {
             broker: Some(broker),
             db: self.db,
@@ -263,7 +266,7 @@ impl DbProducerBuilder<Has, Has, Has, Has, Has, Has, Has> {
 
 #[derive(Clone)]
 pub struct DbProducer {
-    pub(crate) broker: Arc<dyn EventBroker>,
+    pub(crate) broker: Arc<dyn EventBrokerApi>,
     pub(crate) ctx: SecurityContext,
     pub(crate) identity: ProducerIdentity,
     pub(crate) deduplication: DbDeduplication,
@@ -483,7 +486,7 @@ pub enum UnknownProducerAction {
 }
 
 async fn resolve_managed_registration(
-    broker: &Arc<dyn EventBroker>,
+    broker: &Arc<dyn EventBrokerApi>,
     ctx: &SecurityContext,
     store: &ProducerRegistrationStore,
     managed: &super::types::ManagedDeduplication,
