@@ -248,7 +248,7 @@ clippy-deep:
 # Run markdown checks with 'lychee'
 lychee:
 	$(call check_tool,lychee)
-	lychee --exclude-path 'docs/web-docs' docs examples tools/dylint_lints guidelines
+	lychee --exclude-path 'docs/web-docs' docs examples tools/dylint_lints guidelines gears/system/event-broker/docs
 
 ## Validate internal links in web-docs.
 # The web-docs pages use Starlight route-relative links (e.g. ../foo/) that only

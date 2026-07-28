@@ -726,7 +726,7 @@ async fn routed_dispatch_retry_does_not_advance_past_earlier_unprocessed_event()
 #[cfg(feature = "test-util")]
 #[tokio::test]
 async fn runtime_dispatch_never_mixes_topics_or_partitions_in_handler_batches() {
-    use crate::EventBroker;
+    use crate::EventBrokerApi;
     use crate::mock::stubs::test_ctx_for_tenant;
     use crate::mock::{MockBroker, MockBrokerHandle};
     use crate::models::Event;
@@ -762,7 +762,7 @@ async fn runtime_dispatch_never_mixes_topics_or_partitions_in_handler_batches() 
         .set_heartbeat_interval(Duration::from_millis(10))
         .await;
 
-    let broker: Arc<dyn EventBroker> = Arc::new(mock);
+    let broker: Arc<dyn EventBrokerApi> = Arc::new(mock);
     let ctx = test_ctx_for_tenant(Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap());
     let recorder = BatchScopeRecorder::default();
     let scopes = recorder.scopes.clone();
@@ -839,7 +839,7 @@ async fn runtime_dispatch_never_mixes_topics_or_partitions_in_handler_batches() 
 #[cfg(feature = "test-util")]
 #[tokio::test]
 async fn parallelism_creates_independent_slots_with_shared_group_and_interests() {
-    use crate::EventBroker;
+    use crate::EventBrokerApi;
     use crate::ids::ConsumerGroupId;
     use crate::mock::{MockBroker, MockBrokerHandle};
     use std::collections::{BTreeSet, HashSet};
@@ -857,7 +857,7 @@ async fn parallelism_creates_independent_slots_with_shared_group_and_interests()
         .await;
 
     let group = ConsumerGroupId::from_gts(GROUP);
-    let broker: Arc<dyn EventBroker> = Arc::new(mock);
+    let broker: Arc<dyn EventBrokerApi> = Arc::new(mock);
     let handle = ConsumerBuilder::new(broker)
         .group(ConsumerGroupRef::id(group))
         .topics([TOPIC])
@@ -939,7 +939,7 @@ async fn wait_for_parallel_assignments(
 #[cfg(feature = "test-util")]
 #[tokio::test]
 async fn slow_detection_emits_listener_events_and_drops_subscription_stream() {
-    use crate::EventBroker;
+    use crate::EventBrokerApi;
     use crate::mock::stubs::test_ctx_for_tenant;
     use crate::mock::{MockBroker, MockBrokerHandle};
     use crate::models::Event;
@@ -962,7 +962,7 @@ async fn slow_detection_emits_listener_events_and_drops_subscription_stream() {
         .set_heartbeat_interval(Duration::from_millis(10))
         .await;
 
-    let broker: Arc<dyn EventBroker> = Arc::new(mock);
+    let broker: Arc<dyn EventBrokerApi> = Arc::new(mock);
     let ctx = test_ctx_for_tenant(Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap());
     let listener = RecordingRuntimeListener::default();
     let recorded = listener.events.clone();
@@ -1084,7 +1084,7 @@ async fn slow_detection_emits_listener_events_and_drops_subscription_stream() {
 #[cfg(feature = "test-util")]
 #[tokio::test]
 async fn slow_drop_reports_other_assignments_owned_by_same_subscription_slot() {
-    use crate::EventBroker;
+    use crate::EventBrokerApi;
     use crate::mock::stubs::test_ctx_for_tenant;
     use crate::mock::{MockBroker, MockBrokerHandle};
     use crate::models::Event;
@@ -1109,7 +1109,7 @@ async fn slow_drop_reports_other_assignments_owned_by_same_subscription_slot() {
         .set_heartbeat_interval(Duration::from_millis(10))
         .await;
 
-    let broker: Arc<dyn EventBroker> = Arc::new(mock);
+    let broker: Arc<dyn EventBrokerApi> = Arc::new(mock);
     let ctx = test_ctx_for_tenant(Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap());
     let listener = RecordingRuntimeListener::default();
     let recorded = listener.events.clone();
@@ -1210,7 +1210,7 @@ async fn wait_for_slow_drop_affected_assignments(
 #[cfg(feature = "test-util")]
 #[tokio::test]
 async fn runtime_listener_observes_representative_non_dlq_event_variants() {
-    use crate::EventBroker;
+    use crate::EventBrokerApi;
     use crate::mock::stubs::test_ctx_for_tenant;
     use crate::mock::{MockBroker, MockBrokerHandle};
     use crate::models::Event;
@@ -1234,7 +1234,7 @@ async fn runtime_listener_observes_representative_non_dlq_event_variants() {
         .set_heartbeat_interval(Duration::from_millis(10))
         .await;
 
-    let broker: Arc<dyn EventBroker> = Arc::new(mock);
+    let broker: Arc<dyn EventBrokerApi> = Arc::new(mock);
     let ctx = test_ctx_for_tenant(Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap());
     let listener = RecordingRuntimeListener::default();
     let recorded = listener.events.clone();
@@ -1348,7 +1348,7 @@ async fn wait_for_runtime_event_kinds(
 #[cfg(feature = "test-util")]
 #[tokio::test]
 async fn listener_failure_does_not_commit_drop_or_stop_consumer_events() {
-    use crate::EventBroker;
+    use crate::EventBrokerApi;
     use crate::mock::stubs::test_ctx_for_tenant;
     use crate::mock::{MockBroker, MockBrokerHandle};
     use crate::models::Event;
@@ -1372,7 +1372,7 @@ async fn listener_failure_does_not_commit_drop_or_stop_consumer_events() {
         .set_heartbeat_interval(Duration::from_millis(10))
         .await;
 
-    let broker: Arc<dyn EventBroker> = Arc::new(mock);
+    let broker: Arc<dyn EventBrokerApi> = Arc::new(mock);
     let ctx = test_ctx_for_tenant(Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap());
     let recorder = RecordingRuntimeListener::default();
     let recorded_events = recorder.events.clone();
@@ -1481,7 +1481,7 @@ async fn listener_failure_does_not_commit_drop_or_stop_consumer_events() {
 #[cfg(feature = "test-util")]
 #[tokio::test]
 async fn slow_listener_timeout_does_not_block_runtime_delivery_or_handler_processing() {
-    use crate::EventBroker;
+    use crate::EventBrokerApi;
     use crate::mock::stubs::test_ctx_for_tenant;
     use crate::mock::{MockBroker, MockBrokerHandle};
     use crate::models::Event;
@@ -1505,7 +1505,7 @@ async fn slow_listener_timeout_does_not_block_runtime_delivery_or_handler_proces
         .set_heartbeat_interval(Duration::from_millis(10))
         .await;
 
-    let broker: Arc<dyn EventBroker> = Arc::new(mock);
+    let broker: Arc<dyn EventBrokerApi> = Arc::new(mock);
     let ctx = test_ctx_for_tenant(Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap());
     let recorder = RecordingRuntimeListener::default();
     let recorded_events = recorder.events.clone();
@@ -1600,7 +1600,7 @@ async fn slow_listener_timeout_does_not_block_runtime_delivery_or_handler_proces
 #[cfg(feature = "test-util")]
 #[tokio::test]
 async fn handler_latency_strikes_emit_listener_events_and_drop_subscription_stream() {
-    use crate::EventBroker;
+    use crate::EventBrokerApi;
     use crate::mock::stubs::test_ctx_for_tenant;
     use crate::mock::{MockBroker, MockBrokerHandle};
     use crate::models::Event;
@@ -1623,7 +1623,7 @@ async fn handler_latency_strikes_emit_listener_events_and_drop_subscription_stre
         .set_heartbeat_interval(Duration::from_millis(10))
         .await;
 
-    let broker: Arc<dyn EventBroker> = Arc::new(mock);
+    let broker: Arc<dyn EventBrokerApi> = Arc::new(mock);
     let ctx = test_ctx_for_tenant(Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap());
     let listener = RecordingRuntimeListener::default();
     let recorded = listener.events.clone();
@@ -1751,7 +1751,7 @@ async fn handler_latency_strikes_emit_listener_events_and_drop_subscription_stre
 #[cfg(feature = "test-util")]
 #[tokio::test]
 async fn slow_drop_drains_buffer_before_rejoin_load_position() {
-    use crate::EventBroker;
+    use crate::EventBrokerApi;
     use crate::mock::stubs::test_ctx_for_tenant;
     use crate::mock::{MockBroker, MockBrokerHandle};
     use crate::models::Event;
@@ -1775,7 +1775,7 @@ async fn slow_drop_drains_buffer_before_rejoin_load_position() {
         .set_heartbeat_interval(Duration::from_millis(10))
         .await;
 
-    let broker: Arc<dyn EventBroker> = Arc::new(mock);
+    let broker: Arc<dyn EventBrokerApi> = Arc::new(mock);
     let ctx = test_ctx_for_tenant(Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap());
     let timeline = Arc::new(Mutex::new(Vec::new()));
 
@@ -1883,7 +1883,7 @@ async fn wait_for_drain_rejoin_timeline(timeline: &SharedTimeline) -> Vec<&'stat
 #[cfg(feature = "test-util")]
 #[tokio::test]
 async fn async_auto_commit_uses_resolved_group_topic_partition_and_frontier_offset() {
-    use crate::EventBroker;
+    use crate::EventBrokerApi;
     use crate::mock::stubs::test_ctx_for_tenant;
     use crate::mock::{MockBroker, MockBrokerHandle};
     use crate::models::Event;
@@ -1940,7 +1940,7 @@ async fn async_auto_commit_uses_resolved_group_topic_partition_and_frontier_offs
         .set_heartbeat_interval(Duration::from_millis(10))
         .await;
 
-    let broker: Arc<dyn EventBroker> = Arc::new(mock);
+    let broker: Arc<dyn EventBrokerApi> = Arc::new(mock);
     let ctx = test_ctx_for_tenant(Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap());
     let offset_manager = RecordingOffsetManager::default();
     let commits = offset_manager.commits.clone();
