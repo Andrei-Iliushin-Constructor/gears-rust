@@ -216,11 +216,10 @@ setup: .setup-stamp
 
 .PHONY: fmt clippy clippy-deep lychee docs-preview kani geiger safety lint dylint dylint-list dylint-test shear gts-docs cfs-ensure cfs-repair cfs-validate cfs-validate-kits cfs-validate-kit-local cfs-spec-coverage ensure-submodules
 
-## Initialize/update git submodules (e.g. guidelines/DNA) if not already checked out.
+## Verify git submodules (e.g. guidelines/DNA) are initialized; fails otherwise.
 ensure-submodules:
 	@if git submodule status --recursive 2>/dev/null | grep -q '^-'; then \
-		echo "Uninitialized git submodules detected; running 'git submodule update --init --recursive'..."; \
-		git submodule update --init --recursive; \
+		echo "ERROR: Uninitialized git submodules detected. Run 'git submodule update --init --recursive'." && exit 1; \
 	fi
 
 # Check code formatting
