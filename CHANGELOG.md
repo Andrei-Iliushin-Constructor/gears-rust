@@ -9,6 +9,254 @@ release-plz updates this file in the Release PR.
 
 ## [Unreleased]
 
+## [0.1.0](https://github.com/constructorfabric/gears-rust/releases/tag/cf-gears-event-broker-sdk-v0.1.0) - 2026-07-28
+
+### Other
+
+- *(event-broker)* PR #4083 post-review fixes (by @striped-zebra-dev)
+- *(event-broker)* gear design + SDK (by @striped-zebra-dev)
+
+### Contributors
+
+* @striped-zebra-dev
+
+## [0.1.0](https://github.com/constructorfabric/gears-rust/releases/tag/cf-gears-llm-gateway-sdk-v0.1.0) - 2026-07-28
+
+### Added
+
+- *(llm-gateway)* Add llm-gateway sdk (by @Qilin101)
+
+### Fixed
+
+- *(llm-gateway-sdk)* Fix packaging metadata (by @Qilin101)
+
+### Other
+
+- Fix linters (by @Qilin101) - #4236
+- Fix review comments (by @Qilin101) - #4236
+- Fix gts_id usage (by @Qilin101) - #4236
+- mass renaming - Cyber Fabric -> Constructor Fabric
+
+### Contributors
+
+* @Qilin101
+
+## [0.1.0](https://github.com/constructorfabric/gears-rust/releases/tag/cf-gears-timescaledb-usage-collector-plugin-v0.1.0) - 2026-07-28
+
+### Added
+
+- *(usage-collector)* add TimescaleDB storage plugin (by @capybutler)
+
+### Contributors
+
+* @capybutler
+
+## [0.1.3](https://github.com/constructorfabric/gears-rust/compare/cf-gears-noop-usage-collector-plugin-v0.1.2...cf-gears-noop-usage-collector-plugin-v0.1.3) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-usage-collector-v0.2.1...cf-gears-usage-collector-v0.2.2) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+- Merge pull request #4227 from capybutler/usage-collector/timescaledb-plugin (by @Artifizer) - #4227
+
+### Contributors
+
+* @github-actions[bot]
+* @Artifizer
+
+## [0.3.0](https://github.com/constructorfabric/gears-rust/compare/cf-gears-usage-collector-sdk-v0.2.1...cf-gears-usage-collector-sdk-v0.3.0) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+- Merge pull request #4227 from capybutler/usage-collector/timescaledb-plugin (by @Artifizer) - #4227
+
+### Contributors
+
+* @github-actions[bot]
+* @Artifizer
+
+## [0.2.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-oidc-authn-plugin-v0.2.0...cf-gears-oidc-authn-plugin-v0.2.1) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-cluster-conformance-v0.1.1...cf-gears-cluster-conformance-v0.1.2) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-cluster-v0.1.1...cf-gears-cluster-v0.1.2) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-standalone-cluster-plugin-v0.1.1...cf-gears-standalone-cluster-plugin-v0.1.2) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-cluster-sdk-v0.1.1...cf-gears-cluster-sdk-v0.1.2) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.7](https://github.com/constructorfabric/gears-rust/compare/cf-gears-tr-authz-plugin-v0.1.6...cf-gears-tr-authz-plugin-v0.1.7) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.25](https://github.com/constructorfabric/gears-rust/compare/cf-gears-static-tr-plugin-v0.1.24...cf-gears-static-tr-plugin-v0.1.25) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.4](https://github.com/constructorfabric/gears-rust/compare/cf-gears-static-idp-plugin-v0.1.3...cf-gears-static-idp-plugin-v0.1.4) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-static-credstore-plugin-v0.2.0...cf-gears-static-credstore-plugin-v0.2.1) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.24](https://github.com/constructorfabric/gears-rust/compare/cf-gears-static-authz-plugin-v0.1.23...cf-gears-static-authz-plugin-v0.1.24) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.3.4](https://github.com/constructorfabric/gears-rust/compare/cf-gears-static-authn-plugin-v0.3.3...cf-gears-static-authn-plugin-v0.3.4) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.26](https://github.com/constructorfabric/gears-rust/compare/cf-gears-single-tenant-tr-plugin-v0.1.25...cf-gears-single-tenant-tr-plugin-v0.1.26) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.7](https://github.com/constructorfabric/gears-rust/compare/cf-gears-rg-tr-plugin-v0.1.6...cf-gears-rg-tr-plugin-v0.1.7) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.1](https://github.com/constructorfabric/gears-rust/compare/cf-chat-engine-v0.2.0...cf-chat-engine-v0.2.1) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.4.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-account-management-v0.4.1...cf-gears-account-management-v0.4.2) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.4.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-account-management-sdk-v0.4.0...cf-gears-account-management-sdk-v0.4.1) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.6.16](https://github.com/constructorfabric/gears-rust/compare/cf-gears-toolkit-v0.6.15...cf-gears-toolkit-v0.6.16) - 2026-07-28
+
+### Other
+
+- release (by @github-actions[bot]) - #4277
+- Merge pull request #4243 from mattgarmon/oop_impl (by @Artifizer) - #4243
+
+### Contributors
+
+* @github-actions[bot]
+* @Artifizer
+
 ## [0.1.3](https://github.com/constructorfabric/gears-rust/compare/cf-gears-noop-usage-collector-plugin-v0.1.2...cf-gears-noop-usage-collector-plugin-v0.1.3) - 2026-07-28
 
 ### Other
