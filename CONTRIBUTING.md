@@ -178,6 +178,7 @@ In `Gears.toml`, add the rule ID to the `skip` list:
 [apps.gears-rust.dev.lint.dylint]
 enabled = true
 skip = [
+    "de0504_client_versioning",   # not yet addressed
     "de1101_tests_in_separate_files",  # migration in progress
 ]
 ```
