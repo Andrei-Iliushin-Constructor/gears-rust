@@ -1,6 +1,9 @@
 # Created: 2026-03-06 by Constructor Tech
 # Updated: 2026-04-07 by Constructor Tech
 
+# NOTE: the aggregated, CI-verified schema for the whole platform is
+# docs/api/api.json (also served live by the api-gateway at {prefix}/docs).
+# Paths below are gear-relative: the gateway prepends its prefix_path (e.g. /cf).
 openapi: 3.1.0
 info:
   title: Resource Group API
@@ -56,7 +59,7 @@ paths:
 
   # ── Types ──────────────────────────────────────────────────────────
 
-  /api/types-registry/v1/types:
+  /types-registry/v1/types:
     get:
       operationId: listTypes
       tags: [types]
@@ -397,7 +400,7 @@ paths:
                       custom_domain: { type: string, format: hostname }
                       barrier: { type: boolean, default: false }
 
-  /api/types-registry/v1/types/{schema_id}:
+  /types-registry/v1/types/{code}:
     parameters:
       - $ref: '#/components/parameters/TypeSchemaId'
     get:
@@ -499,7 +502,7 @@ paths:
 
   # ── Groups ─────────────────────────────────────────────────────────
 
-  /api/resource-group/v1/groups:
+  /resource-group/v1/groups:
     get:
       operationId: listGroups
       tags: [groups]
@@ -740,7 +743,7 @@ paths:
                     detail: "Setting parent_id would create a cycle in the hierarchy"
                     trace_id: 01HXYZRGCYCLE
 
-  /api/resource-group/v1/groups/{group_id}:
+  /resource-group/v1/groups/{group_id}:
     parameters:
       - $ref: '#/components/parameters/GroupId'
     get:
@@ -813,7 +816,7 @@ paths:
         '204':
           description: Group deleted
 
-  /api/resource-group/v1/groups/{group_id}/hierarchy:
+  /resource-group/v1/groups/{group_id}/hierarchy:
     parameters:
       - $ref: '#/components/parameters/GroupId'
     get:
@@ -968,7 +971,7 @@ paths:
 
   # ── Memberships ────────────────────────────────────────────────────
 
-  /api/resource-group/v1/memberships:
+  /resource-group/v1/memberships:
     get:
       operationId: listMemberships
       tags: [memberships]
@@ -1007,7 +1010,7 @@ paths:
                   next_cursor: "eyJpZCI6Ijc3NzcuLi4ifQ"
                   limit: 25
 
-  /api/resource-group/v1/memberships/{group_id}/{resource_type}/{resource_id}:
+  /resource-group/v1/memberships/{group_id}/{resource_type}/{resource_id}:
     parameters:
       - $ref: '#/components/parameters/MembershipGroupId'
       - $ref: '#/components/parameters/MembershipResourceType'
@@ -1050,7 +1053,7 @@ components:
       example: 22222222-2222-2222-2222-222222222222
 
     TypeSchemaId:
-      name: schema_id
+      name: code
       in: path
       required: true
       description: "GTS type path (`$id` value without `gts://` prefix)."
