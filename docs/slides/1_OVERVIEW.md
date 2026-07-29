@@ -128,7 +128,7 @@ Custom static analysis is a **core architectural mechanism**, not a coding aid.
 - Runs alongside Clippy + CI → **violations fail fast, before review or runtime**
 
 > "Shift-left": architecture that lives in markdown decays; `cargo gears lint` makes it executable.
-> GTS* = Global Type System identifers like `gts.cf.core.events.v1~a.b.c.d.v1~`
+> GTS* = Global Type System identifiers like `gts.cf.core.events.v1~a.b.c.d.v1~`
 
 ---
 

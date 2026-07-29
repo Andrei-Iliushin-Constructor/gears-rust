@@ -5,7 +5,7 @@ date: 2026-04-15
 decision-makers: Constructor Fabric Steering Committee
 ---
 
-# Enforce test code in separate files via architecture lint DE1101
+# Enforce test code in separate files vian architecture lint DE1101
 
 **ID**: `cpt-cf-adr-tests-in-separate-files`
 
@@ -30,12 +30,12 @@ Rust modules in the gears-rust monorepo contain inline `#[cfg(test)] mod tests {
 ## Considered Options
 
 * Keep inline tests (Rust Book default)
-* Separate test files with a architecture lint
+* Separate test files with an architecture lint
 * Integration tests only (`tests/` directory)
 
 ## Decision Outcome
 
-Chosen option: "Separate test files with a architecture lint", because it is the only option that provides automatic enforcement, supports incremental migration, and preserves the ability to test `pub(crate)` internals (via `#[path]` module reference which compiles as part of the crate).
+Chosen option: "Separate test files with an architecture lint", because it is the only option that provides automatic enforcement, supports incremental migration, and preserves the ability to test `pub(crate)` internals (via `#[path]` module reference which compiles as part of the crate).
 
 ### Consequences
 
@@ -63,7 +63,7 @@ Follow the standard Rust convention: `#[cfg(test)] mod tests { ... }` inline in 
 * Bad, because PRs mix production and test changes in the same diff.
 * Bad, because no automatic enforcement — relies on code review.
 
-### Separate test files with a architecture lint
+### Separate test files with an architecture lint
 
 Enforce `*_tests.rs` companion files via a custom architecture lint (DE1101). The lint denies inline test blocks exceeding `max_inline_test_lines` (default: 100), denies any inline test when a companion file exists, and validates `#[path]` attributes.
 

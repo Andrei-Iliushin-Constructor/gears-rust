@@ -69,7 +69,7 @@ The `LockGuard`, `ServiceHandle`, and `LeaderWatch` types have no-op `Drop` impl
 
 Consumers that forget to call these rely on the backend TTL for eventual cleanup. The TTL is bounded (seconds, not hours) and identical in behavior to the process-crash case.
 
-The `LockGuard` does not expose a fencing token. Instead, Gears enforces two architectural principles via a architecture lint rule:
+The `LockGuard` does not expose a fencing token. Instead, Gears enforces two architectural principles via an architecture lint rule:
 
 1. All cluster operations are `async fn` invoked within Tokio. Consumers SHOULD wrap them with `tokio::time::timeout` to bound blocking on network calls.
 2. Code protected by a `LockGuard` (or inside a database transaction) MUST NOT make additional remote I/O calls. Remote effects MUST occur before `try_lock` or after `release`, never between them.
