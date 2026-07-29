@@ -170,14 +170,6 @@ setup: .setup-stamp
 	@echo "Setup complete. All tools installed."
 	@touch .setup-stamp
 
-# -------- Gear naming validation --------
-
-.PHONY: validate-gear-names
-
-## Validate gear folder names follow kebab-case convention
-validate-gear-names:
-	@$(PYTHON) tools/scripts/validate_gear_names.py
-
 # -------- Code safety checks --------
 #
 # Tool Comparison - What Each Tool Checks:
