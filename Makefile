@@ -18,6 +18,16 @@ define check_tool
     @command -v $(1) >/dev/null || (echo "ERROR: $(1) is not installed. Run 'make setup' to install required tools." && exit 1)
 endef
 
+# fips-policy relies on cargo-deny bans-check behavior only available since 0.20.0
+DENY_MIN_VERSION := 0.20.0
+
+define check_deny_version
+    @DENY_VERSION=$$(cargo deny --version 2>/dev/null | awk '{print $$2}'); \
+	if [ -z "$$DENY_VERSION" ] || ! $(PYTHON) -c "import sys; sys.exit(0 if tuple(map(int, '$$DENY_VERSION'.split('.'))) > tuple(map(int, '$(DENY_MIN_VERSION)'.split('.'))) else 1)" 2>/dev/null; then \
+		echo "ERROR: cargo-deny > $(DENY_MIN_VERSION) is required (found: $${DENY_VERSION:-none}). Run 'cargo install --locked cargo-deny' to upgrade." && exit 1; \
+	fi
+endef
+
 define check_rustup_component
     @command -v rustup >/dev/null || (echo "ERROR: rustup not installed. Install rustup or run 'make setup'." && exit 1)
 	@rustup component list --installed | grep -q '^$(1)' || (echo "ERROR: $(1) component not installed. Run 'rustup component add $(1)' or 'make setup'." && exit 1)
@@ -204,7 +214,13 @@ setup: .setup-stamp
 # |             | - Use 'make dylint-list' to see all available custom lints           |
 # +-------------+----------------------------------------------------------------------+
 
-.PHONY: fmt clippy clippy-deep lychee docs-preview kani geiger safety lint dylint dylint-list dylint-test shear gts-docs cfs-ensure cfs-repair cfs-validate cfs-validate-kits cfs-validate-kit-local cfs-spec-coverage
+.PHONY: fmt clippy clippy-deep lychee docs-preview kani geiger safety lint dylint dylint-list dylint-test shear gts-docs cfs-ensure cfs-repair cfs-validate cfs-validate-kits cfs-validate-kit-local cfs-spec-coverage ensure-submodules
+
+## Verify git submodules (e.g. guidelines/DNA) are initialized; fails otherwise.
+ensure-submodules:
+	@if git submodule status --recursive 2>/dev/null | grep -q '^-'; then \
+		echo "ERROR: Uninitialized git submodules detected. Run 'git submodule update --init --recursive'." && exit 1; \
+	fi
 
 # Check code formatting
 fmt:
@@ -246,7 +262,7 @@ clippy-deep:
 	cargo hack clippy --workspace --all-targets --each-feature $(CLIPPY_FLAGS)
 
 # Run markdown checks with 'lychee'
-lychee:
+lychee: ensure-submodules
 	$(call check_tool,lychee)
 	lychee --exclude-path 'docs/web-docs' docs examples tools/dylint_lints guidelines gears/system/event-broker/docs
 
@@ -288,8 +304,21 @@ gts-docs:
 		--exclude "**/helm/*/templates/*" \
 		docs gears libs examples
 
+# cli_smoke_tests.rs / migrate_command_tests.rs rely on CARGO_BIN_EXE_<name> being
+# set at test runtime, which cargo-nextest only supports from 0.9.130 onward.
+NEXTEST_MIN_VERSION := 0.9.130
+
 install-tools:
-	@command -v cargo-nextest >/dev/null 2>&1 || cargo install --locked cargo-nextest
+	@NEXTEST_VERSION=$$(cargo nextest --version 2>/dev/null | awk '/^cargo-nextest/ {print $$2}'); \
+	if [ -z "$$NEXTEST_VERSION" ] || ! $(PYTHON) -c "import sys; sys.exit(0 if tuple(map(int, '$$NEXTEST_VERSION'.split('.'))) >= tuple(map(int, '$(NEXTEST_MIN_VERSION)'.split('.'))) else 1)" 2>/dev/null; then \
+		echo "Installing/upgrading cargo-nextest (>= $(NEXTEST_MIN_VERSION) required for CARGO_BIN_EXE_* support)..."; \
+		cargo install --locked cargo-nextest; \
+	fi
+	@DENY_VERSION=$$(cargo deny --version 2>/dev/null | awk '{print $$2}'); \
+	if [ -z "$$DENY_VERSION" ] || ! $(PYTHON) -c "import sys; sys.exit(0 if tuple(map(int, '$$DENY_VERSION'.split('.'))) > tuple(map(int, '$(DENY_MIN_VERSION)'.split('.'))) else 1)" 2>/dev/null; then \
+		echo "Installing/upgrading cargo-deny (> $(DENY_MIN_VERSION) required for fips-policy)..."; \
+		cargo install --locked cargo-deny; \
+	fi
 
 ## List all custom project compliance lints (see tools/dylint_lints/README.md)
 dylint-list:
@@ -339,6 +368,7 @@ check-packaging-metadata:
 # Check licenses and dependencies
 deny:
 	$(call check_tool,cargo-deny)
+	$(call check_deny_version)
 	cargo deny check
 
 ## FIPS dependency-graph policy (see deny-fips.toml + ADR 0005).
@@ -347,6 +377,7 @@ deny:
 ## Run on every PR that touches deps.
 fips-policy:
 	$(call check_tool,cargo-deny)
+	$(call check_deny_version)
 	cargo deny --config deny-fips.toml check bans
 
 security: deny fips-policy

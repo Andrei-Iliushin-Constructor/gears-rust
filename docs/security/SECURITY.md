@@ -445,7 +445,7 @@ Under `--features fips`, the `ClientHello` and `ServerHello` offer **only** FIPS
 A FIPS build must not pull in a non-FIPS-validated crypto crate, even transitively. We enforce this at **dependency-resolution time** via [`cargo-deny`](https://embarkstudios.github.io/cargo-deny/): under `--features fips`, the build fails if any banned crypto crate appears in `cargo tree`. This is the Rust analogue of Go 1.25's `fips140=only` runtime gate — Rust has no language-level hook for "refuse this crypto call", so we cut it off one step earlier, before the offending code ever links. Configured via [`deny-fips.toml`](../../deny-fips.toml); rationale in [ADR 0005](fips/adrs/0005-fips-dependency-policy.md).
 
 ```sh
-make fips-policy        # Standalone — runs cargo deny check bans --config deny-fips.toml
+make fips-policy        # Standalone — runs cargo deny --config deny-fips.toml check bans
 make security           # Runs both `deny` (license/advisory) and `fips-policy`
 ```
 
