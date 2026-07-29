@@ -13,12 +13,13 @@ clippy = false    # already handled by `make clippy`
 enabled = true
 # Remove entries as violations are fixed or cargo-gears-lints is updated.
 skip = [
-    # New lint not yet addressed in this repo.
+    # is_system_module() in cargo-gears-lints doesn't recognize "gears/system/"
+    # path prefix, causing false positives on system gear SDK crates.
+    # Tracking: https://github.com/constructorfabric/cargo-gears/issues/84
     "de0504_client_versioning",
     # Path exclusion logic in cargo-gears-lints uses "modules/" prefix but this
-    # repo uses "gears/". Skipped until cargo-gears-lints adds "gears/" support.
-    # Tracking: https://github.com/constructorfabric/cargo-gears/issues/84
-    "de1101_tests_in_separate_files",
+    # repo uses "gears/".
+    "de1101_tests_in_separate_files", # same tracking issue as above
     # Scope broadened from /contract/ to /domain/ in cargo-gears-lints.
     # Pre-existing code in domain/ layers needs migration.
     # Tracking: https://github.com/constructorfabric/cargo-gears/issues/85
