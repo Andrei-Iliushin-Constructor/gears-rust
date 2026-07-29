@@ -57,7 +57,7 @@ Build the `CanonicalError` enum, context types, `Problem` mapping, and `#[resour
 
 #### 1.5 `cargo gears lint` enforcement rules
 
-> Traces to: `cpt-cf-errors-component-`cargo gears lint`-rules`, PRD § 12 Risks — "LLM agents bypass compile checks"
+> Traces to: `cpt-cf-errors-component-architecture-lint-rules`, PRD § 12 Risks — "LLM agents bypass compile checks"
 
 - [ ] 1.5.1 Implement a architecture lint rule — **No direct `Problem` construction**: reject `Problem { ... }` struct literals and direct `IntoResponse` impls that bypass `CanonicalError`; all `Problem` instances must originate from `CanonicalError` via the `From` impl
 - [ ] 1.5.2 Implement a architecture lint rule — **No legacy error patterns**: reject usage of `Problem::new()`, `ErrDef`, `declare_errors!`, or `ErrorCode`
