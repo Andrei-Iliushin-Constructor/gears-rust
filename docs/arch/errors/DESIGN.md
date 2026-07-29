@@ -293,7 +293,7 @@ async fn get_user(Path(id): Path<String>) -> Result<Json<User>, CanonicalError> 
 
 ```text
 ┌─────────────────────────────────────────────────┐
-│  libs/toolkit-errors                             │
+│  libs/toolkit-errors                            │
 │  ┌───────────────┐  ┌─────────────────────────┐ │
 │  │ CanonicalError│  │ Context Types           │ │
 │  │ (16 variants) │──│ Validation, ResourceInfo│ │
@@ -307,15 +307,15 @@ async fn get_user(Path(id): Path<String>) -> Result<Json<User>, CanonicalError> 
 │  │ → Problem       │  for Problem               │
 │  └─────────────────┘                            │
 ├─────────────────────────────────────────────────┤
-│  libs/toolkit-canonical-errors-macro              │
+│  libs/toolkit-canonical-errors-macro            │
 │  ┌──────────────────────┐                       │
 │  │ #[resource_error]    │ macro                 │
 │  └──────────────────────┘                       │
 ├─────────────────────────────────────────────────┤
-│  architecture lints (via `cargo gears lint`)                                │
-│  ┌─────────────────┐                            │
-│  │ Architecture Lint Rules     │ compile-time lint           │
-│  └─────────────────┘                            │
+│  architecture lints (via `cargo gears lint`)    │
+│  ┌─────────────────────────┐                    │
+│  │ Architecture Lint Rules │ compile-time lint  │
+│  └─────────────────────────┘                    │
 └─────────────────────────────────────────────────┘
 ```
 
