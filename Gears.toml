@@ -15,9 +15,11 @@ enabled = true
 skip = [
     # Path exclusion logic in cargo-gears-lints uses "modules/" prefix but this
     # repo uses "gears/". Skipped until cargo-gears-lints adds "gears/" support.
+    # Tracking: https://github.com/constructorfabric/cargo-gears/issues/84
     "de1101_tests_in_separate_files",
     # Scope broadened from /contract/ to /domain/ in cargo-gears-lints.
     # Pre-existing code in domain/ layers needs migration.
+    # Tracking: https://github.com/constructorfabric/cargo-gears/issues/85
     "de0101_no_serde_in_contract",
-    "de0102_no_toschema_in_contract",
+    "de0102_no_toschema_in_contract", # same tracking issue as above
 ]
