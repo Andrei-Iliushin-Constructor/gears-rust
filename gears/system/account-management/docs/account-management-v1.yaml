@@ -18,7 +18,7 @@ info:
     shapes, field semantics, and HTTP-level error mapping.
 
     Versioning: breaking changes increment the major version embedded in the URL
-    path (`/account-management/v1/` → `/v2/`) and are coordinated with a
+    path (`/account-management/v1/` → `/account-management/v2/`) and are coordinated with a
     migration window per the Compatibility NFR in DESIGN.md. Additive changes
     within v1 do not rev the path.
 
