@@ -278,7 +278,7 @@ Keep current names and rely on `CREATE ... IF NOT EXISTS`, migration ordering, o
 
 * ToolKit currently isolates only per-gear migration history tables: [migration runner](../../../../libs/toolkit-db/src/migration_runner.rs).
 * ToolKit database execution and migration patterns: [database patterns](../../../toolkit_unified_system/11_database_patterns.md).
-* Project-specific architectural rules and their validation commands: [Dylint lint catalog](../../../../tools/dylint_lints/README.md).
+* Project-specific architectural rules and their validation commands: [architecture lints and validation commands](../../../../CONTRIBUTING.md).
 * The reusable outbox already supports caller-provided prefixes: [outbox migrations](../../../../libs/toolkit-db/src/outbox/migrations.rs).
 * Existing incompatible `messages` entities: [Chat Engine](../../../../gears/chat-engine/chat-engine/src/infra/db/entity/message.rs) and [Mini Chat](../../../../gears/mini-chat/mini-chat/src/infra/db/entity/message.rs).
 * File Storage documents why its runtime migrations currently use a flat namespace: [File Storage initial migration](../../../../gears/file-storage/file-storage/src/infra/storage/migrations/m20260624_000001_p1_initial.rs).
