@@ -2766,4 +2766,54 @@ async fn group_create_duplicate_id_is_already_exists() {
         matches!(err, DomainError::GroupAlreadyExists { id: got } if got == id),
         "expected GroupAlreadyExists({id}), got: {err:?}"
     );
+
+    // Verify entity state: the rejected insert left the first group untouched
+    let conn = db.conn().expect("conn");
+    let scope = AccessScope::allow_all();
+    let model = RgEntity::find()
+        .filter(RgColumn::Id.eq(id))
+        .secure()
+        .scope_with(&scope)
+        .one(&conn)
+        .await
+        .expect("query")
+        .expect("found");
+    assert_eq!(model.name, "First");
+    assert_eq!(model.tenant_id, tenant_a);
+}
+
+/// Duplicate id inside the caller's own tenant also yields `GroupAlreadyExists`.
+#[tokio::test]
+async fn group_create_duplicate_id_same_tenant_is_already_exists() {
+    let db = common::test_db().await;
+    let type_svc = TypeService::new(db.clone(), Arc::new(TypeRepository));
+    let group_svc = common::make_group_service(db.clone());
+
+    let tenant = Uuid::now_v7();
+    let ctx = common::make_ctx(tenant);
+    let root_type = common::create_root_type(&type_svc, "dupidsame").await;
+
+    let id = Uuid::now_v7();
+    let req = |name: &str| CreateGroupRequest {
+        id: Some(id),
+        code: root_type.code.clone(),
+        name: name.to_owned(),
+        parent_id: None,
+        metadata: None,
+    };
+
+    group_svc
+        .create_group(&ctx, req("First"), tenant)
+        .await
+        .expect("first create should succeed");
+
+    let err = group_svc
+        .create_group(&ctx, req("Second"), tenant)
+        .await
+        .expect_err("the id is already taken in this tenant");
+
+    assert!(
+        matches!(err, DomainError::GroupAlreadyExists { id: got } if got == id),
+        "expected GroupAlreadyExists({id}), got: {err:?}"
+    );
 }
