@@ -1,2 +1,7 @@
-libs @MikeFalcon77
-gears/mini-chat @MikeFalcon77
+/libs/ @MikeFalcon77
+/gears/bss/ @diffora
+/gears/credstore/ @diffora
+/gears/mini-chat/ @MikeFalcon77
+/gears/system/account-management/ @diffora
+/gears/system/authn-resolver/plugins/oidc-authn-plugin/ @fluiderson
+/gears/system/usage-collector/ @capybutler
