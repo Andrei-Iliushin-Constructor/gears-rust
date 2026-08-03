@@ -584,6 +584,8 @@ mime = "0.3"
 
 # Document parsing libraries
 docx-rust = "0.1.11"
+# `bundled-pdfium` downloads a prebuilt libpdfium at build time rather than vendoring one;
+# Cargo.lock does not pin it. The version lives in .cargo/config.toml as PDFIUM_VERSION.
 kreuzberg = { version = "=4.9.8", features = ["html", "excel", "office", "pdf", "bundled-pdfium"] }
 
 # Additional testing utilities
