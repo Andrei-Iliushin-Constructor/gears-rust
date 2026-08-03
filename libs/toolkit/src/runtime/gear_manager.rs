@@ -114,6 +114,25 @@ impl Clone for GearInstance {
 }
 
 impl GearInstance {
+    /// Build a new instance record using `other`'s metadata but preserving
+    /// `self`'s `inner` runtime-state lock. This makes re-registration atomic:
+    /// concurrent `update_heartbeat` calls continue to write to the same state
+    /// object instead of racing with a copied/swapped `InstanceRuntimeState`.
+    fn with_metadata_of(&self, other: &GearInstance) -> GearInstance {
+        GearInstance {
+            gear: other.gear.clone(),
+            instance_id: other.instance_id,
+            control: other.control.clone(),
+            grpc_services: other.grpc_services.clone(),
+            version: other.version.clone(),
+            rest_endpoint: other.rest_endpoint.clone(),
+            openapi_spec: other.openapi_spec.clone(),
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl GearInstance {
     pub fn new(gear: impl Into<String>, instance_id: Uuid) -> Self {
         Self {
             gear: gear.into(),
@@ -208,6 +227,15 @@ impl GearManager {
     }
 
     /// Register or update a gear instance
+    ///
+    /// Re-registering an existing `instance_id` is an idempotent endpoint /
+    /// metadata refresh, NOT a liveness reset: the existing runtime state
+    /// (`last_heartbeat` + [`InstanceState`]) is carried over onto the new
+    /// record by preserving the same `Arc<RwLock<InstanceRuntimeState>>`.
+    /// Without this, a periodic self-heal re-registration (see
+    /// `oop_registration::presence_loop`) would knock a `Healthy` instance back
+    /// to `Registered`, dropping it out of gRPC round-robin until the next
+    /// heartbeat. It would also race with concurrent `update_heartbeat` calls.
     pub fn register_instance(&self, instance: Arc<GearInstance>) {
         let gear = instance.gear.clone();
         let mut vec = self.inner.entry(gear).or_default();
@@ -216,7 +244,7 @@ impl GearManager {
             .iter()
             .position(|i| i.instance_id == instance.instance_id)
         {
-            vec[pos] = instance;
+            vec[pos] = Arc::new(vec[pos].with_metadata_of(&instance));
         } else {
             vec.push(instance);
         }
@@ -530,6 +558,90 @@ mod tests {
         let registered = dir.instances_of("test_gear");
         assert_eq!(registered.len(), 1, "Should not duplicate instance");
         assert_eq!(registered[0].version, Some("2.0.0".to_owned()));
+    }
+
+    #[test]
+    fn test_reregistration_preserves_liveness_state() {
+        let dir = GearManager::new();
+        let instance_id = Uuid::new_v4();
+
+        // Register, then heartbeat so the instance is Healthy (routable).
+        dir.register_instance(Arc::new(
+            GearInstance::new("test_gear", instance_id).with_version("1.0.0"),
+        ));
+        dir.update_heartbeat("test_gear", instance_id, Instant::now());
+        assert!(matches!(
+            dir.instances_of("test_gear")[0].state(),
+            InstanceState::Healthy
+        ));
+
+        // A periodic self-heal re-registration must NOT reset liveness back to
+        // Registered — otherwise the instance drops out of gRPC round-robin
+        // until the next heartbeat (the "split-brain" flap).
+        dir.register_instance(Arc::new(
+            GearInstance::new("test_gear", instance_id).with_version("2.0.0"),
+        ));
+
+        let instances = dir.instances_of("test_gear");
+        assert_eq!(instances.len(), 1);
+        assert!(
+            matches!(instances[0].state(), InstanceState::Healthy),
+            "re-registration must preserve the Healthy state"
+        );
+        assert_eq!(
+            instances[0].version,
+            Some("2.0.0".to_owned()),
+            "re-registration must still refresh metadata/endpoints"
+        );
+    }
+
+    #[test]
+    fn test_concurrent_reregister_and_heartbeat_preserves_state() {
+        let dir = GearManager::new();
+        let instance_id = Uuid::new_v4();
+
+        let initial = Arc::new(GearInstance::new("test_gear", instance_id).with_version("1.0.0"));
+        dir.register_instance(initial);
+        dir.update_heartbeat("test_gear", instance_id, Instant::now());
+        assert!(matches!(
+            dir.instances_of("test_gear")[0].state(),
+            InstanceState::Healthy
+        ));
+
+        let start = Instant::now();
+
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                for _ in 0..1000 {
+                    dir.update_heartbeat("test_gear", instance_id, Instant::now());
+                }
+            });
+            s.spawn(|| {
+                for i in 0..1000 {
+                    let version = if i % 2 == 0 { "2.0.0" } else { "3.0.0" };
+                    let reinst = Arc::new(
+                        GearInstance::new("test_gear", instance_id)
+                            .with_version(version)
+                            .with_rest_endpoint(Endpoint::http(
+                                "127.0.0.1",
+                                8000u16 + u16::try_from(i % 10).expect("i % 10 fits in u16"),
+                            )),
+                    );
+                    dir.register_instance(reinst);
+                }
+            });
+        });
+
+        let instances = dir.instances_of("test_gear");
+        assert_eq!(instances.len(), 1);
+        assert!(
+            matches!(instances[0].state(), InstanceState::Healthy),
+            "concurrent re-registration must not reset Healthy state"
+        );
+        assert!(
+            instances[0].last_heartbeat() >= start,
+            "concurrent re-registration must not lose heartbeat updates"
+        );
     }
 
     #[test]
