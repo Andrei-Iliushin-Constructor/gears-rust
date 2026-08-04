@@ -444,7 +444,7 @@ dev: dev-fmt dev-clippy dev-test
 
 # -------- Tests --------
 
-.PHONY: test test-no-macros test-macros test-sqlite test-pg test-mysql test-db test-users-info-pg test-usage-collector-pg test-fips
+.PHONY: test test-no-macros test-macros test-sqlite test-pg test-mysql test-db test-users-info-pg test-usage-collector-pg test-cluster-pg test-fips
 
 # Run all tests
 test: install-tools
@@ -481,6 +481,19 @@ test-users-info-pg: install-tools
 ## the suite spins up its own timescale/timescaledb container via testcontainers)
 test-usage-collector-pg: install-tools
 	cargo nextest run -p cf-gears-timescaledb-usage-collector-plugin --features postgres
+
+## Run the Postgres cluster plugin's conformance (Layer 2) and Layer 3
+## integration suites (Docker required;
+## each spins up its own postgres container per test via testcontainers —
+## see gears/system/cluster/plugins/postgres-cluster-plugin/docs/TESTING.md §7).
+##
+## `--retries 1` because the container/pool *setup* in tests/common/mod.rs is
+## load-sensitive on a busy host: it already retries `Postgres::start()` itself,
+## and exhausting that budget surfaces as a failure in whichever test drew the
+## short straw. A genuine logic regression fails both attempts, so this absorbs
+## Docker churn without masking one.
+test-cluster-pg: install-tools
+	cargo nextest run -p cf-postgres-cluster-plugin --features integration --retries 1
 
 ## Run FIPS-mode integration tests (requires Go for aws-lc-fips-sys).
 ## Covers:
