@@ -1747,6 +1747,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-gears-event-broker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "cf-gears-cluster",
+ "cf-gears-cluster-sdk",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-security",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "cf-gears-event-broker-sdk"
 version = "0.1.1"
 dependencies = [
