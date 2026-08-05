@@ -80,6 +80,7 @@ OoP gear lifecycle, discovery coordination, and gateway registration. The archit
 | `cpt-cf-adr-platform-plane-auth`   | Platform-plane authentication: SA tokens (Profile 3) / bootstrap token (Profile 2) first, mTLS + SPIFFE next |
 | `cpt-cf-adr-rest-first-oop`         | REST as primary OoP protocol; each gear runs its own HTTP server                                     |
 | `cpt-cf-adr-gateway-abstraction`    | GatewayProvider trait abstracts built-in and external gateways                                         |
+| `cpt-cf-adr-instance-addressable-discovery` | Target a specific gear instance (role/shard) via additive directory metadata + targeted resolve; RR stays the default |
 
 ### 1.3 Architecture Layers
 
@@ -1344,6 +1345,10 @@ state. Persistent state (if needed for multi-host P2) will be addressed in a fut
 - k8s DNS provides service discovery; DirectoryService is optional for metadata.
 - Platform services (gear-orchestrator, types-registry, credstore) run as separate pods. The trust-coupled core (authz-resolver, tenant-resolver, resource-group, account-management) remains in the Platform Host pod (see § Platform Host Composition).
 - No built-in api-gateway in this profile.
+
+> **Amended by [ADR-0009 (Instance-Addressable Discovery)](ADR/0009-cpt-cf-adr-instance-addressable-discovery.md)** for role-split / sharded gears:
+> - *"Each gear is an independent Deployment + Service"* holds for a single-role gear, but a gear running in differentiated **roles** or **sharded** maps to *multiple* role-qualified names — hence *multiple* Deployments/StatefulSets and *multiple* Services, one per role-name — not a single Service in front of the whole gear. Shard-targeted role-names advertise a **per-instance-addressable** endpoint (not a shared VIP); the workload mechanism (`StatefulSet` + headless Service or a self-registering `Deployment`) is the gear developer's choice.
+> - *"DirectoryService is optional for metadata"* is **unchanged for basic name resolution** (k8s DNS resolves a gear name; the directory is still not required for it). ADR-0009 adds a distinct **instance / shard targeting** capability that *does* resolve through the directory (`resolve_by_labels`), because k8s DNS cannot select a *specific* instance behind a Service VIP.
 
 ### 3.9 K8s Packaging (Helm Charts)
 

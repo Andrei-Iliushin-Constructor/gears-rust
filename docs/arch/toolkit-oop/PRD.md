@@ -142,6 +142,7 @@ application code remains deployment-agnostic. ToolKit Distributed Gears bring th
 - Deployment Profile 3: K8s Native (each gear = pod, external gateway, k8s DNS discovery)
 - Two-plane auth — gateway validates the JWT at the edge; OoP gears **re-validate it per hop** (tenant plane) and use a tenant-less identity for infra calls (platform plane). See [ADR-0008](ADR/0008-cpt-cf-adr-two-plane-auth.md)
 - Direct gear-to-gear REST communication (not routed through gateway)
+- Instance-addressable discovery — target a specific gear instance (role/shard) via additive directory metadata + targeted resolve, with round-robin remaining the default. Targeted selection does **not** expand the Toolkit's load-balancing scope beyond round-robin: the directory only enumerates/pinpoints instances; any pick-one over a matched set (e.g. consistent-hash sharding) is application-owned policy in the consuming gear. See [ADR-0009](ADR/0009-cpt-cf-adr-instance-addressable-discovery.md)
 - Public vs. internal API distinction in route registration
 - REST client generation from annotated Rust traits (trait-first, `#[toolkit::rest_contract]` proc-macro)
 - Gateway abstraction trait with built-in ToolKit implementation
@@ -278,6 +279,14 @@ basic service resolution in k8s.
 - **Rationale**: K8s provides built-in service discovery and load balancing. Requiring a custom DirectoryService adds
   unnecessary complexity in k8s environments.
 - **Actors**: `cpt-cf-actor-platform-op`, `cpt-cf-actor-oop-worker`
+
+> **Amended by [ADR-0009 (Instance-Addressable Discovery)](ADR/0009-cpt-cf-adr-instance-addressable-discovery.md).**
+> This MUST is **unchanged for basic name resolution** — k8s DNS resolves a gear name and DirectoryService is still
+> not required for it. ADR-0009 adds a distinct **instance / shard targeting** capability that *does* resolve
+> through the directory (a gear cannot pick a *specific* instance through a shared Service VIP), and refines the
+> deployment shape: a gear that runs in differentiated **roles** or is **sharded** maps to *multiple* role-qualified
+> names — i.e. *multiple* k8s Services — rather than a single Service, and shard-targeted instances advertise a
+> **per-instance-addressable** endpoint (not a VIP).
 
 ### 5.4 Client Generation
 
