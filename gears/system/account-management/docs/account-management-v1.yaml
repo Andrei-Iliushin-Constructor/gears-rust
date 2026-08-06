@@ -348,6 +348,19 @@ paths:
         (`code=already_exists`). Unsupported by a legacy provider surfaces as
         `code=idp_unsupported_operation` (501); IdP transport failure as
         `code=idp_unavailable` (503).
+
+        An attribute the IdP manages and does not allow AM to override — e.g.
+        federated from a read-only LDAP mapper, or marked non-writable in the
+        provider's user-profile configuration — is refused with
+        `code=validation` (400) whose `context.field_violations[0]` carries
+        `field` = the refused request property (`username`, `email`,
+        `display_name`, `first_name`, or `last_name`) and
+        `reason=IDP_MANAGED_FIELD`. Clients key form-field attribution off
+        `field` and disable exactly that input. Deliberately NOT a 403:
+        writability is a property of the provider's schema, identical for
+        every caller, so no additional grant would let the write succeed. The
+        refusal is scoped to attributes the patch actually touches — a patch
+        that omits a locked attribute still applies.
       requestBody:
         required: true
         content:
