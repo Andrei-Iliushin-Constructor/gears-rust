@@ -12,6 +12,17 @@ OPENAPI_OUT ?= docs/api/api.json
 E2E_FEATURES ?= $(strip $(shell cat config/e2e-features.txt 2>/dev/null))
 E2E_ARGS ?= $(if $(E2E_FEATURES),--features $(E2E_FEATURES),)
 
+# Nightly toolchain for targets that need unstable rustc flags (currently only
+# `shear`, which drives -Zunpretty=expanded). This default serves local runs;
+# CI overrides it via `make shear RUST_NIGHTLY=...` so the toolchain it installs
+# and caches cannot drift from the one that actually compiles.
+RUST_NIGHTLY ?= nightly-2026-04-16
+
+# cargo-shear version installed by `make setup`. Pinned because an unused-dep
+# verdict that disagrees with CI is worse than no local check at all.
+# Keep in sync with the `Install cargo-shear` step in shear-nightly.yml.
+SHEAR_VERSION ?= 1.13.1
+
 # -------- Utility macros --------
 
 define check_tool
@@ -151,6 +162,7 @@ setup: .setup-stamp
 	cargo install cargo-gears
 	cargo install cargo-fuzz
 	cargo install cargo-hack
+	cargo install --locked cargo-shear --version $(SHEAR_VERSION)
 	cargo install gts-validator
 	@if echo "$$OS" | grep -iq windows || [ -n "$$COMSPEC" ]; then \
 		echo "NOTE: kani-verifier is not supported on Windows; skipping (use WSL2/Docker for Kani)."; \
@@ -318,7 +330,7 @@ dylint:
 # Check for unused dependencies with cargo-shear.
 shear:
 	$(call check_tool,cargo-shear)
-	cargo +nightly-2026-04-16 shear --expand --deny-warnings
+	cargo +$(RUST_NIGHTLY) shear --expand --deny-warnings
 
 # Run all code safety checks
 safety: clippy kani lint dylint # geiger
