@@ -160,7 +160,8 @@ pub use select::{
 pub use db_ops::{
     SecureDeleteExt, SecureDeleteMany, SecureInsertExt, SecureInsertMany, SecureInsertManyExt,
     SecureInsertOne, SecureOnConflict, SecureUpdateExt, SecureUpdateMany, max_bind_params_for,
-    secure_insert, secure_insert_many, secure_update_with_scope, validate_tenant_in_scope,
+    secure_insert, secure_insert_from_select, secure_insert_many, secure_update_with_scope,
+    validate_tenant_in_scope,
 };
 
 // Provider pattern for advanced tenant filtering
