@@ -1252,6 +1252,62 @@
         ],
         "type": "object"
       },
+      "GearDto": {
+        "description": "Response DTO for a single registered gear",
+        "properties": {
+          "capabilities": {
+            "description": "Declared capabilities (e.g., \"rest\", \"grpc\", \"system\", \"db\")",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "dependencies": {
+            "description": "Gear dependencies (other gear names)",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "deployment_mode": {
+            "$ref": "#/components/schemas/DeploymentModeDto",
+            "description": "Whether the gear is compiled-in or out-of-process"
+          },
+          "instances": {
+            "description": "Running instances of this gear",
+            "items": {
+              "$ref": "#/components/schemas/GearInstanceDto"
+            },
+            "type": "array"
+          },
+          "name": {
+            "description": "Gear name",
+            "type": "string"
+          },
+          "plugins": {
+            "description": "Plugins provided by this gear (reserved for follow-up implementation)",
+            "items": {
+              "$ref": "#/components/schemas/PluginDto"
+            },
+            "type": "array"
+          },
+          "version": {
+            "description": "Gear version (if reported by a running instance)",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "capabilities",
+          "dependencies",
+          "deployment_mode",
+          "instances"
+        ],
+        "type": "object"
+      },
       "GearInstanceDto": {
         "description": "Response DTO for a running gear instance",
         "properties": {
@@ -2884,6 +2940,24 @@
           "items": {
             "items": {
               "$ref": "#/components/schemas/UserDto"
+            },
+            "type": "array"
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/PageInfo"
+          }
+        },
+        "required": [
+          "items",
+          "page_info"
+        ],
+        "type": "object"
+      },
+      "Page_UsersInfoUserDto": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/UsersInfoUserDto"
             },
             "type": "array"
           },
@@ -5500,77 +5574,41 @@
         },
         "type": "object"
       },
-      "Vec": {
-        "items": {
-          "properties": {
-            "cors": {
-              "oneOf": [
-                {
-                  "type": "null"
-                },
-                {
-                  "$ref": "#/components/schemas/CorsConfig"
-                }
-              ]
-            },
-            "enabled": {
-              "type": "boolean"
-            },
-            "id": {
-              "type": "string"
-            },
-            "match": {
-              "$ref": "#/components/schemas/MatchRules"
-            },
-            "plugins": {
-              "oneOf": [
-                {
-                  "type": "null"
-                },
-                {
-                  "$ref": "#/components/schemas/PluginsConfig"
-                }
-              ]
-            },
-            "priority": {
-              "format": "int32",
-              "type": "integer"
-            },
-            "rate_limit": {
-              "oneOf": [
-                {
-                  "type": "null"
-                },
-                {
-                  "$ref": "#/components/schemas/RateLimitConfig"
-                }
-              ]
-            },
-            "tags": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "tenant_id": {
-              "format": "uuid",
-              "type": "string"
-            },
-            "upstream_id": {
-              "type": "string"
-            }
+      "UsersInfoUserDto": {
+        "description": "REST DTO for user representation with serde/utoipa\n\nAliased in the `OpenAPI` components as `UsersInfoUserDto`: the\naccount-management gear ships an unrelated `UserDto` and both are mounted in\nthe same server, so the bare ident would collide in `components.schemas`.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
           },
-          "required": [
-            "id",
-            "tenant_id",
-            "upstream_id",
-            "match",
-            "priority",
-            "enabled"
-          ],
-          "type": "object"
+          "display_name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "tenant_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
         },
-        "type": "array"
+        "required": [
+          "id",
+          "tenant_id",
+          "email",
+          "display_name",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
       },
       "VersionDto": {
         "description": "One content version (`GET /files/{id}/versions`).\n\nWire shape documented in `docs/api.md` (`hash_mode`/`part_count`/`manifest`\nfields, ADR-0006).\n\n@cpt-dod:cpt-cf-file-storage-dod-content-hash-modes-docs:p2",
@@ -12604,7 +12642,10 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Vec"
+                  "items": {
+                    "$ref": "#/components/schemas/GearDto"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -14775,7 +14816,10 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Vec"
+                  "items": {
+                    "$ref": "#/components/schemas/NodeDto"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -15022,7 +15066,10 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Vec"
+                  "items": {
+                    "$ref": "#/components/schemas/RouteResponse"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -15576,7 +15623,10 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Vec"
+                  "items": {
+                    "$ref": "#/components/schemas/UpstreamResponse"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -18537,7 +18587,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Page_UserDto"
+                  "$ref": "#/components/schemas/Page_UsersInfoUserDto"
                 }
               }
             },
@@ -18629,7 +18679,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UserDto"
+                  "$ref": "#/components/schemas/UsersInfoUserDto"
                 }
               }
             },
@@ -18829,7 +18879,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UserDto"
+                  "$ref": "#/components/schemas/UsersInfoUserDto"
                 }
               }
             },
@@ -18916,7 +18966,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UserDto"
+                  "$ref": "#/components/schemas/UsersInfoUserDto"
                 }
               }
             },
