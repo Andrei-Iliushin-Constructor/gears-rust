@@ -1,4 +1,6 @@
-use std::collections::{BTreeSet, HashMap};
+#[cfg(feature = "test-util")]
+use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use toolkit_gts::gts_id;
@@ -13,26 +15,38 @@ use super::dispatcher::{
 };
 use super::runtime::RoutedBatchHandler;
 use super::{
-    BatchHandlerOutcome, CommitOffset, ConnectionDropReason, ConsumerBuffering, ConsumerBuilder,
-    ConsumerCommitMode, ConsumerGroupRef, ConsumerHandler, ConsumerListenerSettings,
-    ConsumerRuntimeEvent, ConsumerRuntimeListener, ConsumerSlowDetection, EventBatch, EventTypeRef,
-    Fallback, HandlerOutcome, InMemoryOffsetManager, OffsetManagerError, OffsetStore,
-    PartitionBufferState, RawEvent, ResolvedPosition, SingleEventHandlerAdapter,
-    SlowConsumerTrigger, TopicRef,
+    BatchHandlerOutcome, ConsumerHandler, EventBatch, EventTypeRef, HandlerOutcome, RawEvent,
+    SingleEventHandlerAdapter, TopicRef,
+};
+#[cfg(feature = "test-util")]
+use super::{
+    CommitOffset, ConnectionDropReason, ConsumerBuffering, ConsumerBuilder, ConsumerCommitMode,
+    ConsumerGroupRef, ConsumerListenerSettings, ConsumerRuntimeEvent, ConsumerRuntimeListener,
+    ConsumerSlowDetection, Fallback, InMemoryOffsetManager, OffsetManagerError, OffsetStore,
+    PartitionBufferState, ResolvedPosition, SlowConsumerTrigger,
 };
 use crate::error::ConsumerError;
-use crate::ids::{ConsumerGroupId, TopicId};
+#[cfg(feature = "test-util")]
+use crate::ids::ConsumerGroupId;
+use crate::ids::TopicId;
 
 type SharedOffsets = Arc<Mutex<Vec<i64>>>;
 type SharedNamedOffsets = Arc<Mutex<Vec<(&'static str, i64)>>>;
 type PartitionCall = (String, u32, i64);
 type SharedPartitionCalls = Arc<Mutex<Vec<PartitionCall>>>;
+#[cfg(feature = "test-util")]
 type SharedAttempts = Arc<Mutex<Vec<u16>>>;
+#[cfg(feature = "test-util")]
 type SharedTimeline = Arc<Mutex<Vec<&'static str>>>;
+#[cfg(feature = "test-util")]
 type CommitRecord = (ConsumerGroupId, TopicId, u32, i64);
+#[cfg(feature = "test-util")]
 type SharedCommits = Arc<Mutex<Vec<CommitRecord>>>;
+#[cfg(feature = "test-util")]
 type SharedScopes = Arc<Mutex<Vec<(String, u32, usize)>>>;
+#[cfg(feature = "test-util")]
 type SharedViolations = Arc<Mutex<Vec<String>>>;
+#[cfg(feature = "test-util")]
 type SharedRuntimeEvents = Arc<Mutex<Vec<ConsumerRuntimeEvent>>>;
 type TestPartitionBuffers =
     Arc<RwLock<HashMap<TopicPartitionKey, super::dispatcher::PartitionEventBuffer>>>;
@@ -60,6 +74,7 @@ fn raw_event_on(topic: &str, type_id: &str, partition: u32, offset: i64) -> RawE
     }
 }
 
+#[cfg(feature = "test-util")]
 fn partition_key_for_partition(target: u32, partitions: u32) -> String {
     assert_eq!(partitions, 2, "only the two-partition fixture is supported");
     match target {
@@ -133,11 +148,13 @@ impl ConsumerHandler for AckAllBatchHandler {
     }
 }
 
+#[cfg(feature = "test-util")]
 struct SleepingBatchHandler {
     calls: SharedPartitionCalls,
     delay: Duration,
 }
 
+#[cfg(feature = "test-util")]
 #[async_trait::async_trait]
 impl ConsumerHandler for SleepingBatchHandler {
     async fn handle_batch(
@@ -161,11 +178,13 @@ impl ConsumerHandler for SleepingBatchHandler {
     }
 }
 
+#[cfg(feature = "test-util")]
 struct FailingThenCommitBatchHandler {
     failures_remaining: Arc<Mutex<usize>>,
     calls: SharedAttempts,
 }
 
+#[cfg(feature = "test-util")]
 #[async_trait::async_trait]
 impl ConsumerHandler for FailingThenCommitBatchHandler {
     async fn handle_batch(
@@ -188,10 +207,12 @@ impl ConsumerHandler for FailingThenCommitBatchHandler {
     }
 }
 
+#[cfg(feature = "test-util")]
 struct SequencedOffsetManager {
     timeline: SharedTimeline,
 }
 
+#[cfg(feature = "test-util")]
 #[async_trait::async_trait]
 impl OffsetStore for SequencedOffsetManager {
     async fn load_position(
@@ -205,6 +226,7 @@ impl OffsetStore for SequencedOffsetManager {
     }
 }
 
+#[cfg(feature = "test-util")]
 #[async_trait::async_trait]
 impl CommitOffset for SequencedOffsetManager {
     async fn commit(
@@ -218,11 +240,13 @@ impl CommitOffset for SequencedOffsetManager {
     }
 }
 
+#[cfg(feature = "test-util")]
 #[derive(Clone, Default)]
 struct RecordingCommitOffsetManager {
     commits: SharedCommits,
 }
 
+#[cfg(feature = "test-util")]
 #[async_trait::async_trait]
 impl OffsetStore for RecordingCommitOffsetManager {
     async fn load_position(
@@ -235,6 +259,7 @@ impl OffsetStore for RecordingCommitOffsetManager {
     }
 }
 
+#[cfg(feature = "test-util")]
 #[async_trait::async_trait]
 impl CommitOffset for RecordingCommitOffsetManager {
     async fn commit(
@@ -252,10 +277,12 @@ impl CommitOffset for RecordingCommitOffsetManager {
     }
 }
 
+#[cfg(feature = "test-util")]
 struct SequencedBatchHandler {
     timeline: SharedTimeline,
 }
 
+#[cfg(feature = "test-util")]
 #[async_trait::async_trait]
 impl ConsumerHandler for SequencedBatchHandler {
     async fn handle_batch(
@@ -268,17 +295,20 @@ impl ConsumerHandler for SequencedBatchHandler {
     }
 }
 
+#[cfg(feature = "test-util")]
 #[derive(Default)]
 struct BatchScopeRecorder {
     scopes: SharedScopes,
     violations: SharedViolations,
 }
 
+#[cfg(feature = "test-util")]
 #[derive(Clone, Default)]
 struct RecordingRuntimeListener {
     events: SharedRuntimeEvents,
 }
 
+#[cfg(feature = "test-util")]
 #[async_trait::async_trait]
 impl ConsumerRuntimeListener for RecordingRuntimeListener {
     async fn on_consumer_event(&self, event: &ConsumerRuntimeEvent) -> Result<(), ConsumerError> {
@@ -287,8 +317,10 @@ impl ConsumerRuntimeListener for RecordingRuntimeListener {
     }
 }
 
+#[cfg(feature = "test-util")]
 struct FailingRuntimeListener;
 
+#[cfg(feature = "test-util")]
 #[async_trait::async_trait]
 impl ConsumerRuntimeListener for FailingRuntimeListener {
     async fn on_consumer_event(&self, _event: &ConsumerRuntimeEvent) -> Result<(), ConsumerError> {
@@ -298,10 +330,12 @@ impl ConsumerRuntimeListener for FailingRuntimeListener {
     }
 }
 
+#[cfg(feature = "test-util")]
 struct SlowRuntimeListener {
     delay: Duration,
 }
 
+#[cfg(feature = "test-util")]
 #[async_trait::async_trait]
 impl ConsumerRuntimeListener for SlowRuntimeListener {
     async fn on_consumer_event(&self, _event: &ConsumerRuntimeEvent) -> Result<(), ConsumerError> {
@@ -310,6 +344,7 @@ impl ConsumerRuntimeListener for SlowRuntimeListener {
     }
 }
 
+#[cfg(feature = "test-util")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum RuntimeEventKind {
     SubscriptionJoining,
@@ -328,6 +363,7 @@ enum RuntimeEventKind {
     RetryScheduled,
 }
 
+#[cfg(feature = "test-util")]
 fn runtime_event_kind(event: &ConsumerRuntimeEvent) -> RuntimeEventKind {
     match event {
         ConsumerRuntimeEvent::SubscriptionJoining { .. } => RuntimeEventKind::SubscriptionJoining,
@@ -357,6 +393,7 @@ fn runtime_event_kind(event: &ConsumerRuntimeEvent) -> RuntimeEventKind {
     }
 }
 
+#[cfg(feature = "test-util")]
 #[async_trait::async_trait]
 impl ConsumerHandler for BatchScopeRecorder {
     async fn handle_batch(
