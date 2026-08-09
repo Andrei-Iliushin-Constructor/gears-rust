@@ -100,7 +100,7 @@ credstore-sdk = { workspace = true, features = ["test-util"] }
 toolkit = { workspace = true, features = ["bootstrap"] }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 types-registry-sdk = { workspace = true, features = ["test-util"] }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "net"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "net", "test-util"] }
 tower = { workspace = true, features = ["util"] }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
