@@ -61,7 +61,7 @@ refs: []
   - [Discovery and Inventory](#discovery-and-inventory)
   - [Capabilities and Tags](#capabilities-and-tags)
   - [Retention and Accounting](#retention-and-accounting)
-  - [History and Migration](#history-and-migration)
+  - [History](#history)
   - [Dependency Unavailability](#dependency-unavailability)
   - [Non-Functional Requirements (Show-Stoppers)](#non-functional-requirements-show-stoppers)
 - [13. Dependencies](#13-dependencies)
@@ -70,6 +70,7 @@ refs: []
 - [16. Open Questions](#16-open-questions)
 - [17. Reference Materials](#17-reference-materials)
 - [18. Traceability](#18-traceability)
+- [Appendix A — First-Adapter Walkthrough (Informative)](#appendix-a--first-adapter-walkthrough-informative)
 
 <!-- /toc -->
 
@@ -140,7 +141,7 @@ Each goal is tracked by a metric with a defined data source. Baselines and targe
 | Capability | Optional feature (backup, monitoring, encryption) that a resource type offers. It is enabled and configured per resource instance. |
 | Virtual Resource Graph | Typed nodes (resources) and edges — ownership (parent-child), dependency, attachment — that support traversal, impact analysis, and visualization. |
 | Discovery | Automated detection and synchronization of existing provider resources into IRM inventory. |
-| Resource Group | Lifecycle container for related resources. Every resource belongs to exactly one group within the scope hierarchy. |
+| Resource Group | Lifecycle container for related resources. IRM records exactly one group placement per managed resource within the scope hierarchy; the invariant holds over IRM records, not over the data of the Resource Group Service. |
 | Tenant | Isolated customer or organizational boundary. All IRM operations carry tenant context. |
 | Deployment Address | The tuple (tenant, resource group, deployment name) that uniquely identifies a deployment. |
 | Default Group | Per-tenant resource group that IRM uses as the implicit placement when the caller gives none. |
@@ -167,7 +168,7 @@ Each goal is tracked by a metric with a defined data source. Baselines and targe
 | **Deliberate scope decision** | Continuous drift detection and reconciliation loops are **not** an IRM responsibility in this scope. Adapters own continuous reconciliation. IRM provides on-demand refresh and preview (§5.2). §16 records the question of revisiting this. |
 | **Deliberate scope decision (multi-region)** | Multi-region management is out of scope for this release (§7.2), but it is a known platform direction: the technical design **MUST NOT** preclude a later placement dimension (such as a region) in deployment addressing, identifiers, or group semantics. §16 records the question. |
 | **Safety applicability** | Safety (ISO/IEC 25010 §4.2.9) is not applicable: IRM is a control plane for IT resources operated through API and CLI; it does not actuate physical equipment. Destructive-operation risk to managed infrastructure is governed by `cpt-cf-infrastructure-resource-manager-fr-guardrails`, `cpt-cf-infrastructure-resource-manager-fr-cascade-admission`, `cpt-cf-infrastructure-resource-manager-fr-cascade-disclosure`, and `cpt-cf-infrastructure-resource-manager-fr-operation-cancel`. |
-| **Recorded platform conventions** | CloudEvents (event-broker ADR-0003) for the event envelope. RFC 9457 (ToolKit `05_errors_rfc9457.md`) for error responses. The Idempotency-Key header (toolkit-http) for duplicate-safe mutations. CEL (quota-enforcement / serverless-runtime precedents) for declarative expressions. AuthZEN-based authorization resolution (authz-resolver, `docs/arch/authorization/`) for access decisions. |
+| **Recorded platform conventions** | CloudEvents (event-broker ADR-0003) for the event envelope. RFC 9457 (ToolKit `05_errors_rfc9457.md`) for error responses. The Idempotency-Key header (toolkit-http) for duplicate-safe mutations. OData query conventions (`$filter`, `$orderby`) with opaque cursor pagination (toolkit-odata) for list surfaces. CEL (quota-enforcement / serverless-runtime precedents) for declarative expressions. AuthZEN-based authorization resolution (authz-resolver, `docs/arch/authorization/`) for access decisions. |
 | **IRM-level recorded choices** | UUID v7 (RFC 9562) for time-sortable identifiers. Salted per-tenant digests for secret-field change detection without cleartext exposure. A canonical plan fingerprint that binds an apply to the exact inputs it was previewed against. |
 
 ## 3. Actors
@@ -308,7 +309,7 @@ All human actors are technical professionals who work through the API, CLI, and 
 
 ### 4.1 Module-Specific Environment Constraints
 
-- IRM is pre-GA: one-time breaking migrations (event namespace normalization to the platform vendor token, migration to the deployment-scoped resource model) MAY be executed without a dual-publish compatibility window.
+- IRM is pre-GA: one-time breaking changes MAY be executed without a dual-publish compatibility window.
 - Deployment and release mechanics (build, packaging, rollout) are owned by the platform ToolKit lifecycle, not by this PRD.
 - This PRD imposes no further runtime, OS, or lifecycle constraints. The technical design settles anything beyond the NFRs in §7.
 
@@ -316,7 +317,7 @@ All human actors are technical professionals who work through the API, CLI, and 
 
 ### 5.1 In Scope
 
-Priority below is the strongest requirement priority within the row, on the same `p1`–`p4` scale that §6 and §7 use. `p1` must ship — the capability already exists in a reference implementation. `p2` should ship — planned. `p3` is deferred — blocked on a platform dependency that is not yet available. `p4` is unused.
+Priority below is the strongest requirement priority within the row, on the same `p1`–`p4` scale that §6 and §7 use. `p1` must ship in the first release. `p2` should ship — planned, and not critical for the first release. `p3` is deferred — blocked on a platform dependency that is not yet available. `p4` is unused.
 
 | **#** | **Feature** | **Priority** | **Requirements** | **Notes** |
 |-------|-------------|--------------|------------------|-----------|
@@ -329,7 +330,7 @@ Priority below is the strongest requirement priority within the row, on the same
 | 7 | Preview (dry-run) | p1 | `cpt-cf-infrastructure-resource-manager-fr-preview` | Human-readable and machine-readable preview of every planned change with zero side effects. Secrets are always redacted. |
 | 8 | Plan binding and concurrency safety | p1 | `cpt-cf-infrastructure-resource-manager-fr-plan-binding` | Apply executes exactly the previewed change, or IRM rejects the apply when definition, state, or type metadata drifted since preview. |
 | 9 | Ordered durable execution | p1 | `cpt-cf-infrastructure-resource-manager-fr-ordered-execution`, `cpt-cf-infrastructure-resource-manager-fr-deployment-status` | Dependency-ordered execution, parallel only where no dependency relates, durable and resumable, with compensation on failure. |
-| 10 | Replacement strategies | p1 | `cpt-cf-infrastructure-resource-manager-fr-replace-strategies` | Delete-before-create (default) and create-before-destroy per type with per-resource override. IRM re-wires dependent resources safely. |
+| 10 | Replacement strategies | p2 | `cpt-cf-infrastructure-resource-manager-fr-replace-strategies` | Delete-before-create (default) and create-before-destroy per type with per-resource override. IRM re-wires dependent resources safely. |
 | 11 | Management policy | p1 | `cpt-cf-infrastructure-resource-manager-fr-guardrails` | One per-resource protection mechanism with three levels (full / no-delete / no-touch). no-delete detaches the provider object instead of destroying it. |
 | 12 | Duplicate-safe writes (idempotency) | p1 | `cpt-cf-infrastructure-resource-manager-fr-idempotent-writes` | Mandatory caller-supplied idempotency keys make resource and deployment mutations safely retryable with verbatim replay. `cpt-cf-infrastructure-resource-manager-fr-idempotent-writes` lists the operations exempt by construction. |
 | 13 | Revisions, history, rollback | p1 | `cpt-cf-infrastructure-resource-manager-fr-revisions-history`, `cpt-cf-infrastructure-resource-manager-fr-rollback` | Immutable revision per successful apply. Unified chronological history. Multi-selector rollback as a fresh reconciliation. Lineage survives replacement. |
@@ -337,24 +338,23 @@ Priority below is the strongest requirement priority within the row, on the same
 | 15 | Soft-delete, retention, orphans | p1 | `cpt-cf-infrastructure-resource-manager-fr-soft-delete-retention`, `cpt-cf-infrastructure-resource-manager-fr-delete-uncertainty` | Tombstones with configurable retention and purge. Orphaned provider objects are first-class: visible, capped per tenant, operator-cleanable. |
 | 16 | Secret hygiene | p1 | `cpt-cf-infrastructure-resource-manager-fr-secret-hygiene` | Secret values are never persisted or emitted in cleartext anywhere (state, history, previews, logs, events). Comparison detects a changed secret value without storing or exposing cleartext. |
 | 17 | Lifecycle actions (day-2) | p2 | `cpt-cf-infrastructure-resource-manager-fr-action-framework`, `cpt-cf-infrastructure-resource-manager-fr-action-execution` | Provider-defined actions (start, stop, snapshot, resize, migrate) with state validation, asynchronous tracking, and full audit. |
-| 18 | Virtual resource graph | p1 | `cpt-cf-infrastructure-resource-manager-fr-relationship-model`, `cpt-cf-infrastructure-resource-manager-fr-graph-query`, `cpt-cf-infrastructure-resource-manager-fr-relationship-backfill` | Typed relationships derived from resource data. Traversal and impact queries. Consistency maintenance (cascade, orphan-edge cleanup, migration archiving). |
+| 18 | Virtual resource graph | p1 | `cpt-cf-infrastructure-resource-manager-fr-relationship-model`, `cpt-cf-infrastructure-resource-manager-fr-graph-query` | Typed relationships derived from resource data. Traversal and impact queries. Consistency maintenance (cascade, orphan-edge cleanup). |
 | 19 | Topology data surface | p2 | `cpt-cf-infrastructure-resource-manager-fr-visualization` | Machine-readable topology surface for the frontend visualization: scoped queries, path computation, export. |
 | 20 | Discovery and inventory | p2 | `cpt-cf-infrastructure-resource-manager-fr-discovery-jobs`, `cpt-cf-infrastructure-resource-manager-fr-discovery-sync`, `cpt-cf-infrastructure-resource-manager-fr-tenant-assignment`, `cpt-cf-infrastructure-resource-manager-fr-discovery-compliance` | Manual, scheduled, and event-driven discovery. Idempotent bulk sync. Stale handling. Tenant assignment with discovery pool. Circuit breaker. Non-blocking compliance flagging. |
-| 21 | Resource groups | p1 | `cpt-cf-infrastructure-resource-manager-fr-resource-groups` | Scope model is tenant → resource group → resource. Every managed resource is in exactly one group. Group placement and move. IRM rejects deletion of non-empty groups. |
+| 21 | Resource groups | p1 | `cpt-cf-infrastructure-resource-manager-fr-resource-groups` | Scope model is tenant → resource group → resource. IRM records exactly one placement per managed resource. Group placement and move. IRM rejects deletion of non-empty groups. |
 | 22 | Tags | p2 | `cpt-cf-infrastructure-resource-manager-fr-tags` | Key-value tags on groups and resources with downward inheritance. Filtering and policy targeting. |
 | 23 | Governance cross-cut | p1 | `cpt-cf-infrastructure-resource-manager-fr-tenant-isolation`, `cpt-cf-infrastructure-resource-manager-fr-rbac`, `cpt-cf-infrastructure-resource-manager-fr-policy-gating`, `cpt-cf-infrastructure-resource-manager-fr-audit-events`, `cpt-cf-infrastructure-resource-manager-fr-admission-pipeline`, `cpt-cf-infrastructure-resource-manager-fr-data-classification` | Tenant isolation, role-based access, policy and quota gating, audit events with correlation on every operation. |
-| 24 | Migration to the deployment-scoped model | p2 | `cpt-cf-infrastructure-resource-manager-fr-model-migration` | Per-tenant migration (expand → backfill → verify → contract) with abort and resume. Legacy data stays readable until completion. |
-| 25 | Group placement and deployment addressing | p1 | `cpt-cf-infrastructure-resource-manager-fr-group-addressing`, `cpt-cf-infrastructure-resource-manager-fr-default-group`, `cpt-cf-infrastructure-resource-manager-fr-group-validation`, `cpt-cf-infrastructure-resource-manager-fr-deployment-scoped` | Deployment identity is (tenant, group, name). Submitting a definition creates-or-updates at that address. Default group is implicit when the caller gives none. |
-| 26 | Explicit group move | p1 | `cpt-cf-infrastructure-resource-manager-fr-group-move`, `cpt-cf-infrastructure-resource-manager-fr-group-move-concurrency` | Relocating a deployment between groups is a separate, synchronous, optimistically-concurrent operation. Apply never moves anything. |
-| 27 | Membership convergence and drift repair | p1 | `cpt-cf-infrastructure-resource-manager-fr-membership-convergence`, `cpt-cf-infrastructure-resource-manager-fr-membership-ordering`, `cpt-cf-infrastructure-resource-manager-fr-membership-durability`, `cpt-cf-infrastructure-resource-manager-fr-membership-failure-handling`, `cpt-cf-infrastructure-resource-manager-fr-placement-drift` | IRM commits placement locally and propagates it asynchronously with bounded staleness. A periodic sweep reconciles out-of-band changes in both directions. |
-| 28 | Manifest-based adapter onboarding | p1 | `cpt-cf-infrastructure-resource-manager-fr-manifest-onboarding`, `cpt-cf-infrastructure-resource-manager-fr-manifest-policy`, `cpt-cf-infrastructure-resource-manager-fr-adapter-delegation` | One call ingests an adapter package and atomically registers the adapter, its types, data-plane operations, delegation scopes, and policy bundles, then activates it. |
-| 29 | Data-plane operation catalog | p1 | `cpt-cf-infrastructure-resource-manager-fr-data-plane-catalog`, `cpt-cf-infrastructure-resource-manager-fr-grantable-types` | Per-type catalog of provider operations published for capability-grant issuance, discovery, and per-instance availability. |
-| 30 | Per-resource-type authorization with response masking | p1 | `cpt-cf-infrastructure-resource-manager-fr-per-type-authz`, `cpt-cf-infrastructure-resource-manager-fr-write-admission`, `cpt-cf-infrastructure-resource-manager-fr-authz-list-union`, `cpt-cf-infrastructure-resource-manager-fr-authz-payload-masking`, `cpt-cf-infrastructure-resource-manager-fr-authz-topology-narrowing` | IRM decides access per resource type. Unreadable members stay listed, but IRM withholds and marks their payloads. IRM silently narrows topology neighbors. |
-| 31 | Mid-flight re-authorization | p2 | `cpt-cf-infrastructure-resource-manager-fr-midflight-reauth` | A running deployment re-validates the caller's live authority before each side-effecting stage and cancels when authority was revoked. |
-| 32 | Cascade delete of owned subtrees | p1 | `cpt-cf-infrastructure-resource-manager-fr-cascade-delete`, `cpt-cf-infrastructure-resource-manager-fr-cascade-admission`, `cpt-cf-infrastructure-resource-manager-fr-cascade-disclosure` | Deleting an owning parent commits first. The owned subtree converges to deleted asynchronously, behind admission gates and a blast-radius cap. |
-| 33 | Operation cancellation | p1 | `cpt-cf-infrastructure-resource-manager-fr-operation-cancel` | A single idempotent cancel surface addressed by operation, distinguishing "cancellation requested" from "already finished". |
-| 34 | Concurrency control and conditional reads | p2 | `cpt-cf-infrastructure-resource-manager-fr-conditional-reads` | Validators on reads with not-modified responses, and optional precondition validation on mutating operations. |
-| 35 | Platform hardening and licensing | p1 | `cpt-cf-infrastructure-resource-manager-fr-adapter-credential`, `cpt-cf-infrastructure-resource-manager-fr-adapter-egress`, `cpt-cf-infrastructure-resource-manager-fr-adapter-response-validation`, `cpt-cf-infrastructure-resource-manager-fr-adapter-async-protocol`, `cpt-cf-infrastructure-resource-manager-fr-request-limits`, `cpt-cf-infrastructure-resource-manager-fr-license-gating`, `cpt-cf-infrastructure-resource-manager-fr-dependency-unavailability` | Per-call adapter credentials, egress protection, adapter-response validation, request size limits distinct from field validation, and license gating of the whole API. |
+| 24 | Group placement and deployment addressing | p1 | `cpt-cf-infrastructure-resource-manager-fr-group-addressing`, `cpt-cf-infrastructure-resource-manager-fr-default-group`, `cpt-cf-infrastructure-resource-manager-fr-group-validation`, `cpt-cf-infrastructure-resource-manager-fr-deployment-scoped` | Deployment identity is (tenant, group, name). Submitting a definition creates-or-updates at that address. Default group is implicit when the caller gives none. |
+| 25 | Explicit group move | p2 | `cpt-cf-infrastructure-resource-manager-fr-group-move`, `cpt-cf-infrastructure-resource-manager-fr-group-move-concurrency` | Relocating a deployment between groups is a separate, synchronous, optimistically-concurrent operation. Apply never moves anything. |
+| 26 | Membership convergence and drift repair | p1 | `cpt-cf-infrastructure-resource-manager-fr-membership-convergence`, `cpt-cf-infrastructure-resource-manager-fr-membership-ordering`, `cpt-cf-infrastructure-resource-manager-fr-membership-durability`, `cpt-cf-infrastructure-resource-manager-fr-membership-failure-handling`, `cpt-cf-infrastructure-resource-manager-fr-placement-drift` | IRM commits placement locally and propagates it asynchronously with bounded staleness. A periodic sweep reconciles out-of-band changes in both directions. |
+| 27 | Manifest-based adapter onboarding | p1 | `cpt-cf-infrastructure-resource-manager-fr-manifest-onboarding`, `cpt-cf-infrastructure-resource-manager-fr-manifest-policy`, `cpt-cf-infrastructure-resource-manager-fr-adapter-delegation` | One call ingests an adapter package and atomically registers the adapter, its types, data-plane operations, delegation scopes, and policy bundles, then activates it. |
+| 28 | Data-plane operation catalog | p2 | `cpt-cf-infrastructure-resource-manager-fr-data-plane-catalog`, `cpt-cf-infrastructure-resource-manager-fr-grantable-types` | Per-type catalog of provider operations published for capability-grant issuance, discovery, and per-instance availability. |
+| 29 | Per-resource-type authorization with response masking | p1 | `cpt-cf-infrastructure-resource-manager-fr-per-type-authz`, `cpt-cf-infrastructure-resource-manager-fr-write-admission`, `cpt-cf-infrastructure-resource-manager-fr-authz-list-union`, `cpt-cf-infrastructure-resource-manager-fr-authz-payload-masking`, `cpt-cf-infrastructure-resource-manager-fr-authz-topology-narrowing` | IRM decides access per resource type. Unreadable members stay listed, but IRM withholds and marks their payloads. IRM silently narrows topology neighbors. |
+| 30 | Mid-flight re-authorization | p2 | `cpt-cf-infrastructure-resource-manager-fr-midflight-reauth` | A running deployment re-validates the caller's live authority before each side-effecting stage and cancels when authority was revoked. |
+| 31 | Cascade delete of owned subtrees | p1 | `cpt-cf-infrastructure-resource-manager-fr-cascade-delete`, `cpt-cf-infrastructure-resource-manager-fr-cascade-admission`, `cpt-cf-infrastructure-resource-manager-fr-cascade-disclosure` | Deleting an owning parent commits first. The owned subtree converges to deleted asynchronously, behind admission gates and a blast-radius cap. |
+| 32 | Operation cancellation | p1 | `cpt-cf-infrastructure-resource-manager-fr-operation-cancel` | A single idempotent cancel surface addressed by operation, distinguishing "cancellation requested" from "already finished". |
+| 33 | Concurrency control and conditional reads | p2 | `cpt-cf-infrastructure-resource-manager-fr-conditional-reads` | Validators on reads with not-modified responses, and optional precondition validation on mutating operations. |
+| 34 | Platform hardening and licensing | p1 | `cpt-cf-infrastructure-resource-manager-fr-adapter-credential`, `cpt-cf-infrastructure-resource-manager-fr-adapter-egress`, `cpt-cf-infrastructure-resource-manager-fr-adapter-response-validation`, `cpt-cf-infrastructure-resource-manager-fr-adapter-async-protocol`, `cpt-cf-infrastructure-resource-manager-fr-request-limits`, `cpt-cf-infrastructure-resource-manager-fr-license-gating`, `cpt-cf-infrastructure-resource-manager-fr-dependency-unavailability` | Per-call adapter credentials, egress protection, adapter-response validation, request size limits distinct from field validation, and license gating of the whole API. |
 
 ### 5.2 Out of Scope
 
@@ -514,9 +514,9 @@ The system **MUST** let callers discover which optional capabilities a resource 
 
 #### Data-Plane Operation Catalog
 
-- [ ] `p1` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-data-plane-catalog`
+- [ ] `p2` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-data-plane-catalog`
 
-For every resource type, the system **MUST** publish the provider operations available on it. The published entry for an operation **MUST** include the required resource state, input and output shapes, maximum credential lifetime, credential class, and deprecation status. With this catalog, other platform services can issue scoped grants for direct data-plane access. They can discover which operations exist. They can also determine which operations are available on a specific resource instance.
+For every resource type, the system **MUST** publish the provider operations available on it. The published entry for an operation **MUST** include the required resource state, input and output shapes, maximum credential lifetime, credential class, and deprecation status. With this catalog, other platform services can issue scoped grants for direct data-plane access. They can discover which operations exist. They can also determine which operations are available on a specific resource instance. Re-submission of an adapter package **MUST** reconcile the published catalog. For an operation with outstanding grants, removal or an incompatible change **MUST** at minimum mark the operation deprecated, and the system **MUST** refuse the removal or flag it for operator resolution rather than silently invalidate outstanding grants.
 
 **Rationale**: Direct data-plane access must be grantable per operation, not all-or-nothing. The grant issuer needs an authoritative machine-readable catalog to scope against.
 
@@ -588,7 +588,7 @@ The system **MUST** produce a preview of every planned change, in both human-rea
 
 - [ ] `p1` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-plan-binding`
 
-An apply **MUST** execute exactly the change that was previewed, or refuse when the definition, current state, or type metadata drifted since preview. To do this, the system **MUST** bind the plan to its inputs (definition, current state, type metadata, tenant, options). As a result, definitions that differ only in ordering, or that explicitly state a declared default, bind to the same plan. When any input drifted since preview, the system **MUST** reject the apply with a distinct, actionable reason. Concurrent submissions against the same deployment **MUST** admit against its current revision under a consistency guard. The system **MUST** refuse a submission that lost the race as a conflict.
+An apply **MUST** execute exactly the change that was previewed, or refuse when the definition, current state, or type metadata drifted since preview. In this requirement, current state means the recorded actual state. Plan binding detects drift of the recorded inputs since preview; it makes no promise about provider-side freshness. `cpt-cf-infrastructure-resource-manager-fr-refresh` and the adapter drift channel (§9.2) bring provider-side changes into the recorded state, and §15 records the residual drift-visibility risk. To detect drift, the system **MUST** bind the plan to its inputs (definition, current state, type metadata, tenant, options). As a result, definitions that differ only in ordering, or that explicitly state a declared default, bind to the same plan. When any input drifted since preview, the system **MUST** reject the apply with a distinct, actionable reason. Concurrent submissions against the same deployment **MUST** admit against its current revision under a consistency guard. The system **MUST** refuse a submission that lost the race as a conflict.
 
 **Rationale**: If the executed change can differ from the reviewed one, approval is meaningless.
 
@@ -598,7 +598,7 @@ An apply **MUST** execute exactly the change that was previewed, or refuse when 
 
 - [ ] `p1` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-ordered-execution`
 
-The system **MUST** execute changes in dependency order. The system **MAY** execute in parallel those changes that no dependency relates. The system **MUST** survive process failure and resume with no double application of any resource. The system **MUST** compensate on failure. The system **MUST** schedule for removal each resource that it created during the failed change. A removal that finds the resource already gone **MUST** count as success. The system **MUST NOT** revert a resource that was updated rather than created.
+The system **MUST** execute changes in dependency order. The system **MAY** execute in parallel those changes that no dependency relates. The system **MUST** survive process failure and resume with no double application of any resource. The system **MUST** compensate on failure. The system **MUST** schedule for removal each resource that it created during the failed change. A removal that finds the resource already gone **MUST** count as success. The system **MUST NOT** revert a resource that was updated rather than created. Compensation removes only the resources that the failed change created; recovery of a partly applied change beyond that is an explicit rollback (`cpt-cf-infrastructure-resource-manager-fr-rollback`).
 
 **Rationale**: Long-running multi-resource changes must be crash-proof and leave a consistent state on failure.
 
@@ -616,7 +616,7 @@ A deployment **MUST** expose its execution state while it runs and after complet
 
 #### Replacement Strategies
 
-- [ ] `p1` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-replace-strategies`
+- [ ] `p2` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-replace-strategies`
 
 Where a change requires re-provisioning, the system **MUST** support both delete-before-create (default) and create-before-destroy strategies. The strategy is selected per type, with a per-resource override. The system **MUST** re-wire dependent resources to the replacement safely. Create-before-destroy **MUST** bring the replacement into service and re-point dependents before the system tears down the replaced instance.
 
@@ -656,7 +656,7 @@ Every mutating operation on resources and deployments **MUST** require a caller-
 
 - [ ] `p1` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-cascade-delete`
 
-Deletion of a resource that owns others **MUST** tear down its whole owned subtree. The parent's deletion **MUST** be committed first. The owned subtree **MUST** then converge to deleted asynchronously until no owned descendant remains. The teardown **MUST** run in bounded batches and resume after process restart from persisted state alone. Reads during that window **MUST** reflect reality: a descendant not yet removed remains visible until it is actually removed. Descendants **MUST NOT** require authorization beyond the admission-time evaluation of `cpt-cf-infrastructure-resource-manager-fr-cascade-admission`. No per-descendant re-authorization occurs during teardown.
+Deletion of a resource that owns others **MUST** tear down its whole owned subtree. The parent's deletion **MUST** be committed first. The owned subtree **MUST** then converge to deleted asynchronously until no owned descendant remains. A committed cascade teardown **MUST NOT** be cancellable: cancellation is available only in the window before the parent's deletion commits. The teardown **MUST** run in bounded batches and resume after process restart from persisted state alone. Reads during that window **MUST** reflect reality: a descendant not yet removed remains visible until it is actually removed. Descendants **MUST NOT** require authorization beyond the admission-time evaluation of `cpt-cf-infrastructure-resource-manager-fr-cascade-admission`. No per-descendant re-authorization occurs during teardown.
 
 **Rationale**: Owned resources are meaningless without their parent. A separate teardown of those resources leaves unusable remnants. A per-descendant authorization requirement makes a legitimate teardown fail halfway. A subtree cannot be destroyed in one provider call. A commit of the parent's deletion first makes the intent durable. Bounded, restart-safe batches make the teardown convergent under any failure.
 
@@ -699,21 +699,11 @@ The system **MUST** let an authorized caller request cancellation of a running o
 
 **Actors**: `cpt-cf-infrastructure-resource-manager-actor-sre-operator`
 
-#### Relationship Backfill for Pre-Existing Deployments
-
-- [ ] `p1` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-relationship-backfill`
-
-The system **SHOULD** provide an idempotent administrative pass that derives relationships for deployments created before relationship tracking existed. The pass **MUST** report the deployments that it cannot cover. Operators then know where ownership-dependent behavior can be incomplete.
-
-**Rationale**: Cascade and protection semantics depend on derived relationships. Without this pass, deployments that predate relationship tracking behave incorrectly and silently.
-
-**Actors**: `cpt-cf-infrastructure-resource-manager-actor-sre-operator`
-
 #### Revisions and Unified History
 
 - [ ] `p1` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-revisions-history`
 
-The system **MUST** record every admitted apply as an immutable revision. The revision captures what was applied and under which type metadata and policies. An empty (no-change) apply **MUST** complete synchronously and still record a revision. It starts no execution and no provider call. The system **MUST** provide a unified chronological history of applies, rollbacks, and refreshes at both deployment and single-resource scope. Resource history **MUST** remain reachable across replacement (lineage).
+The system **MUST** record every admitted apply as an immutable revision. The revision captures what was applied and under which type metadata and policies. An empty (no-change) apply **MUST** complete synchronously and still record a revision. It starts no execution and no provider call. The system **MUST** provide a unified chronological history of applies, rollbacks, and refreshes at both deployment and single-resource scope. Resource history **MUST** remain reachable across replacement (lineage). Revisions **MUST** be retained per tenant for a configurable window with the published default and floor that `cpt-cf-infrastructure-resource-manager-nfr-limits` declares. This window bounds the revisions that rollback (`cpt-cf-infrastructure-resource-manager-fr-rollback`) can reach, and expiry feeds the retention purge (§12 criterion 63).
 
 **Rationale**: "What changed, when, by whom" is the audit and recovery backbone.
 
@@ -743,7 +733,7 @@ The system **MUST** let operators refresh the recorded actual state of a deploym
 
 - [ ] `p1` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-soft-delete-retention`
 
-Deletion **MUST** tombstone resources with configurable retention before permanent removal. Every tombstone **MUST** record why it was created. At minimum, the record **MUST** distinguish removal from the definition from removal through a cascade. For a cascade, the record **MUST** name the originating parent. Provider objects detached by policy (orphans) **MUST** remain queryable with their provider identity preserved. Orphans **MUST** count against a per-tenant orphan capacity. Orphans **MUST** be cleanable only through an explicit operator action with confirmation.
+Deletion **MUST** tombstone resources with configurable retention before permanent removal. Every tombstone **MUST** record why it was created. At minimum, the record **MUST** distinguish removal from the definition from removal through a cascade. For a cascade, the record **MUST** name the originating parent. Provider objects detached by policy (orphans) **MUST** remain queryable with their provider identity preserved. Orphans **MUST** count against a per-tenant orphan capacity. The system **MUST** evaluate that capacity at plan admission over the aggregate detaches the plan produces: an apply that would exceed the remaining capacity **MUST** be refused whole, reporting the resulting count against the capacity. The system **MUST** re-validate this admission verdict under the change lock immediately before commit, like `cpt-cf-infrastructure-resource-manager-fr-cascade-admission`. Orphans **MUST** be cleanable only through an explicit operator action with confirmation.
 
 **Rationale**: This gives recoverability after deletion and controlled handling of intentionally preserved provider objects.
 
@@ -753,19 +743,9 @@ Deletion **MUST** tombstone resources with configurable retention before permane
 
 - [ ] `p1` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-secret-hygiene`
 
-The system **MUST NOT** persist or emit secret values in cleartext in any artifact. Artifacts include state, revisions, previews, history, logs, metrics, events, and error messages. The system **MUST** detect a change to a secret field without storing, exposing, or reconstructing its cleartext. The comparison artifacts the system derives from a secret value **MUST NOT** enable cross-tenant correlation of equal values or offline recovery of the value. When a field becomes secret through type re-registration, the system **MUST** re-protect existing persisted values before further changes on affected types proceed.
+The system **MUST NOT** persist or emit secret values in cleartext in any artifact. Artifacts include state, revisions, previews, history, logs, metrics, events, and error messages. The system **MUST** detect a change to a secret field without storing, exposing, or reconstructing its cleartext. The comparison artifacts the system derives from a secret value **MUST NOT** enable cross-tenant correlation of equal values. The system **MUST** provision and store its own per-tenant comparison key, lazily on first use. Key provisioning **MUST NOT** depend on an external trigger or on tenant-creation ordering. When a field becomes secret through type re-registration, the system **MUST** re-protect existing persisted values before further changes on affected types proceed.
 
-**Rationale**: A single cleartext leak in any persisted artifact defeats all other secret handling.
-
-**Actors**: `cpt-cf-infrastructure-resource-manager-actor-platform-engineer`
-
-#### Model Migration with Abort Path
-
-- [ ] `p2` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-model-migration`
-
-Migration of existing data to the deployment-scoped model **MUST** proceed per tenant in resumable phases, with verification before any destructive step. The migration **MUST** keep legacy data readable until completion. The migration **MUST** support administrative abort and resume. Each migration step **MUST** be reversible.
-
-**Rationale**: A platform-wide data model change must never strand a tenant in a broken intermediate state.
+**Rationale**: A single cleartext leak in any persisted artifact defeats all other secret handling. The comparison artifacts are not a defense against a compromise of the state store itself; §15 records that residual exposure, and envelope encryption stays in the Phase-2 hardening scope (§5.2).
 
 **Actors**: `cpt-cf-infrastructure-resource-manager-actor-platform-engineer`
 
@@ -785,7 +765,7 @@ The system **MUST** let providers define day-2 actions per resource type, with p
 
 - [ ] `p2` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-action-execution`
 
-Action invocation **MUST** validate the resource's current state against the action's allowed states and reject invalid transitions. Action invocation **MUST** validate supplied parameters against the action's declared parameter schema before dispatch. Action execution is a modification for management-policy purposes. The system **MUST** refuse an action invocation on a no-touch resource before dispatch. The no-delete level does not restrict actions. Execution **MUST** be asynchronous and trackable to completion or failure. Execution **MUST** be authorized and tenant-scoped. The system **MUST** fully audit execution, including rejected attempts.
+Action invocation **MUST** validate the resource's current state against the action's allowed states and reject invalid transitions. Action admission **MUST** run under the same consistency guard as apply admission. The system **MUST** refuse an action on a resource in a transitional state unless the action declares that state as an allowed source state. Action invocation **MUST** validate supplied parameters against the action's declared parameter schema before dispatch. Action execution is a modification for management-policy purposes. The system **MUST** refuse an action invocation on a no-touch resource before dispatch. The no-delete level does not restrict actions. Execution **MUST** be asynchronous and trackable to completion or failure. Execution **MUST** be authorized and tenant-scoped. The system **MUST** fully audit execution, including rejected attempts.
 
 **Rationale**: Day-2 actions mutate live workloads. State validation and traceability are non-negotiable.
 
@@ -797,7 +777,7 @@ Action invocation **MUST** validate the resource's current state against the act
 
 - [ ] `p1` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-relationship-model`
 
-The system **MUST** maintain typed relationships between resources: ownership (parent-child), dependency, and attachment. The system **MUST** keep these relationships consistent with the resource lifecycle. Relationship removal cascades with resource removal. The system removes orphaned relationships. A relationship change from migration preserves the prior relationship as archived, not erased. A resource **MUST** have at most one live owning parent. The ownership graph **MUST** stay acyclic. A relationship **MUST NOT** relate resources of different tenants. Relationships **MUST** be derivable from two sources in the same committed change. The sources are declarations in the deployment definition, and per-type declarations that extract references from the instance data of a resource. Delete behavior is attachable to owning relationships only.
+The system **MUST** maintain typed relationships between resources: ownership (parent-child), dependency, and attachment. The system **MUST** keep these relationships consistent with the resource lifecycle. Relationship removal cascades with resource removal. The system removes orphaned relationships. A resource **MUST** have at most one live owning parent. The ownership graph **MUST** stay acyclic. A relationship **MUST NOT** relate resources of different tenants. Relationships **MUST** be derivable from two sources in the same committed change. The sources are declarations in the deployment definition, and per-type declarations that extract references from the instance data of a resource. Delete behavior is attachable to owning relationships only.
 
 **Rationale**: Trustworthy topology requires that the graph never contradicts resource reality.
 
@@ -849,7 +829,7 @@ Discovery synchronization **MUST** idempotently create and update IRM inventory 
 
 - [ ] `p2` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-tenant-assignment`
 
-Discovered resources **MUST** be assignable to tenants automatically (by adapter ownership or policy) or manually through a pool of unassigned resources. The pool **MUST** support bulk assignment. A pooled discovered resource is an inventory candidate, not yet a managed resource; the group and deployment invariants apply from the moment of tenant assignment onward.
+Discovered resources **MUST** be assignable to tenants automatically (by adapter ownership or policy) or manually through a pool of unassigned resources. The pool **MUST** support bulk assignment. A pooled discovered resource is an inventory candidate, not yet a managed resource; the group and deployment invariants apply from the moment of tenant assignment onward. Assignment **MUST** wrap each resource in an automatically created single-resource deployment (`cpt-cf-infrastructure-resource-manager-fr-deployment-scoped`). Placement is the group chosen at assignment, or the tenant default group when the assigner chooses none. The desired state of an assigned resource **MUST** be seeded from its last observed configuration, so that an unchanged estate classifies as no change on the next classification.
 
 **Rationale**: Multi-tenant adoption of an existing estate requires controlled ownership assignment.
 
@@ -871,7 +851,7 @@ Discovery **MUST** record all found resources, even when they violate quota, lic
 
 - [ ] `p1` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-resource-groups`
 
-The scope model is tenant → resource group → resource. Every managed resource **MUST** belong to exactly one resource group. The system **MUST** reject the deletion of a non-empty group. `cpt-cf-infrastructure-resource-manager-fr-group-addressing`, `cpt-cf-infrastructure-resource-manager-fr-group-move`, and `cpt-cf-infrastructure-resource-manager-fr-default-group` govern placement, relocation, and the tenant default group.
+The scope model is tenant → resource group → resource. IRM **MUST** record exactly one placement per managed resource. This invariant holds over IRM records, not over the data of the Resource Group Service: `cpt-cf-infrastructure-resource-manager-fr-placement-drift` states the reconciler behavior when the group service holds additional memberships out of band. The system **MUST** reject the deletion of a non-empty group. `cpt-cf-infrastructure-resource-manager-fr-group-addressing`, `cpt-cf-infrastructure-resource-manager-fr-group-move`, and `cpt-cf-infrastructure-resource-manager-fr-default-group` govern placement, relocation, and the tenant default group.
 
 **Rationale**: Lifecycle containers with strict membership are the unit of organization, access, and cleanup.
 
@@ -889,9 +869,9 @@ The tuple (tenant, resource group, name) **MUST** identify a deployment. When a 
 
 #### Explicit Group Relocation
 
-- [ ] `p1` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-group-move`
+- [ ] `p2` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-group-move`
 
-Relocation of a deployment to another group **MUST** be a distinct, explicitly requested operation. An apply of a definition **MUST NOT** move anything. Relocation **MUST** complete synchronously and **MUST** carry every live resource of the deployment with it. The system **MUST** state to callers that the vacated address becomes free. As a result, a pipeline that still addresses the old location creates a new deployment there and does not find the relocated one.
+Relocation of a deployment to another group **MUST** be a distinct, explicitly requested operation. An apply of a definition **MUST NOT** move anything. The system **MUST** refuse a relocation while an apply runs on the same deployment, mirroring the refresh exclusion in `cpt-cf-infrastructure-resource-manager-fr-refresh`. Relocation **MUST** complete synchronously and **MUST** carry every live resource of the deployment with it. The system **MUST** state to callers that the vacated address becomes free. As a result, a pipeline that still addresses the old location creates a new deployment there and does not find the relocated one.
 
 **Rationale**: Placement changes are consequential and must never occur as a side effect of a routine apply. Explicit relocation allows apply to be idempotent with respect to placement.
 
@@ -978,7 +958,7 @@ Propagation **MUST** distinguish transient failure from permanent failure. The s
 
 - [ ] `p2` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-placement-drift`
 
-The system **MUST** periodically reconcile placement in both directions. The system **MUST** remove membership records for resource types that IRM manages that no longer correspond to a managed resource; membership records of other platform components **MUST NOT** be touched. The system **MUST** re-propagate managed resources whose membership is missing or wrong. Reconciliation **MUST** be bounded per pass. If reconciliation stops early, it **MUST** report this rather than appear complete. Every resource of a deployment **MUST** eventually be in the group of the deployment. The system **MUST** repair a divergence, not tolerate it.
+The system **MUST** periodically reconcile placement in both directions. The system **MUST** remove membership records for resource types that IRM manages that no longer correspond to a managed resource; membership records of other platform components **MUST NOT** be touched. The membership records that IRM manages are partitioned by resource type: the partition key is `resource_type`, and its values are GTS-qualified type identifiers. When a managed resource holds more group memberships than its recorded placement, the reconciler **MUST** remove the extra memberships and keep the recorded placement. The system **MUST** re-propagate managed resources whose membership is missing or wrong. Reconciliation **MUST** be bounded per pass. If reconciliation stops early, it **MUST** report this rather than appear complete. Every resource of a deployment **MUST** eventually be in the group of the deployment. The system **MUST** repair a divergence, not tolerate it.
 
 **Rationale**: Groups can be edited out of band. Without a reconciler, the authorization view drifts from reality permanently and invisibly.
 
@@ -1090,9 +1070,9 @@ Resource creation **MUST** pass through an ordered, extensible admission pipelin
 
 - [ ] `p1` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-policy-gating`
 
-Policy and quota evaluation **MUST** gate provisioning, modification, and lifecycle actions before any change executes. The system evaluates quota before policy. Denials **MUST** carry an actionable reason. When the decision service is unavailable, the system **MUST** fail closed. Replacement strategies that temporarily double capacity **MUST** be validated against quota at their peak. A decision **MAY** be advisory: an allow verdict **MAY** carry obligations or warnings from the decision service, and the system **MUST** deliver them to the caller unaltered alongside the operation result.
+Policy and quota evaluation **MUST** gate provisioning, modification, and lifecycle actions before any change executes. The system evaluates quota before policy. Denials **MUST** carry an actionable reason. When the decision service is unavailable, the system **MUST** fail closed. Replacement strategies that temporarily double capacity **MUST** be validated against quota at their peak. Capacity admitted for an operation **MUST** stay held from admission until the operation reaches a terminal state: committed on success, and released on failure, cancellation, or expiry. Concurrent admissions **MUST NOT** jointly exceed the quota. A decision **MAY** be advisory: an allow verdict **MAY** carry obligations or warnings from the decision service, and the system **MUST** deliver them to the caller unaltered alongside the operation result.
 
-**Rationale**: Governance that runs after the change is not governance.
+**Rationale**: Governance that runs after the change is not governance. The capacity-hold semantics follow the reserve, commit, and release lease that the platform quota-enforcement precedent defines; without the hold, capacity admitted for a running operation can be double-spent.
 
 **Actors**: `cpt-cf-infrastructure-resource-manager-actor-policy-engine`
 
@@ -1132,9 +1112,9 @@ Every outbound call to an adapter **MUST** carry a capability token. This token 
 
 - [ ] `p1` - **ID**: `cpt-cf-infrastructure-resource-manager-fr-adapter-egress`
 
-The component **MUST NOT** be usable as a path to platform-internal endpoints. The system **MUST** validate the destination of an outbound adapter call on every attempt. As a result, a destination that resolves differently after admission cannot bypass the validation. A redirect **MUST NOT** be followed. A destination that the system cannot validate **MUST** fail closed.
+The component **MUST NOT** be usable as a path to platform-internal endpoints. Outbound adapter traffic **MUST** route through the central outbound egress path (the abstract role that §13 records). IRM **MUST** require the following guarantees from that path: the destination of an outbound adapter call is validated on every attempt, so that a destination that resolves differently after admission cannot bypass the validation; a redirect is never followed; and a destination that cannot be validated fails closed.
 
-**Rationale**: Adapters are registered by operators and addressed by URL. This makes adapter registration an egress attack surface. Validation done only once at registration is trivially bypassable.
+**Rationale**: Adapters are registered by operators and addressed by URL. This makes adapter registration an egress attack surface. Validation done only once at registration is trivially bypassable. The egress path owns the transport enforcement; IRM owes the requirement that no adapter call bypasses it.
 
 **Actors**: `cpt-cf-infrastructure-resource-manager-actor-infrastructure-adapter`
 
@@ -1159,6 +1139,8 @@ An adapter **MUST** be able to answer synchronously, or to accept the work and r
 - The system **MUST** continue to poll after a transient provider error. Authorization and absence errors **MUST** be treated as terminal.
 - Retried outbound calls **MUST** carry the same duplicate-safety key. As a result, a retry or a process restart resumes the provider-side operation and does not start a second one.
 - When the operation is canceled, the system **MUST** attempt to cancel the provider-side work and record whether that attempt succeeded.
+
+Transport mechanics of outbound calls belong to the central outbound egress path (`cpt-cf-infrastructure-resource-manager-fr-adapter-egress`, §13); this requirement states the operation-level protocol semantics that stay in IRM.
 
 **Rationale**: Real provisioning takes minutes to hours. A requirement for adapters to hold a connection makes them fragile and prevents cancellation.
 
@@ -1248,6 +1230,16 @@ The management surface **MUST** meet ≥ 99.9 % availability and ≥ 99.999 % da
 
 **Rationale**: IRM is the control plane of the platform. An IRM outage blocks all resource operations. Backup cadence, retention, and restore-verification mechanics that achieve the stated recovery point and recovery time are settled by the technical design and the platform backup policy, not by this PRD.
 
+#### Post-Restore Consistency Gate
+
+- [ ] `p2` - **ID**: `cpt-cf-infrastructure-resource-manager-nfr-restore-gate`
+
+A restore from backup **MUST** mark every scope whose recorded state the restore rewound as refresh-required. The system **MUST** refuse apply admission on a scope that has not been refreshed since the restore. Refresh cannot repair idempotency records lost inside the recovery point; §15 records that residual exposure, bounded by the stated recovery point.
+
+**Threshold**: Zero apply admissions succeed on an unrefreshed scope after a restore.
+
+**Rationale**: A restore rewinds recorded state behind provider reality. An apply admitted against rewound state executes against an estate that no longer exists.
+
 #### Scale
 
 - [ ] `p1` - **ID**: `cpt-cf-infrastructure-resource-manager-nfr-scale`
@@ -1294,7 +1286,7 @@ A retried mutation that carries a previously used key **MUST NOT** produce a sec
 
 Group membership **MUST** reflect a committed placement decision within 5 s at p95, measured from commit to converged. Group reference validation **MUST** complete within 50 ms at p95. Default-group provisioning **MUST** complete within 100 ms at p95. Rows parked for operator attention **MUST** be zero in steady state, and any nonzero count **MUST** be observable.
 
-**Threshold**: p95 as stated. Parked rows and unrepaired drift are alertable at any nonzero value.
+**Threshold**: p95 as stated. Parked rows and unrepaired drift are alertable at any nonzero value. The 50 ms and 100 ms budgets depend on Resource Group Service operations that have no published service-level objective today; the §16 open question on the group-service objectives tracks the resolution.
 
 **Rationale**: Group-scoped access is only as current as membership. This bound makes "moved out of the group" mean "lost access" in a predictable time.
 
@@ -1328,6 +1320,7 @@ The system **MUST** enforce and publish the limits that follow. A violation **MU
 | Traversal results per page | 100 |
 | Owned parent-child chain depth | 16 |
 | Completed-operation retention | 24 hours |
+| Revision retention (per tenant, configurable) | 90 days default, 30 days floor |
 | Idempotency in-flight reservation window | 5 minutes |
 | Idempotency replay window (recorded outcomes) | 24 hours |
 | Running-operation maximum lifetime | 2 hours |
@@ -1370,7 +1363,7 @@ The system **MUST** enforce and publish the limits that follow. A violation **MU
 
 **Stability**: stable
 
-**Description**: The single management surface for all IRM domains: types and adapters, resources and capabilities, deployments (preview, apply, rollback, refresh, history), lifecycle actions, operations tracking, discovery, and topology queries. Absent optional data MUST be distinguishable from empty or zero values in every response. A machine-readable interface description MUST be published and kept in sync with the surface. The platform edge provides request-rate limiting. IRM itself enforces only the size limits declared in §7.
+**Description**: The single management surface for all IRM domains: types and adapters, resources and capabilities, deployments (preview, apply, rollback, refresh, history), lifecycle actions, operations tracking, discovery, and topology queries. Absent optional data MUST be distinguishable from empty or zero values in every response. A machine-readable interface description MUST be published and kept in sync with the surface. The platform edge provides request-rate limiting. IRM itself enforces only the size limits declared in §7. No gRPC projection of this surface ships in this release.
 
 **Breaking Change Policy**: A major version bump is required. Evolution within a major version is additive.
 
@@ -1408,7 +1401,7 @@ The system **MUST** enforce and publish the limits that follow. A violation **MU
 
 **Protocol/Format**: HTTP/REST (provider-agnostic, any implementation stack)
 
-**Compatibility**: Versioned contract. IRM validates and size-bounds all adapter responses. Long-running provider operations are trackable to completion. Data-handling obligations for transmitted resource properties and secret material are part of this contract; the contract specification settles them. The contract includes an optional drift-report channel through which an adapter **MAY** surface detected out-of-band divergence to IRM; drift-detection service levels are per-adapter and outside this PRD's scope.
+**Compatibility**: Versioned contract. IRM validates and size-bounds all adapter responses. Long-running provider operations are trackable to completion. Data-handling obligations for transmitted resource properties and secret material are part of this contract; the contract specification settles them. The contract includes an optional drift-report channel through which an adapter **MAY** surface detected out-of-band divergence to IRM; drift-detection service levels are per-adapter and outside this PRD's scope. The adapter package format evolves additively within a major version; an onboarded adapter is unaffected by a format change until it is re-submitted.
 
 #### Workflow Executor Contract
 
@@ -1428,7 +1421,7 @@ The system **MUST** enforce and publish the limits that follow. A violation **MU
 
 **Protocol/Format**: CloudEvents envelope, versioned event names under the platform vendor namespace
 
-**Compatibility**: Additive schema evolution within a major version. Consumers deduplicate by event identity. A breaking rename of the event namespace is permitted at most once before general availability, and MUST be announced to consumers in advance. After that, a breaking rename requires a major version.
+**Compatibility**: Additive schema evolution within a major version. Consumers deduplicate by event identity. Events are published under the platform vendor namespace from the first release; a breaking rename of the event namespace requires a major version.
 
 ## 10. Use Cases
 
@@ -1623,28 +1616,6 @@ The system **MUST** enforce and publish the limits that follow. A violation **MU
 **Alternative Flows**:
 - **Repeated provider errors**: The circuit breaker suspends discovery for the adapter and alerts operators.
 
-#### Migrate a Tenant to the Deployment-Scoped Model
-
-- [ ] `p2` - **ID**: `cpt-cf-infrastructure-resource-manager-usecase-migrate-tenant`
-
-**Actor**: `cpt-cf-infrastructure-resource-manager-actor-platform-engineer`
-
-**Preconditions**:
-- The tenant still holds data in the legacy model. The operator holds the dedicated migration permission, following the same precedent as the orphan-cleanup permission that `cpt-cf-infrastructure-resource-manager-fr-rbac` requires.
-
-**Main Flow**:
-1. The operator initiates migration for the tenant. The system expands the schema so both models are served concurrently.
-2. The system backfills existing tenant data into the deployment-scoped model.
-3. The operator triggers verification. The system confirms the backfilled data matches the legacy source.
-4. The operator triggers the contract step. The system retires the legacy representation.
-
-**Postconditions**:
-- The tenant's data is fully represented in the deployment-scoped model. Legacy data stayed readable throughout, up to the contract step.
-
-**Alternative Flows**:
-- **Interruption at any phase**: The operator resumes migration from the interrupted phase rather than restarting it.
-- **Administrative abort before the contract step**: The tenant remains on the legacy model with no data loss.
-
 ## 11. User Interaction and Design
 
 The consoles below are frontend-scope deliverables (§5.2); their platform-side targets are settled there, not in this table. API and CLI usability is covered by the §7.1 latency NFRs and the §1.3 preview-adoption metric. This PRD sets no separate learnability target for the expert tooling these interfaces represent — that is a deliberate omission, not a gap.
@@ -1653,7 +1624,7 @@ The consoles below are frontend-scope deliverables (§5.2); their platform-side 
 |--------------------|----------|-----------|-------------------|
 | Graph Explorer | As a System Administrator, I want to view infrastructure topology so that I can plan maintenance and troubleshoot | 1. Open the resource graph for a scope<br>2. Filter by tenant, type, or tag<br>3. Highlight dependency paths. Export the view | — |
 | Discovery Console | As a System Administrator, I want discovery health and pool management so that I can adopt estates safely | 1. Review adapter discovery status and errors<br>2. Configure schedules, maintenance mode, thresholds<br>3. Assign pooled resources to tenants | — |
-| Day-2 Operations | As an SRE / Operator, I want to execute lifecycle actions so that I can operate workloads | 1. Select resources and view available actions<br>2. Trigger the action. Track it to completion (§12 #67)<br>3. Review the audit trail | — |
+| Day-2 Operations | As an SRE / Operator, I want to execute lifecycle actions so that I can operate workloads | 1. Select resources and view available actions<br>2. Trigger the action. Track it to completion (§12 #66)<br>3. Review the audit trail | — |
 | Command-Line Interface | As an SRE / Operator, I want to preview, apply and roll back from a terminal so that I can work from automation and during incidents | 1. Validate a definition, then preview the classified change set (§12 #9)<br>2. Confirm and apply. The applied change equals the reviewed change (§12 #10)<br>3. Inspect history and roll back to a selected revision (§12 #15)<br>4. Before any destructive operation, confirm explicitly | — |
 | Deployment Timeline | As an SRE, I want deployment progress and history so that I can diagnose and revert failures | 1. Open the timeline of a deployment<br>2. Inspect per-resource status of the apply in progress<br>3. Trigger rollback to a selected revision | — |
 
@@ -1992,8 +1963,8 @@ Requirements without a named criterion here are validated through the testing st
 
 **52. Outbound calls are individually credentialed and confined**
 - **Given** an adapter registered with an endpoint that resolves to a platform-internal address, or that redirects, or whose address changes after registration
-- **When** the system calls it
-- **Then** the call MUST fail closed in each case, with the destination validated again on that attempt rather than trusted from registration
+- **When** the system calls it through the central outbound egress path (§13)
+- **Then** the call MUST fail closed in each case, with the destination revalidated by the egress path on that attempt rather than trusted from registration
 - **And** a call to a legitimate adapter MUST carry a credential usable only for that adapter and that operation. When the work outlives the credential, the credential MUST be refreshed rather than reused
 
 **53. Hostile or broken adapter responses are contained**
@@ -2080,7 +2051,7 @@ Requirements without a named criterion here are validated through the testing st
 - **Then** the operation MUST be refused, and the refusal reports the current count against the capacity
 - **And** an operator MUST be able to list detached objects and remove them through the explicit confirmed action
 
-### History and Migration
+### History
 
 **65. Unified history reconstructs the change timeline**
 - **Given** a deployment that was applied several times, rolled back, and refreshed
@@ -2088,13 +2059,7 @@ Requirements without a named criterion here are validated through the testing st
 - **Then** the response MUST present those events in chronological order. The same MUST hold for a single resource across a replacement that changed its identity
 - **And** history MUST NOT lag the underlying change beyond the stated staleness bound
 
-**66. Migration is resumable and never strands a tenant**
-- **Given** a tenant part-way through migration to the deployment-scoped model
-- **When** the migration is interrupted, then resumed
-- **Then** the migration MUST continue from where it stopped rather than restart or skip
-- **And** the tenant's data MUST remain readable throughout. An administrator MUST be able to abort and not leave the tenant between models
-
-**67. Day-2 action execution is tracked to a terminal outcome**
+**66. Day-2 action execution is tracked to a terminal outcome**
 - **Given** a validated action invocation on a resource
 - **When** the action executes
 - **Then** the system MUST record an operation that the caller can track to success or failure. It MUST reflect the provider's resulting state on the resource
@@ -2102,7 +2067,7 @@ Requirements without a named criterion here are validated through the testing st
 
 ### Dependency Unavailability
 
-**68. Dependency unavailability is deterministic and never blocks committed delivery**
+**67. Dependency unavailability is deterministic and never blocks committed delivery**
 - **Given** any IRM dependency is unavailable
 - **When** an operation whose correctness depends on that dependency is attempted, and separately when downstream event-delivery infrastructure is unavailable after a mutation has committed
 - **Then** the dependency-dependent operation MUST refuse deterministically, naming the unavailable dependency, rather than guess or hang
@@ -2111,19 +2076,19 @@ Requirements without a named criterion here are validated through the testing st
 
 ### Non-Functional Requirements (Show-Stoppers)
 
-**69. Interactive latency at scale**
+**68. Interactive latency at scale**
 - **Given** the declared scale (100 k+ resources per tenant, 1 M+ topology nodes)
 - **When** core operations and single-node topology queries execute under sustained load
 - **Then** p95 latency MUST be within 500 ms and 200 ms respectively
 - **And** scoped lists MUST complete within 2 s at p95
 
-**70. Availability**
+**69. Availability**
 - **Given** production operation measured monthly
 - **When** availability and durability are evaluated
 - **Then** the management surface MUST meet ≥ 99.9 % availability and ≥ 99.999 % durability
 - **And** policy and authorization failures MUST fail closed
 
-**71. Crash-safe execution**
+**70. Crash-safe execution**
 - **Given** a process failure during a multi-resource apply
 - **When** execution resumes
 - **Then** the system MUST NOT apply any resource twice
@@ -2131,21 +2096,22 @@ Requirements without a named criterion here are validated through the testing st
 
 ## 13. Dependencies
 
-"Direction" states which side initiates the call: outbound — IRM calls the system; inbound — the system calls IRM; bidirectional — both sides initiate. (Contract entries in §9.2 use the template vocabulary instead: who provides or requires the contract.) Criticality is the highest §5.1 scope priority that requires the integration.
+"Direction" states which side initiates the call: outbound — IRM calls the system; inbound — the system calls IRM; bidirectional — both sides initiate. (Contract entries in §9.2 use the template vocabulary instead: who provides or requires the contract.) Criticality is the highest §5.1 scope priority that requires the integration. "Readiness" records the delivery state of each dependency at the time of writing; a dependency that is not yet built points at the §15 risk row that tracks it.
 
-| Dependency | Description | Direction | Criticality |
-|------------|-------------|-----------|-------------|
-| Policy Decision Service | Admission, policy, quota, and license-entitlement decisions (fail-closed) | outbound | p1 |
-| RBAC Engine | Role definitions and scope-based access resolution | outbound | p1 |
-| AM and IdP | Authentication, subject identity, tenant context | inbound | p1 |
-| Persistence layer | Durable storage with atomic reservations, consistency guards, and cursor pagination for idempotency, history, and stable pagination (database-agnostic) | outbound | p1 |
-| Infrastructure Adapters | Provider adapters that implement the adapter contract | outbound | p1 |
-| Workflow Executor | Long-running operation substrate, reached through a plugin contract | bidirectional | p1 |
-| Type Identifier Service | Platform type-identifier allocation and resolution (IRM owns the resource-type registry itself) | outbound | p1 |
-| Event & Audit Consumers | Delivery of domain and audit events to consumers | outbound | p1 |
-| Resource Group Service | Group existence, membership, and default-group semantics. The decision point compiles group-scoped access from the membership it holds | outbound | p1 |
-| Token Issuer | Mints the per-call credentials used for outbound adapter traffic | outbound | p1 |
-| Grant Issuance Service | Consumes the data-plane operation catalog and resource resolution that IRM publishes | inbound | p1 |
+| Dependency | Description | Direction | Criticality | Readiness |
+|------------|-------------|-----------|-------------|-----------|
+| Policy Decision Service | Admission, policy, quota, and license-entitlement decisions (fail-closed). Informative mapping to the platform of today: admission and policy decisions map to the authz-resolver (the platform architecture's "Policy Manager" hop), quota maps to quota-enforcement (specified, not yet built), and license maps to the license resolver or the gateway license middleware. The role itself stays abstract (§1.4) | outbound | p1 | Partial — per the informative mapping in the description |
+| RBAC Engine | Role definitions and scope-based access resolution. IRM has no direct dependency on the engine internals — it consumes them through the platform authorization resolution path (§5.2) | outbound | p1 | Available — through the Policy Decision Service path; engine internals stay behind that contract |
+| AM and IdP | Authentication, subject identity, tenant context | inbound | p1 | Available |
+| Persistence layer | Durable storage with atomic reservations, consistency guards, and cursor pagination for idempotency, history, and stable pagination (database-agnostic) | outbound | p1 | Available |
+| Infrastructure Adapters | Provider adapters that implement the adapter contract | outbound | p1 | Per adapter — separate deliveries; §16 names the first adapter to validate the contract against |
+| Workflow Executor | Long-running operation substrate, reached through a plugin contract | bidirectional | p1 | Pending — §15 tracks the durable-execution substrate risk |
+| Type Identifier Service | Platform type-identifier allocation and resolution (IRM owns the resource-type registry itself). The platform publication path is unproven; `cpt-cf-infrastructure-resource-manager-fr-adapter-onboarding` and `cpt-cf-infrastructure-resource-manager-fr-grantable-types` depend on it | outbound | p1 | Unproven — §15 tracks the type-publication risk |
+| Event & Audit Consumers | Delivery of domain and audit events to consumers | outbound | p1 | Pending — §15 tracks the event-delivery substrate risk |
+| Resource Group Service | Group existence, membership, and default-group semantics. The decision point compiles group-scoped access from the membership it holds | outbound | p1 | Available — §16 tracks the missing service-level objectives |
+| Central outbound egress path | Abstract role that carries all outbound adapter traffic and enforces the per-attempt destination revalidation, redirect refusal, and fail-closed behavior that `cpt-cf-infrastructure-resource-manager-fr-adapter-egress` requires. The platform outbound API gateway (OAGW) is the current implementation of the role | outbound | p1 | Available — OAGW implements the role today |
+| Token Issuer | Mints the per-call credentials used for outbound adapter traffic. Planned as gear #4321 (milestone 26.08) | outbound | p1 | Planned — §15 tracks the readiness risk |
+| Grant Issuance Service | Consumes the data-plane operation catalog and resource resolution that IRM publishes | inbound | p1 | Not designed — §15 tracks the readiness risk |
 
 ## 14. Assumptions
 
@@ -2153,8 +2119,7 @@ Requirements without a named criterion here are validated through the testing st
 - Infrastructure adapters are semi-trusted external components. Their responses are validated and bounded.
 - A durable workflow engine is available through the executor plugin contract.
 - Persistence supports atomic reservations, consistency guards, and cursor pagination as required by idempotency and history.
-- Tenants receive a provisioned secret salt at creation for digest-based secret comparison, per the mechanism recorded in the §2 "IRM-level recorded choices" row.
-- IRM is pre-GA: one-shot breaking migrations are acceptable (no dual-publish windows).
+- IRM is pre-GA: one-time breaking changes are acceptable, without dual-publish compatibility windows (§4.1).
 - All new entities use time-sortable unique identifiers to support stable pagination.
 - The platform event broker provides the delivery substrate for domain and audit events, meeting the at-least-once, ordered, deduplicable, loss-detectable delivery that `cpt-cf-infrastructure-resource-manager-fr-audit-events` requires.
 
@@ -2164,14 +2129,19 @@ Requirements without a named criterion here are validated through the testing st
 |------|--------|------------|
 | Performance at 1 M+ topology nodes unvalidated | Latency SLOs are missed at enterprise scale. The graph value proposition is void | Scale testing occurs before GA. The storage strategy decision is gated on benchmarks |
 | Event delivery substrate integration is pending | Downstream consumers do not receive domain and audit events until the binding lands | The platform event broker is the assumed transport (its ADR defines the envelope convention recorded in §2); emitter contracts stay stable so the binding lands without contract changes |
-| Deferred secret hardening (Phase 2) | Workflow payloads and retention windows carry residual exposure | Restrict execution-substrate access. Shorten retention. Schedule the Phase-2 spec |
+| Deferred secret hardening (Phase 2) | Workflow payloads and retention windows carry residual exposure. Phase-1 comparison digests are not a defense against a compromise of the state store itself | Restrict execution-substrate access. Shorten retention. Envelope encryption stays in Phase 2; schedule the Phase-2 spec |
 | Specification-code drift once implementation begins | The build diverges from this PRD, and the divergence is not noticed | Every requirement is verifiable through a named criterion in §12 or the §6 testing strategy. Validate at each milestone. Route scope changes through change requests, not through code |
-| Migration to deployment-scoped model fails mid-tenant | A tenant is stranded between data models | Use phased migration with verification, abort, and resume. Legacy data stays readable until the contract step |
 | Visualization complexity at 10 k+ nodes | Unusable topology UI | Progressive loading and aggregation in the frontend design |
 | Group membership lag widens the window in which revoked access still resolves | A user removed from a group can briefly still reach its resources | The convergence bound is a stated NFR and is alertable. Drift reconciliation is the backstop |
 | Placement rows parked after permanent failure stay parked on a quiet tenant | Group membership silently diverges from placement for that deployment | The parked count is an alertable metric with a documented operator recovery path. The resume trigger is settled in the technical design |
 | The decision point trusts the trusted system actor, and the actor does not bypass it | A defect in the clamp widens internal authority | Elevation is confined to named call sites and is individually attributable. A pre-GA security review gates release |
 | Adapter onboarding mutates platform authorization policy | A malicious or careless adapter package can widen access | Onboarding is restricted to tenant-wide administrative authority. Policy changes are attributable to the adapter. Packages are integrity-verified and carry an exposed trust level (`cpt-cf-infrastructure-resource-manager-fr-manifest-onboarding`) |
+| Platform type-publication path is unproven: the registration API exists, but the types-registry store is in-memory and re-seeded from the link-time inventory at each start, and decision-point use of runtime-registered permissions is undesigned | Adapter-contributed types and per-type authorization identities can vanish from the platform registry after a restart, so per-type grants stop resolving. `cpt-cf-infrastructure-resource-manager-fr-adapter-onboarding` and `cpt-cf-infrastructure-resource-manager-fr-grantable-types` depend on this path | IRM re-publishes adapter types and authorization identities from its own durable store at start-up, and again when it detects a registry epoch or version change |
+| Token Issuer is planned but not built (gear #4321, milestone 26.08) | Until it ships, the per-call adapter credentials that `cpt-cf-infrastructure-resource-manager-fr-adapter-credential` requires have no realization | Delivery is tracked against gear #4321. The §16 Token Issuer question keeps the required per-call token format on that gear's design agenda |
+| Grant Issuance Service has no gear in this repository and no design documentation (§16) | The data-plane operation catalog has no consumer here, and capability grants for direct data-plane access cannot be issued | A working reference implementation exists (vhp-core) but carries no design documentation. The catalog contract (`cpt-cf-infrastructure-resource-manager-fr-data-plane-catalog`) stays stable so the service can build against it. The §16 documentation-gap item tracks closure |
+| Durable-execution substrate integration is pending | Long-running operations (apply, actions, discovery) have no durable executor until the binding lands | A durable workflow engine behind the executor plugin contract is the stated §14 assumption; the plugin contract with a no-op default keeps IRM startable without it. The §16 workflow-executor question settles the concrete engine |
+| Adapters own continuous drift detection, and the adapter drift channel is optional (§9.2) | With an adapter that skips the optional drift channel, out-of-band drift stays invisible until a manual refresh | Refresh before change windows (`cpt-cf-infrastructure-resource-manager-fr-refresh`). The adapter drift channel where the adapter offers it. Scheduled discovery sync (`cpt-cf-infrastructure-resource-manager-fr-discovery-sync`). A revisit of drift ownership is gated by the change request recorded in §16 |
+| A restore from backup loses idempotency records created inside the recovery point | A retry arriving after the restore can re-execute; refresh cannot repair lost idempotency records. This extends `cpt-cf-infrastructure-resource-manager-nfr-idempotency`, whose zero-duplicate threshold is scoped to the retry and crash-recovery matrix | The post-restore gate (`cpt-cf-infrastructure-resource-manager-nfr-restore-gate`) blocks apply admission until affected scopes are refreshed; the residual exposure window is bounded by the stated recovery point (≤ 1 hour) |
 
 ## 16. Open Questions
 
@@ -2189,10 +2159,16 @@ These decisions must be made before or during design, each with an owner and a d
 | Does management policy gate day-2 actions? "No-touch" refuses modification, but whether an action (stop, resize, snapshot) counts as modification is unstated. A no-touch resource can still be mutated through an action. | Head of Platform Architecture + Security | 2026-09-15 | Yes: action execution is a modification. An invocation of an action on a no-touch resource is refused before dispatch. No-delete does not restrict actions. This is stated in fr-action-execution. Enforcement is an implementation ticket. | 2026-08-03 |
 | A no-delete parent that owns a subtree: deletion detaches the parent intact. But whether its owned descendants are then removed or preserved, or whether the request is refused outright, is undefined. The interaction between detach-instead-of-delete and cascade needs a rule. | Head of Platform Architecture | 2026-10-31 | Refused outright: a protected parent that owns live descendants can be neither deleted nor detached. The request fails admission. Detach-instead-of-delete applies only to a resource that owns nothing (fr-cascade-admission). | 2026-08-03 |
 | Are three further limits needed, beyond the request-body bound that constrains deployment size today? The candidates are maximum resources per deployment, maximum dependency depth, and retained history per tenant. | Head of Platform Architecture | 2026-10-31 | Not introduced: the request-body bound constrains definition size, cycle detection bounds the dependency graph, and retention bounds history. Reintroduction requires a change request backed by production data. | 2026-08-03 |
-| Business success metrics for the five goals in §1.3: baseline and target for each metric in the §1.3 metric table (metric and data source are already defined there). | Product | 2026-09-30 | — | — |
+| Business success metrics for the five goals in §1.3: baseline and target for each metric in the §1.3 metric table (metric and data source are already defined there), and how each metric is emitted or derived from its named data source. | Product | 2026-09-30 | — | — |
 | Does continuous drift detection belong to IRM or to infrastructure adapters? This scope assigns it to adapters (§2). | Head of Platform Architecture | 2026-09-30 | Confirmed: infrastructure adapters own continuous reconciliation. IRM provides on-demand refresh and preview (§2, §5.2). A revisit requires a change request. | 2026-08-03 |
 | Policy-execution engine: adapter packages register policy bundles (`cpt-cf-infrastructure-resource-manager-fr-manifest-policy`); their evaluation requires an execution engine outside IRM, consumed through the fail-closed policy-gating contract (`cpt-cf-infrastructure-resource-manager-fr-policy-gating`). Which engine evaluates the bundles is a design decision. The selected engine MUST satisfy the admission NFRs: fit the p95 mutation budget (§7.1), incur no cold start on the hot path, and degrade fail-closed (§6.8). | Head of Platform Architecture | 2026-10-31 | — | — |
-| Workflow Executor evolution: `cpt-cf-infrastructure-resource-manager-contract-workflow-executor` (§9.2) defines a plugin contract with a no-op default, and today one plugin implementation exists. Whether and how that implementation is replaced is a design decision. Related platform documentation gaps to close before that design: the Grant Issuance Service has no gear or design documentation, the types-registry has a PRD but no design documentation, and the authz-resolver has platform-level authorization documentation (`docs/arch/authorization/` — design and ADRs, AuthZEN evaluation model) but no gear-level PRD or DESIGN. | Head of Platform Architecture | 2026-10-31 | — | — |
+| Workflow Executor evolution: `cpt-cf-infrastructure-resource-manager-contract-workflow-executor` (§9.2) defines a plugin contract with a no-op default, and today one plugin implementation exists — the Temporal-based executor plugin of the vhp-core reference implementation. Whether and how that implementation is replaced is a design decision. Related platform documentation gaps to close before that design: the Grant Issuance Service has no gear or design documentation, the types-registry has a PRD but no design documentation — and that PRD understates the surface that is already implemented — and the authz-resolver has platform-level authorization documentation (`docs/arch/authorization/` — design and ADRs, AuthZEN evaluation model) but no gear-level PRD or DESIGN. | Head of Platform Architecture | 2026-10-31 | — | — |
+| Final component placement: does IRM live under `gears/` or `gears/system/`? The current path is interim. | Head of Platform Architecture | 2026-10-31 | — | — |
+| Token Issuer realization: the token formats of gear #4321 (milestone 26.08) must cover per-call capability tokens scoped to one adapter and one operation, as `cpt-cf-infrastructure-resource-manager-fr-adapter-credential` requires. | Head of Platform Architecture | 2026-10-31 | — | — |
+| MVP first slice: which smallest end-to-end provisioning path ships first? Project planning owns the cut; the §5.1 priorities rank capabilities, they do not define the slice. | Product | 2026-10-31 | — | — |
+| Resource Group Service service-level objectives: the placement budgets of 50 ms (group reference validation) and 100 ms (default-group provisioning) in `cpt-cf-infrastructure-resource-manager-nfr-placement-convergence` depend on group point reads and group and membership writes that have no published objective (published today: hierarchy read 250 ms, membership read 30 ms). Options: renegotiated Resource Group Service targets, an IRM-side cache, or budgets that exclude the remote hop. | Head of Platform Architecture | 2026-10-31 | — | — |
+| Resource Group Service write contract: confirmation from the group-service owners that multi-membership is tolerated for the resource types IRM manages, and that the membership write contract holds across vendor providers. | Head of Platform Architecture | 2026-10-31 | — | — |
+| Adapter-contract validation: the technical design must validate the adapter contract end-to-end — package, registered schema, preview, a day-2 action, and a discovery run — against VHI/OpenStack as the named first adapter. Appendix A walks that path informatively. | Head of Platform Architecture | 2026-10-31 | — | — |
 
 ## 17. Reference Materials
 
@@ -2217,3 +2193,15 @@ The materials below are external standards that the requirements refer to by nam
 - **Downstream**: The technical design is pending; §16 lists the decisions it owes.
 - **Code**: No implementation is bound to this document yet.
 - Requirement-level traceability is carried by the stable `cpt-cf-infrastructure-resource-manager-*` identifiers on every actor, requirement, interface, contract, use case, and acceptance criterion.
+
+## Appendix A — First-Adapter Walkthrough (Informative)
+
+> **Non-normative.** This appendix illustrates how the requirements compose for one concrete resource. It adds no requirement, and it defines no wire schema; the referenced requirement IDs govern. The §16 adapter-contract validation question names VHI/OpenStack as the first adapter that the technical design validates this path against.
+
+The walkthrough follows one virtual machine on a VHI/OpenStack backend through the five stages of the adapter contract.
+
+1. **Package.** The adapter developer submits one adapter package (`cpt-cf-infrastructure-resource-manager-fr-manifest-onboarding`). The package declares the adapter, a virtual-machine resource type with its property schema (immutable, computed, and secret fields marked), the day-2 actions the type offers (for example start, stop, and resize), the data-plane operations it publishes (for example console access), the delegation scopes it requests, and its authorization policy bundles. The system verifies package integrity, registers everything as one unit, and activates the adapter.
+2. **Registered schema.** The virtual-machine type is now discoverable under its GTS identifier (`cpt-cf-infrastructure-resource-manager-fr-type-registry`). Its per-type authorization identity is published, so a role author can grant access to virtual machines and to nothing else (`cpt-cf-infrastructure-resource-manager-fr-grantable-types`).
+3. **Preview.** A platform engineer submits a declarative definition that contains one virtual machine. The system validates the definition, classifies the pending change as a create, and returns a preview with secrets redacted and no side effects (`cpt-cf-infrastructure-resource-manager-fr-preview`). The engineer applies; the apply executes exactly the previewed change (`cpt-cf-infrastructure-resource-manager-fr-plan-binding`), and the system records a revision.
+4. **Day-2 action.** An operator invokes the resize action. The system validates the action's allowed source states and its parameters, checks the management policy, executes asynchronously through the adapter, and audits the invocation to its terminal outcome (`cpt-cf-infrastructure-resource-manager-fr-action-execution`).
+5. **Discovery run.** A discovery run enumerates the backend and finds a virtual machine that was created outside IRM (`cpt-cf-infrastructure-resource-manager-fr-discovery-jobs`). The run records it idempotently, flags any policy violation without blocking (`cpt-cf-infrastructure-resource-manager-fr-discovery-compliance`), and an administrator assigns it to a tenant, which wraps it in an anonymous deployment seeded from its observed configuration (`cpt-cf-infrastructure-resource-manager-fr-tenant-assignment`).
