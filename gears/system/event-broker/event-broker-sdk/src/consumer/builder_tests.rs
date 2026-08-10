@@ -1,5 +1,3 @@
-#[cfg(all(feature = "db", feature = "test-util"))]
-use crate::consumer::ConsumerCommitMode;
 use crate::consumer::{
     BatchHandlerOutcome, ConsumerBuffering, ConsumerBuilder, ConsumerGroupRef, ConsumerHandle,
     ConsumerHandler, ConsumerListenerSettings, ConsumerProfile, EventBatch, EventTypeRef, Fallback,
@@ -580,6 +578,7 @@ mod tx_typestate {
     #[tokio::test]
     async fn transactional_consumer_does_not_auto_commit_when_handler_omits_commit_in_tx() {
         use crate::EventBrokerApi;
+        use crate::consumer::ConsumerCommitMode;
         use crate::mock::stubs::test_ctx_for_tenant;
         use crate::mock::{MockBroker, MockBrokerHandle};
         use crate::models::Event;
