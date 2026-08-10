@@ -1,8 +1,44 @@
-# ADR: OAuth2 Client Credentials Auth Plugin
+---
+status: accepted
+date: 2026-02-24
+decision-makers: Constructor Fabric Steering Committee
+---
 
-- **Status**: Proposal
-- **Date**: 2026-02-24 (initial), 2026-03-02 (updated — token caching implemented), 2026-03-03 (updated — switched to `fetch_token`, per-IdP TTL)
-- **Deciders**: OAGW Team
+# OAuth2 Client Credentials Auth Plugin — Internal Token Cache with `fetch_token`
+
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+  - [Why `fetch_token()` over `Token`](#why-fetch_token-over-token)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Plugin Variants](#plugin-variants)
+  - [Plugin Config (ctx.config keys)](#plugin-config-ctxconfig-keys)
+  - [Gear-Level Configuration (OagwConfig)](#gear-level-configuration-oagwconfig)
+  - [Cache Key Design](#cache-key-design)
+  - [Hash-Collision Safety via CachedToken Wrapper](#hash-collision-safety-via-cachedtoken-wrapper)
+  - [Authentication Flow](#authentication-flow)
+  - [Plugin Implementation](#plugin-implementation)
+  - [Registry Integration](#registry-integration)
+  - [Upstream Configuration Example](#upstream-configuration-example)
+  - [Retry on Upstream 401 (Deferred)](#retry-on-upstream-401-deferred)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Internal `pingora-memory-cache` token cache](#internal-pingora-memory-cache-token-cache)
+  - [Generic caching decorator over `AuthPlugin`](#generic-caching-decorator-over-authplugin)
+  - [No caching (per-request IdP call)](#no-caching-per-request-idp-call)
+- [Out of Scope](#out-of-scope)
+- [Future Considerations](#future-considerations)
+- [Related ADRs](#related-adrs)
+- [References](#references)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
+**ID**: `cpt-cf-oagw-adr-oauth2-client-credentials-auth-plugin`
 
 ## Context and Problem Statement
 
@@ -27,15 +63,21 @@ The OAGW plugin is multi-tenant: each cache miss resolves a different (tenant, s
 
 ## Decision Drivers
 
-- Credential safety: secrets sourced via CredStore, wrapped in `SecretString`, never logged
-- Per-request IdP calls incur 100–500ms latency and risk IdP rate limits — caching required
-- Dual auth methods: `Form` and `Basic` as separate registered plugin IDs
-- Cross-tenant and cross-subject credential isolation must be guaranteed by cache key design
-- Strategic alignment: `pingora-memory-cache` aligns with planned Pingora adoption
+* Credential safety: secrets sourced via CredStore, wrapped in `SecretString`, never logged
+* Per-request IdP calls incur 100–500ms latency and risk IdP rate limits — caching required
+* Dual auth methods: `Form` and `Basic` as separate registered plugin IDs
+* Cross-tenant and cross-subject credential isolation must be guaranteed by cache key design
+* Strategic alignment: `pingora-memory-cache` aligns with planned Pingora adoption
+
+## Considered Options
+
+* Plugin with internal `pingora-memory-cache` token cache
+* Generic caching decorator wrapping any `AuthPlugin`
+* No caching (per-request IdP call)
 
 ## Decision Outcome
 
-**Plugin with internal `pingora-memory-cache` token cache**. The plugin fetches a token from the IdP on the first request for a given (tenant, subject, config) tuple, caches it with a configurable TTL (default 5 minutes), and serves subsequent requests from cache until expiry.
+Chosen option: "Plugin with internal `pingora-memory-cache` token cache". The plugin fetches a token from the IdP on the first request for a given (tenant, subject, config) tuple, caches it with a configurable TTL (default 5 minutes), and serves subsequent requests from cache until expiry.
 
 Caching is an internal concern of the OAuth2 CC plugin — not a generic decorator. `ApiKeyAuthPlugin` and `NoopAuthPlugin` have no expensive fetch and carry no caching infrastructure. The `AuthPlugin` trait remains unchanged.
 
@@ -232,38 +274,70 @@ Key considerations for future retry design:
 
 This is an area of active design. The trait shape, the metadata returned, and the retry policy are all open questions that will be addressed in a dedicated iteration.
 
-## Consequences
+### Consequences
 
-### Positive
+#### Positive
 
-- Eliminates per-request IdP calls — cached tokens served in microseconds (vs 100–500ms)
-- Reduces IdP rate-limit pressure — one call per unique (tenant, subject, config) per TTL window
-- Cross-tenant and cross-subject isolation guaranteed by cache key design + CachedToken key verification
-- `SecretString` (`ZeroizeOnDrop`) securely zeroes token buffers on cache eviction
-- Failed token fetches are not cached — transient IdP errors self-heal on the next request
-- No changes to the `AuthPlugin` trait — existing plugins (`ApiKeyAuthPlugin`, `NoopAuthPlugin`) unchanged
-- `pingora-memory-cache` aligns with planned Pingora adoption (S3-FIFO + TinyLFU eviction, stampede protection)
-- `expires_in`-aware cache TTL via `min(config_ttl, expires_in − 30s)` prevents serving tokens near expiry when IdP issues short-lived tokens
-- No orphaned background tasks — `fetch_token()` performs a single HTTP exchange and returns; no `TokenWatcher` is spawned
+- Good, because it eliminates per-request IdP calls — cached tokens served in microseconds (vs 100–500ms)
+- Good, because it reduces IdP rate-limit pressure — one call per unique (tenant, subject, config) per TTL window
+- Good, because cross-tenant and cross-subject isolation is guaranteed by cache key design + `CachedToken` key verification
+- Good, because `SecretString` (`ZeroizeOnDrop`) securely zeroes token buffers on cache eviction
+- Good, because failed token fetches are not cached — transient IdP errors self-heal on the next request
+- Good, because no changes to the `AuthPlugin` trait — existing plugins (`ApiKeyAuthPlugin`, `NoopAuthPlugin`) unchanged
+- Good, because `pingora-memory-cache` aligns with planned Pingora adoption (S3-FIFO + TinyLFU eviction, stampede protection)
+- Good, because `expires_in`-aware cache TTL via `min(config_ttl, expires_in − 30s)` prevents serving tokens near expiry when the IdP issues short-lived tokens
+- Good, because no orphaned background tasks — `fetch_token()` performs a single HTTP exchange and returns; no `TokenWatcher` is spawned
 
-### Negative
+#### Negative
 
-- Plugin is no longer stateless — carries an in-memory cache with security-sensitive material
-- CredStore lookups still happen on every cache miss (not cached separately)
-- No automatic recovery from upstream 401 — the Data Plane has no metadata to decide whether retrying with fresh credentials is meaningful (see [Retry on Upstream 401 (Deferred)](#retry-on-upstream-401-deferred))
-- `TinyUfo`'s lazy expiry means tokens may linger in memory slightly past TTL until the next `get()` check
+- Bad, because the plugin is no longer stateless — it carries an in-memory cache with security-sensitive material
+- Bad, because CredStore lookups still happen on every cache miss (not cached separately)
+- Bad, because there is no automatic recovery from upstream 401 — the Data Plane has no metadata to decide whether retrying with fresh credentials is meaningful (see [Retry on Upstream 401 (Deferred)](#retry-on-upstream-401-deferred))
+- Neutral, because `TinyUfo`'s lazy expiry means tokens may linger in memory slightly past TTL until the next `get()` check
 
-### Risks
+#### Risks
 
 - **CredStore unreachable**: returns `PluginError::Internal` on cache miss; cached tokens continue to be served until TTL expiry
 - **IdP unavailable**: `fetch_token()` fails → `PluginError::Internal`; not cached; next request retries
-- **Hash collision in TinyUfo**: mitigated by `CachedToken` key verification — collision returns a cache miss, never another tenant's token
+- **Hash collision in TinyUfo**: mitigated by `CachedToken` key verification — a collision returns a cache miss, never another tenant's token
 
-### Known Residual Plaintext
+#### Known Residual Plaintext
 
 - The `format!("Bearer {}", token.expose())` string in `ctx.headers` is a plain `String` — not zeroed, but short-lived (scoped to the request).
 - Inside `OAuthTokenSource::request_token()`, the access token is a plain `String` — not zeroed. However, the source is created, used once, and dropped immediately by `fetch_token()`, so the plaintext lifetime is limited to the fetch call.
 - The long-lived cache entry itself IS zeroed on eviction via `SecretString`'s `ZeroizeOnDrop`. `pingora-memory-cache` uses flurry/seize for deferred reclamation, so there is a small delay between eviction and actual `Drop`. For bearer tokens with ~1 hour TTL, this delay (milliseconds to seconds) is negligible.
+
+### Confirmation
+
+Code review confirms: `OAuth2ClientCredAuthPlugin` implemented in `oagw/src/infra/plugin/oauth2_client_cred_auth.rs` using `pingora_memory_cache::MemoryCache<String, CachedToken>`, `toolkit_auth::oauth2::fetch_token`, and the `min(config_ttl, expires_in − 30s)` TTL rule. Both `Form` and `Basic` variants are registered in `AuthPluginRegistry::with_builtins` (`oagw/src/infra/plugin/registry.rs`) under `OAUTH2_CLIENT_CRED_AUTH_PLUGIN_ID` and `OAUTH2_CLIENT_CRED_BASIC_AUTH_PLUGIN_ID`. The multi-tenant isolation and cache behaviour are covered by unit tests in the same module (`cache_hit_skips_idp_call`, `different_tenant_id_gets_separate_cache_entry`, `cache_does_not_leak_token_across_subjects`, `failed_auth_does_not_pollute_cache`).
+
+## Pros and Cons of the Options
+
+### Internal `pingora-memory-cache` token cache
+
+The plugin owns a `MemoryCache<String, CachedToken>` and manages token lifetime itself.
+
+* Good, because caching lives only where an expensive fetch exists (no cost for `ApiKey`/`Noop`)
+* Good, because the `AuthPlugin` trait stays unchanged
+* Good, because `pingora-memory-cache` aligns with the planned Pingora data plane
+* Bad, because the plugin becomes stateful and holds security-sensitive material in memory
+
+### Generic caching decorator over `AuthPlugin`
+
+A wrapper type caches the output of any `AuthPlugin`.
+
+* Good, because caching logic is written once and reused
+* Bad, because most plugins (`ApiKey`, `Noop`) have nothing expensive to cache — the abstraction is dead weight
+* Bad, because credential-injection outputs are not uniformly cacheable (static vs rotating), so the decorator needs per-plugin policy anyway
+* Bad, because it complicates the trait/registry wiring for no MVP benefit
+
+### No caching (per-request IdP call)
+
+Fetch a fresh token from the IdP on every proxied request.
+
+* Good, because it is the simplest possible implementation and always current
+* Bad, because it adds 100–500ms latency to every request
+* Bad, because it risks tripping IdP rate limits under load
 
 ## Out of Scope
 
@@ -277,10 +351,10 @@ This is an area of active design. The trait shape, the metadata returned, and th
 
 ## Related ADRs
 
-- [ADR: Plugin System](./adr-plugin-system.md) — `AuthPlugin` trait and execution model
-- [ADR: Component Architecture](./adr-component-architecture.md) — `DataPlaneService`, `AuthPluginRegistry`
-- [ADR: Control Plane Caching](./adr-data-plane-caching.md) — Cache invalidation pattern
-- [ADR: State Management](./adr-state-management.md) — Cache eviction and state coordination
+- [ADR: Plugin System](./0003-plugin-system.md) — `AuthPlugin` trait and execution model
+- [ADR: Component Architecture](./0001-component-architecture.md) — `DataPlaneService`, `AuthPluginRegistry`
+- [ADR: Control Plane Caching](./0007-data-plane-caching.md) — Cache invalidation pattern
+- [ADR: State Management](./0008-state-management.md) — Cache eviction and state coordination
 
 ## References
 
@@ -289,3 +363,15 @@ This is an area of active design. The trait shape, the metadata returned, and th
 - [pingora-memory-cache](https://github.com/cloudflare/pingora/tree/main/pingora-memory-cache) — S3-FIFO + TinyLFU eviction, cache stampede protection
 - `libs/toolkit-auth` (`oauth2/config.rs`, `oauth2/source.rs`, `oauth2/token.rs`, `oauth2/fetch.rs`) — Token management library
 - `oagw/src/infra/plugin/apikey_auth.rs` — Reference `AuthPlugin` implementation
+
+## Traceability
+
+- **PRD**: [PRD.md](../PRD.md)
+- **DESIGN**: [DESIGN.md](../DESIGN.md)
+- **Related ADR**: [ADR: Plugin System](./0003-plugin-system.md)
+
+This decision directly addresses the following requirements or design elements:
+
+* `cpt-cf-oagw-fr-auth-injection` — Auth plugins handle credential injection
+* `cpt-cf-oagw-fr-plugin-system` — OAuth2 CC plugin registered as a built-in auth plugin
+* `cpt-cf-oagw-fr-builtin-plugins` — Built-in plugin implementation with internal token caching
