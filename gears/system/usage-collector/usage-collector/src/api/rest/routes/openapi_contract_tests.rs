@@ -707,7 +707,8 @@ fn canonical_error_statuses() -> BTreeSet<u16> {
     let reg = OpenApiRegistryImpl::new();
     let _router: Router = OperationBuilder::get("/probe")
         .operation_id("probe")
-        .public()
+        .anonymous()
+        .exposed()
         .handler(probe)
         .json_response(StatusCode::OK, "probe")
         .standard_errors(&reg)

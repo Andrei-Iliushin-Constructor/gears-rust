@@ -5,7 +5,10 @@ use toolkit::api::OpenApiRegistry;
 use toolkit::{Gear, GearCtx, RestApiCapability};
 use tracing::{debug, info};
 
+use file_parser_sdk::FileParserClientV1;
+
 use crate::config::FileParserConfig;
+use crate::domain::local_client::FileParserLocalClient;
 use crate::domain::service::{FileParserService, ServiceConfig};
 use crate::infra::parsers::{
     DocxParser, ImageParser, KreuzbergParser, PlainTextParser, StubParser,
@@ -79,6 +82,14 @@ impl Gear for FileParserGear {
 
         // Create file parser service
         let file_parser_service = Arc::new(FileParserService::new(parsers, service_config));
+
+        // Register the in-process ClientHub client so other gears (e.g.
+        // scan-gateway, extracting text from an attachment before running
+        // its detector fan-out) can call file-parser without going over
+        // HTTP.
+        let client: Arc<dyn FileParserClientV1> =
+            Arc::new(FileParserLocalClient::new(file_parser_service.clone()));
+        ctx.client_hub().register::<dyn FileParserClientV1>(client);
 
         // Store service for REST usage
         self.service
