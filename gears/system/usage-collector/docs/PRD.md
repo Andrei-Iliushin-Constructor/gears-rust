@@ -24,6 +24,7 @@
   - [5.6 Corrections (Event Deactivation & Usage Compensation)](#56-corrections-event-deactivation--usage-compensation)
   - [5.7 Usage Types](#57-usage-types)
   - [5.8 Data Classification](#58-data-classification)
+  - [5.9 Billing Integration (Phase 2)](#59-billing-integration-phase-2)
 - [6. Non-Functional Requirements](#6-non-functional-requirements)
   - [6.1 Gear-Specific NFRs](#61-gear-specific-nfrs)
   - [6.2 NFR Exclusions](#62-nfr-exclusions)
@@ -176,17 +177,21 @@ Authorization is enforced via the platform PDP (`authz-resolver`) on all read an
 - Caller authentication is performed by the platform gateway upstream of the gear
 - Delegated audit trail through platform gateway access logs and platform audit infrastructure, with gear-emitted correlation identifiers on every API operation
 - Custodianship of tenant usage data under PDP-mediated read and write boundaries, including tenant-owner, operator-steward, and gear-custodian role distinctions
+- **(Phase 2 — all UsageTypes)** Interval usage windows replace the record timestamp: every record carries `window_start` / `window_end` (equal bounds for a point event) plus a gear-assigned `accepted_at`, and the dedup identity and derived-`id` input move with them
+- **(Phase 2 — billing-relevant UsageTypes only)** Billing profile gating a strict model: bound metering unit, published counter/gauge quantity semantics under windows, and the existing derived record `id` carried through to billing reads
+- **(Phase 2)** Canonical metering units and declared dimension keys (via the closed-shape metadata model) for billing-relevant UsageTypes
+- **(Phase 2)** A replay-safe, pull-primary billing read/feed surface for the Rating gear, with corrections observable on it
+- **(Phase 2)** Dedicated origin-flagged backfill, ingestion rate limiting, per-scope reconciliation metadata / watermarks, and an operator/plugin retention floor for billing-relevant UsageTypes
 
 ### 4.2 Out of Scope
 
 - **Business Logic**: Pricing, rating, billing rules, invoice generation, quota enforcement decisions — responsibility of downstream consumers
+- **Commercial identity resolution**: subscription, SKU, and the payer/seller tenant axes are **not** carried or resolved by the gear; downstream consumers resolve them from the record's tenant/resource attribution
 - **Multi-Region Replication**: Deferred to future phase
-- **Retention Policy Management**: out of scope for v1 (no gear-level retention enforcement); the unbounded idempotency-key obligation is preserved (see §5.1).
-- **Dedicated Backfill Capability**: out of scope for v1; bulk historical import rides the normal ingestion path.
-- **Individual Event Amendment**: Operator-initiated property updates to existing usage records are out of scope for phase 1 of the gear; covered in a later phase
-- **Audit Events**: Structured audit-event emission to the platform `audit_service` for operator-initiated writes is out of scope for phase 1 of the gear; covered in a later phase
-- **Rate Limiting**: Per-caller-gear and per-(caller, tenant) ingestion quotas and rate-limit enforcement are out of scope for phase 1 of the gear; covered in a later phase
-- **Watermark and Reconciliation Metadata**: Per-caller-gear and per-tenant ingestion metadata (watermarks, event counts, latest event timestamps, ingestion statistics) and the corresponding metadata-exposure API are out of scope for phase 1 of the gear; covered in a later phase. External reconciliation workflows that depend on this metadata are out of scope for the gear entirely
+- **Individual Event Amendment**: Operator-initiated in-place property updates to existing usage records remain out of scope; corrections are expressed through deactivation (+ optional re-emission) and compensation (§5.6)
+- **Audit Events**: Structured audit-event emission to a platform `audit_service` for operator-initiated writes remains deferred; the platform gateway/PDP access trail plus gear-emitted correlation IDs remain the audit surface
+
+> **Phase 2 (this revision) brings the following previously-deferred items into scope for billing-relevant UsageTypes — see [§5.9](#59-billing-integration-phase-2):** **Retention** (as an operator/plugin deployment floor, not gear-level enforcement — the delegation of retention, archival, and purging to the active storage plugin is unchanged), **Dedicated Backfill**, **Rate Limiting**, and **Watermark & Reconciliation Metadata**. Non-billing telemetry is unchanged; the unbounded idempotency-key obligation (§5.1) is preserved.
 
 ## 5. Functional Requirements
 
@@ -205,7 +210,7 @@ The system **MUST** accept usage records from authenticated usage sources. Each 
 
 - [ ] `p1` - **ID**: `cpt-cf-usage-collector-fr-idempotency`
 
-The system **MUST** require a client-provided idempotency key on every usage record. The system **MUST** reject any record submitted without an idempotency key with an actionable error. When a record is submitted whose idempotency key matches a previously accepted record for the same tenant and UsageType **and** every caller-supplied field is identical — value, resource (resource_ref), subject (subject_ref), and metadata — the system **MUST** silently deduplicate the submission (no error, no duplicate record); this is the exact-equality retry case. When the key matches a previously accepted record for the same tenant and UsageType but **any** caller-supplied field differs from the stored record — including a metadata-only difference — the system **MUST** reject the submission with an actionable conflict error and **MUST NOT** silently drop the second write. A submission whose idempotency key matches but whose event timestamp (`created_at`) differs is a distinct record, not a conflict: `created_at` is part of the dedup identity (the 4-tuple `(tenant_id, gts_id, idempotency_key, created_at)`, ADR-0014), not a compared field. The dedup boundary is per-tenant per-UsageType: the same idempotency key may legitimately reappear under a different tenant or a different UsageType without being treated as a duplicate. The idempotency window is **UNBOUNDED**: a key has no time-to-live, never expires, and is never intentionally reusable, so the per-tenant per-UsageType uniqueness of an idempotency key is permanent.
+The system **MUST** require a client-provided idempotency key on every usage record. The system **MUST** reject any record submitted without an idempotency key with an actionable error. When a record is submitted whose idempotency key matches a previously accepted record for the same tenant and UsageType **and** every caller-supplied field is identical — value, resource (resource_ref), subject (subject_ref), and metadata — the system **MUST** silently deduplicate the submission (no error, no duplicate record); this is the exact-equality retry case. When the key matches a previously accepted record for the same tenant and UsageType but **any** caller-supplied field differs from the stored record — including a metadata-only difference — the system **MUST** reject the submission with an actionable conflict error and **MUST NOT** silently drop the second write. A submission whose idempotency key matches but whose window bounds differ is a distinct record, not a conflict: `window_start` and `window_end` are part of the dedup identity (the tuple `(tenant_id, gts_id, idempotency_key, window_start, window_end)` — see `cpt-cf-usage-collector-fr-usage-windows` and `cpt-cf-usage-collector-fr-billing-record-identity`, which would supersede ADR-0014 once its replacement ADR is accepted), not compared fields. The dedup boundary is per-tenant per-UsageType: the same idempotency key may legitimately reappear under a different tenant or a different UsageType without being treated as a duplicate. The idempotency window is **UNBOUNDED**: a key has no time-to-live, never expires, and is never intentionally reusable, so the per-tenant per-UsageType uniqueness of an idempotency key is permanent.
 
 - **Rationale**: Client-side retries on transient failures can produce duplicate submissions; deduplication prevents incorrect aggregations. For counter UsageTypes, a retry of a keyless delta inflates the accumulated total without any means of detection or correction. For gauge UsageTypes, duplicate readings can still poison downstream consumers that derive counts, distinct timestamps, or rate-of-change signals from raw records. Requiring an idempotency key on every emission eliminates this data integrity risk at the calling gear, removes a semantics-dependent special case from the ingestion contract, and lets calling gears adopt a single retry pattern across all UsageTypes they emit. Splitting the same-key outcome is deliberate: an exact-equality retry is the benign at-least-once case and remains safe to absorb silently, but a key reused with different content is a caller bug. Surfacing that divergence as a conflict rather than silently dropping the second write protects billing-correctness and other downstream consumers from data that would otherwise be lost without any signal, while an unbounded window guarantees a key can never be silently recycled into a different record.
 - **Actors**: `cpt-cf-usage-collector-actor-usage-source`
@@ -435,6 +440,198 @@ The system **MUST** treat its persisted data as one of three classes:
 - **Rationale**: Explicit classification bounds the data the gear holds and keeps Privacy by Design, regulatory, and residency obligations delegated to the platform layer and the operator-selected plugin.
 - **Actors**: `cpt-cf-usage-collector-actor-usage-source`, `cpt-cf-usage-collector-actor-platform-developer`, `cpt-cf-usage-collector-actor-platform-operator`
 
+### 5.9 Billing Integration (Phase 2)
+
+Phase 2 is the milestone that lets the BSS Rating gear work: it extends the metering substrate into a **billing-grade usage source**. Records remain **append-only**; corrections continue to use `cpt-cf-usage-collector-fr-usage-compensation` and `cpt-cf-usage-collector-fr-event-deactivation` (no in-place amendment is introduced). Commercial identity (subscription, SKU, payer/seller axes) is **not** carried by the gear — it is resolved by downstream consumers.
+
+**Scope of this section.** Every requirement below applies **only** to UsageTypes declared with the billing profile (`cpt-cf-usage-collector-fr-billing-usage-type-profile`), with **one deliberate exception**: `cpt-cf-usage-collector-fr-usage-windows` replaces the record timestamp with an interval for **every** UsageType, billing-relevant or not. That one requirement is a change to the core record model and is called out as such; everything else leaves non-billing telemetry's record shape, correction model, and query surface unchanged.
+
+**Relationship to the UsageType catalog.** Several requirements below constrain what a UsageType **declaration** carries (billing profile, metering unit, dimension keys, gauge sampling interval). They are written against the declaration itself, not against the component that stores it, because the UsageType catalog is expected to migrate out of this gear into a separate types registry. A requirement here is satisfied wherever the declaration lives at the time; no requirement in this section depends on the catalog remaining gear-local.
+
+#### Billing-Relevant UsageType Profile
+
+- [ ] `p1` - **ID**: `cpt-cf-usage-collector-fr-billing-usage-type-profile`
+
+A UsageType declaration **MUST** be able to carry a **billing profile** flag. For billing-relevant UsageTypes the system **MUST** enforce the strict billing model of this section — a bound metering unit (`cpt-cf-usage-collector-fr-metering-unit-binding`), published quantity semantics including a gauge sampling interval (`cpt-cf-usage-collector-fr-billing-quantity-semantics`), and the derived record `id` carried onto the billing reads (`cpt-cf-usage-collector-fr-billing-record-identity`) — and **MUST** include accepted records on the billing read/feed surface (`cpt-cf-usage-collector-fr-billing-usage-feed`). UsageTypes without the billing profile take on no obligation from this section: no metering unit, no dimension keys, no feed inclusion, and no change to their correction model or query results. (Interval windows are the one exception and apply to every UsageType — see `cpt-cf-usage-collector-fr-usage-windows`.)
+
+Enabling the profile on a UsageType that already has persisted records is **not specified here**: those records predate the billing model and carry no bound unit, so admitting them to the billing feed would require a migration rule this phase does not define. Deployments **SHOULD** declare billing meters as billing-relevant from first registration.
+
+- **Depends on**: `cpt-cf-usage-collector-fr-usage-type-existence-and-semantics`
+- **Rationale**: One switch scopes every Phase-2 obligation to the UsageTypes that are actually billed, preserving the lightweight contract for the rest of platform telemetry and keeping the gear generic. The enable-on-existing case is deliberately left unspecified rather than forbidden: the UsageType catalog is expected to move to a separate types registry, so writing a migration rule against today's catalog would specify a surface that is on its way out. Declaring billing meters as billing from the start costs nothing while the gear is unreleased and no billing meter exists yet.
+- **Actors**: `cpt-cf-usage-collector-actor-platform-operator`, `cpt-cf-usage-collector-actor-usage-source`
+
+#### Record Identity for Billing (no new identity)
+
+- [ ] `p1` - **ID**: `cpt-cf-usage-collector-fr-billing-record-identity`
+
+**No new identifier is introduced.** The existing record `id` already satisfies every identity need of the billing path: it is server-derived rather than client-supplied, stable across at-least-once retries, exposed on read, addressable by point lookup and deactivation, reproducible offline by a client, and already the target of the `corrects_id` correction pointer. Downstream billing **MUST** use this `id` as its deduplication and reference key, and the billing read/feed surface **MUST** carry it (`cpt-cf-usage-collector-fr-billing-fields-on-read`). The compensation reference is unchanged.
+
+**What changes is the input to the derivation, because the emitter-supplied timestamp `created_at` no longer exists** (`cpt-cf-usage-collector-fr-usage-windows`). The window bounds take its place in both the dedup identity and the derived `id`:
+
+- Dedup identity: `(tenant_id, gts_id, idempotency_key, window_start, window_end)`.
+- Derivation: `id = UUIDv5(NS, tenant_id ⟨0x1F⟩ gts_id ⟨0x1F⟩ window_start_micros ⟨0x1F⟩ window_end_micros ⟨0x1F⟩ idempotency_key)`, with the namespace constant unchanged.
+
+Two consequences **MUST** hold. First, two records covering different windows can no longer collide on one `id`, so an emitter may keep a stable per-meter idempotency key across windows — the window bounds already distinguish them. Second, offline `corrects_id` pre-computation now requires the target's exact window bounds (µs) instead of its `created_at`.
+
+- **Depends on**: `cpt-cf-usage-collector-fr-idempotency`
+- **Rationale**: ADR-0014 folded `created_at` into the derivation precisely so that two submissions differing only in when they happened would not collide. Once the timestamp is replaced by an interval, the same argument applies unchanged to the interval, so promoting the bounds is the consistent move rather than a new idea — and it is strictly better than the alternative of leaving the derivation alone and making "encode the window into your idempotency key" an emitter obligation, which pushes an identity concern onto every integrator and fails as a runtime conflict when they get it wrong. The namespace is deliberately left alone: it is a forever-fixed constant, and the derivation input is already changing.
+- **Actors**: `cpt-cf-usage-collector-actor-usage-source`, `cpt-cf-usage-collector-actor-usage-consumer`
+
+#### Interval Usage Windows
+
+- [ ] `p1` - **ID**: `cpt-cf-usage-collector-fr-usage-windows`
+
+> **Scope note:** this is the one requirement in [§5.9](#59-billing-integration-phase-2) that applies to **all** UsageTypes, not only billing-relevant ones. It replaces the record timestamp rather than adding a field alongside it.
+
+Every usage record **MUST** carry `window_start` and `window_end` as UTC instants with `window_start <= window_end`, and `created_at` — the single emitter-supplied event timestamp on the record today, referred to informally as "the timestamp" and typed as `Timestamp` in `usage-collector-v1.yaml` — **MUST** be removed from the record model. The interval replaces it; the record gains no other time field from the emitter. The interval `[window_start, window_end)` is the period the record's `value` describes. The gear **MUST** reject timestamps without offset information and **MUST** normalize non-UTC offsets to UTC.
+
+**Point events.** A record with `window_start == window_end` is a **point event** — the direct replacement for the Phase-1 timestamp, and the shape every non-billing emitter uses. Because a zero-length half-open interval contains no instant, a point event **MUST NOT** be matched by interval-overlap logic. Query selection is therefore defined in two cases, and both **MUST** be implemented:
+
+- **Interval record** (`window_start < window_end`): selected when `[window_start, window_end)` overlaps the requested range — `window_start < range_end AND window_end > range_start`.
+- **Point event** (`window_start == window_end`): selected when the instant falls in the requested range — `window_start >= range_start AND window_start < range_end`.
+
+Applying interval-overlap logic to a point event would silently drop every record sitting exactly on a range's lower bound — the month-close boundary — so the point case is a normative requirement, not an implementation detail.
+
+**Acceptance instant.** The system **MUST** assign every record an `accepted_at`, a gear-assigned UTC instant recording when the gear accepted the record, and expose it on read. `accepted_at` **MUST NOT** be settable or overridable by the emitter. Late arrival is evaluated as `accepted_at` against `window_end`.
+
+**Consequences for identity and dedup.** The emitter-supplied timestamp `created_at` is a component of both the write-path dedup identity and the derived record `id` (ADR-0013 as amended by ADR-0014). Removing it **MUST** be accompanied by promoting the window bounds into both, so that the dedup identity becomes `(tenant_id, gts_id, idempotency_key, window_start, window_end)` and the `id` derivation covers the same tuple; see `cpt-cf-usage-collector-fr-billing-record-identity`. ADR-0014 recorded the opposite decision (folding `created_at` in), so adopting this change **would supersede** it. A PRD cannot retire an ADR: a replacement ADR **MUST** accompany this change, and ADR-0014 stays in the record marked superseded.
+
+- **Depends on**: `cpt-cf-usage-collector-fr-ingestion`, `cpt-cf-usage-collector-fr-idempotency`, `cpt-cf-usage-collector-fr-query-raw`, `cpt-cf-usage-collector-fr-query-aggregation`
+- **Rationale**: Billing consumers evaluate consumption over an interval and detect late arrivals against window boundaries; high-rate infrastructure emitters such as S3 can only integrate by pre-aggregating into windows, and a single timestamp makes "N operations during [T1,T2)" inexpressible. Rather than carry a timestamp *and* a window — two overlapping notions of when a record happened, with an ambiguous relationship — the interval subsumes the timestamp: a point event is simply a zero-length interval. That removes a field from the record instead of adding one, and leaves exactly one answer to "when". The cost is a wire-breaking change for non-billing emitters, which is affordable while the gear is unreleased (ADR-0013 accepts breaking wire changes on the same grounds) and is semantically free — an emitter that previously sent one timestamp now sends the same instant as both bounds. Late arrival is deliberately measured against a **gear-assigned** `accepted_at`: an emitter-supplied instant would let a skewed or misbehaving emitter hide its own lateness.
+- **Actors**: `cpt-cf-usage-collector-actor-usage-source`, `cpt-cf-usage-collector-actor-usage-consumer`
+
+#### Live-Path Future-Time Bound
+
+- [ ] `p3` - **ID**: `cpt-cf-usage-collector-fr-live-future-time-bound`
+
+On the live ingestion path the system **MUST** reject a billing-relevant record whose `window_end` exceeds `now + tolerance` (configurable; default 5 minutes), with an actionable error identifying the offending timestamp and the bound.
+
+- **Depends on**: `cpt-cf-usage-collector-fr-ingestion`
+- **Rationale**: Emitter clock skew must not open not-yet-existing billing windows; a bounded tolerance turns silent time-corruption into a visible emitter defect. Historical past-dated import is handled by `cpt-cf-usage-collector-fr-backfill`, not the live path.
+- **Actors**: `cpt-cf-usage-collector-actor-usage-source`
+
+#### Metering Unit Binding
+
+- [ ] `p2` - **ID**: `cpt-cf-usage-collector-fr-metering-unit-binding`
+
+The declaration of a billing-relevant UsageType **MUST** bind a `metering_unit` drawn from the canonical unit list (`cpt-cf-usage-collector-fr-canonical-units`). Ingestion **MUST** reject a billing-relevant record whose UsageType has no bound unit.
+
+- **Depends on**: `cpt-cf-usage-collector-fr-billing-usage-type-profile`
+- **Rationale**: Fail-fast at the gear prevents unrateable records ("unrated poison") from reaching billing; downstream rejection is more expensive and splits the error from its source.
+- **Actors**: `cpt-cf-usage-collector-actor-platform-operator`
+
+#### Canonical Units
+
+- [ ] `p2` - **ID**: `cpt-cf-usage-collector-fr-canonical-units`
+
+The system **MUST** publish a normative canonical unit list for billing-relevant UsageTypes (at minimum `bytes`, `byte-hours`, `count`, `seconds`) and **MUST NOT** convert, scale, or round stored or emitted quantities. Quantities persist and travel in the declared canonical unit; presentation conversions (GiB vs GB, hours vs seconds) are the consumer's responsibility.
+
+- **Rationale**: Unit conversion inside the metering substrate is a classic source of silent billing discrepancy (decimal vs binary prefixes). One canonical unit per meter, converted only at the edge, keeps every stored quantity comparable and auditable. S3 maps directly: `byte-hours` for storage GB-hours, `bytes` for traffic.
+- **Actors**: `cpt-cf-usage-collector-actor-usage-source`, `cpt-cf-usage-collector-actor-usage-consumer`
+
+#### Billing Quantity Semantics Under Windows
+
+- [ ] `p1` - **ID**: `cpt-cf-usage-collector-fr-billing-quantity-semantics`
+
+For billing-relevant UsageTypes the gear **MUST** publish, as a normative part of this contract, how `value` relates to `[window_start, window_end)` under each existing semantics:
+
+- **Counter**: `value` is the quantity **accrued over** the window. Values for disjoint windows of the same series are additive; a consumer obtains period consumption by summing. Pre-integrated resource-time meters (e.g., S3 storage expressed in `byte-hours` accumulated across the window) are counters.
+- **Gauge**: `value` is a **point-in-time observation**, not a quantity accrued over the window. Gauge values **MUST NOT** be summed across windows by any consumer; deriving period consumption requires integrating the observation series over time. A billing-relevant gauge UsageType declaration **MUST** carry a nominal sampling interval so that integration and gap detection are well defined.
+
+The gear **MUST NOT** integrate, differentiate, interpolate, re-window, or synthesize missing samples in either direction — it carries the emitted quantity and the declared semantics, and integration remains a consumer concern (`cpt-cf-usage-collector-contract-downstream-usage-reader`).
+
+- **Depends on**: `cpt-cf-usage-collector-fr-counter-semantics`, `cpt-cf-usage-collector-fr-gauge-semantics`, `cpt-cf-usage-collector-fr-usage-windows`
+- **Rationale**: Windows alone do not tell a consumer whether to sum or to integrate, and the two readings of the same series differ by orders of magnitude — summing a byte-level gauge produces a bill that is wrong rather than merely imprecise. Existing counter/gauge semantics already encode the distinction and are derivable from the `gts_id` prefix present on every record, so no new record field is introduced; what was missing is the normative statement of what each means once an interval window exists, plus the sampling interval a gauge consumer needs to integrate at all. This is the seam an infrastructure baseline like S3 hits first: storage is naturally a level (gauge), and the recommended shape is to pre-integrate at the source into a `byte-hours` counter rather than to push integration downstream.
+- **Actors**: `cpt-cf-usage-collector-actor-usage-source`, `cpt-cf-usage-collector-actor-usage-consumer`, `cpt-cf-usage-collector-actor-platform-operator`
+
+#### Dimension Key (via declared metadata keys)
+
+- [ ] `p2` - **ID**: `cpt-cf-usage-collector-fr-dimension-key`
+
+A billing-relevant UsageType declaration **MAY** name an ordered subset of its closed metadata keys as its `dimension_key` — the pricing-relevant dimensions (e.g., storage class, traffic scope, operation). Values follow the closed-shape metadata contract (declared keys, string values). The gear **MUST NOT** interpret dimension semantics. Emission of dimension values is the source's responsibility; until sources emit them the `dimension_key` is empty and dimensional rating is out of MVP.
+
+This **extends the grouping set** of `cpt-cf-usage-collector-fr-query-aggregation`, which today groups by time bucket, tenant, subject, and resource only: for billing-relevant UsageTypes, aggregation **MUST** additionally support grouping by the declared dimension keys, and raw and aggregation queries **MUST** support equality filtering on them. Grouping and filtering on metadata keys that are *not* declared as dimension keys remains unsupported, so the addressable grouping surface stays bounded and declared at registration rather than open-ended over arbitrary metadata.
+
+- **Depends on**: `cpt-cf-usage-collector-fr-record-metadata`, `cpt-cf-usage-collector-fr-query-aggregation`, `cpt-cf-usage-collector-fr-query-raw`
+- **Rationale**: Dimensional rating needs a stable, declared grouping tuple. Reusing the closed-shape metadata model avoids a new typed field while giving downstream a stable, addressable contract.
+- **Actors**: `cpt-cf-usage-collector-actor-usage-source`, `cpt-cf-usage-collector-actor-usage-consumer`
+
+#### Correction Reason Code
+
+- [ ] `p2` - **ID**: `cpt-cf-usage-collector-fr-compensation-reason-code`
+
+For billing-relevant UsageTypes, compensation entries and deactivation operations **MUST** additionally carry a non-empty `reason_code`. All other Phase-1 correction invariants (counter-only compensation, strictly-negative value, active-reference check, SUM-only effect, one-way deactivation, depth-1 cascade, no compensation of compensations) are unchanged.
+
+- **Depends on**: `cpt-cf-usage-collector-fr-usage-compensation`, `cpt-cf-usage-collector-fr-event-deactivation`
+- **Rationale**: Billing consumers and auditors must distinguish a duplicate give-back from a goodwill credit from a metering-bug fix; without a reason code every negative entry is indistinguishable.
+- **Actors**: `cpt-cf-usage-collector-actor-usage-source`, `cpt-cf-usage-collector-actor-platform-operator`
+
+#### Billing Fields on Read Paths
+
+- [ ] `p1` - **ID**: `cpt-cf-usage-collector-fr-billing-fields-on-read`
+
+For billing-relevant UsageTypes all read paths **MUST** return the full billing field set unstripped: `id`, `window_start`/`window_end`, `accepted_at`, `metering_unit`, declared `dimension_key` values, signed `value`, lifecycle status (active/inactive), the compensation/deactivation reference, and origin flag (`cpt-cf-usage-collector-fr-backfill`). Point lookup by record `id` **MUST** return the exact persisted fact.
+
+- **Depends on**: `cpt-cf-usage-collector-fr-query-raw`, `cpt-cf-usage-collector-fr-query-aggregation`
+- **Rationale**: Replay, backfill rating, and finance audits require the persisted fact with its billing identity intact; stripping fields forces consumers back into store internals.
+- **Actors**: `cpt-cf-usage-collector-actor-usage-consumer`
+
+#### Billing Usage Feed (pull-primary)
+
+- [ ] `p1` - **ID**: `cpt-cf-usage-collector-fr-billing-usage-feed`
+
+The system **MUST** provide billing consumers a deterministic, replay-safe read path over billing-relevant records, **pull-based** over the Downstream Usage Reader Contract (§7.2) as the primary mechanism (no event bus in this phase).
+
+> **Direction, to avoid a recurring misreading:** "pull, not push" describes only the **outbound** edge — how a billing consumer such as the Rating gear obtains records **from** the Usage Collector. It says nothing about the **inbound** edge: usage sources, including the S3 agent, continue to *push* records **into** the gear through ordinary REST/SDK ingestion (`cpt-cf-usage-collector-fr-ingestion`). Nothing in this requirement asks an emitter to be polled. It **MUST** provide: a documented, monotonic acceptance-sequence ordering scoped per `(tenant_id, gts_id)` — the same scope as the consistency floor in `cpt-cf-usage-collector-nfr-query-freshness`; no cross-tenant or cross-UsageType total order is claimed — stable cursor pagination over a consistent snapshot — a paginated scan **MUST NOT** observe records appearing, disappearing, or mutating mid-scan, except append-only arrivals demarcated by an explicit watermark returned with the page — and inclusion of correction/deactivation state per `cpt-cf-usage-collector-fr-billing-fields-on-read` so a reader can reconstruct correction history. A push delivery **MAY** be added in a later phase; it is not in scope here.
+
+- **Depends on**: `cpt-cf-usage-collector-fr-query-raw`, `cpt-cf-usage-collector-contract-downstream-usage-reader`
+- **Rationale**: The Rating gear's inbound path must be replay-safe under concurrent ingest (consumer outage beyond buffer, region loss, bounded re-rating); without snapshot-consistent cursors a scan is silently incomplete or duplicated. Pull over the existing reader contract reuses built surface, and with record-`id` dedup downstream, overlap is safe. Push is deferred solely because no platform event bus exists yet.
+- **Actors**: `cpt-cf-usage-collector-actor-usage-consumer`
+
+#### Retention Floor for Billing Data
+
+- [ ] `p2` - **ID**: `cpt-cf-usage-collector-fr-billing-retention-floor`
+
+For billing-relevant UsageTypes the operator-selected storage plugin deployment profile **MUST** retain raw records for at least:
+
+> `floor = max(operational replay horizon, configured backfill window)`
+
+with launch defaults of a 35-day replay horizon and a 90-day backfill window (`cpt-cf-usage-collector-fr-backfill`), giving a **90-day** floor at launch. The floor is stated as a formula rather than a constant so that widening the backfill window cannot silently create records the deployment is entitled to purge sooner than it accepted them.
+
+This is an **operator/plugin deployment obligation**, not gear-level enforcement — the gear continues to delegate retention, archival, and purging to the active storage plugin's deployment profile and the platform governance layer, unchanged from Phase 1. A deployment below the floor for a billing-relevant UsageType is a readiness failure surfaced at operator onboarding / storage-plugin readiness review.
+
+The Usage Collector is **not** the system of record for long-term billing evidence. Retention of rated charges, billable items, and invoice detail across dispute, audit, and statutory periods is a downstream obligation of the Rating, ledger, and invoicing gears. Accordingly this requirement sets no multi-year floor and mandates no aggregate: the floor covers the **operational** recovery horizon only.
+
+- **Rationale**: The pull feed's disaster path (`cpt-cf-usage-collector-fr-billing-usage-feed`) is only real if the data outlives the outage it recovers from, and the backfill path is only real if imported history outlives its own import. Deriving the floor from both horizons removes the inconsistency of accepting 90-day-old history into a 35-day store. Keeping the floor operational — rather than extending it to dispute and audit periods — is what keeps the [§6.2](#62-nfr-exclusions) exclusion honest: the gear can only continue to declare itself out of scope as a financial-reporting source if the financial record of what was charged genuinely lives downstream. Expressing all of it as a deployment obligation respects the delegated-retention model instead of pinning retention inside the gear.
+- **Actors**: `cpt-cf-usage-collector-actor-platform-operator`, `cpt-cf-usage-collector-actor-storage-backend`
+
+#### Dedicated Backfill
+
+- [ ] `p3` - **ID**: `cpt-cf-usage-collector-fr-backfill`
+
+The system **MUST** provide a dedicated bulk-import path for historical billing-relevant records, with: a bounded backfill window (configurable; default 90 days; submissions beyond it require elevated authorization), an `origin=backfill` flag on persisted records and on the billing read/feed surface, workload isolation from live ingestion (backfill load **MUST NOT** breach live-path SLOs), and full billing validation identical to the live path. The configured backfill window feeds the retention floor of `cpt-cf-usage-collector-fr-billing-retention-floor`: a deployment **MUST NOT** admit a backfill window wider than the raw retention its storage profile guarantees, since a record imported outside that retention would be eligible for purge on arrival.
+
+- **Rationale**: Bulk historical import on the live path competes with real-time SLOs and would surface stale records to billing consumers unmarked; an isolated, flagged path lets consumers route backfill to batch handling.
+- **Actors**: `cpt-cf-usage-collector-actor-platform-operator`, `cpt-cf-usage-collector-actor-usage-source`
+
+#### Ingestion Rate Limiting
+
+- [ ] `p3` - **ID**: `cpt-cf-usage-collector-fr-rate-limiting`
+
+The system **MUST** enforce configurable ingestion quotas per calling gear and per (calling gear, tenant) across all ingestion paths (SDK, REST), rejecting over-quota submissions with an actionable throttle error carrying retry guidance. Throttling **MUST NOT** silently drop records.
+
+- **Rationale**: A misbehaving emitter must not degrade the ingestion SLO for billing-critical sources; explicit throttle errors let well-behaved emitters apply backpressure instead of losing data.
+- **Actors**: `cpt-cf-usage-collector-actor-platform-operator`, `cpt-cf-usage-collector-actor-usage-source`
+
+#### Reconciliation Metadata & Watermarks
+
+- [ ] `p3` - **ID**: `cpt-cf-usage-collector-fr-reconciliation-metadata`
+
+The system **MUST** expose, via API, per-scope ingestion metadata at minimum at granularities (calling gear), (calling gear, tenant), and (tenant, UsageType): accepted record counts, accepted quantity sums per unit, latest `accepted_at` watermark, latest covered `window_end`, and latest acceptance-sequence watermark. The metadata **MUST** be sufficient for an external reconciliation job to compare gear-side accepted totals against a consumer's processed totals for a time range without a full raw scan, and to detect a silent (stalled-watermark) emitter.
+
+- **Rationale**: Revenue assurance compares emitter → gear → consumer totals; without cheap per-scope counters the comparison is a raw scan, and a meter that silently stops is invisible until an invoice is wrong.
+- **Actors**: `cpt-cf-usage-collector-actor-platform-operator`, `cpt-cf-usage-collector-actor-usage-consumer`
+
 ## 6. Non-Functional Requirements
 
 ### 6.1 Gear-Specific NFRs
@@ -495,7 +692,7 @@ The system **MUST** ensure that aggregation query workloads do not degrade inges
 
 The system **MUST** publish a plugin-agnostic consistency contract between the synchronous ingestion ack path and the subsequent raw / aggregated / catalog query surfaces. The contract is **floor-and-ceiling**: the gear floor is the minimum every active plugin honours under default deployment posture, and each plugin's deployment guide MAY advertise a stronger ceiling.
 
-- **Floor (gear-level)**: ingestion `Acknowledged` is durable and the `(tenant_id, gts_id, idempotency_key, created_at)` dedup tuple is permanently visible to subsequent ingestion attempts. Visibility of the same record through `cpt-cf-usage-collector-fr-query-raw`, `cpt-cf-usage-collector-fr-query-aggregation`, and the catalog read paths reached by `cpt-cf-usage-collector-fr-usage-type-existence-and-semantics` is **eventually consistent with no upper bound** relative to the ingestion ack. The floor is per-`(tenant_id, gts_id)`; no cross-tenant or cross-usage_type ordering claim is made. No monotonic-reads-per-`(tenant_id, gts_id)` guarantee at the floor.
+- **Floor (gear-level)**: ingestion `Acknowledged` is durable and the `(tenant_id, gts_id, idempotency_key, window_start, window_end)` dedup tuple is permanently visible to subsequent ingestion attempts. Visibility of the same record through `cpt-cf-usage-collector-fr-query-raw`, `cpt-cf-usage-collector-fr-query-aggregation`, and the catalog read paths reached by `cpt-cf-usage-collector-fr-usage-type-existence-and-semantics` is **eventually consistent with no upper bound** relative to the ingestion ack. The floor is per-`(tenant_id, gts_id)`; no cross-tenant or cross-usage_type ordering claim is made. No monotonic-reads-per-`(tenant_id, gts_id)` guarantee at the floor.
 - **Ceiling (per-plugin)**: each `usage-collector-plugin-<backend>` deployment guide **MUST** publish the plugin's actual consistency profile (e.g., "sync, single-node", "bounded-staleness ≤ N ms", "eventual, no bound — see workload-isolation routing"). Consumers that depend on a tighter bound consciously couple themselves to that plugin's ceiling; the coupling **MUST** be recorded in the consumer's own design document.
 - **Consumer rule**: read-after-write calling-gear flows (admission control, post-emit summary, immediate-readback dashboards) **MUST NOT** be designed against the query surfaces. Same-request outcome flows **MUST** consume the ingestion ack. Near-real-time observers poll within `cpt-cf-usage-collector-nfr-query-latency` and accept lag bounded by the active plugin's published ceiling.
 - **Threshold**: Floor: no gear-level numeric bound (absence claim, verified by documentation review over DESIGN §3.10, `plugin-spi.md` §"Consistency profile", and the feature pointers). Ceiling: per-plugin published profile, verified against each plugin's release-readiness review.
@@ -534,6 +731,32 @@ The system **MUST** sustain the following ingestion and query workload profile a
 
 Usage Collector domain metrics **MUST** be integrated into shared platform dashboards and alert routing. At minimum, operator treatment **MUST** exist for ingestion latency, ingestion error rate, query latency, PDP error rate, and storage-plugin readiness. Every accepted and rejected API operation **MUST** emit a structured log record carrying the `correlation_id` propagated unchanged from the inbound platform-resolved `SecurityContext` so gear activity reconciles with platform gateway access logs.
 
+#### Billing Feed Freshness
+
+- [ ] `p1` - **ID**: `cpt-cf-usage-collector-nfr-billing-feed-freshness`
+
+This NFR defines a **billing-capable plugin profile**. It does **not** introduce a gear-level upper bound: the gear floor declared by `cpt-cf-usage-collector-nfr-query-freshness` — query-surface visibility is eventually consistent with **no upper bound** — is unchanged and continues to apply to every UsageType.
+
+A storage plugin deployment qualifies as **billing-capable** only if the consistency ceiling it publishes under `cpt-cf-usage-collector-nfr-query-freshness` bounds acceptance → billing-read visibility (`cpt-cf-usage-collector-fr-billing-usage-feed`) at **≤ 5 minutes p95** for billing-relevant UsageTypes, under the `cpt-cf-usage-collector-nfr-throughput-profile` envelope, measured over a ≥ 30-minute steady-state window. Operators **MUST NOT** enable the billing profile (`cpt-cf-usage-collector-fr-billing-usage-type-profile`) on a deployment whose active plugin publishes no qualifying ceiling; a deployment that does so is a readiness failure, surfaced at storage-plugin readiness review alongside `cpt-cf-usage-collector-fr-billing-retention-floor`.
+
+- **Threshold**: Gear floor: unchanged, no numeric bound (absence claim, per `cpt-cf-usage-collector-nfr-query-freshness`). Billing-capable ceiling: published p95 ≤ 5 minutes acceptance → billing-read visibility, verified against the plugin's published consistency profile at release-readiness review.
+- **Rationale**: A pull feed is only a valid substitute for push if its staleness is bounded and published — but that bound cannot honestly be asserted gear-wide, because the gear delegates storage and the query-freshness contract deliberately publishes no gear-level ceiling. Expressing the 5-minute requirement as a qualifying condition on the plugin ceiling gets the downstream guarantee Rating needs without overpromising on behalf of backends the gear does not control, and reuses the floor-and-ceiling machinery already established rather than contradicting it.
+- **Architecture Allocation**: See DESIGN.md §3.10 (Consistency Contract).
+
+#### Bulk Replay Throughput
+
+- [ ] `p2` - **ID**: `cpt-cf-usage-collector-nfr-replay-throughput`
+
+The billing read/feed path (`cpt-cf-usage-collector-fr-billing-usage-feed`) **MUST** meet a **recovery objective**: a single authorized billing consumer that has fallen `T_backlog` behind **MUST** be able to return to the live watermark within `T_recovery`, without breaching the ingestion SLOs (`cpt-cf-usage-collector-nfr-ingestion-latency`, via `cpt-cf-usage-collector-nfr-workload-isolation`). Launch objective: **24 hours behind → caught up within 6 hours.**
+
+A catching-up consumer drains its backlog while new records keep arriving, so the required read rate is a **multiple of the billing-relevant ingestion rate**, not an absolute constant:
+
+> `R_read ≥ R_billing × (1 + T_backlog / T_recovery)` — at the launch objective, `R_read ≥ 5 × R_billing`
+
+- **Threshold**: Recovery objective met (24h backlog cleared within 6h) with ingestion p95 within bounds throughout. At the launch planning assumption of ≤ 10,000,000 billing-relevant records/hour/region, this yields a sustained bulk read rate of ≥ 50,000,000 records/hour/region.
+- **Rationale**: Stated as a bare constant this requirement silently fails to deliver recovery. Net drain is `R_read − R_billing`, so a flat 50M/h against a billing stream arriving at the gear-wide envelope of `cpt-cf-usage-collector-nfr-throughput-profile` (10,000 records/sec ≈ 36M/h) leaves only ~14M/h of drain, and a 24-hour backlog would take roughly 60 hours to clear — the number looks like a guarantee while providing none. The multiple makes both terms explicit: the guarantee is the recovery objective, and the absolute rate follows from whatever share of the envelope is actually billing-relevant. Note that the gear-wide envelope covers all telemetry, including high-volume non-billing sources; the billing-relevant subset is a planning assumption recorded in [§11](#11-assumptions) and **MUST** be revalidated when billing meters are onboarded, because the required read rate scales directly with it.
+- **Architecture Allocation**: See DESIGN.md
+
 ### 6.2 NFR Exclusions
 
 The following commonly applicable NFR categories are not applicable to this gear:
@@ -565,7 +788,7 @@ The Usage Collector exposes three public surfaces: an in-process SDK trait consu
 
 **Type**: In-process async client trait
 **Stability**: stable (V1)
-**Description**: In-process consumer surface covering ingestion of usage and compensation records (`cpt-cf-usage-collector-fr-ingestion`, `cpt-cf-usage-collector-fr-usage-compensation`, `cpt-cf-usage-collector-fr-idempotency`), raw query (`cpt-cf-usage-collector-fr-query-raw`), aggregated query (`cpt-cf-usage-collector-fr-query-aggregation`), and individual event deactivation (`cpt-cf-usage-collector-fr-event-deactivation`). Operator and UsageType-lifecycle operations are intentionally REST-only.
+**Description**: In-process consumer surface covering ingestion of usage and compensation records (`cpt-cf-usage-collector-fr-ingestion`, `cpt-cf-usage-collector-fr-usage-compensation`, `cpt-cf-usage-collector-fr-idempotency`), raw query (`cpt-cf-usage-collector-fr-query-raw`), aggregated query (`cpt-cf-usage-collector-fr-query-aggregation`), and individual event deactivation (`cpt-cf-usage-collector-fr-event-deactivation`). Phase 2 adds the read side needed by an in-process billing consumer: the billing usage feed with cursor and watermark (`cpt-cf-usage-collector-fr-billing-usage-feed`) and point lookup by record `id` (`cpt-cf-usage-collector-fr-billing-record-identity`). Operator and UsageType-lifecycle operations remain intentionally REST-only — this includes the Phase-2 operator surfaces (billing-profile registration, backfill import, quota configuration, reconciliation metadata).
 **Consumed / Provided Data**: consumes usage submissions, raw and aggregated query requests, and deactivation requests; provides acceptance acknowledgements, raw usage views, and aggregated usage results. Operator-only data classes are intentionally not exposed on this trait.
 **Availability / Fallback**: in-process trait availability follows the Usage Collector gear and its active storage dependency. The SDK does not provide an alternate persistence path or synthesize usage data.
 **Breaking Change Policy**: Major version bump required for trait method signature changes; within a version, only additive changes (new methods with default implementations). The platform supports one previous major version of this trait concurrently to give consumer gears a migration window, consistent with `cpt-cf-usage-collector-nfr-plugin-contract-stability`.
@@ -603,12 +826,20 @@ See DESIGN.md for the trait signature.
 **Stability**: stable (V1)
 **Description**: HTTP API consumed by remote usage sources, operator tooling, and downstream consumers. This REST surface is the full product operation surface for the gear. Capability categories:
 
-- Ingestion of usage and compensation records — `cpt-cf-usage-collector-fr-ingestion`, `cpt-cf-usage-collector-fr-usage-compensation`, `cpt-cf-usage-collector-fr-idempotency`.
+- Ingestion of usage and compensation records — `cpt-cf-usage-collector-fr-ingestion`, `cpt-cf-usage-collector-fr-usage-compensation`, `cpt-cf-usage-collector-fr-idempotency`; subject to per-caller and per-(caller, tenant) quotas — `cpt-cf-usage-collector-fr-rate-limiting`
 - Raw query — `cpt-cf-usage-collector-fr-query-raw`
 - Aggregated query — `cpt-cf-usage-collector-fr-query-aggregation`
 - Individual event deactivation — `cpt-cf-usage-collector-fr-event-deactivation`
 - UsageType registration and lifecycle (create, list, get, delete) — `cpt-cf-usage-collector-fr-usage-type-registration`, `cpt-cf-usage-collector-fr-usage-type-deletion`, `cpt-cf-usage-collector-fr-usage-type-existence-and-semantics`
 - Health
+
+Phase-2 capability categories (billing-relevant UsageTypes; see [§5.9](#59-billing-integration-phase-2)):
+
+- Billing usage feed — cursor-paginated, snapshot-consistent, replay-safe reads with watermarks — `cpt-cf-usage-collector-fr-billing-usage-feed`, `cpt-cf-usage-collector-fr-billing-fields-on-read`
+- Point lookup of a single record by `id` — `cpt-cf-usage-collector-fr-billing-record-identity`
+- Billing-profile UsageType registration attributes — billing profile flag, bound metering unit, declared dimension keys, and gauge sampling interval — `cpt-cf-usage-collector-fr-billing-usage-type-profile`, `cpt-cf-usage-collector-fr-metering-unit-binding`, `cpt-cf-usage-collector-fr-dimension-key`, `cpt-cf-usage-collector-fr-billing-quantity-semantics`
+- Dedicated bulk backfill import, isolated from live ingestion and flagged `origin=backfill` — `cpt-cf-usage-collector-fr-backfill`
+- Reconciliation metadata and watermarks per scope — `cpt-cf-usage-collector-fr-reconciliation-metadata`
 
 The detailed wire contract is authored in `usage-collector-v1.yaml` (sibling to DESIGN.md) and the endpoint enumeration is in DESIGN §3.3 Endpoints Overview; the yaml is authoritative for wire schemas and the canonical error envelope shape. Per-endpoint stability for v1 is captured in the DESIGN §3.3 Endpoints Overview table; the major-version stability contract is declared in the yaml info description. Technical API details are intentionally not duplicated here.
 
@@ -673,8 +904,8 @@ The Usage Collector requires two platform services as outbound dependencies — 
 
 **Direction**: provided by library (read-only usage views consumed by downstream readers: billing, quota enforcement, dashboards, and platform monitoring)
 **Protocol/Format**: Public REST API `cpt-cf-usage-collector-interface-rest-api` for out-of-process readers and, for in-process platform gears, the SDK trait `cpt-cf-usage-collector-interface-sdk-client`.
-**Consumed / Provided Data**: downstream readers submit raw and aggregated query requests and health requests where applicable; the Usage Collector returns raw usage views, aggregated usage results, and health visibility. Business logic (pricing, rating, invoice generation, quota enforcement decisions) **MUST NOT** be performed inside the Usage Collector; it is the responsibility of the downstream reader.
-**Availability / Fallback**: Query availability and latency follow `cpt-cf-usage-collector-nfr-query-latency` and `cpt-cf-usage-collector-nfr-availability`. PDP authorization is on the critical path and is fail-closed. Downstream readers **MUST NOT** invent usage state when the Usage Collector is unavailable.
+**Consumed / Provided Data**: downstream readers submit raw and aggregated query requests and health requests where applicable; the Usage Collector returns raw usage views, aggregated usage results, and health visibility. For billing-relevant UsageTypes this contract additionally carries the Phase-2 billing feed: readers submit cursor-based feed requests and record-`id` point lookups, and the Usage Collector returns snapshot-consistent pages with an explicit watermark, the unstripped billing field set, and correction/deactivation state sufficient to reconstruct correction history (`cpt-cf-usage-collector-fr-billing-usage-feed`, `cpt-cf-usage-collector-fr-billing-fields-on-read`). Business logic (pricing, rating, invoice generation, quota enforcement decisions) **MUST NOT** be performed inside the Usage Collector; it is the responsibility of the downstream reader. This explicitly includes resolving commercial identity (subscription, SKU, payer, seller) and integrating gauge series into period quantities (`cpt-cf-usage-collector-fr-billing-quantity-semantics`).
+**Availability / Fallback**: Query availability and latency follow `cpt-cf-usage-collector-nfr-query-latency` and `cpt-cf-usage-collector-nfr-availability`. PDP authorization is on the critical path and is fail-closed. Downstream readers **MUST NOT** invent usage state when the Usage Collector is unavailable. Feed staleness is bounded only by the active plugin's published consistency ceiling; for billing-relevant UsageTypes that ceiling must qualify as billing-capable per `cpt-cf-usage-collector-nfr-billing-feed-freshness`, and readers **MUST NOT** assume a tighter bound than the ceiling their deployment publishes. Recovery from a reader outage is by cursor replay, bounded by the retention floor in `cpt-cf-usage-collector-fr-billing-retention-floor`; duplicate delivery across an overlapping replay is expected and is deduplicated downstream by record `id`.
 **Compatibility**: Read shapes follow the Usage Collector's public versioning policy — at most one prior major version of the REST API and SDK trait is supported concurrently to give downstream readers a migration window. Additive changes within a major version do not break existing readers.
 
 <!-- cpt-cf-id-content -->
@@ -846,7 +1077,7 @@ The canonical endpoint surface is defined in `usage-collector-v1.yaml` (sibling 
 
 **Postconditions**:
 
-- The event carries `status = inactive`; all other properties (including `tenant`, `created_at`, `idempotency_key`, `value`, referenced UsageType, resource, subject, and metadata) are unchanged
+- The event carries `status = inactive`; all other properties (including `tenant`, `window_start`, `window_end`, `accepted_at`, `idempotency_key`, `value`, referenced UsageType, resource, subject, and metadata) are unchanged
 - Inactive events remain queryable and are distinguishable from active records by downstream consumers
 
 **Alternative Flows**:
@@ -891,6 +1122,101 @@ The canonical endpoint surface is defined in `usage-collector-v1.yaml` (sibling 
 - **Authorization denied**: PDP denies the emission; the record is rejected immediately and never persisted.
 - **Idempotency conflict / retry**: an exact-equality re-submission under the same idempotency key is silently deduplicated; a same-key submission whose content differs is rejected with an actionable conflict error (cross-reference `cpt-cf-usage-collector-fr-idempotency`).
 - **Cascade on later deactivation of `R`**: if `R` is subsequently deactivated by an operator, the depth-1 cascade defined by `cpt-cf-usage-collector-fr-event-deactivation` flips this compensation row to `inactive` in the same one-way step.
+
+#### Register a Billing-Relevant UsageType
+
+- [ ] `p1` - **ID**: `cpt-cf-usage-collector-usecase-register-billing-usage-type`
+
+**Actor**: `cpt-cf-usage-collector-actor-platform-operator`
+
+**Preconditions**:
+
+- Actor is authenticated with a valid SecurityContext with operator-level permissions
+- The UsageTypeGtsId is unique across the deployment
+- The active storage plugin publishes a billing-capable consistency ceiling (`cpt-cf-usage-collector-nfr-billing-feed-freshness`) and a deployment profile meeting the retention floor (`cpt-cf-usage-collector-fr-billing-retention-floor`)
+
+**Main Flow**:
+
+1. Operator submits a UsageType registration carrying the Phase-1 payload (`gts_id`, closed `metadata_fields`) plus the billing profile: the billing flag, a `metering_unit` drawn from the canonical unit list, optionally an ordered subset of the declared metadata keys as the `dimension_key`, and — for a gauge `gts_id` prefix — the nominal sampling interval
+2. System authorizes the request via PDP and applies the Phase-1 validations (well-formed and unique `gts_id`, reserved counter/gauge prefix, well-formed `metadata_fields`)
+3. System validates the billing profile: the `metering_unit` is canonical, every declared dimension key is a member of `metadata_fields`, and a gauge billing UsageType carries a sampling interval
+4. System persists the UsageType with its billing profile in the catalog
+5. Records referencing this UsageType are thereafter validated against the strict billing model and included on the billing feed
+
+**Postconditions**:
+
+- The UsageType is registered as billing-relevant; ingestion enforces windows, unit binding, and the billing field set for it
+- Accepted records for this UsageType appear on the billing read/feed surface with the unstripped billing field set
+
+**Alternative Flows**:
+
+- **Non-canonical or missing metering unit**: System rejects registration with an actionable validation error; no UsageType is created (`cpt-cf-usage-collector-fr-metering-unit-binding`)
+- **Dimension key not in `metadata_fields`**: System rejects registration with an actionable validation error naming the offending key
+- **Gauge billing UsageType without sampling interval**: System rejects registration with an actionable validation error (`cpt-cf-usage-collector-fr-billing-quantity-semantics`)
+- **Deployment not billing-capable**: Operator is prevented from enabling the billing profile; the condition is surfaced as a readiness failure rather than accepted silently
+- **PDP denial**: System rejects the registration before any change is made
+
+#### Consume the Billing Usage Feed
+
+- [ ] `p1` - **ID**: `cpt-cf-usage-collector-usecase-consume-billing-feed`
+
+**Actor**: `cpt-cf-usage-collector-actor-usage-consumer`
+
+**Preconditions**:
+
+- Actor is an authenticated billing consumer with PDP authorization for the requested scope
+- At least one billing-relevant UsageType is registered
+
+**Main Flow**:
+
+1. Consumer requests a page of the billing feed for a scope and time range, supplying either no cursor (first page) or the cursor returned with the previous page
+2. System authorizes the request via PDP; PDP-returned constraints define the authorization boundary and consumer-supplied filters only narrow it further
+3. System returns a page over a consistent snapshot: records ordered by the monotonic acceptance sequence scoped per `(tenant_id, gts_id)`, each carrying the unstripped billing field set (`id`, window bounds, `accepted_at`, `metering_unit`, dimension values, signed `value`, lifecycle status, correction reference, `origin`), together with a next cursor and an explicit watermark
+4. Consumer processes the page, deduplicating by record `id`, and persists the cursor
+5. Consumer repeats from the persisted cursor; records accepted after the snapshot are delivered on subsequent pages, demarcated by the watermark
+
+**Postconditions**:
+
+- Consumer has processed every record in scope up to the watermark exactly once, with correction and deactivation state sufficient to reconstruct correction history
+- The persisted cursor allows the consumer to resume without rescanning processed ranges
+
+**Alternative Flows**:
+
+- **Consumer outage and replay**: Consumer resumes from its last persisted cursor, or replays from an earlier cursor within the retention floor; overlapping delivery is expected and is resolved by record-`id` deduplication (`cpt-cf-usage-collector-fr-billing-retention-floor`)
+- **Correction arrives after a record was processed**: The compensation entry or deactivation appears as its own feed entry referencing the corrected row by its `id` via `corrects_id`; the original row is never mutated in place
+- **Late-arriving record**: A record whose `accepted_at` is later than its `window_end` is delivered in acceptance-sequence order, not window order; the consumer detects lateness by comparing `accepted_at` against `window_end`
+- **Cursor older than the retention floor**: System returns an actionable error rather than a silently truncated range
+- **PDP denial or empty constraints**: System rejects the request immediately; no data is returned
+
+#### Backfill Historical Billing Usage
+
+- [ ] `p3` - **ID**: `cpt-cf-usage-collector-usecase-backfill`
+
+**Actor**: `cpt-cf-usage-collector-actor-platform-operator`, `cpt-cf-usage-collector-actor-usage-source`
+
+**Preconditions**:
+
+- Actor is authenticated and PDP-authorized for the bulk import path
+- The target UsageType is registered and billing-relevant
+
+**Main Flow**:
+
+1. Actor submits historical records to the dedicated backfill path, with windows inside the configured backfill window
+2. System authorizes via PDP and applies the same billing validation as the live path (windows, unit binding, metadata, idempotency)
+3. System persists accepted records flagged `origin=backfill`, isolated from live ingestion workload
+4. Records become available on the billing feed carrying the `origin=backfill` flag
+
+**Postconditions**:
+
+- Historical records are queryable and on the feed, distinguishable from live-path records by `origin`
+- Live-path ingestion SLOs are not breached by the backfill workload
+
+**Alternative Flows**:
+
+- **Window beyond the configured backfill bound**: System rejects the submission unless the caller carries elevated authorization
+- **Same record already accepted**: Idempotency applies unchanged — exact-equality re-submission is silently deduplicated; a same-key content mismatch is rejected with a conflict error
+- **Future-dated record on the live path**: Rejected by `cpt-cf-usage-collector-fr-live-future-time-bound`; past-dated import is the backfill path's concern, not the live path's
+- **Quota exceeded**: System returns an actionable throttle error with retry guidance; no records are silently dropped
 
 ## 9. Acceptance Criteria
 
@@ -952,6 +1278,34 @@ The functional and non-functional acceptance bullets below evaluate the requirem
 - [ ] Sustained ingestion of ≥ 10,000 records/sec and burst ingestion of ≥ 30,000 records/sec for ≤ 5 minutes per 60-minute window are sustainable without breaching ingestion p95 latency; ≥ 100 concurrent aggregation queries are sustainable without breaching query p95 latency or degrading ingestion p95; ≥ 700,000,000 accepted ingestion calls per 24-hour day are sustainable at the sustained rate
 - [ ] Usage Collector domain metrics are integrated into shared platform dashboards and alert routing, with operator treatment for ingestion latency, ingestion error rate, query latency, PDP error rate, and storage-plugin readiness; every accepted and rejected API operation emits a structured log record carrying the inbound `correlation_id` unchanged
 
+**Phase 2 — Billing Integration.** The criteria below evaluate [§5.9](#59-billing-integration-phase-2) and the Phase-2 NFRs. Except where a criterion states otherwise, every one of them applies **only** to UsageTypes registered with the billing profile; the first criterion is the regression guard for everything else.
+
+- [ ] Non-billing UsageTypes take on no obligation from [§5.9](#59-billing-integration-phase-2) other than the record-model change in `cpt-cf-usage-collector-fr-usage-windows`: no metering unit, no dimension keys, no feed inclusion, no `reason_code`, and no change to their correction model, semantics, or query results (cross-reference `cpt-cf-usage-collector-fr-billing-usage-type-profile`)
+- [ ] The window change is semantically lossless for non-billing telemetry: a former single-timestamp emission is expressed as a point event (`window_start == window_end == the former timestamp`), and the resulting record is queryable, correctable, and deduplicated exactly as before. The change is acknowledged as **wire-breaking** — every emitter must be updated — and is taken while the gear is unreleased, on the same grounds as ADR-0013 (cross-reference `cpt-cf-usage-collector-fr-usage-windows`)
+- [ ] A UsageType declaration can carry the billing profile flag; records referencing it are validated against the strict billing model (bound metering unit, published quantity semantics, the derived record `id` on reads) and are included on the billing read/feed surface, while UsageTypes without the profile are not (cross-reference `cpt-cf-usage-collector-fr-billing-usage-type-profile`)
+- [ ] No new record identifier is introduced: the derived `id` of ADR-0013 is present on every billing read path, resolvable by point lookup, and carried on the feed; an exact-equality retry yields the same `id` by construction (cross-reference `cpt-cf-usage-collector-fr-billing-record-identity`)
+- [ ] The dedup identity and the `id` derivation both cover `(tenant_id, gts_id, idempotency_key, window_start, window_end)` with the namespace constant unchanged; two records covering different windows therefore derive different `id`s while sharing one per-meter idempotency key, and offline `corrects_id` pre-computation uses the target's window bounds (cross-reference `cpt-cf-usage-collector-fr-billing-record-identity`, `cpt-cf-usage-collector-fr-idempotency`)
+- [ ] The compensation reference is unchanged by Phase 2: `corrects_id` continues to name the corrected row by its derived `id`, and every Phase-1 validation (row exists, is an original non-compensation row, shares the `(tenant_id, gts_id, resource_ref, subject_ref)` identity tuple, is active, counter-only, `value < 0`) still applies (cross-reference `cpt-cf-usage-collector-fr-usage-compensation`)
+- [ ] Every usage record carries `window_start` and `window_end` as UTC instants with `window_start <= window_end` and no longer carries the emitter-supplied timestamp `created_at`; timestamps without offset information are rejected and non-UTC offsets are normalized to UTC (cross-reference `cpt-cf-usage-collector-fr-usage-windows`)
+- [ ] A point event (`window_start == window_end`) is selected by a query when its instant falls in the requested range (`window_start >= range_start AND window_start < range_end`), **not** by interval-overlap logic. Specifically: a point event sitting exactly on a range's lower bound — a record at `00:00` on the first of the month, queried for that month — is returned. This is verified by an explicit boundary test, since interval-overlap logic silently drops that record (cross-reference `cpt-cf-usage-collector-fr-usage-windows`)
+- [ ] `accepted_at` is assigned by the gear on every record, exposed on read, and cannot be set or overridden by the emitter; a submission attempting to supply it is rejected or has the supplied value ignored in favour of the gear-assigned instant (cross-reference `cpt-cf-usage-collector-fr-usage-windows`)
+- [ ] Raw and aggregation queries select an interval record (`window_start < window_end`) by `[window_start, window_end)` overlap with the requested range (cross-reference `cpt-cf-usage-collector-fr-usage-windows`)
+- [ ] Counter and gauge quantity semantics under windows are published normatively: counter values are accrued over the window and additive across disjoint windows, gauge values are point-in-time observations that are not additive, a billing-relevant gauge UsageType cannot be declared without a nominal sampling interval, and the gear performs no integration, differentiation, interpolation, or re-windowing in either direction (cross-reference `cpt-cf-usage-collector-fr-billing-quantity-semantics`)
+- [ ] On the live ingestion path a billing-relevant record whose `window_end` exceeds `now + tolerance` (configurable, default 5 minutes) is rejected with an actionable error naming the offending timestamp and the bound (cross-reference `cpt-cf-usage-collector-fr-live-future-time-bound`)
+- [ ] Registration of a billing-relevant UsageType binds a `metering_unit` from the canonical list, and ingestion rejects a billing-relevant record whose UsageType has no bound unit (cross-reference `cpt-cf-usage-collector-fr-metering-unit-binding`)
+- [ ] The canonical unit list is published and includes at minimum `bytes`, `byte-hours`, `count`, and `seconds`; stored and emitted quantities are never converted, scaled, or rounded by the gear, and a value read back equals the value submitted in the declared unit (cross-reference `cpt-cf-usage-collector-fr-canonical-units`)
+- [ ] A billing-relevant UsageType may declare an ordered subset of its closed `metadata_fields` as dimension keys; billing read paths support equality filtering and grouping on the declared keys, grouping on undeclared metadata keys remains unsupported, and the gear applies no interpretation to dimension semantics (cross-reference `cpt-cf-usage-collector-fr-dimension-key`)
+- [ ] Compensation entries and deactivation operations on billing-relevant UsageTypes require a non-empty `reason_code`; submissions without one are rejected, and all other Phase-1 correction invariants are unchanged (cross-reference `cpt-cf-usage-collector-fr-compensation-reason-code`)
+- [ ] Billing read paths return the billing field set unstripped — `id`, `window_start`/`window_end`, `accepted_at`, `metering_unit`, declared dimension values, signed `value`, lifecycle status, correction reference, and `origin` — and point lookup by record `id` returns the exact persisted fact (cross-reference `cpt-cf-usage-collector-fr-billing-fields-on-read`)
+- [ ] The billing feed is deterministic and replay-safe: records are ordered by a monotonic acceptance sequence scoped per `(tenant_id, gts_id)` with no cross-tenant or cross-UsageType ordering claimed; a paginated scan over a consistent snapshot never observes records appearing, disappearing, or mutating mid-scan other than append-only arrivals demarcated by the returned watermark; and correction/deactivation state is present so a reader can reconstruct correction history (cross-reference `cpt-cf-usage-collector-fr-billing-usage-feed`)
+- [ ] A consumer resuming from a persisted cursor, and a consumer replaying from an earlier cursor within the retention floor, both reach the same processed set after record-`id` deduplication; a cursor older than the retention floor produces an actionable error rather than a silently truncated range (cross-reference `cpt-cf-usage-collector-fr-billing-usage-feed`, `cpt-cf-usage-collector-fr-billing-retention-floor`)
+- [ ] The retention floor is expressed as an operator/plugin deployment obligation and verified at storage-plugin readiness review: raw billing records are retained at least `max(replay horizon, backfill window)` — 90 days at the launch defaults — so no backfill import can land outside the retention that covers it; a deployment below the floor is a readiness failure; the gear itself enforces no retention and mandates no aggregate; and long-term dispute/audit evidence is a downstream obligation, keeping the [§6.2](#62-nfr-exclusions) financial-reporting-source exclusion intact (cross-reference `cpt-cf-usage-collector-fr-billing-retention-floor`, `cpt-cf-usage-collector-fr-backfill`)
+- [ ] The dedicated backfill path applies billing validation identical to the live path, flags persisted records `origin=backfill` on storage and on the feed, enforces a configurable bounded backfill window that cannot be reduced below the replay horizon, requires elevated authorization beyond it, and runs without breaching live-path ingestion SLOs (cross-reference `cpt-cf-usage-collector-fr-backfill`)
+- [ ] Configurable ingestion quotas are enforced per calling gear and per (calling gear, tenant) across SDK and REST; over-quota submissions are rejected with an actionable throttle error carrying retry guidance and are never silently dropped (cross-reference `cpt-cf-usage-collector-fr-rate-limiting`)
+- [ ] Reconciliation metadata is exposed via API at (calling gear), (calling gear, tenant), and (tenant, UsageType) granularity — accepted record counts, accepted quantity sums per unit, latest `accepted_at` watermark, latest covered `window_end`, and latest acceptance-sequence watermark — and is sufficient to compare gear-side totals against a consumer's processed totals for a time range without a full raw scan and to detect a stalled emitter (cross-reference `cpt-cf-usage-collector-fr-reconciliation-metadata`)
+- [ ] Billing feed freshness is verified as a plugin-ceiling qualification, not a gear bound: the gear floor remains eventually consistent with no upper bound, and a deployment is billing-capable only where the active plugin's published consistency profile bounds acceptance → billing-read visibility at p95 ≤ 5 minutes under the `cpt-cf-usage-collector-nfr-throughput-profile` envelope; enabling the billing profile on a deployment without a qualifying ceiling is a readiness failure (cross-reference `cpt-cf-usage-collector-nfr-billing-feed-freshness`, `cpt-cf-usage-collector-nfr-query-freshness`)
+- [ ] The billing feed meets its recovery objective: a single authorized billing consumer 24 hours behind returns to the live watermark within 6 hours while records continue to arrive, with ingestion p95 latency remaining within `cpt-cf-usage-collector-nfr-ingestion-latency` throughout and the §9.0 tolerance applied; the test is run against the measured billing-relevant ingestion rate and the observed read rate satisfies `R_read ≥ 5 × R_billing` (≥ 50,000,000 records/hour/region at the launch planning assumption) (cross-reference `cpt-cf-usage-collector-nfr-replay-throughput`, `cpt-cf-usage-collector-nfr-workload-isolation`)
+
 ## 10. Dependencies
 
 | Dependency     | Description                                                                            | Criticality |
@@ -971,6 +1325,8 @@ The functional and non-functional acceptance bullets below evaluate the requirem
 | Initial release establishes the launch capacity baseline (10,000 records/sec sustained, 30,000 records/sec burst, 100 concurrent aggregation queries, 10,000 tenants, 10,000 registered UsageTypes); no prior historical workload data exists at launch                                                                                                                                                                                                                                                                       | Usage Collector Maintainers / Platform Operations                          | Validated by launch load tests against representative plugin backends                                                   |
 | Platform monitoring and log infrastructure are available to host the observable signals expected by the operational visibility NFR                                                                                                                                                                                                                                                                                                                                                                                              | Platform Operations                                                        | Verified during operations readiness review before production release candidate                                         |
 | The §9.0 load and measurement definitions (load envelope anchored on `cpt-cf-usage-collector-nfr-throughput-profile`, ≥ 30-minute steady-state measurement window, ±10% latency tolerance) are the single source of truth for every numeric acceptance criterion in [§9](#9-acceptance-criteria) and supersede the prior informal terms "normal load" and "normal operation" wherever they appeared in earlier PRD revisions                                                                                                    | Usage Collector Maintainers / Platform Operations                          | Verified during load-test plan review and release-readiness review                                                      |
+| **(Phase 2)** Downstream billing consumers persist, per rated charge, the usage identity they rated (the record-`id` set, or the aggregated source detail with its window and dimension breakdown), so invoice-dispute and audit evidence is reconstructable downstream and does not require raw retention inside the Usage Collector beyond the operational floor in `cpt-cf-usage-collector-fr-billing-retention-floor` | BSS Rating owner / Usage Collector Maintainers | Verified against the Rating gear's charge-detail retention requirement before the Phase-2 release candidate |
+| **(Phase 2)** Billing-relevant records are a subset of the gear-wide ingestion envelope, assumed at ≤ 10,000,000 records/hour/region at launch; the bulk read rate required by `cpt-cf-usage-collector-nfr-replay-throughput` scales directly with this figure | Usage Collector Maintainers / BSS Rating owner | Revalidated as billing meters are onboarded, and at load-test plan review before the Phase-2 release candidate |
 
 ## 12. Risks
 
@@ -989,3 +1345,7 @@ No open questions.
 **Design**: [DESIGN.md](./DESIGN.md)
 
 **ADRs**: see DESIGN §5 ADR Inventory
+
+**Phase 2 (Billing Integration)**: §4.1 / §4.2 updated and **§5.9 Billing Integration** added — billing profile, interval windows with gear-assigned `accepted_at`, counter/gauge quantity semantics under windows, canonical units + metering-unit binding, dimension keys via declared metadata, `reason_code` on corrections, billing fields on read, pull-primary billing feed, retention floor, backfill, rate limiting, reconciliation metadata. Also added: Phase-2 NFRs `cpt-cf-usage-collector-nfr-billing-feed-freshness` (a billing-capable **plugin ceiling** qualification, not a gear-level bound) and `cpt-cf-usage-collector-nfr-replay-throughput`; Phase-2 capability categories in §7.1 and feed semantics in §7.2; three use cases in §8 (`usecase-register-billing-usage-type`, `usecase-consume-billing-feed`, `usecase-backfill`); and a Phase-2 acceptance-criteria block in §9 led by a regression guard for non-billing UsageTypes.
+
+Changed for **every** UsageType, not only billing-relevant ones: the record timestamp `created_at` is replaced by the interval `window_start` / `window_end` (a point event sets them equal), and the dedup identity and derived-`id` input become `(tenant_id, gts_id, idempotency_key, window_start, window_end)`. This is wire-breaking and **would supersede ADR-0014**; a replacement ADR is required alongside this PRD change.
