@@ -1923,3 +1923,223 @@ async fn internal_write_copies_owner_pair_from_session() {
     );
     assert_eq!(row.owner_id, user, "child inherits session owner_id");
 }
+
+// ===========================================================================
+// Real-repo harness suite: exercise resolve/list/delete flows end-to-end so
+// the scoped message_repo methods (find_message_by_id_scoped,
+// fetch_active_history_scoped, find_message_in_session_scoped,
+// delete_message_subtree_scoped) run under a permissive / denying PDP.
+// ===========================================================================
+
+use crate::domain::ports::NewUserMessage;
+use crate::domain::service::test_support::{
+    build_message_service, ctx_for_subject, enforcer_allow, enforcer_deny, inmem_db, message_repo,
+    seed_session,
+};
+
+fn harness_text_part(text: &str) -> MessagePartInput {
+    MessagePartInput {
+        part_type: chat_engine_sdk::models::MessagePartType::Text,
+        content: serde_json::json!({ "text": text }),
+        file_citations: vec![],
+        link_citations: vec![],
+        references: vec![],
+    }
+}
+
+async fn harness_seed_pair(
+    db: &std::sync::Arc<crate::infra::db::repo::ChatEngineDb>,
+    session_id: Uuid,
+    tenant: Uuid,
+    user: Uuid,
+) -> InsertedPair {
+    message_repo(db)
+        .insert_user_and_assistant_stub(NewUserMessage {
+            session_id,
+            tenant_id: Some(tenant.to_string()),
+            user_id: Some(user.to_string()),
+            parent_message_id: None,
+            parts: vec![harness_text_part("hi")],
+            file_ids: None,
+            metadata: None,
+        })
+        .await
+        .expect("seed message pair")
+}
+
+#[tokio::test]
+async fn resolve_owned_message_for_delete_pdp_denied_is_forbidden() {
+    let db = inmem_db().await;
+    let (tenant, user) = (Uuid::new_v4(), Uuid::new_v4());
+    let svc = build_message_service(&db, enforcer_deny());
+    let err = svc
+        .resolve_owned_message_for_delete(&ctx_for_subject(user, tenant), Uuid::new_v4())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ChatEngineError::Forbidden { .. }));
+}
+
+#[tokio::test]
+async fn resolve_owned_message_for_delete_unknown_is_not_found() {
+    let db = inmem_db().await;
+    let (tenant, user) = (Uuid::new_v4(), Uuid::new_v4());
+    let svc = build_message_service(&db, enforcer_allow());
+    let err = svc
+        .resolve_owned_message_for_delete(&ctx_for_subject(user, tenant), Uuid::new_v4())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ChatEngineError::NotFound { .. }));
+}
+
+#[tokio::test]
+async fn resolve_owned_message_for_delete_owner_resolves() {
+    let db = inmem_db().await;
+    let (tenant, user, sid) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_session(&db, sid, tenant, user).await;
+    let pair = harness_seed_pair(&db, sid, tenant, user).await;
+
+    let svc = build_message_service(&db, enforcer_allow());
+    let msg = svc
+        .resolve_owned_message_for_delete(&ctx_for_subject(user, tenant), pair.user_message_id)
+        .await
+        .expect("owner resolve ok");
+    assert_eq!(msg.message_id, pair.user_message_id);
+}
+
+#[tokio::test]
+async fn list_active_messages_pdp_denied_is_forbidden() {
+    let db = inmem_db().await;
+    let (tenant, user, sid) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_session(&db, sid, tenant, user).await;
+
+    let svc = build_message_service(&db, enforcer_deny());
+    let err = svc
+        .list_active_messages(&ctx_for_subject(user, tenant), sid, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ChatEngineError::Forbidden { .. }));
+}
+
+#[tokio::test]
+async fn list_active_messages_owner_returns_history() {
+    let db = inmem_db().await;
+    let (tenant, user, sid) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_session(&db, sid, tenant, user).await;
+    harness_seed_pair(&db, sid, tenant, user).await;
+
+    let svc = build_message_service(&db, enforcer_allow());
+    let msgs = svc
+        .list_active_messages(&ctx_for_subject(user, tenant), sid, None)
+        .await
+        .expect("owner list ok");
+    assert!(!msgs.is_empty(), "seeded active messages must be returned");
+}
+
+#[tokio::test]
+async fn delete_message_cascade_pdp_denied_is_forbidden() {
+    let db = inmem_db().await;
+    let (tenant, user, sid) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_session(&db, sid, tenant, user).await;
+
+    let svc = build_message_service(&db, enforcer_deny());
+    let err = svc
+        .delete_message_cascade(&ctx_for_subject(user, tenant), sid, Uuid::new_v4())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ChatEngineError::Forbidden { .. }));
+}
+
+#[tokio::test]
+async fn delete_message_cascade_owner_removes_subtree() {
+    let db = inmem_db().await;
+    let (tenant, user, sid) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_session(&db, sid, tenant, user).await;
+    // Root pair (the session's first message cannot be deleted), then a child
+    // reply under the root's assistant — the child subtree is deletable.
+    let root = harness_seed_pair(&db, sid, tenant, user).await;
+    let child = message_repo(&db)
+        .insert_user_and_assistant_stub(NewUserMessage {
+            session_id: sid,
+            tenant_id: Some(tenant.to_string()),
+            user_id: Some(user.to_string()),
+            parent_message_id: Some(root.assistant_message_id),
+            parts: vec![harness_text_part("follow up")],
+            file_ids: None,
+            metadata: None,
+        })
+        .await
+        .expect("seed child pair");
+
+    let svc = build_message_service(&db, enforcer_allow());
+    let outcome = svc
+        .delete_message_cascade(&ctx_for_subject(user, tenant), sid, child.user_message_id)
+        .await
+        .expect("owner delete ok");
+    // Child + its assistant-stub descendant removed.
+    assert_eq!(outcome.message_id, child.user_message_id);
+    assert!(outcome.deleted_count >= 1, "at least the target is removed");
+}
+
+#[tokio::test]
+async fn resolve_owned_message_read_owner_resolves() {
+    let db = inmem_db().await;
+    let (tenant, user, sid) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_session(&db, sid, tenant, user).await;
+    let pair = harness_seed_pair(&db, sid, tenant, user).await;
+
+    let svc = build_message_service(&db, enforcer_allow());
+    let msg = svc
+        .resolve_owned_message(&ctx_for_subject(user, tenant), pair.user_message_id)
+        .await
+        .expect("owner read resolve ok");
+    assert_eq!(msg.message_id, pair.user_message_id);
+}
+
+#[tokio::test]
+async fn resolve_owned_message_read_pdp_denied_is_forbidden() {
+    let db = inmem_db().await;
+    let (tenant, user) = (Uuid::new_v4(), Uuid::new_v4());
+    let svc = build_message_service(&db, enforcer_deny());
+    let err = svc
+        .resolve_owned_message(&ctx_for_subject(user, tenant), Uuid::new_v4())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ChatEngineError::Forbidden { .. }));
+}
+
+#[tokio::test]
+async fn list_active_messages_with_parent_filter_returns_direct_replies() {
+    let db = inmem_db().await;
+    let (tenant, user, sid) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_session(&db, sid, tenant, user).await;
+    let root = harness_seed_pair(&db, sid, tenant, user).await;
+    // A reply under the root assistant, so the parent-filtered branch has data.
+    message_repo(&db)
+        .insert_user_and_assistant_stub(NewUserMessage {
+            session_id: sid,
+            tenant_id: Some(tenant.to_string()),
+            user_id: Some(user.to_string()),
+            parent_message_id: Some(root.assistant_message_id),
+            parts: vec![harness_text_part("reply")],
+            file_ids: None,
+            metadata: None,
+        })
+        .await
+        .expect("seed child");
+
+    let svc = build_message_service(&db, enforcer_allow());
+    let filtered = svc
+        .list_active_messages(
+            &ctx_for_subject(user, tenant),
+            sid,
+            Some(root.assistant_message_id),
+        )
+        .await
+        .expect("parent-filtered list ok");
+    // Every returned message is a direct child of the requested parent.
+    assert!(
+        filtered
+            .iter()
+            .all(|m| m.parent_message_id == Some(root.assistant_message_id))
+    );
+}

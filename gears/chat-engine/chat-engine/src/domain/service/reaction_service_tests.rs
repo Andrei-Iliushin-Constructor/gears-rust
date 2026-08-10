@@ -809,3 +809,87 @@ async fn list_reactions_real_db_read_returns_empty() {
     assert_eq!(listing.message_id, message_id);
     assert!(listing.reactions.is_empty());
 }
+
+// ===========================================================================
+// Real-repo harness: set_reaction + list_for_messages over in-memory SQLite so
+// the Sea-ORM reaction repo (upsert / get_by_pk / list) runs end-to-end.
+// ===========================================================================
+
+#[tokio::test]
+async fn set_reaction_real_repo_upserts_then_lists() {
+    use crate::domain::service::test_support::{
+        build_reaction_service, build_session_service, ctx_for_subject, enforcer_allow, inmem_db,
+        message_repo, seed_session,
+    };
+
+    let db = inmem_db().await;
+    let (tenant, user, sid) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_session(&db, sid, tenant, user).await;
+    let ctx = ctx_for_subject(user, tenant);
+
+    // Enable the feedback capability (persisted) so reactions are permitted.
+    build_session_service(&db, enforcer_allow())
+        .update_capabilities(
+            &ctx,
+            sid,
+            vec![chat_engine_sdk::models::CapabilityValue {
+                name: "feedback".into(),
+                value: serde_json::json!(true),
+            }],
+        )
+        .await
+        .expect("enable feedback capability");
+
+    // Seed a message to react to.
+    let pair = message_repo(&db)
+        .insert_user_and_assistant_stub(NewUserMessage {
+            session_id: sid,
+            tenant_id: Some(tenant.to_string()),
+            user_id: Some(user.to_string()),
+            parent_message_id: None,
+            parts: vec![chat_engine_sdk::models::MessagePartInput {
+                part_type: chat_engine_sdk::models::MessagePartType::Text,
+                content: serde_json::json!({ "text": "hi" }),
+                file_citations: vec![],
+                link_citations: vec![],
+                references: vec![],
+            }],
+            file_ids: None,
+            metadata: None,
+        })
+        .await
+        .expect("seed message");
+
+    let rx = build_reaction_service(&db, enforcer_allow());
+    let (resp, _mutation) = rx
+        .set_reaction(&ctx, sid, pair.assistant_message_id, ReactionType::Like)
+        .await
+        .expect("set_reaction ok");
+    assert_eq!(resp.reaction_type, ReactionType::Like);
+
+    // Batch read back through the real repo.
+    let by_msg = rx
+        .list_for_messages(&ctx, &[pair.assistant_message_id])
+        .await
+        .expect("list_for_messages ok");
+    assert!(by_msg.contains_key(&pair.assistant_message_id));
+
+    // Point read of the same message's reactions.
+    let listing = rx
+        .list_reactions(&ctx, sid, pair.assistant_message_id)
+        .await
+        .expect("list_reactions ok");
+    assert!(!listing.reactions.is_empty());
+
+    // Clearing the reaction (None) exercises the repo delete path.
+    let (cleared, _) = rx
+        .set_reaction(&ctx, sid, pair.assistant_message_id, ReactionType::None)
+        .await
+        .expect("clear reaction ok");
+    assert_eq!(cleared.reaction_type, ReactionType::None);
+    let after = rx
+        .list_reactions(&ctx, sid, pair.assistant_message_id)
+        .await
+        .expect("list after clear ok");
+    assert!(after.reactions.is_empty(), "reaction removed after clear");
+}

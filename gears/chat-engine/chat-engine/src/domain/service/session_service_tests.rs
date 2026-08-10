@@ -124,7 +124,8 @@ fn ensure_can_transition_path_used_by_service_for_archive() {
 
 use crate::domain::service::test_support::{
     build_session_service, ctx_allow_tenants, ctx_for_subject, enforcer_allow,
-    enforcer_compile_fail, enforcer_deny, enforcer_failing, inmem_db, seed_session,
+    enforcer_allow_unconstrained, enforcer_compile_fail, enforcer_deny, enforcer_failing, inmem_db,
+    seed_session,
 };
 use toolkit_odata::ODataQuery;
 
@@ -388,4 +389,307 @@ async fn get_session_owner_returns_session() {
         .await
         .expect("owner should read its own session");
     assert_eq!(got.session_id, sid);
+}
+
+// ===========================================================================
+// Happy-path coverage: exercise the authorized write flows end-to-end so the
+// scoped repo mutations (update_metadata/capabilities/lifecycle/soft_delete)
+// and the session-type surface run under a permissive PDP.
+// ===========================================================================
+
+#[tokio::test]
+async fn create_session_owner_persists_and_reads_back() {
+    let db = inmem_db().await;
+    let (tenant, user) = (Uuid::new_v4(), Uuid::new_v4());
+    let ctx = ctx_for_subject(user, tenant);
+    let svc = build_session_service(&db, enforcer_allow());
+
+    let created = svc
+        .create_session(
+            &ctx,
+            CreateSessionRequest {
+                session_type_id: None,
+                metadata: Some(serde_json::json!({ "title": "fresh" })),
+            },
+        )
+        .await
+        .expect("owner create ok");
+
+    let got = svc
+        .get_session(&ctx, created.session_id)
+        .await
+        .expect("read back own session");
+    assert_eq!(got.session_id, created.session_id);
+    assert_eq!(
+        got.metadata.and_then(|m| m.get("title").cloned()),
+        Some(serde_json::json!("fresh"))
+    );
+}
+
+#[tokio::test]
+async fn list_sessions_owner_returns_seeded_row() {
+    let db = inmem_db().await;
+    let (tenant, user, sid) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_session(&db, sid, tenant, user).await;
+
+    let svc = build_session_service(&db, enforcer_allow());
+    let page = svc
+        .list_sessions(&ctx_for_subject(user, tenant), &ODataQuery::default())
+        .await
+        .expect("owner list ok");
+    assert!(page.items.iter().any(|s| s.session_id == sid));
+}
+
+#[tokio::test]
+async fn update_metadata_owner_persists() {
+    let db = inmem_db().await;
+    let (tenant, user, sid) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_session(&db, sid, tenant, user).await;
+
+    let svc = build_session_service(&db, enforcer_allow());
+    let updated = svc
+        .update_metadata(
+            &ctx_for_subject(user, tenant),
+            sid,
+            serde_json::json!({ "title": "renamed" }),
+        )
+        .await
+        .expect("owner metadata update ok");
+    assert_eq!(
+        updated.metadata.and_then(|m| m.get("title").cloned()),
+        Some(serde_json::json!("renamed"))
+    );
+}
+
+#[tokio::test]
+async fn update_capabilities_owner_persists() {
+    let db = inmem_db().await;
+    let (tenant, user, sid) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_session(&db, sid, tenant, user).await;
+
+    let svc = build_session_service(&db, enforcer_allow());
+    // Seeded session has no session_type → no plugin negotiation; caps verbatim.
+    let updated = svc
+        .update_capabilities(
+            &ctx_for_subject(user, tenant),
+            sid,
+            vec![CapabilityValue {
+                name: "feedback".into(),
+                value: serde_json::json!(true),
+            }],
+        )
+        .await
+        .expect("owner capability update ok");
+    assert!(updated.enabled_capabilities.is_some());
+}
+
+#[tokio::test]
+async fn archive_then_restore_roundtrip() {
+    let db = inmem_db().await;
+    let (tenant, user, sid) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_session(&db, sid, tenant, user).await;
+    let ctx = ctx_for_subject(user, tenant);
+    let svc = build_session_service(&db, enforcer_allow());
+
+    let archived = svc.archive_session(&ctx, sid).await.expect("archive ok");
+    assert_eq!(archived.lifecycle_state, LifecycleState::Archived);
+
+    let restored = svc.restore_session(&ctx, sid).await.expect("restore ok");
+    assert_eq!(restored.lifecycle_state, LifecycleState::Active);
+}
+
+#[tokio::test]
+async fn delete_session_soft_owner_marks_soft_deleted() {
+    let db = inmem_db().await;
+    let (tenant, user, sid) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_session(&db, sid, tenant, user).await;
+
+    let svc = build_session_service(&db, enforcer_allow());
+    let outcome = svc
+        .delete_session(&ctx_for_subject(user, tenant), sid, false)
+        .await
+        .expect("owner soft-delete ok");
+    match outcome {
+        SessionDeleteOutcome::Soft { session } => {
+            assert_eq!(session.lifecycle_state, LifecycleState::SoftDeleted);
+        }
+        SessionDeleteOutcome::Hard => panic!("expected soft-delete outcome"),
+    }
+}
+
+// --- session-type surface -------------------------------------------------
+
+#[tokio::test]
+async fn register_session_type_owner_no_plugin_persists() {
+    let db = inmem_db().await;
+    let ctx = ctx_for_subject(Uuid::new_v4(), Uuid::new_v4());
+    let svc = build_session_service(&db, enforcer_allow_unconstrained());
+
+    let st = svc
+        .register_session_type(
+            &ctx,
+            RegisterSessionTypeRequest {
+                name: "support".into(),
+                plugin_instance_id: None,
+                plugin_config: None,
+            },
+        )
+        .await
+        .expect("register ok");
+    assert_eq!(st.name, "support");
+
+    // list + get read paths (authenticated-only, no PDP call).
+    let all = svc.list_session_types(&ctx).await.expect("list ok");
+    assert!(all.iter().any(|t| t.session_type_id == st.session_type_id));
+    let got = svc
+        .get_session_type(&ctx, st.session_type_id)
+        .await
+        .expect("get ok");
+    assert_eq!(got.session_type_id, st.session_type_id);
+}
+
+#[tokio::test]
+async fn register_session_type_empty_name_is_bad_request() {
+    let db = inmem_db().await;
+    let ctx = ctx_for_subject(Uuid::new_v4(), Uuid::new_v4());
+    let svc = build_session_service(&db, enforcer_allow_unconstrained());
+    let err = svc
+        .register_session_type(
+            &ctx,
+            RegisterSessionTypeRequest {
+                name: "   ".into(),
+                plugin_instance_id: None,
+                plugin_config: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ChatEngineError::BadRequest { .. }));
+}
+
+#[tokio::test]
+async fn register_session_type_pdp_denied_returns_forbidden() {
+    let db = inmem_db().await;
+    let ctx = ctx_for_subject(Uuid::new_v4(), Uuid::new_v4());
+    let svc = build_session_service(&db, enforcer_deny());
+    let err = svc
+        .register_session_type(
+            &ctx,
+            RegisterSessionTypeRequest {
+                name: "support".into(),
+                plugin_instance_id: None,
+                plugin_config: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ChatEngineError::Forbidden { .. }));
+}
+
+#[tokio::test]
+async fn get_session_type_unknown_is_not_found() {
+    let db = inmem_db().await;
+    let ctx = ctx_for_subject(Uuid::new_v4(), Uuid::new_v4());
+    let svc = build_session_service(&db, enforcer_allow());
+    let err = svc
+        .get_session_type(&ctx, Uuid::new_v4())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ChatEngineError::NotFound { .. }));
+}
+
+#[tokio::test]
+async fn delete_session_hard_owner_removes_and_cascades() {
+    use crate::domain::ports::NewUserMessage;
+    use crate::domain::service::test_support::message_repo;
+
+    let db = inmem_db().await;
+    let (tenant, user, sid) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_session(&db, sid, tenant, user).await;
+    // Seed a message so the hard-delete cascade runs over child rows too.
+    message_repo(&db)
+        .insert_user_and_assistant_stub(NewUserMessage {
+            session_id: sid,
+            tenant_id: Some(tenant.to_string()),
+            user_id: Some(user.to_string()),
+            parent_message_id: None,
+            parts: vec![chat_engine_sdk::models::MessagePartInput {
+                part_type: chat_engine_sdk::models::MessagePartType::Text,
+                content: serde_json::json!({ "text": "hi" }),
+                file_citations: vec![],
+                link_citations: vec![],
+                references: vec![],
+            }],
+            file_ids: None,
+            metadata: None,
+        })
+        .await
+        .expect("seed message");
+
+    let svc = build_session_service(&db, enforcer_allow());
+    let ctx = ctx_for_subject(user, tenant);
+    let outcome = svc
+        .delete_session(&ctx, sid, true)
+        .await
+        .expect("hard delete ok");
+    assert!(matches!(outcome, SessionDeleteOutcome::Hard));
+
+    // The row is gone — a subsequent read is NotFound.
+    let err = svc.get_session(&ctx, sid).await.unwrap_err();
+    assert!(matches!(err, ChatEngineError::NotFound { .. }));
+}
+
+#[tokio::test]
+async fn create_session_with_known_session_type_binds_it() {
+    use crate::domain::ports::NewSessionType;
+    use crate::domain::service::test_support::session_type_repo;
+
+    let db = inmem_db().await;
+    let (tenant, user) = (Uuid::new_v4(), Uuid::new_v4());
+    let ctx = ctx_for_subject(user, tenant);
+
+    // Seed a plugin-less session type directly (no plugin call on create).
+    let st_id = Uuid::new_v4();
+    let now = OffsetDateTime::now_utc();
+    session_type_repo(&db)
+        .insert(NewSessionType {
+            session_type_id: st_id,
+            name: "support".into(),
+            plugin_instance_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .expect("seed session type");
+
+    let svc = build_session_service(&db, enforcer_allow());
+    let created = svc
+        .create_session(
+            &ctx,
+            CreateSessionRequest {
+                session_type_id: Some(st_id),
+                metadata: None,
+            },
+        )
+        .await
+        .expect("create with session type ok");
+    assert_eq!(created.session_type_id, Some(st_id));
+}
+
+#[tokio::test]
+async fn create_session_with_unknown_session_type_is_not_found() {
+    let db = inmem_db().await;
+    let ctx = ctx_for_subject(Uuid::new_v4(), Uuid::new_v4());
+    let svc = build_session_service(&db, enforcer_allow());
+    let err = svc
+        .create_session(
+            &ctx,
+            CreateSessionRequest {
+                session_type_id: Some(Uuid::new_v4()),
+                metadata: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ChatEngineError::NotFound { .. }));
 }

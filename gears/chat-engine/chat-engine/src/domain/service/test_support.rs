@@ -37,6 +37,7 @@ use crate::domain::service::message_service::MessageService;
 use crate::domain::service::plugin_service::PluginService;
 use crate::domain::service::reaction_service::ReactionService;
 use crate::domain::service::session_service::SessionService;
+use crate::domain::service::variant_service::{VariantRepo, VariantService};
 use crate::domain::service::webhook::NoopWebhookEmitter;
 use crate::domain::session::Session;
 use crate::infra::db::migrations::Migrator;
@@ -46,6 +47,7 @@ use crate::infra::db::repo::plugin_config_repo::SeaPluginConfigRepo;
 use crate::infra::db::repo::reaction_repo::SeaReactionRepo;
 use crate::infra::db::repo::session_repo::SeaSessionRepo;
 use crate::infra::db::repo::session_type_repo::SeaSessionTypeRepo;
+use crate::infra::db::repo::variant_repo::SeaVariantRepo;
 
 // ---------------------------------------------------------------------------
 // SecurityContext fixtures
@@ -117,6 +119,11 @@ pub fn session_type_repo(db: &Arc<ChatEngineDb>) -> Arc<dyn SessionTypeRepo> {
     Arc::new(SeaSessionTypeRepo::new(Arc::clone(db)))
 }
 
+#[must_use]
+pub fn variant_repo(db: &Arc<ChatEngineDb>) -> Arc<dyn VariantRepo> {
+    Arc::new(SeaVariantRepo::new(Arc::clone(db)))
+}
+
 // ---------------------------------------------------------------------------
 // Service builders (real repos + inmem DB + injected enforcer)
 // ---------------------------------------------------------------------------
@@ -160,6 +167,20 @@ pub fn build_reaction_service(db: &Arc<ChatEngineDb>, enforcer: PolicyEnforcer) 
         message_repo(db),
         reaction_repo(db),
         test_plugins(db),
+        enforcer,
+    )
+}
+
+#[must_use]
+pub fn build_variant_service(db: &Arc<ChatEngineDb>, enforcer: PolicyEnforcer) -> VariantService {
+    let message_service = Arc::new(build_message_service(db, enforcer.clone()));
+    VariantService::new(
+        session_repo(db),
+        session_type_repo(db),
+        message_repo(db),
+        variant_repo(db),
+        test_plugins(db),
+        message_service,
         enforcer,
     )
 }
@@ -217,6 +238,16 @@ pub fn enforcer_allow() -> PolicyEnforcer {
 #[must_use]
 pub fn enforcer_deny() -> PolicyEnforcer {
     enforcer(Arc::new(DenyAllAuthZResolver))
+}
+
+/// Allow enforcer with NO ABAC constraints — models a pure permission gate
+/// (e.g. `SESSION_TYPE`, DESIGN §3.5.6) where the PDP returns `decision=true`
+/// and no owner constraints, so nothing needs to compile against a scopable
+/// resource. Use this for the global-table surfaces `MockAuthZResolver`'s
+/// owner constraints would fail-closed against.
+#[must_use]
+pub fn enforcer_allow_unconstrained() -> PolicyEnforcer {
+    enforcer(Arc::new(AllowUnconstrainedAuthZResolver))
 }
 
 /// PDP-unreachable enforcer — `EvaluationFailed` → `Forbidden` (403, fail-closed).
@@ -289,6 +320,26 @@ impl AuthZResolverClient for MockAuthZResolver {
                 constraints,
                 ..Default::default()
             },
+        })
+    }
+}
+
+/// Allow resolver that returns `decision=true` with NO constraints — the
+/// accurate model for a global-table permission gate (`SESSION_TYPE`): a plain
+/// allow with nothing to compile against a scopable resource.
+//
+// @cpt-cf-chat-engine-design-auth-model
+pub struct AllowUnconstrainedAuthZResolver;
+
+#[async_trait]
+impl AuthZResolverClient for AllowUnconstrainedAuthZResolver {
+    async fn evaluate(
+        &self,
+        _request: EvaluationRequest,
+    ) -> Result<EvaluationResponse, AuthZResolverError> {
+        Ok(EvaluationResponse {
+            decision: true,
+            context: EvaluationResponseContext::default(),
         })
     }
 }

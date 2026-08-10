@@ -75,3 +75,18 @@ pub fn system_read_scope() -> AccessScope {
 pub fn unrestricted_table_scope() -> AccessScope {
     AccessScope::allow_all()
 }
+
+#[cfg(test)]
+mod bypass_tests {
+    use super::*;
+
+    // Every bypass helper returns an unconstrained (allow-all) scope; these
+    // are the system-internal, non-PDP paths documented in the registry.
+    #[test]
+    fn bypass_scopes_are_unconstrained() {
+        assert!(internal_write_scope().is_unconstrained());
+        assert!(capability_read_scope().is_unconstrained());
+        assert!(system_read_scope().is_unconstrained());
+        assert!(unrestricted_table_scope().is_unconstrained());
+    }
+}
