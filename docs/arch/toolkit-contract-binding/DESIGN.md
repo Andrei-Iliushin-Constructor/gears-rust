@@ -4,7 +4,7 @@
 
 ### 1.1 Architectural Vision
 
-The contract-binding system introduces a two-layer trait architecture for ToolKit gears. The first layer is the **base trait** -- a plain Rust trait with zero annotations that defines the domain contract. The second layer is the **transport projection** -- a trait that extends the base and carries transport-specific annotations (HTTP paths, methods, streaming). A proc macro processes the projection and generates a REST client, OpenAPI spec, and any transport-specific logic.
+The contract-binding system introduces a two-layer trait architecture for ToolKit gears. The first layer is the **base trait** -- a Rust trait carrying no transport annotations, which defines the domain contract. The second layer is the **transport projection** -- a trait that extends the base and carries transport-specific annotations (HTTP paths, methods, streaming). A proc macro processes the projection and generates a REST client, OpenAPI spec, and any transport-specific logic.
 
 Four **contract types** encode operational semantics directly in the trait name. The contract type determines the failure domain, transaction scope, timeout requirements, and error handling strategy. There is no configuration file, no annotation, and no runtime flag that overrides what the name declares.
 
@@ -148,7 +148,7 @@ The four-type segregation encodes this asymmetry in the type system. A migration
 
 | Requirement | Design Response |
 |-------------|-----------------|
-| `cpt-cf-binding-fr-base-trait-purity` | Base traits are plain Rust with zero annotations. No transport, no macros, no binding modes. Compile-time plugins implement the base trait directly. |
+| `cpt-cf-binding-fr-base-trait-purity` | Base traits carry no transport annotations and no binding modes; compile-time plugins implement them directly. They do carry `#[toolkit::contract]` and `#[idempotency]` — see the principle for what "purity" does and does not cover. |
 | `cpt-cf-binding-fr-transport-projection` | Transport traits extend the base and carry HTTP annotations. The `#[toolkit::rest_contract]` macro generates the REST client, OpenAPI spec, and SSE support. |
 | `cpt-cf-binding-fr-compile-time-safety` | Redeclared methods in the transport trait are checked by the Rust compiler against the base trait signatures. Missing methods, wrong param types, wrong return types are caught at compile time. |
 | `cpt-cf-binding-fr-contract-types` | Four contract types (Api, Embedded, Backend, Extension) encode operational semantics in the trait name suffix. The name IS the contract. |
@@ -215,7 +215,17 @@ The contract type suffix (Api, Embedded, Backend, Extension) is the operational 
 
 - [ ] `p1` - **ID**: `cpt-cf-binding-principle-base-trait-purity`
 
-Base traits carry zero transport annotations, zero macros, zero binding-mode awareness. They define the domain contract in pure Rust. A base trait is usable without any macro crate dependency. Compile-time plugins implement the base trait directly without pulling in HTTP, serialization, or schema libraries.
+Base traits carry zero **transport** annotations and zero binding-mode awareness. They define the domain contract in Rust, and compile-time plugins implement them directly without pulling in HTTP, serialization, or schema libraries.
+
+> **Implementation note (current behavior).** "Zero macros" did not survive the
+> design. A base trait carries `#[toolkit::contract(gear = .., version = ..)]`,
+> which is what materializes the contract IR that validation, versioning, and
+> spec generation all read; methods carry `#[idempotency(..)]`; and
+> `#[streaming]` methods are *rewritten* by the macro (authored as
+> `Result<Item, E>`, emitted as a stream type). So a base trait does depend on
+> the macro crate. What holds — and what the principle is really about — is that
+> nothing transport-specific leaks in: no paths, no verbs, no HTTP or gRPC
+> types, and a consumer sees the same `Arc<dyn Base>` regardless of binding.
 
 **Decisions**: `cpt-cf-binding-decision-two-layer-architecture`
 
@@ -385,7 +395,7 @@ Remote services expose their OpenAPI spec at `/.well-known/openapi.json`. The se
 
 - [ ] `p1` - **ID**: `cpt-cf-binding-decision-two-layer-architecture`
 
-**Decision**: Separate base traits (domain contract, zero annotations) from transport projections (annotated traits extending the base). The Rust compiler checks that redeclared method signatures in the projection match the base trait.
+**Decision**: Separate base traits (domain contract, no transport annotations) from transport projections (annotated traits extending the base). The Rust compiler checks that redeclared method signatures in the projection match the base trait.
 
 **Rationale**: Decouples domain contracts from transport concerns. Compile-time plugins depend only on the base trait and never pull in HTTP or schema dependencies. Transport projections are additive and independently versionable.
 
@@ -688,7 +698,7 @@ impl RestApiCapability for MyGear {
 |-------|------|----------------|
 | `cf-toolkit-contract-macros` | proc-macro | `#[toolkit::rest_contract]` -- generates REST client struct, server route registration function (`register_<name>_routes()`), HTTP binding IR, OpenAPI spec function, SSE streaming, retryable methods. `#[derive(ContractError)]` -- generates Problem Details conversion with `error_code` + `error_domain`. Method annotations: `#[get]`, `#[post]`, `#[put]`, `#[delete]`, `#[patch]`, `#[streaming]`, `#[retryable]`. |
 | `cf-toolkit-contract-runtime` | lib | `Problem` struct (RFC 9457 with `error_code` / `error_domain` extension fields). SSE stream parser (byte stream to typed events). `ClientConfig` (base URL, timeout, retry policy). `RetryConfig` and `with_retry()` helper for exponential backoff. |
-| Gear SDK crates (e.g., `notification-sdk`) | lib | Base traits (zero annotations, no macro dependency). Transport projection traits (behind `rest-client` feature). Feature-gated: `rest-client` enables `reqwest`, `schemars`, and the generated REST client. `rest-server` feature enables server route registration function (`register_<name>_routes()`) and `OperationBuilder`, `axum`, `utoipa` dependencies. Without features, only the base trait is available. |
+| Gear SDK crates (e.g., `notification-sdk`) | lib | Base traits (no transport annotations; they do carry `#[toolkit::contract]`). Transport projection traits (behind `rest-client` feature). Feature-gated: `rest-client` enables `reqwest`, `schemars`, and the generated REST client. `rest-server` feature enables server route registration function (`register_<name>_routes()`) and `OperationBuilder`, `axum`, `utoipa` dependencies. Without features, only the base trait is available. |
 | `cf-toolkit` (modified) | lib | ClientHub: fallback resolution (compile-time first, then REST proxy from directory). Gear lifecycle: new proxy wiring phase after plugin discovery, before post-init. |
 | `cf-toolkit-macros` (modified) | proc-macro | Alignment with ADR-0004 (PR #1380) gear/plugin declaration macros. |
 
@@ -890,20 +900,51 @@ The **remote-side requirement** is unchanged: remote services MUST preserve back
 
 Circuit breakers, fallback methods, and degraded-mode behavior when remote plugins are temporarily unavailable. The `#[retryable]` annotation handles transient failures, but sustained unavailability (minutes, not seconds) requires a different strategy: circuit breaker state, fallback to a default implementation, or graceful degradation with cached data. Needs a separate ADR.
 
-### gRPC Transport Projection
+### gRPC Transport Projection — **shipped**
 
-`#[toolkit::grpc_contract]` macro design following the same two-layer pattern. Open questions include: proto-first vs. code-first generation, interaction with `tonic`, streaming semantics (server-streaming, client-streaming, bidirectional), and whether the gRPC projection can coexist with the REST projection on the same base trait.
+No longer an open question. `#[toolkit::grpc_contract]` follows the same
+two-layer pattern and is implemented; see
+[ADR-0008](./ADR/0008-cpt-cf-binding-adr-grpc-projection.md) for the decisions
+that closed the questions this section used to list. In summary: code-first with
+a committed `.proto` regenerated from the contract IR (`toolkit-contract-protogen`,
+pinned by `proto.lock.toml`); `tonic` for the transport; server-streaming only;
+and REST and gRPC projections do coexist on one base trait — the `api-contracts`
+example ships both.
+
+Still open: client-streaming and bidirectional RPCs, and reconnect/idle-timeout
+for server-streaming (the REST/SSE path has both, the gRPC path does not).
 
 ### Complex REST Annotations
 
 Path variables and query parameters are **implemented**: a method parameter whose name matches a
-`{param}` in the path template binds as a path parameter (client percent-encodes it; the generated
-server route emits the corresponding OpenAPI path parameter and a `Path<..>` extractor), the first
-remaining parameter on a body-carrying verb (`POST`/`PUT`/`PATCH`) is the JSON body, and any other
-parameter binds as a query parameter (single flat-struct form; the generated server route rejects
-more than one query parameter at compile time). Verb coverage is `#[get]`/`#[post]`/`#[put]`/
-`#[patch]`/`#[delete]`. Still deferred: explicit parameter-level `#[path]`/`#[query]` annotations
-(classification is by-convention today), header injection (`#[header]`), and multi-part request
+`{param}` in the path template binds as a path parameter, the first remaining parameter on a
+body-carrying verb (`POST`/`PUT`/`PATCH`) is the JSON body, and any other parameter binds as the
+query parameter. Verb coverage is `#[get]`/`#[post]`/`#[put]`/`#[patch]`/`#[delete]`.
+
+**Path parameters.** The client percent-encodes and substitutes *by name*; the generated server
+route emits a single `Path<(..)>` tuple extractor, which axum fills *positionally* from the URL.
+The macro therefore orders the tuple by the placeholders in the template, not by the trait's
+parameter order — with two same-typed parameters, a mismatch would otherwise swap their values
+silently. A placeholder with no matching parameter is a `compile_error!`.
+
+**Query parameters.** One per method, and it must be a struct deriving
+`toolkit_contract::QueryParams`. Client and server share one codec (`serde_html_form`), so the two
+ends cannot disagree about the wire format:
+
+- `Vec<T>` fields encode as repeated keys (`?tag=a&tag=b`, OpenAPI `style: form, explode: true`)
+  and decode back into a sequence. A `Vec` field must carry `#[serde(default)]` — an empty vector
+  emits no key at all — which the derive enforces.
+- Every field's leaf type must implement `QueryScalar`. That bound is what keeps **nested structs**
+  out: a query string is a flat key/value list and cannot represent them unambiguously. Implement
+  `QueryScalar` for a unit-only enum or a string-like newtype to use it as a field.
+- A **bare scalar** query parameter (`count: u64`) is rejected on a generated route: a query string
+  deserializes as a map at the top level, so such a route would 400 on every request. Wrap it in a
+  struct. A `#[server_manual]` method may still take a scalar, since the author writes the decoder.
+- The derive also emits the OpenAPI parameter list the route registers, so the spec is generated
+  from the same declaration as the wire format rather than inferred separately.
+
+Still deferred: explicit parameter-level `#[path]`/`#[query]` annotations (classification is
+by-convention today), header injection (`#[header]`), nested query objects, and multi-part request
 bodies — these fall to a manual `impl Base for MyClient` (ADR-0002 escape hatch).
 
 ### Method Annotation Naming Collision
@@ -920,5 +961,6 @@ bodies — these fall to a manual `impl Base for MyClient` (ADR-0002 escape hatc
 - **ADR-0004** — consumer wiring: [`./ADR/0004-cpt-cf-binding-adr-consumer-wiring.md`](./ADR/0004-cpt-cf-binding-adr-consumer-wiring.md)
 - **ADR-0006** — client observability (tracing/OTEL): [`./ADR/0006-cpt-cf-binding-adr-client-observability.md`](./ADR/0006-cpt-cf-binding-adr-client-observability.md)
 - **ADR-0007** — contract versioning (additive + parallel traits): [`./ADR/0007-cpt-cf-binding-adr-contract-versioning.md`](./ADR/0007-cpt-cf-binding-adr-contract-versioning.md)
+- **ADR-0008** — gRPC transport projection: [`./ADR/0008-cpt-cf-binding-adr-grpc-projection.md`](./ADR/0008-cpt-cf-binding-adr-grpc-projection.md)
 - **PoC**: [striped-zebra-dev/toolkit-binding-poc](https://github.com/striped-zebra-dev/toolkit-binding-poc)
 - **Gear/plugin declaration and resolution**: [PR #1380](https://github.com/constructorfabric/gears-rust/pull/1380)

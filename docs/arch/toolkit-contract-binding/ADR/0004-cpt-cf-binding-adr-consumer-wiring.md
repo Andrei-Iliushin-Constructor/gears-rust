@@ -100,16 +100,30 @@ inventory::submit! {
         wire: |hub: &ClientHub, resolver: Arc<dyn EndpointResolver>|
               -> anyhow::Result<WireOutcome> {
             // Short-circuit: Profile 1 in-process impl already present.
-            if hub.try_get::<dyn billing_sdk::BillingApi>().is_some() {
+            if hub.try_get_local::<dyn billing_sdk::BillingApi>().is_some() {
                 return Ok(WireOutcome::Local);
             }
+            // Another consumer of the same contract already wired a proxy.
+            if hub.has_remote_proxy::<dyn billing_sdk::BillingApi>() {
+                return Ok(WireOutcome::Remote);
+            }
             let client = billing_sdk::BillingApiRestResolvingClient::new(resolver);
-            hub.register::<dyn billing_sdk::BillingApi>(Arc::new(client));
+            hub.register_remote_proxy::<dyn billing_sdk::BillingApi>(Arc::new(client));
             Ok(WireOutcome::Remote)
         },
     }
 }
 ```
+
+**The short-circuit must use `try_get_local`, not `try_get`.** `ClientHub` is
+keyed by type alone, so a resolving proxy and a genuine local implementation are
+indistinguishable once stored. With plain `try_get`, two consumers of the same
+contract in one process break the readiness model: whichever wires second finds
+the first one's *proxy*, reports `Local`, and — since both registrations carry
+the same `dep_gear` — marks the very `DependencyChecker` entry the unresolved
+remote dep was gating on. The checker is sticky, so `/readyz` goes 200 with no
+provider up. `register_remote_proxy` records the provenance that makes
+`try_get_local` able to tell the two apart.
 
 Two details differ from the sketch this ADR originally carried, both load-bearing:
 
@@ -158,6 +172,24 @@ registered for a `Remote` dep resolves its endpoint per call through the same
 Re-resolution is triggered on `DirectoryClient` reconnect to handle provider restarts. The backoff
 policy and reconnect behaviour are consistent with the self-registration retry already specified in
 vision ADR-0007.
+
+**The not-found sentinel is load-bearing.** `EndpointResolver` distinguishes
+`Ok(None)` ("the lookup succeeded; nothing is registered yet") from `Err` ("the
+directory itself failed"), and that distinction decides whether a routine startup
+race is logged at `debug` or `warn`. It only works if the directory client
+constructs the typed `DirectoryNotFound` sentinel: `DirectoryEndpointResolver`
+downcasts to it, and a bare `anyhow` falls through to the `Err` arm. Both clients
+must therefore produce it — `LocalDirectoryClient` on an empty `GearManager`
+lookup, and `DirectoryGrpcClient` on `tonic::Code::NotFound` — and the
+orchestrator's gRPC server must map only genuine not-found to `NotFound` rather
+than blanket-mapping every failure. Getting this wrong is not a loud failure: the
+system still converges, but every unresolved dependency is reported as a
+directory outage, and the resolving client warns on *every* business call to a
+provider that has simply not started yet.
+
+**Endpoint resolution is memoized** for `DirectoryEndpointResolver::TTL` (1500 ms).
+Only successes are cached, and a failed call does not invalidate the entry, so a
+provider that moves is followed within roughly the TTL rather than instantly.
 
 ### Runtime integration — embedded profile (Profile 1)
 
@@ -234,6 +266,32 @@ in-process ([`WireOutcome::Local`](#what-the-macro-generates)) never appears the
 
 This is the shape specified by the accepted eventual-readiness ADR
 (`cpt-cf-adr-eventual-readiness`).
+
+### Known limitation: "resolved" is not "conformant"
+
+**Accepted, not fixed.** A dependency is marked resolved as soon as the directory
+returns *any* live endpoint for the gear name. Nothing checks that the provider
+actually serves this contract: not the base path, not the schema, not the major
+version. A consumer of `PaymentApiV2` therefore goes Ready against a provider
+that only serves `/v1/**`, and discovers the mismatch as a 404 on its first call.
+There is no contract identity on the wire — no hash, no version handshake — so
+schema evolution rests entirely on `oasdiff` in CI.
+
+Two things make this tolerable rather than dangerous. Both versions of a contract
+are normally served by the *same* provider (ADR-0007: parallel traits on one
+router), so "the gear is up but serving the wrong major" means a genuinely
+mis-deployed topology rather than routine startup churn. And the failure is a
+clean 404 at the call site, not silent data corruption.
+
+Related and deliberate: `DependencyChecker` stores a bare `bool` per dependency,
+so `Local`, directory-resolved, and static-override all collapse into one
+`true`. `/readyz` cannot distinguish them. `unresolved_deps` is the only
+per-dependency detail exposed.
+
+Closing this needs a contract identity exchanged at resolve time — the provider
+advertising which contracts and majors it serves, and the consumer checking its
+own `base_path`/version from the IR against that. That is a wire-protocol
+addition on both sides and belongs in its own ADR; tracked as follow-up.
 
 ### Relationship to `#[toolkit::provides]`
 

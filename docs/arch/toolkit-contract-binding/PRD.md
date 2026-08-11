@@ -135,7 +135,6 @@ Collapsing to fewer contract types would force callers into unnecessary defensiv
 
 ### 4.2 Out of Scope
 
-- gRPC transport projection (`#[toolkit::grpc_contract]`) -- future work, same pattern
 - Service directory implementation -- delivered by cluster service discovery workstream
 - Transaction guard (TxGuard) compile-time mechanism -- open design question, separate ADR
 - Transaction context propagation for Embedded/Extension contracts -- separate ADR
@@ -264,7 +263,18 @@ Transport projection methods MUST declare their HTTP method and path via annotat
 
 - [ ] `p1` - **ID**: `cpt-cf-binding-fr-param-annotations`
 
-Transport projection methods MUST support parameter annotations: `#[path]`, `#[query]`, `#[header]`. Annotations are on the actual parameters with real types, not separate strings.
+Transport projection methods MUST bind parameters by real Rust type rather than by separate strings, so a mismatch between the path template and the parameter list is a compile error.
+
+> **Implementation note (current behavior).** Binding is **by convention**, not
+> by explicit annotation: a parameter whose name matches a `{placeholder}` in
+> the path template is a path parameter, the first remaining parameter on a
+> body-carrying verb is the JSON body, and any other parameter is the query
+> parameter (`classify_params`, `libs/toolkit-contract-macros/src/rest_contract.rs`).
+> A template placeholder with no matching parameter is a `compile_error!`. The
+> explicit `#[path]` / `#[query]` / `#[header]` vocabulary this requirement
+> originally specified was **not** implemented; header injection in particular
+> falls to a manual `impl` (ADR-0002 escape hatch). A query parameter must be a
+> struct deriving `QueryParams` — see §5.4.
 
 - **Rationale**: Type-safe parameter binding prevents runtime mismatches between path templates and parameter types.
 - **Actors**: `cpt-cf-binding-actor-gear-developer`
@@ -282,7 +292,14 @@ The macro MUST read transport annotations (`#[post(...)]`, `#[get(...)]`, `#[str
 
 - [ ] `p1` - **ID**: `cpt-cf-binding-fr-rest-only-methods`
 
-The transport projection trait MAY add methods with default implementations that are not in the base trait (e.g., `deliver_batch` that delegates to `deliver` in a loop). These methods SHALL be available on the generated REST client. Compile-time plugins implementing only the base trait SHALL NOT be affected.
+> **Superseded by ADR-0003.** This requirement is **not** implemented and is
+> retained only to record the decision against it. A projection method with no
+> counterpart in the base trait is rejected at macro-expansion time
+> (`rest_extra_projection_method` trybuild fixture), because the projection is a
+> *projection*: allowing it to add surface makes the base trait no longer the
+> single source of truth, and a consumer holding `Arc<dyn Base>` could not call
+> the extra method anyway. REST-specific convenience endpoints are registered by
+> hand via `OperationBuilder` alongside the generated routes.
 
 - **Rationale**: Enables REST-specific convenience endpoints (batch, pagination) without polluting the domain contract.
 - **Actors**: `cpt-cf-binding-actor-gear-developer`
@@ -500,7 +517,12 @@ The runtime crate SHALL provide a `with_retry()` function implementing exponenti
 
 - [ ] `p1` - **ID**: `cpt-cf-binding-fr-feature-gate`
 
-The generated REST client and its dependencies (`reqwest`, `schemars`) SHALL be behind a `rest-client` Cargo feature flag. Consumers depending on the SDK crate without the `rest-client` feature SHALL NOT compile HTTP dependencies.
+The generated REST client and its HTTP dependencies SHALL be behind a `rest-client` Cargo feature flag. Consumers depending on the SDK crate without the `rest-client` feature SHALL NOT compile HTTP dependencies.
+
+> **Implementation note (current behavior).** The gate covers the transport
+> stack (`toolkit-http` and friends). `schemars` and `utoipa` are **not**
+> gated — DTOs derive their schemas unconditionally, since the same types are
+> used by the server-side registry and by local callers.
 
 - **Rationale**: Compile-time-only consumers should not pay for HTTP dependencies they do not use.
 - **Actors**: `cpt-cf-binding-actor-gear-developer`, `cpt-cf-binding-actor-plugin-developer`
@@ -616,7 +638,10 @@ The generated code from `#[toolkit::rest_contract]` MUST be inspectable via `car
 
 - [ ] `p2` - **ID**: `cpt-cf-binding-nfr-compile-time`
 
-SDK crates with the `rest-client` feature disabled MUST NOT incur additional compile time from HTTP-related dependencies (`reqwest`, `schemars`, `openapiv3`).
+SDK crates with the `rest-client` feature disabled MUST NOT incur additional compile time from HTTP transport dependencies.
+
+> **Implementation note.** `schemars`/`utoipa` are outside this gate — see the
+> note on `cpt-cf-binding-fr-feature-gate`.
 
 - **Rationale**: Compile-time-only consumers should have the same build performance as before the binding system is introduced.
 
@@ -625,7 +650,7 @@ SDK crates with the `rest-client` feature disabled MUST NOT incur additional com
 ### 7.1 Constraints
 
 - The system is built on Gears Toolkit framework and uses its ClientHub, inventory-based plugin discovery, and gear lifecycle.
-- REST is the first transport. gRPC is a future transport following the same two-layer pattern.
+- REST was the first transport; gRPC followed the same two-layer pattern and has since shipped (`#[toolkit::grpc_contract]`, ADR-0008).
 - The service directory implementation is delivered by a separate workstream. This change defines only the interface trait.
 - Alignment with ADR-0004 (PR #1380) gear/plugin declaration macros is required.
 
@@ -640,7 +665,6 @@ SDK crates with the `rest-client` feature disabled MUST NOT incur additional com
 
 - **Transaction guard (TxGuard)**: A compile-time mechanism that restricts which contracts can be called inside a transaction scope. Within a `TxGuard<'tx>`, only Embedded/Extension contracts would be callable -- the compiler would reject calls to Api/Backend traits. This would enforce the operational semantics table at the type level, not just by naming convention. Needs its own ADR to design the type-state mechanism and interaction with database transactions (SeaORM/SQLx). Not a requirement for this change.
 - **Remote backend unavailability**: Circuit breakers, fallback methods, degraded-mode behavior when remote plugins are temporarily down.
-- **gRPC transport projection**: `#[toolkit::grpc_contract]` macro design, proto generation approach, interaction with tonic.
 - **Transaction context propagation**: How Embedded/Extension contracts receive and participate in the caller's transaction scope.
 
 ## 8. Prior Art

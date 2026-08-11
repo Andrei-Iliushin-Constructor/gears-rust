@@ -114,9 +114,11 @@ or error semantics of an existing operation.
 ### 2. Breaking change → a parallel trait pair
 
 A new major version introduces a **new base trait and a new projection**, served
-alongside the old one. The version belongs in the **module path** (preferred) or
-as an **infix** in the trait name — never as a trailing suffix (see the naming
-constraint below):
+alongside the old one. The version is spelled as a **trailing `V<N>` marker on
+the trait name** — see [Version spelling](#version-spelling-a-trailing-vn-on-the-trait-name)
+below for why, and why module-per-version was rejected. Files may still be split
+per version (`contract.rs` / `contract_v2.rs`); that is a source-layout
+convention, not part of the type name:
 
 ```rust
 // sdk/src/contract.rs — v1, untouched by the v2 work
