@@ -147,6 +147,28 @@ pub struct ViaStringParseError {
     pub source: Box<dyn std::error::Error + Send + Sync + 'static>,
 }
 
+/// Fallible proto → Rust conversion for inbound wire data.
+///
+/// `#[derive(ProtoBridge)]` emits both an infallible `From<Proto>` and a
+/// fallible counterpart. The infallible one panics on a malformed
+/// `#[proto_bridge(via_string)]` field, which is fine for data this process
+/// produced and unacceptable for data a peer sent — a malformed UUID from a
+/// remote would take the process down. Generated gRPC clients and hand-written
+/// tonic servers therefore convert inbound messages through this trait.
+///
+/// The derive implements it for structs and enums alike, so codegen can call it
+/// uniformly. A hand-written proto bridge used as an RPC response type must
+/// implement it too; the missing impl is a compile error at the call site
+/// rather than a silent fall-back to the panicking path.
+pub trait TryFromProto<P>: Sized {
+    /// Convert a proto message into its Rust representation.
+    ///
+    /// # Errors
+    /// Returns [`ViaStringParseError`] when a `via_string` field carries a
+    /// value its `FromStr` impl rejects.
+    fn try_from_proto_wire(proto: P) -> Result<Self, ViaStringParseError>;
+}
+
 /// Logging hook called from generated `From<i32>` impls when the wire value
 /// does not correspond to any known Rust variant.
 ///

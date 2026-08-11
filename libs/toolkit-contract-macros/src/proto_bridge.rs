@@ -314,6 +314,20 @@ fn derive_struct(
                 })
             }
         }
+
+        // Trait form of the same conversion, so `#[toolkit::grpc_contract]`
+        // codegen can convert any response type uniformly without knowing
+        // whether it derives from a struct or an enum.
+        #[automatically_derived]
+        impl #impl_generics #support::grpc_repr::TryFromProto<#stub_path>
+            for #rust_ty #ty_generics #where_clause
+        {
+            fn try_from_proto_wire(
+                proto: #stub_path,
+            ) -> ::std::result::Result<Self, #support::grpc_repr::ViaStringParseError> {
+                Self::try_from_proto(&proto)
+            }
+        }
     })
 }
 
@@ -425,6 +439,24 @@ fn derive_enum(
                 <#stub_path as ::std::convert::TryFrom<i32>>::try_from(v)
                     .map(<#rust_ty #ty_generics as ::std::convert::From<#stub_path>>::from)
                     .map_err(|_| #support::grpc_repr::UnknownEnumDiscriminant(v))
+            }
+        }
+
+        // Trait form, so `#[toolkit::grpc_contract]` codegen can convert any
+        // response type uniformly. An enum has no `via_string` fields, so this
+        // is infallible in practice; it keeps the forward-compatible
+        // unknown-discriminant fallback of `From<#stub_path>` rather than
+        // turning peer-side schema drift into a hard error.
+        #[automatically_derived]
+        impl #impl_generics #support::grpc_repr::TryFromProto<#stub_path>
+            for #rust_ty #ty_generics #where_clause
+        {
+            fn try_from_proto_wire(
+                proto: #stub_path,
+            ) -> ::std::result::Result<Self, #support::grpc_repr::ViaStringParseError> {
+                ::std::result::Result::Ok(
+                    <#rust_ty #ty_generics as ::std::convert::From<#stub_path>>::from(proto),
+                )
             }
         }
     })

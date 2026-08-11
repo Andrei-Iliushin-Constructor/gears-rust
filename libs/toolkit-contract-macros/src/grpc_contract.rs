@@ -496,8 +496,15 @@ fn generate_one_shot_unary_method(
                     .#rpc_method_ident(__request)
                     .await
                     .map_err(|__s| #support::grpc::map_tonic_status(&__s))?;
+                // Fallible conversion: the infallible `From<Proto>` panics on a
+                // malformed `via_string` field, which would let a peer take this
+                // process down with one bad response.
+                let __decoded = <#ok_ty as #support::grpc_repr::TryFromProto<_>>::try_from_proto_wire(
+                    __response.into_inner(),
+                )
+                .map_err(#support::runtime::transport_error::TransportError::serialization)?;
                 ::std::result::Result::<#ok_ty, #support::runtime::transport_error::TransportError>::Ok(
-                    __response.into_inner().into(),
+                    __decoded,
                 )
             };
             let __result = __inner().await;
@@ -559,8 +566,14 @@ fn generate_retryable_unary_method(
                         .#rpc_method_ident(__request)
                         .await
                         .map_err(|__s| #support::grpc::map_tonic_status(&__s))?;
+                    // See the one-shot arm: a panicking decode here would blow
+                    // up inside the retry loop rather than returning an error.
+                    let __decoded = <#ok_ty as #support::grpc_repr::TryFromProto<_>>::try_from_proto_wire(
+                        __response.into_inner(),
+                    )
+                    .map_err(#support::runtime::transport_error::TransportError::serialization)?;
                     ::std::result::Result::<#ok_ty, #support::runtime::transport_error::TransportError>::Ok(
-                        __response.into_inner().into(),
+                        __decoded,
                     )
                 }
             };
@@ -647,7 +660,18 @@ fn generate_streaming_client_method(
                     let __proto_item = __item.map_err(|__s| -> #err_ty {
                         ::std::convert::From::from(#support::grpc::map_tonic_status(&__s))
                     })?;
-                    let __out: #ok_ty = ::std::convert::From::from(__proto_item);
+                    // Fallible decode per item: a malformed `via_string` in one
+                    // frame ends the stream with an error instead of panicking
+                    // through whatever task is polling it.
+                    let __out: #ok_ty =
+                        <#ok_ty as #support::grpc_repr::TryFromProto<_>>::try_from_proto_wire(
+                            __proto_item,
+                        )
+                        .map_err(|__e| -> #err_ty {
+                            ::std::convert::From::from(
+                                #support::runtime::transport_error::TransportError::serialization(__e),
+                            )
+                        })?;
                     yield __out;
                 }
             })

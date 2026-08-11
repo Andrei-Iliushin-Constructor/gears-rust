@@ -230,6 +230,23 @@ fn parse_method(method: &TraitItemFn) -> syn::Result<GrpcMethodModel> {
         }
     }
 
+    // Retrying a non-idempotent write duplicates it. The generated client
+    // retries on transient transport failures, and a 502/504 can arrive after
+    // the server already committed — so `#[retryable]` on `NotIdempotent` is a
+    // double-write waiting to happen. The two attributes were previously
+    // independent flags with nothing reconciling them, which made the
+    // idempotency metadata dead weight.
+    if retryable && idempotency == GrpcIdempotency::NotIdempotent {
+        return Err(syn::Error::new(
+            ident.span(),
+            "`#[retryable]` on a `NotIdempotent` method: a transient failure can arrive after \
+             the server committed, so retrying would duplicate the write.\n\
+             Either make the operation idempotent (e.g. accept an idempotency key) and declare \
+             `#[idempotency_level(Idempotent)]`, or drop `#[retryable]` and let the caller \
+             decide.",
+        ));
+    }
+
     let params = parse_params(method)?;
     let result_types = parse_return_type(&method.sig.output, method.sig.ident.span())?;
     let optional = method.default.is_some();

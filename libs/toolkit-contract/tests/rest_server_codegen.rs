@@ -38,7 +38,9 @@ pub struct PairResponse {
 
 /// Every query shape that used to fail: a `Vec` (repeated keys), an omitted
 /// `Option`, and a plain scalar inside the struct.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, toolkit_contract::QueryParams)]
+#[derive(
+    Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, toolkit_contract::QueryParams,
+)]
 pub struct SearchQuery {
     #[serde(default)]
     pub tags: Vec<String>,
@@ -282,10 +284,10 @@ async fn openapi_documents_query_params_including_arrays() {
 async fn openapi_lists_path_params_in_url_order() {
     let (_, spec) = start_generated_server().await;
 
-    let params = spec["paths"]["/api/pair/v1/tenants/{tenant_id}/orders/{order_id}"]["get"]
-        ["parameters"]
-        .as_array()
-        .expect("generated operation should declare path parameters");
+    let params =
+        spec["paths"]["/api/pair/v1/tenants/{tenant_id}/orders/{order_id}"]["get"]["parameters"]
+            .as_array()
+            .expect("generated operation should declare path parameters");
 
     let names: Vec<&str> = params
         .iter()
