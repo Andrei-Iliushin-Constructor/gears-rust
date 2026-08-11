@@ -565,6 +565,8 @@ fn try_from_category_status_mismatch_returns_error() {
         instance: None,
         trace_id: None,
         context: serde_json::json!({"field_violations": []}),
+        error_code: None,
+        error_domain: None,
     };
     let result = CanonicalError::try_from(problem);
     match result {
@@ -586,6 +588,8 @@ fn try_from_zero_status_returns_error() {
         instance: None,
         trace_id: None,
         context: serde_json::json!({}),
+        error_code: None,
+        error_domain: None,
     };
     let result = CanonicalError::try_from(problem);
     match result {
@@ -604,6 +608,8 @@ fn try_from_out_of_range_status_returns_error() {
         instance: None,
         trace_id: None,
         context: serde_json::json!({}),
+        error_code: None,
+        error_domain: None,
     };
     let result = CanonicalError::try_from(problem);
     match result {

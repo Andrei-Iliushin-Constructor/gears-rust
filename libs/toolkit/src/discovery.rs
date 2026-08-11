@@ -210,6 +210,9 @@ mod tests {
         async fn list_instances(&self, _: &str) -> anyhow::Result<Vec<ServiceInstanceInfo>> {
             unimplemented!()
         }
+        async fn list_all_instances(&self) -> anyhow::Result<Vec<ServiceInstanceInfo>> {
+            unimplemented!()
+        }
         async fn register_instance(&self, _: RegisterInstanceInfo) -> anyhow::Result<()> {
             unimplemented!()
         }
@@ -286,6 +289,9 @@ mod tests {
             unimplemented!()
         }
         async fn list_instances(&self, _: &str) -> anyhow::Result<Vec<ServiceInstanceInfo>> {
+            unimplemented!()
+        }
+        async fn list_all_instances(&self) -> anyhow::Result<Vec<ServiceInstanceInfo>> {
             unimplemented!()
         }
         async fn register_instance(&self, _: RegisterInstanceInfo) -> anyhow::Result<()> {
