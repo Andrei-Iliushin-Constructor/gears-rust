@@ -1,4 +1,8 @@
 //! Local (in-process) client for `PaymentApi`.
+//!
+//! Lives in the domain layer per `02_gear_layout_and_sdk_pattern.md`: the local
+//! client is a domain-side adapter onto the SDK trait, not a transport client
+//! (the REST and gRPC clients are generated into the SDK crate).
 
 use std::sync::Arc;
 
@@ -13,6 +17,7 @@ use toolkit_canonical_errors::CanonicalError;
 use toolkit_contract::ContractError;
 use toolkit_contract::ir::contract::{Idempotency, MethodKind};
 use toolkit_contract::policy::{PolicyContext, PolicyStack};
+use toolkit_macros::domain_model;
 use toolkit_security::SecurityContext;
 
 use crate::domain::service::PaymentDomainService;
@@ -21,6 +26,7 @@ use crate::domain::service::PaymentDomainService;
 ///
 /// Wraps each call with the [`PolicyStack`] for tracing/metrics.
 /// Implements [`PaymentApi`] (PRD #1536 D1: consumer always depends on the base contract).
+#[domain_model]
 pub struct PaymentLocalClient {
     service: Arc<PaymentDomainService>,
     policies: Arc<PolicyStack>,
@@ -102,6 +108,7 @@ impl PaymentApi for PaymentLocalClient {
 /// [`PaymentLocalClient`], so a payment charged through either major version is
 /// visible to both — a new API version changes the wire contract, not the
 /// business data.
+#[domain_model]
 pub struct PaymentApiV2LocalClient {
     service: Arc<PaymentDomainService>,
     policies: Arc<PolicyStack>,

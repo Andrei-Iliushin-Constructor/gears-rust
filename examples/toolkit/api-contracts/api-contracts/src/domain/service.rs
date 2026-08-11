@@ -10,6 +10,7 @@ use api_contracts_sdk::models::{
 };
 use parking_lot::RwLock;
 use toolkit_canonical_errors::CanonicalError;
+use toolkit_macros::domain_model;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
@@ -37,6 +38,7 @@ type IdempotencyKey = (Uuid, Uuid, String);
 /// `PaymentApiV2`): a major version changes the wire contract, not the
 /// business data, so a payment charged through either version is visible to
 /// both.
+#[domain_model]
 pub struct PaymentDomainService {
     payments: RwLock<HashMap<Uuid, PaymentRecord>>,
     /// v2 idempotent-charge dedupe: caller-scoped key → the payment it created.

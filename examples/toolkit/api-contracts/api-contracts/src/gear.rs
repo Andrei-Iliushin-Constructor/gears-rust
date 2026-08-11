@@ -14,7 +14,7 @@ use toolkit::{Gear, GearCtx, RestApiCapability};
 use toolkit_contract::policy::PolicyStack;
 
 use crate::api::rest::routes;
-use crate::client::local::{PaymentApiV2LocalClient, PaymentLocalClient};
+use crate::domain::local_client::{PaymentApiV2LocalClient, PaymentLocalClient};
 use crate::domain::service::PaymentDomainService;
 
 /// The one domain store shared by **both** contract versions.
@@ -29,7 +29,7 @@ fn domain_service() -> Arc<PaymentDomainService> {
     Arc::clone(DOMAIN.get_or_init(|| Arc::new(PaymentDomainService::new())))
 }
 
-/// Service hub demo gear — provides [`PaymentApi`].
+/// api-contracts demo gear — provides [`PaymentApi`].
 ///
 /// Auto-wiring rules (declared via `#[toolkit::provides]`):
 ///

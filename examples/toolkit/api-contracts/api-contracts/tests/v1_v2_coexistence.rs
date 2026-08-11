@@ -34,7 +34,7 @@ use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
 use cf_api_contracts::api::rest::routes::{register_routes, register_v2_routes};
-use cf_api_contracts::client::local::{PaymentApiV2LocalClient, PaymentLocalClient};
+use cf_api_contracts::domain::local_client::{PaymentApiV2LocalClient, PaymentLocalClient};
 use cf_api_contracts::domain::service::PaymentDomainService;
 
 const V1_CHARGE_PATH: &str = "/api-contracts/v1/payments/charge";

@@ -1393,6 +1393,7 @@ dependencies = [
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-contract",
  "cf-gears-toolkit-http",
+ "cf-gears-toolkit-macros",
  "cf-gears-toolkit-security",
  "cf-gears-toolkit-transport-grpc",
  "futures-core",

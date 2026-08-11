@@ -35,7 +35,7 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 
 use cf_api_contracts::api::rest::routes::register_routes;
-use cf_api_contracts::client::local::PaymentLocalClient;
+use cf_api_contracts::domain::local_client::PaymentLocalClient;
 use cf_api_contracts::domain::service::PaymentDomainService;
 
 /// A span captured by [`CaptureLayer`]: its metadata name plus recorded fields.

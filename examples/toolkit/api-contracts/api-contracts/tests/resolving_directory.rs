@@ -36,7 +36,7 @@ use toolkit_contract::wiring::ClientTuning;
 use toolkit_security::SecurityContext;
 
 use cf_api_contracts::api::rest::routes::register_routes;
-use cf_api_contracts::client::local::PaymentLocalClient;
+use cf_api_contracts::domain::local_client::PaymentLocalClient;
 use cf_api_contracts::domain::service::PaymentDomainService;
 
 const PROVIDER_GEAR: &str = "api-contracts";

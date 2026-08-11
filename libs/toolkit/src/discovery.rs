@@ -363,14 +363,13 @@ mod tests {
         // and `/readyz` went green with no provider up.
         let hub = ClientHub::new();
 
-        let first =
-            generated_wire_body::<dyn Payments>(&hub, Arc::new(PaymentsProxy)).unwrap();
-        let second =
-            generated_wire_body::<dyn Payments>(&hub, Arc::new(PaymentsProxy)).unwrap();
+        let first = generated_wire_body::<dyn Payments>(&hub, Arc::new(PaymentsProxy)).unwrap();
+        let second = generated_wire_body::<dyn Payments>(&hub, Arc::new(PaymentsProxy)).unwrap();
 
         assert_eq!(first, WireOutcome::Remote);
         assert_eq!(
-            second, WireOutcome::Remote,
+            second,
+            WireOutcome::Remote,
             "the second consumer must still gate readiness, not short-circuit to Local"
         );
     }
@@ -383,8 +382,7 @@ mod tests {
         let hub = ClientHub::new();
         hub.register::<dyn Payments>(Arc::new(PaymentsLocal));
 
-        let outcome =
-            generated_wire_body::<dyn Payments>(&hub, Arc::new(PaymentsProxy)).unwrap();
+        let outcome = generated_wire_body::<dyn Payments>(&hub, Arc::new(PaymentsProxy)).unwrap();
 
         assert_eq!(outcome, WireOutcome::Local);
     }

@@ -77,9 +77,9 @@ impl DirectoryClient for LocalDirectoryClient {
     }
 
     async fn get_openapi_spec(&self, gear_name: &str) -> Result<String> {
-        self.mgr
-            .openapi_spec_of(gear_name)
-            .ok_or_else(|| DirectoryNotFound::new(format!("openapi spec for gear {gear_name}")).into())
+        self.mgr.openapi_spec_of(gear_name).ok_or_else(|| {
+            DirectoryNotFound::new(format!("openapi spec for gear {gear_name}")).into()
+        })
     }
 
     async fn list_instances(&self, gear: &str) -> Result<Vec<ServiceInstanceInfo>> {

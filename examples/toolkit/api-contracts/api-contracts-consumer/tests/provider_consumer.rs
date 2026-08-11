@@ -41,7 +41,7 @@ use toolkit_security::SecurityContext;
 
 use cf_api_contracts::ApiContracts;
 use cf_api_contracts::api::rest::routes::register_routes;
-use cf_api_contracts::client::local::PaymentLocalClient;
+use cf_api_contracts::domain::local_client::PaymentLocalClient;
 use cf_api_contracts::domain::service::PaymentDomainService;
 use cf_api_contracts_consumer::{ApiContractsConsumer, ChargeProxyService};
 use toolkit_canonical_errors::CanonicalError;

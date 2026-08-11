@@ -37,6 +37,7 @@ workspace = true
 api-contracts-sdk.workspace = true
 toolkit-contract = { workspace = true, features = ["runtime-client"] }
 toolkit.workspace = true
+toolkit-macros.workspace = true
 toolkit-canonical-errors.workspace = true
 toolkit-security.workspace = true
 async-trait.workspace = true

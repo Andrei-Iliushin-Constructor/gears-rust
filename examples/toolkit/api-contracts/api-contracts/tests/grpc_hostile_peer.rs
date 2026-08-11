@@ -115,10 +115,7 @@ async fn hostile_client() -> (PaymentApiGrpcClient, oneshot::Sender<()>) {
     let cfg = ClientConfig::new(format!("http://{addr}"))
         .with_timeout(Duration::from_secs(2))
         .with_retry(RetryConfig::off());
-    (
-        PaymentApiGrpcClient::connect(cfg).await.unwrap(),
-        shutdown,
-    )
+    (PaymentApiGrpcClient::connect(cfg).await.unwrap(), shutdown)
 }
 
 #[tokio::test]
