@@ -1,4 +1,4 @@
-//! Service hub demo gear — `PaymentService` implementation.
+//! api-contracts demo gear — `PaymentApi` implementation.
 
 pub mod api;
 pub mod client;

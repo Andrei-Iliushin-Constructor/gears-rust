@@ -1,4 +1,4 @@
-//! Local (in-process) client for `PaymentService`.
+//! Local (in-process) client for `PaymentApi`.
 
 use std::sync::Arc;
 

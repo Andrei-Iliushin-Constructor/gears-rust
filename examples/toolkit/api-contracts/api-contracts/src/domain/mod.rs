@@ -1,3 +1,3 @@
-//! Domain logic for the `PaymentService`.
+//! Domain logic for `PaymentApi`.
 
 pub mod service;

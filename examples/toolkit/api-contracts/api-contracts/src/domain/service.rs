@@ -1,4 +1,4 @@
-//! In-memory mock implementation of `PaymentService` domain logic.
+//! In-memory mock implementation of `PaymentApi` domain logic.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,7 +31,7 @@ struct PaymentRecord {
 /// [`ChargeV2Request::idempotency_key`](api_contracts_sdk::models::ChargeV2Request).
 type IdempotencyKey = (Uuid, Uuid, String);
 
-/// In-memory `PaymentService` implementation for the proof of concept.
+/// In-memory `PaymentApi` implementation for the proof of concept.
 ///
 /// One domain store backs **both** contract versions (v1 `PaymentApi` and v2
 /// `PaymentApiV2`): a major version changes the wire contract, not the

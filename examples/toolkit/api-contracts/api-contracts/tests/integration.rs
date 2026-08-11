@@ -1,6 +1,6 @@
 //! Integration tests for api-contracts local and HTTP clients.
 //!
-//! The HTTP transport is now the macro-generated `PaymentServiceRestClient`
+//! The HTTP transport is now the macro-generated `PaymentApiRestClient`
 //! produced by `#[toolkit::rest_contract]`. The local transport stays a
 //! hand-written adapter so we can also exercise the policy stack.
 
