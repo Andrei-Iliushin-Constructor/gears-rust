@@ -1,6 +1,8 @@
-//! Gear configuration. The `database.server` reference selects the
-//! Postgres connection; `search_path` is set on that connection's
-//! `params` in `config/server.yaml` (see Task 3 notes).
+//! Validated behavioral configuration for the Billing Ledger gear.
+//!
+//! Defines background-job cadences, seller tenant types, recognition, FX,
+//! reconciliation, payment limits, and the event-publication gate. Database
+//! selection is handled separately by the ToolKit `db` capability.
 
 use std::time::Duration;
 

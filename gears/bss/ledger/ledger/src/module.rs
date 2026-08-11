@@ -1,13 +1,9 @@
-//! `BssLedgerGear` — toolkit gear declaration and lifecycle.
+//! ToolKit declaration, dependency wiring, and lifecycle for [`BssLedgerGear`].
 //!
-//! P0/P1 declared the `db` capability so migrations run at startup and create
-//! the `bss` schema + foundation tables. P3 makes `init()` non-trivial: when
-//! the `bss-ledger:` entry is present in the `gears:` block it acquires the
-//! DB handle and publishes the in-process posting client
-//! (`dyn LedgerClientV1`) in `ClientHub`. P6 adds the `stateful`
-//! capability and a `lifecycle(entry = "serve")` background loop that runs the
-//! daily tie-out, fiscal-period-open, and chain-verifier jobs under a
-//! cancellation token.
+//! Initialization runs migrations, builds the ledger services, registers
+//! `dyn LedgerClientV1` in `ClientHub`, and prepares the REST state. The
+//! stateful lifecycle drives reconciliation and maintenance jobs under a
+//! cancellation token and shuts them down cooperatively.
 
 use std::sync::Arc;
 use std::time::Duration;
