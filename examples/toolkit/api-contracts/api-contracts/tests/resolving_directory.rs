@@ -17,9 +17,8 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use axum::Router;
 use uuid::Uuid;
 
@@ -28,10 +27,11 @@ use api_contracts_sdk::models::{ChargeRequest, PaymentStatus};
 use api_contracts_sdk::rest::PaymentApiRestResolvingClient;
 
 use toolkit::api::OpenApiRegistryImpl;
+use toolkit::discovery::DirectoryEndpointResolver;
 use toolkit::{DirectoryClient, Endpoint, GearInstance, GearManager, LocalDirectoryClient};
 use toolkit_canonical_errors::CanonicalError;
 use toolkit_contract::policy::PolicyStack;
-use toolkit_contract::runtime::resolving::{EndpointResolver, ResolveError};
+use toolkit_contract::runtime::resolving::EndpointResolver;
 use toolkit_contract::wiring::ClientTuning;
 use toolkit_security::SecurityContext;
 
@@ -41,29 +41,12 @@ use cf_api_contracts::domain::service::PaymentDomainService;
 
 const PROVIDER_GEAR: &str = "api-contracts";
 
-/// Adapts a [`DirectoryClient`] into the contract layer's [`EndpointResolver`].
-/// This is the seam the host runtime will provide in Phase 2; here it lives in
-/// the test to prove the wiring end-to-end.
-struct DirectoryResolver(Arc<dyn DirectoryClient>);
-
-#[async_trait]
-impl EndpointResolver for DirectoryResolver {
-    async fn resolve_endpoint(&self, gear: &str) -> Result<Option<String>, ResolveError> {
-        // The in-process `LocalDirectoryClient` returns an error only when no
-        // live instance is registered, so map that to `Ok(None)` (not-ready)
-        // rather than a directory-backend failure. A real out-of-process
-        // adapter would distinguish "not found" from transport errors here.
-        Ok(self
-            .0
-            .resolve_rest_service(gear)
-            .await
-            .ok()
-            .map(|ep| ep.uri))
-    }
-}
-
 /// Spin up a live `PaymentApi` HTTP server on an ephemeral port.
-async fn start_server() -> SocketAddr {
+///
+/// Returns the address plus a shutdown handle: dropping the sender stops the
+/// server, which is how a test models a pod actually going away rather than
+/// merely being deregistered from the directory.
+async fn start_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
     let svc = Arc::new(PaymentDomainService::new());
     let local: Arc<dyn PaymentApi> =
         Arc::new(PaymentLocalClient::new(svc, Arc::new(PolicyStack::new())));
@@ -80,10 +63,18 @@ async fn start_server() -> SocketAddr {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        drop(
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    // Err means the sender was dropped, which is also a stop.
+                    drop(rx.await);
+                })
+                .await,
+        );
     });
-    addr
+    (addr, tx)
 }
 
 /// Register `addr` as a healthy REST instance of `PROVIDER_GEAR` and return its id.
@@ -98,8 +89,13 @@ fn register_provider(mgr: &GearManager, addr: SocketAddr) -> Uuid {
 }
 
 fn resolving_client(mgr: &Arc<GearManager>) -> PaymentApiRestResolvingClient {
+    // The production adapter, not a test stand-in. An earlier version of this
+    // test wrapped the directory in a resolver that mapped *every* failure to
+    // `Ok(None)`, which is the opposite of what production did at the time —
+    // so the tests passed while the shipped path classified every unregistered
+    // provider as a directory outage.
     let dir: Arc<dyn DirectoryClient> = Arc::new(LocalDirectoryClient::new(Arc::clone(mgr)));
-    let resolver: Arc<dyn EndpointResolver> = Arc::new(DirectoryResolver(dir));
+    let resolver: Arc<dyn EndpointResolver> = Arc::new(DirectoryEndpointResolver::new(dir));
     PaymentApiRestResolvingClient::new(resolver, PROVIDER_GEAR, ClientTuning::default())
 }
 
@@ -126,7 +122,7 @@ async fn unresolved_when_provider_not_registered() {
 #[tokio::test]
 async fn resolves_and_calls_live_provider() {
     let mgr = Arc::new(GearManager::new());
-    let addr = start_server().await;
+    let (addr, _server) = start_server().await;
     register_provider(&mgr, addr);
 
     let client = resolving_client(&mgr);
@@ -143,7 +139,7 @@ async fn recovers_after_provider_vanishes_and_returns() {
     let mgr = Arc::new(GearManager::new());
 
     // Provider A is up and registered.
-    let addr_a = start_server().await;
+    let (addr_a, server_a) = start_server().await;
     let id_a = register_provider(&mgr, addr_a);
 
     let client = resolving_client(&mgr);
@@ -156,8 +152,15 @@ async fn recovers_after_provider_vanishes_and_returns() {
         PaymentStatus::Pending,
     );
 
-    // Provider A's pod vanishes: deregistered from the directory.
+    // Provider A's pod vanishes: deregistered *and* the socket goes away.
+    // Stopping the server matters — `DirectoryEndpointResolver` memoizes a
+    // successful resolution for its TTL, so for a short window the client still
+    // holds A's address. If A were still listening it would keep answering, and
+    // this test would be asserting on a scenario that cannot happen in
+    // production.
     mgr.deregister(PROVIDER_GEAR, id_a);
+    drop(server_a);
+
     let err = client
         .charge(SecurityContext::anonymous(), charge_req())
         .await
@@ -167,10 +170,15 @@ async fn recovers_after_provider_vanishes_and_returns() {
         "expected ServiceUnavailable after provider vanished, got {err:?}"
     );
 
-    // A fresh instance appears on a different endpoint: the same client (same
-    // ClientHub Arc, in real wiring) re-resolves, rebuilds, and recovers.
-    let addr_b = start_server().await;
+    // A fresh instance appears on a different endpoint. Recovery is bounded by
+    // the resolver's memoization window rather than being instant: the cache
+    // holds only successful resolutions and is not invalidated by a failed
+    // call, so A's dead address is handed out until the entry ages out. That is
+    // the documented self-heal behaviour (`DirectoryEndpointResolver::TTL`).
+    let (addr_b, _server_b) = start_server().await;
     register_provider(&mgr, addr_b);
+    tokio::time::sleep(DirectoryEndpointResolver::TTL + Duration::from_millis(100)).await;
+
     assert_eq!(
         client
             .charge(SecurityContext::anonymous(), charge_req())

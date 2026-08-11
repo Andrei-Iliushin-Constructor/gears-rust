@@ -41,7 +41,11 @@ pub struct DirectoryEndpointResolver {
 
 impl DirectoryEndpointResolver {
     /// Memoization window for successful resolutions.
-    const TTL: std::time::Duration = std::time::Duration::from_millis(1500);
+    ///
+    /// Public because it bounds observable behaviour: a provider that moves is
+    /// followed within roughly this window, not instantly, since the cache
+    /// holds only successes and is not invalidated by a failed call.
+    pub const TTL: std::time::Duration = std::time::Duration::from_millis(1500);
 
     /// Wrap a [`DirectoryClient`] with a short-TTL resolution cache.
     #[must_use]
@@ -142,7 +146,7 @@ impl EndpointResolver for StaticEndpointResolver {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireOutcome {
     /// A compile-time (in-process) impl was already registered — it won the
-    /// `hub.try_get` short-circuit; no remote binding was created.
+    /// `hub.try_get_local` short-circuit; no remote binding was created.
     Local,
     /// A directory-resolving REST client was registered; its endpoint is
     /// resolved lazily/at readiness-probe time.
@@ -155,11 +159,18 @@ pub enum WireOutcome {
 /// `wire` is a non-capturing `fn` (the provider gear name is inlined into the
 /// generated body). It must:
 ///   1. short-circuit returning [`WireOutcome::Local`] if a compile-time (local)
-///      impl is already registered (`hub.try_get::<dyn Trait>().is_some()`), so
-///      in-process providers win;
+///      impl is already registered (`hub.try_get_local::<dyn Trait>().is_some()`),
+///      so in-process providers win;
 ///   2. otherwise register a directory-resolving REST client under the contract
-///      trait (using the supplied [`EndpointResolver`]) and return
-///      [`WireOutcome::Remote`].
+///      trait via [`ClientHub::register_remote_proxy`] (using the supplied
+///      [`EndpointResolver`]) and return [`WireOutcome::Remote`].
+///
+/// Step 1 must use `try_get_local`, not `try_get`. The hub is keyed by type, so
+/// when two consumers in one process depend on the same contract the second to
+/// wire would find the first one's proxy under `try_get`, report `Local`, and
+/// have its dependency marked readiness-resolved — flipping `/readyz` to 200
+/// while the provider is still absent. `register_remote_proxy` is what makes
+/// that distinction visible to the hub.
 pub struct ConsumerRegistration {
     /// Gear that declares the dependency (diagnostics).
     pub owner_gear: &'static str,
@@ -253,6 +264,143 @@ mod tests {
                 .resolve_endpoint("billing")
                 .await
                 .unwrap(),
+            None
+        );
+    }
+
+    /// Answers every lookup with a caller-chosen failure, so the resolver's
+    /// two error branches can be told apart.
+    struct FailingDirectory {
+        make_error: fn(&str) -> anyhow::Error,
+    }
+
+    #[async_trait]
+    impl DirectoryClient for FailingDirectory {
+        async fn resolve_grpc_service(&self, _: &str) -> anyhow::Result<ServiceEndpoint> {
+            unimplemented!()
+        }
+        async fn resolve_rest_service(&self, gear: &str) -> anyhow::Result<ServiceEndpoint> {
+            Err((self.make_error)(gear))
+        }
+        async fn get_openapi_spec(&self, _: &str) -> anyhow::Result<String> {
+            unimplemented!()
+        }
+        async fn list_instances(&self, _: &str) -> anyhow::Result<Vec<ServiceInstanceInfo>> {
+            unimplemented!()
+        }
+        async fn register_instance(&self, _: RegisterInstanceInfo) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn deregister_instance(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn send_heartbeat(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn not_found_sentinel_resolves_to_ok_none() {
+        // "The provider has not registered yet" is a routine startup condition,
+        // not a failure: it must come back as `Ok(None)` so the readiness probe
+        // logs it at `debug` and the resolving client reports `Unresolved`
+        // rather than warning on every call.
+        let dir = Arc::new(FailingDirectory {
+            make_error: |gear| DirectoryNotFound::new(format!("gear {gear}")).into(),
+        });
+        let resolver = DirectoryEndpointResolver::new(dir);
+
+        assert_eq!(resolver.resolve_endpoint("billing").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn backend_failure_resolves_to_err() {
+        // Anything that is not the sentinel is a genuine directory outage and
+        // must stay an error, so a stuck 503 has a diagnostic trail.
+        let dir = Arc::new(FailingDirectory {
+            make_error: |_| anyhow::anyhow!("connection refused"),
+        });
+        let resolver = DirectoryEndpointResolver::new(dir);
+
+        assert!(resolver.resolve_endpoint("billing").await.is_err());
+    }
+
+    /// Mirrors the body `#[toolkit::consumes]` generates, so the wiring
+    /// contract is exercised without going through `inventory` (which is
+    /// link-time global and cannot hold two registrations built by a test).
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "mirrors the fallible signature of ConsumerRegistration::wire so the test \
+                  exercises the same shape the macro emits"
+    )]
+    fn generated_wire_body<C>(hub: &ClientHub, proxy: Arc<C>) -> anyhow::Result<WireOutcome>
+    where
+        C: ?Sized + Send + Sync + 'static,
+    {
+        if hub.try_get_local::<C>().is_some() {
+            return Ok(WireOutcome::Local);
+        }
+        if hub.has_remote_proxy::<C>() {
+            return Ok(WireOutcome::Remote);
+        }
+        hub.register_remote_proxy::<C>(proxy);
+        Ok(WireOutcome::Remote)
+    }
+
+    trait Payments: Send + Sync {}
+    struct PaymentsProxy;
+    impl Payments for PaymentsProxy {}
+    struct PaymentsLocal;
+    impl Payments for PaymentsLocal {}
+
+    #[test]
+    fn two_consumers_of_one_contract_both_report_remote() {
+        // Two gears in one process consuming the same contract from the same
+        // provider. Whichever wires second used to find the first one's proxy,
+        // conclude the dependency was local, and get it marked
+        // readiness-resolved — with both registrations sharing a `dep_gear`,
+        // that flipped the very entry the unresolved remote dep was gating on,
+        // and `/readyz` went green with no provider up.
+        let hub = ClientHub::new();
+
+        let first =
+            generated_wire_body::<dyn Payments>(&hub, Arc::new(PaymentsProxy)).unwrap();
+        let second =
+            generated_wire_body::<dyn Payments>(&hub, Arc::new(PaymentsProxy)).unwrap();
+
+        assert_eq!(first, WireOutcome::Remote);
+        assert_eq!(
+            second, WireOutcome::Remote,
+            "the second consumer must still gate readiness, not short-circuit to Local"
+        );
+    }
+
+    #[test]
+    fn a_genuine_local_impl_still_wins() {
+        // The short-circuit must keep working for its actual purpose: a
+        // co-located provider registered during init means no HTTP hop and no
+        // readiness gate.
+        let hub = ClientHub::new();
+        hub.register::<dyn Payments>(Arc::new(PaymentsLocal));
+
+        let outcome =
+            generated_wire_body::<dyn Payments>(&hub, Arc::new(PaymentsProxy)).unwrap();
+
+        assert_eq!(outcome, WireOutcome::Local);
+    }
+
+    #[tokio::test]
+    async fn local_directory_client_not_found_reaches_the_resolver_as_ok_none() {
+        // End-to-end over the real in-process client rather than a stub: this
+        // is the pairing that was broken (the client returned a bare `anyhow`,
+        // so the resolver could never produce `Ok(None)`).
+        let dir = Arc::new(crate::directory::LocalDirectoryClient::new(Arc::new(
+            crate::runtime::GearManager::new(),
+        )));
+        let resolver = DirectoryEndpointResolver::new(dir);
+
+        assert_eq!(
+            resolver.resolve_endpoint("never-registered").await.unwrap(),
             None
         );
     }

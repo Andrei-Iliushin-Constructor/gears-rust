@@ -195,8 +195,19 @@ pub fn generate(attr: &ConsumesAttr, item: &ItemStruct) -> SynResult<TokenStream
             // A compile-time (local) impl already registered wins — Profile 1.
             // Report `Local` so the runtime treats the dep as readiness-resolved
             // without a directory lookup.
-            if __hub.try_get::<dyn #contract_path>().is_some() {
+            //
+            // `try_get_local` rather than `try_get`: the hub is keyed by type,
+            // so a proxy registered by another consumer of the same contract in
+            // this process would otherwise look exactly like a local impl and
+            // wrongly mark the dependency resolved.
+            if __hub.try_get_local::<dyn #contract_path>().is_some() {
                 return ::std::result::Result::Ok(::toolkit::discovery::WireOutcome::Local);
+            }
+            // Another consumer of this contract already wired a proxy: reuse it
+            // rather than building a second identical one, but still report
+            // `Remote` so this dependency gates readiness like any other.
+            if __hub.has_remote_proxy::<dyn #contract_path>() {
+                return ::std::result::Result::Ok(::toolkit::discovery::WireOutcome::Remote);
             }
             // Otherwise register the directory-resolving REST client. `tuning`
             // is `Default::default()` (inferred as `ClientTuning`).
@@ -205,7 +216,7 @@ pub fn generate(attr: &ConsumesAttr, item: &ItemStruct) -> SynResult<TokenStream
                 #from,
                 ::core::default::Default::default(),
             );
-            __hub.register::<dyn #contract_path>(::std::sync::Arc::new(__client));
+            __hub.register_remote_proxy::<dyn #contract_path>(::std::sync::Arc::new(__client));
             ::std::result::Result::Ok(::toolkit::discovery::WireOutcome::Remote)
         }
 

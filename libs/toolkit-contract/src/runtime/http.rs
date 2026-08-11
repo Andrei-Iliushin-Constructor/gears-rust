@@ -272,19 +272,21 @@ mod tests {
             Some("status=paid&currency=USD"),
         )
         .unwrap();
-        assert_eq!(
-            url,
-            "https://x.example/api/list?status=paid&currency=USD"
-        );
+        assert_eq!(url, "https://x.example/api/list?status=paid&currency=USD");
     }
 
     #[test]
     fn omits_the_separator_for_an_empty_query() {
         let b = binding("/list", vec![]);
         for query in [None, Some("")] {
-            let url =
-                build_request_url("https://x.example", "/api", &b, &serde_json::json!({}), query)
-                    .unwrap();
+            let url = build_request_url(
+                "https://x.example",
+                "/api",
+                &b,
+                &serde_json::json!({}),
+                query,
+            )
+            .unwrap();
             assert_eq!(url, "https://x.example/api/list", "query = {query:?}");
         }
     }
@@ -382,9 +384,14 @@ mod tests {
                 param: "id".into(),
             }],
         );
-        let err =
-            build_request_url("https://x.example", "/api", &b, &serde_json::json!({}), None)
-                .unwrap_err();
+        let err = build_request_url(
+            "https://x.example",
+            "/api",
+            &b,
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, TransportError::UrlBuild(_)));
     }
 }

@@ -155,7 +155,10 @@ fn check_query_params(model: &RestContractModel) -> Option<TokenStream> {
             let wrapper = format!("{}Query", to_pascal_case(&method_name.to_string()));
             let derive_line =
                 "#[derive(serde::Serialize, serde::Deserialize, toolkit_contract::QueryParams)]";
-            let struct_line = format!("pub struct {wrapper} {{ pub {param_name}: {} }}", quote!(#ty));
+            let struct_line = format!(
+                "pub struct {wrapper} {{ pub {param_name}: {} }}",
+                quote!(#ty)
+            );
             let msg = format!(
                 "rest_contract: query parameter `{param_name}` on method `{method_name}` is a \
                  bare scalar. A query string deserializes as a map at the top level, so this \
