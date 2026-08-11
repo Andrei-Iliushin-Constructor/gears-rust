@@ -9,6 +9,117 @@ release-plz updates this file in the Release PR.
 
 ## [Unreleased]
 
+## [0.1.0](https://github.com/constructorfabric/gears-rust/releases/tag/cf-gears-event-broker-v0.1.0) - 2026-08-11
+
+### Added
+
+- *(event-broker)* scaffold deployment-topology skeleton ([#4343](https://github.com/constructorfabric/gears-rust/pull/4343)) (by @striped-zebra-dev)
+
+### Fixed
+
+- *(event-broker)* drop comment-only files that fail cargo-shear (by @capybutler)
+
+### Contributors
+
+* @capybutler
+* @striped-zebra-dev
+
+## [0.1.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-event-broker-sdk-v0.1.1...cf-gears-event-broker-sdk-v0.1.2) - 2026-08-11
+
+### Fixed
+
+- fix(nightly): (by @MikeFalcon77) - #4446
+
+### Other
+
+- Merge pull request #4421 from maurolacy/fix/clippy-lints (by @MikeFalcon77) - #4421
+- *(event-broker)* Extract test-util-only helpers into dedicated module
+- *(event-broker)* gate helpers behind test-util (by @fluiderson)
+
+### Contributors
+
+* @MikeFalcon77
+* @fluiderson
+
+## [0.1.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-llm-gateway-sdk-v0.1.1...cf-gears-llm-gateway-sdk-v0.1.2) - 2026-08-11
+
+### Other
+
+- release (by @github-actions[bot]) - #4449
+- release (by @github-actions[bot]) - #4394
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.5](https://github.com/constructorfabric/gears-rust/compare/cf-gears-noop-usage-collector-plugin-v0.1.4...cf-gears-noop-usage-collector-plugin-v0.1.5) - 2026-08-11
+
+### Other
+
+- release (by @github-actions[bot]) - #4394
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.3](https://github.com/constructorfabric/gears-rust/compare/cf-gears-oidc-authn-plugin-v0.2.2...cf-gears-oidc-authn-plugin-v0.2.3) - 2026-08-11
+
+### Other
+
+- release (by @github-actions[bot]) - #4394
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.0](https://github.com/constructorfabric/gears-rust/compare/cf-gears-cluster-conformance-v0.1.3...cf-gears-cluster-conformance-v0.2.0) - 2026-08-11
+
+### Added
+
+- *(cluster)* implement Postgres cluster plugin (by @asmith987)
+
+### Other
+
+- release (by @github-actions[bot]) - #4394
+
+### Contributors
+
+* @github-actions[bot]
+* @asmith987
+
+## [0.1.4](https://github.com/constructorfabric/gears-rust/compare/cf-gears-cluster-v0.1.3...cf-gears-cluster-v0.1.4) - 2026-08-11
+
+### Added
+
+- *(cluster)* implement Postgres cluster plugin (by @asmith987)
+
+### Other
+
+- release (by @github-actions[bot]) - #4449
+- release (by @github-actions[bot]) - #4428
+- release (by @github-actions[bot]) - #4394
+- *(cluster)* cover per-primitive routing and sd_poll wiring (by @asmith987)
+
+### Contributors
+
+* @github-actions[bot]
+* @asmith987
+
+## [0.1.0](https://github.com/constructorfabric/gears-rust/releases/tag/cf-postgres-cluster-plugin-v0.1.0) - 2026-08-11
+
+### Added
+
+- *(cluster)* implement Postgres cluster plugin (by @asmith987)
+
+### Other
+
+- *(cluster)* arbitrate locks by row, not one connection per lock (by @asmith987)
+- *(cluster)* cover per-primitive routing and sd_poll wiring (by @asmith987)
+
+### Contributors
+
+* @asmith987
+
 ## [0.1.6](https://github.com/constructorfabric/gears-rust/compare/cf-gears-standalone-cluster-plugin-v0.1.5...cf-gears-standalone-cluster-plugin-v0.1.6) - 2026-08-11
 
 ### Other
