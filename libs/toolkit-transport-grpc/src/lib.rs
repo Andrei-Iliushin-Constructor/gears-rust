@@ -35,7 +35,12 @@ pub const PROBLEM_TRUNCATED_HEADER: &str = "x-toolkit-problem-truncated";
 /// the trailer is base64-encoded over the wire (~4/3 expansion), and other
 /// trailers (auth, request-id, secctx) share the same frame budget. 4 KiB
 /// of pre-base64 JSON leaves headroom on all three axes.
-pub const MAX_PROBLEM_TRAILER_BYTES: usize = 8192;
+///
+/// This cap is measured on the JSON *before* base64, which is what makes the
+/// 4 KiB figure the right one: at 8 KiB the encoded trailer alone is ~10.9 KiB
+/// and overruns the frame ceiling, so the peer drops the metadata and the error
+/// envelope is lost entirely — the opposite of what truncating is for.
+pub const MAX_PROBLEM_TRAILER_BYTES: usize = 4096;
 
 use secrecy::{ExposeSecret, SecretString};
 use tonic::Status;

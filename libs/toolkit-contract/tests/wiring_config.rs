@@ -139,6 +139,26 @@ mod runtime_conversion {
     }
 
     #[test]
+    fn tuning_can_require_tls() {
+        // A wired client forwards the tenant bearer token over whatever scheme
+        // the endpoint uses, so a deployment talking outside a trusted boundary
+        // needs a way to demand TLS. Without this knob the wiring always got
+        // the permissive default.
+        let w = parse(
+            r#"{
+                "transport": "rest",
+                "endpoint": "https://x",
+                "require_tls": true
+            }"#,
+        )
+        .unwrap();
+        let ClientWiring::Rest { endpoint, tuning } = w else {
+            unreachable!()
+        };
+        assert!(tuning.apply_to(endpoint).require_tls);
+    }
+
+    #[test]
     fn tuning_apply_with_no_overrides_keeps_defaults() {
         let w = parse(r#"{"transport": "rest", "endpoint": "https://y"}"#).unwrap();
         let ClientWiring::Rest { endpoint, tuning } = w else {

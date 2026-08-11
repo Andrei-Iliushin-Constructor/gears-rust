@@ -28,6 +28,15 @@ pub struct ClientTuning {
     /// Override for the SSE-stream reconnect policy.
     #[serde(default)]
     pub sse_reconnect: Option<ReconnectSettings>,
+
+    /// Reject plaintext `http://` endpoints.
+    ///
+    /// Defaults to `false` (the in-mesh convention). Without this knob a
+    /// discovery-resolved client always got the default, so a consumer talking
+    /// to an endpoint outside a trusted boundary had no way to demand TLS —
+    /// while forwarding a tenant bearer token over it.
+    #[serde(default)]
+    pub require_tls: Option<bool>,
 }
 
 /// Deserializable mirror of
@@ -106,6 +115,9 @@ impl ClientTuning {
                 base_delay: s.base_delay.unwrap_or(base.base_delay),
                 max_delay: s.max_delay.unwrap_or(base.max_delay),
             });
+        }
+        if let Some(require_tls) = self.require_tls {
+            cfg = cfg.with_require_tls(require_tls);
         }
         cfg
     }

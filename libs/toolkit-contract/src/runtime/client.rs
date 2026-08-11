@@ -306,6 +306,10 @@ where
             );
             let activity = inner.activity_handle();
             let mut stream_err: Option<TransportError> = None;
+            // Whether this connection ever delivered an event. A connection that
+            // produced data was healthy, so the failure that follows it starts a
+            // fresh reconnect budget rather than continuing the previous one.
+            let mut delivered_an_event = false;
             loop {
                 // Idle timeout is *idle*: keepalive comments (and any other wire
                 // chunk that dispatches no item) still count as activity, so a
@@ -334,7 +338,10 @@ where
                     break;
                 }
                 match item {
-                    Some(Ok(v)) => yield v,
+                    Some(Ok(v)) => {
+                        delivered_an_event = true;
+                        yield v;
+                    }
                     Some(Err(e)) => {
                         stream_err = Some(e);
                         break;
@@ -357,6 +364,17 @@ where
                         break;
                     }
                 }
+            }
+
+            // A connection that delivered events was healthy, so the budget
+            // starts over. Without this, `max_attempts` is a lifetime cap rather
+            // than a burst cap: a long-lived subscription that survives N
+            // unrelated blips over days would die on the N+1st, despite the
+            // stream being advertised as indefinitely reconnecting. Resetting
+            // also restarts the backoff at its base delay, which is what you
+            // want after a healthy period rather than resuming a 30s ceiling.
+            if delivered_an_event {
+                attempt = 0;
             }
 
             match stream_err {

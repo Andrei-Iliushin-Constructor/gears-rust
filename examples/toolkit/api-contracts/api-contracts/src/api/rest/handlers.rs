@@ -17,11 +17,11 @@ use std::time::Duration;
 use api_contracts_sdk::contract::PaymentApi;
 use api_contracts_sdk::models::ListPaymentsFilter;
 use axum::Extension;
-use toolkit_contract::query::QueryParamsExtractor;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::stream::{self, StreamExt as _};
 use toolkit::api::canonical_prelude::Problem;
 use toolkit_canonical_errors::CanonicalError;
+use toolkit_contract::query::QueryParamsExtractor;
 use toolkit_security::SecurityContext;
 
 /// `GET /api-contracts/v1/payments` — SSE stream of `PaymentSummary`.

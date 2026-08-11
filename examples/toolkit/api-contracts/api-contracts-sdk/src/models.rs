@@ -188,7 +188,14 @@ impl PaymentSummary {
 /// emits the `OpenAPI` parameter list the generated route registers, keeping the
 /// spec and the wire format derived from this one declaration.
 #[derive(
-    Debug, Clone, Default, Serialize, Deserialize, JsonSchema, utoipa::ToSchema, toolkit::QueryParams,
+    Debug,
+    Clone,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    utoipa::ToSchema,
+    toolkit::QueryParams,
 )]
 #[cfg_attr(feature = "grpc-client", derive(toolkit::ProtoBridge))]
 #[cfg_attr(

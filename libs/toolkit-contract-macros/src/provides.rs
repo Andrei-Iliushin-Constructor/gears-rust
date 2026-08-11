@@ -261,6 +261,29 @@ pub fn generate(attr: &ProvidesAttr, item: &ItemStruct) -> SynResult<TokenStream
         }
     };
 
+    // The policy stack is a local-transport construct: it wraps the in-process
+    // call, and the generated REST/gRPC clients have no hook to run it through
+    // (their `new(config)` takes no policies). A `compile_error!` would be
+    // wrong — `transports = [local, rest]` with policies is legitimate, since
+    // the transport is chosen at runtime from config and the policies do apply
+    // on the local path. So warn at wiring time when the choice lands on a
+    // transport that will ignore them, rather than dropping them silently.
+    let policies_declared = attr.policies.is_some();
+    let warn_policies_ignored = |transport: &str| {
+        if policies_declared {
+            let msg = format!(
+                "contract `{contract_ident}`: `policies = [...]` is declared but the configured \
+                 `{transport}` transport does not run them - the policy stack applies to the \
+                 local (in-process) transport only"
+            );
+            quote! { ::tracing::warn!(gear = ctx.gear_name(), #msg); }
+        } else {
+            quote! {}
+        }
+    };
+    let rest_policy_warning = warn_policies_ignored("rest");
+    let grpc_policy_warning = warn_policies_ignored("grpc");
+
     // Build the match arms based on enabled transports.
     let local_arm = if enable_local {
         quote! {
@@ -287,6 +310,7 @@ pub fn generate(attr: &ProvidesAttr, item: &ItemStruct) -> SynResult<TokenStream
     let rest_arm = if enable_rest {
         quote! {
             ::toolkit_contract::wiring::ClientWiring::Rest { endpoint, tuning } => {
+                #rest_policy_warning
                 ::std::sync::Arc::new(
                     #rest_client_path::new(tuning.apply_to(endpoint))
                         .map_err(|e| ::anyhow::anyhow!(
@@ -311,6 +335,7 @@ pub fn generate(attr: &ProvidesAttr, item: &ItemStruct) -> SynResult<TokenStream
     let grpc_arm = if enable_grpc {
         quote! {
             ::toolkit_contract::wiring::ClientWiring::Grpc { endpoint, tuning } => {
+                #grpc_policy_warning
                 ::std::sync::Arc::new(
                     #grpc_client_path::connect(tuning.apply_to(endpoint)).await
                         .map_err(|e| ::anyhow::anyhow!(

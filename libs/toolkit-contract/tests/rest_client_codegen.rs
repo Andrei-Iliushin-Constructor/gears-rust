@@ -296,6 +296,57 @@ async fn reconnecting_ticks_handler(
     }
 }
 
+/// Delivers one event per connection and then drops the stream with no
+/// `event: done`, over and over, until `blips` connections have happened.
+///
+/// Models a long-lived subscription across a series of unrelated blips —
+/// rolling deploys, LB idle timeouts — each separated by a period of healthy
+/// delivery. The reconnect budget is meant to bound a *burst* of consecutive
+/// failures, not the number a stream may survive over its lifetime.
+async fn flapping_ticks_handler(
+    State(state): State<FlappingState>,
+) -> Sse<Pin<Box<dyn Stream<Item = Result<Event, std::convert::Infallible>> + Send>>> {
+    let n = state.connections.fetch_add(1, Ordering::SeqCst);
+    let event = futures_util::stream::once(async move {
+        Ok(Event::default()
+            .id(n.to_string())
+            .data(serde_json::to_string(&Tick { seq: u64::from(n) }).unwrap()))
+    });
+
+    if n + 1 >= state.blips {
+        // Last connection: finish cleanly so the stream terminates.
+        Sse::new(Box::pin(event.chain(futures_util::stream::once(async {
+            Ok(Event::default().event("done"))
+        }))))
+    } else {
+        // Deliver, then vanish without `done` — a reconnect-eligible anomaly.
+        Sse::new(Box::pin(event))
+    }
+}
+
+#[derive(Clone)]
+struct FlappingState {
+    connections: Arc<AtomicU32>,
+    blips: u32,
+}
+
+async fn start_flapping_server(blips: u32) -> (String, FlappingState) {
+    let state = FlappingState {
+        connections: Arc::new(AtomicU32::new(0)),
+        blips,
+    };
+    let app = Router::new().route(
+        "/api/demo/v1/ticks",
+        get(flapping_ticks_handler).with_state(state.clone()),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), state)
+}
+
 async fn start_reconnect_server() -> (String, ReconnectState) {
     let state = ReconnectState::default();
     let app = Router::new().route(
@@ -542,6 +593,66 @@ async fn streaming_reconnects_and_sends_last_event_id_after_doneless_disconnect(
         state.last_event_id_seen.lock().unwrap().as_deref(),
         Some("1"),
         "reconnect request must carry Last-Event-ID from the first connection"
+    );
+}
+
+/// `max_attempts` bounds a *burst* of consecutive failures, not the number a
+/// subscription may survive in total.
+///
+/// The budget used to increment on every reconnect and never reset, so a
+/// long-lived stream died on the `max_attempts + 1`-th blip no matter how much
+/// healthy traffic separated them — contradicting the indefinitely-reconnecting
+/// behaviour the streaming client advertises. Here six blips run against a
+/// budget of two: each connection delivers an event before dropping, so each
+/// failure starts a fresh budget.
+#[tokio::test]
+async fn reconnect_budget_resets_after_a_connection_delivers_events() {
+    const BLIPS: u32 = 6;
+    const MAX_ATTEMPTS: u32 = 2;
+
+    let (base_url, state) = start_flapping_server(BLIPS).await;
+    let cfg = ClientConfig::new(base_url).with_sse_reconnect(
+        toolkit_contract::runtime::config::ReconnectConfig::enabled(
+            MAX_ATTEMPTS,
+            Duration::from_millis(1),
+        ),
+    );
+    let client = DemoApiRestClient::new(cfg).unwrap();
+
+    let items: Vec<Tick> = DemoApi::ticks(&client, anonymous_ctx(), 0)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .expect("a stream that keeps delivering must not exhaust its reconnect budget");
+
+    assert_eq!(items.len(), BLIPS as usize, "one item per connection");
+    assert_eq!(state.connections.load(Ordering::SeqCst), BLIPS);
+}
+
+/// The reset must not defeat the budget's actual purpose. When a connection
+/// fails *without* delivering anything, the attempts keep accumulating and the
+/// stream gives up as configured.
+#[tokio::test]
+async fn reconnect_budget_still_caps_a_burst_with_no_progress() {
+    // No route is registered, so every attempt fails at connect time and no
+    // connection ever delivers an event.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener); // Nothing is listening: connection refused on every attempt.
+
+    let cfg = ClientConfig::new(format!("http://{addr}")).with_sse_reconnect(
+        toolkit_contract::runtime::config::ReconnectConfig::enabled(2, Duration::from_millis(1)),
+    );
+    let client = DemoApiRestClient::new(cfg).unwrap();
+
+    let results: Vec<_> = DemoApi::ticks(&client, anonymous_ctx(), 0)
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(
+        results.iter().any(std::result::Result::is_err),
+        "a burst with no progress must still exhaust the budget and surface an error"
     );
 }
 
