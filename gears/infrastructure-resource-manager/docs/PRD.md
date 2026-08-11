@@ -2124,7 +2124,16 @@ A criterion that exercises a `p2` or `p3` requirement is verified when that requ
 ### Quota Gate
 
 **71. Quota gate orders before policy and refuses actionably**
-- **Given** quota constraints configured for a scope, so that the quota gate is active
+
+Scope without quota constraints:
+
+- **Given** a scope with no quota constraints
+- **When** provisioning, modification, or a lifecycle action is requested
+- **Then** IRM MUST skip quota evaluation and continue to the remaining admission gates
+
+Scope with active quota constraints and a conforming provider:
+
+- **Given** quota constraints are active for a scope
 - **When** provisioning, modification, or a lifecycle action is requested
 - **Then** the request MUST be evaluated against quota before any change executes, and before policy when the policy gate is also active
 - **And** a denial MUST carry an actionable reason. An unavailable quota decision service MUST fail closed
@@ -2136,7 +2145,20 @@ A criterion that exercises a `p2` or `p3` requirement is verified when that requ
 - **And** concurrent admissions MUST NOT jointly exceed the quota: an admission that would exceed it while an earlier hold is still live MUST be refused
 - **And** the hold MUST NOT lapse while the operation is non-terminal: where admitted capacity is held only for a bounded term, that hold MUST be kept in force until the operation reaches a terminal state, and a hold that cannot be kept in force MUST fail closed rather than let the operation run on unheld capacity
 - **And** an unavailable provider, or a provider that cannot preserve these accounting rules, MUST fail closed
-- **And** this criterion covers `cpt-cf-infrastructure-resource-manager-fr-quota-gating` (`p2`); until a conforming quota decision provider ships (§15), the gate is inactive and this criterion is not part of first-release acceptance
+
+Interim behavior before a conforming provider ships:
+
+- **Given** no conforming quota decision provider is available (§15)
+- **When** quota configuration or admission is requested
+- **Then** IRM MUST NOT accept or activate quota constraints
+- **And** if quota constraints are nevertheless present, IRM MUST fail closed by rejecting admission
+- **And** IRM MUST NOT run the operation without quota protection
+- **And** successful quota admission and settlement scenarios remain outside first-release acceptance
+- **And** configuration rejection and runtime fail-closed behavior remain in first-release acceptance
+
+Traceability:
+
+- This criterion covers `cpt-cf-infrastructure-resource-manager-fr-quota-gating` (`p2`).
 
 ### Secret-Field Registration Gate
 
@@ -2181,7 +2203,7 @@ A criterion that exercises a `p2` or `p3` requirement is verified when that requ
 |------|--------|------------|
 | Performance at 1 M+ topology nodes unvalidated | Latency SLOs are missed at enterprise scale. The graph value proposition is void | Scale testing occurs before GA. The storage strategy decision is gated on benchmarks |
 | Event delivery substrate integration is pending | Downstream consumers do not receive domain and audit events until the binding lands | The platform event broker is the assumed transport (its ADR defines the envelope convention recorded in §2); emitter contracts stay stable so the binding lands without contract changes |
-| Deferred secret hardening (Phase 2) | While the interim gate holds, a definition parameter that carries the sensitivity flag of `cpt-cf-infrastructure-resource-manager-fr-parameters` stays outside that gate, so a sensitive parameter value can still be captured in cleartext by revisions and history. Once secret-declaring types register again, workflow payloads and retention windows carry residual exposure, and the comparison digests of `cpt-cf-infrastructure-resource-manager-fr-secret-hygiene` are not a defense against a compromise of the state store itself | Interim, until `cpt-cf-infrastructure-resource-manager-fr-secret-hygiene` (p2) ships: type registration refuses any resource type that declares secret fields (`cpt-cf-infrastructure-resource-manager-fr-type-registry`), so no type-declared secret field value enters a persisted or emitted artifact and the §8 zero-cleartext show-stopper holds for every field a type declares secret; the sensitive-parameter path named in the Impact column is the residual exposure this gate does not cover. After it ships: restrict execution-substrate access; shorten retention; envelope encryption stays in Phase 2, so schedule the Phase-2 spec |
+| Deferred secret hardening (Phase 2) | Before `cpt-cf-infrastructure-resource-manager-fr-secret-hygiene` ships, a sensitive-parameter value can be captured in cleartext by revisions and history. This exposure applies only to parameters that carry the sensitivity flag of `cpt-cf-infrastructure-resource-manager-fr-parameters`. Artifacts created during this interim can retain those values until cleanup, migration, or retention expiry. Type-declared secret fields remain behind the registration gate | Until secret hygiene ships, type registration refuses every resource type that declares secret fields (`cpt-cf-infrastructure-resource-manager-fr-type-registry`). The Phase 2 rollout MUST address retained interim sensitive-parameter cleartext before secret hygiene becomes active. It MUST remove or migrate the cleartext, or confirm its retention expiry. After secret hygiene ships, new persisted and emitted artifacts MUST exclude cleartext values for both sensitive parameters and type-declared secret fields. The treatment of historical revisions created before an ordinary field was reclassified as secret remains the open question in DESIGN §2.1. This mitigation does not claim to rewrite them. Restrict execution-substrate access and shorten retention. Envelope encryption remains in Phase 2 |
 | Specification-code drift once implementation begins | The build diverges from this PRD, and the divergence is not noticed | Every requirement is verifiable through a named criterion in §12 or the §6 testing strategy. Validate at each milestone. Route scope changes through change requests, not through code |
 | Visualization complexity at 10 k+ nodes | Unusable topology UI | Progressive loading and aggregation in the frontend design |
 | Group membership lag widens the window in which revoked access still resolves | A user removed from a group can briefly still reach its resources | The convergence bound is a stated NFR and is alertable. Drift reconciliation is the backstop |
@@ -2190,7 +2212,7 @@ A criterion that exercises a `p2` or `p3` requirement is verified when that requ
 | Adapter onboarding mutates platform authorization policy | A malicious or careless adapter package can widen access | Onboarding is restricted to tenant-wide administrative authority. Policy changes are attributable to the adapter. Packages are integrity-verified and carry an exposed trust level (`cpt-cf-infrastructure-resource-manager-fr-manifest-onboarding`) |
 | Platform type-publication path is unproven: the registration API exists, but the types-registry store is in-memory and re-seeded from the link-time inventory at each start, and decision-point use of runtime-registered permissions is undesigned | Adapter-contributed types and per-type authorization identities can vanish from the platform registry after a restart, so per-type grants stop resolving. `cpt-cf-infrastructure-resource-manager-fr-adapter-onboarding` and `cpt-cf-infrastructure-resource-manager-fr-grantable-types` depend on this path | IRM re-publishes adapter types and authorization identities from its own durable store at start-up, and again when it detects a registry epoch or version change |
 | Token Issuer is planned but not built (gear #4321, milestone 26.08) | Until it ships, the per-call adapter credentials that `cpt-cf-infrastructure-resource-manager-fr-adapter-credential` requires have no realization | Delivery is tracked against gear #4321. The §16 Token Issuer question keeps the required per-call token format on that gear's design agenda |
-| Quota-enforcement provider is specified but not built | Until it ships, the quota gate and capacity hold of `cpt-cf-infrastructure-resource-manager-fr-quota-gating` have no decision provider: no quota refusal and no capacity hold protect admission | The provider binding must preserve the PRD accounting invariant. Delivery is tracked against the quota-enforcement specification and is expected within the release window — the reason the requirement stays p2. The binding remains blocked until the provider resolves lease lifetime or renewal, partial decrement, and atomic multi-metric admission. The §13 readiness cell points here |
+| Quota-enforcement provider is specified but not built | Until a conforming provider ships, IRM cannot admit operations in a scope that has quota constraints. IRM does not accept or activate new quota constraints. If constraints are nevertheless present, IRM fails closed and rejects admission. It does not run the operation without quota protection. For a scope with no quota constraints, IRM skips quota evaluation and continues to the remaining admission gates | First-release acceptance covers rejection of quota configuration and fail-closed runtime behavior. It excludes successful quota admission and settlement. The provider binding must preserve the PRD accounting invariant. Delivery is tracked against the quota-enforcement specification and is expected within the release window — the reason the requirement stays p2. The binding remains blocked until the provider resolves lease lifetime or renewal, partial decrement, and atomic multi-metric admission. The §13 readiness cell points here |
 | Grant Issuance Service has no gear in this repository and no design documentation (§16) | The data-plane operation catalog has no consumer here, and capability grants for direct data-plane access cannot be issued | A working reference implementation exists (vhp-core) but carries no design documentation. The catalog contract (`cpt-cf-infrastructure-resource-manager-fr-data-plane-catalog`) stays stable so the service can build against it. The §16 documentation-gap item tracks closure |
 | Durable-execution substrate integration is pending | Long-running operations (apply, actions, discovery) have no durable executor until the binding lands | A durable workflow engine behind the executor plugin contract is the stated §14 assumption; the plugin contract with a no-op default keeps IRM startable without it. The §16 workflow-executor question settles the concrete engine |
 | Adapters own continuous drift detection, and the adapter drift channel is optional (§9.2) | With an adapter that skips the optional drift channel, out-of-band drift stays invisible until a manual refresh | Refresh before change windows (`cpt-cf-infrastructure-resource-manager-fr-refresh`). The adapter drift channel where the adapter offers it. Scheduled discovery sync (`cpt-cf-infrastructure-resource-manager-fr-discovery-sync`). A revisit of drift ownership is gated by the change request recorded in §16 |
