@@ -99,8 +99,8 @@ pub use registry::GearRegistry;
 
 // Re-export the macros from the proc-macro crate
 pub use toolkit_contract::{
-    ContractError, GrpcRepr, GrpcReprScalar, ProtoBridge, consumes, contract, grpc_contract,
-    provides, rest_contract,
+    ContractError, GrpcRepr, GrpcReprScalar, ProtoBridge, QueryParams, consumes, contract,
+    grpc_contract, provides, rest_contract,
 };
 pub use toolkit_macros::{ExpandVars, gear, lifecycle};
 
@@ -110,7 +110,9 @@ pub mod contract_support {
     // list minimal to avoid leaking unrelated `toolkit_contract` surface.
     #[cfg(feature = "contract-grpc-client")]
     pub use toolkit_contract::grpc;
-    pub use toolkit_contract::{contract, descriptor, error, grpc_repr, ir, policy, runtime};
+    pub use toolkit_contract::{
+        contract, descriptor, error, grpc_repr, ir, policy, query, runtime,
+    };
 }
 
 // Re-export var_expand gear so derive-generated impls resolve via ::toolkit::var_expand

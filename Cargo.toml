@@ -347,6 +347,10 @@ toml = "0.8"
 serde-saphyr = "0.0.22"
 secrecy = { version = "0.10", features = ["serde"] }
 serde_urlencoded = "0.7"
+# Query-string codec shared by the generated REST client and its server
+# extractor. Unlike `serde_urlencoded` it round-trips repeated keys into a
+# sequence, which is what makes `Vec<T>` query fields work end to end.
+serde_html_form = "0.4"
 schemars = { version = "1.2", features = ["derive", "uuid1"] }
 
 # Error handling

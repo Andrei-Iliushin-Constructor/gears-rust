@@ -13,6 +13,7 @@ mod parse;
 mod projection;
 mod proto_bridge;
 mod provides;
+mod query_params;
 mod rest_contract;
 mod rest_contract_parse;
 mod support;
@@ -90,6 +91,32 @@ pub fn consumes(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn derive_proto_bridge(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as syn::DeriveInput);
     match proto_bridge::generate(&input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// `#[derive(QueryParams)]` — mark a struct as a REST query parameter.
+///
+/// Generates `impl QueryParams`, whose `openapi_params()` describes each field
+/// for the `OpenAPI` document. The generated route registers those parameters, so
+/// the spec is derived from the same declaration that determines the wire
+/// format instead of being inferred separately.
+///
+/// Field rules, both enforced at compile time:
+/// - every field's leaf type must implement
+///   [`QueryScalar`](toolkit_contract::query::QueryScalar) — scalars,
+///   `Option<scalar>`, and `Vec<scalar>`. Nested structs are rejected: a query
+///   string is a flat key/value list and cannot represent them unambiguously.
+/// - a `Vec<..>` field must carry `#[serde(default)]`, since an empty vector
+///   emits no key and would otherwise fail to deserialize.
+///
+/// `#[serde(rename = "...")]` and `#[serde(skip)]` are honoured so the spec
+/// matches what serde actually puts on the wire.
+#[proc_macro_derive(QueryParams)]
+pub fn derive_query_params(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as syn::DeriveInput);
+    match query_params::generate(&input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }

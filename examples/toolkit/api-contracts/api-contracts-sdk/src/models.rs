@@ -182,7 +182,14 @@ impl PaymentSummary {
 }
 
 /// Filter criteria for listing payments.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, utoipa::ToSchema)]
+///
+/// `QueryParams` is what makes this usable as a REST query parameter: it
+/// checks every field against `QueryScalar` (so the struct stays flat) and
+/// emits the `OpenAPI` parameter list the generated route registers, keeping the
+/// spec and the wire format derived from this one declaration.
+#[derive(
+    Debug, Clone, Default, Serialize, Deserialize, JsonSchema, utoipa::ToSchema, toolkit::QueryParams,
+)]
 #[cfg_attr(feature = "grpc-client", derive(toolkit::ProtoBridge))]
 #[cfg_attr(
     feature = "grpc-client",
@@ -195,6 +202,10 @@ pub struct ListPaymentsFilter {
     /// Filter by currency code.
     pub currency: Option<String>,
 }
+
+// `PaymentStatus` is a unit-only enum that serializes as a plain string, so it
+// is a legitimate query-parameter value even though it is not a primitive.
+impl toolkit_contract::query::QueryScalar for PaymentStatus {}
 
 impl ListPaymentsFilter {
     /// Build a filter from optional status and currency.

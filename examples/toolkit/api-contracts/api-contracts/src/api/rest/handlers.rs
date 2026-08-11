@@ -17,7 +17,7 @@ use std::time::Duration;
 use api_contracts_sdk::contract::PaymentApi;
 use api_contracts_sdk::models::ListPaymentsFilter;
 use axum::Extension;
-use axum::extract::Query;
+use toolkit_contract::query::QueryParamsExtractor;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::stream::{self, StreamExt as _};
 use toolkit::api::canonical_prelude::Problem;
@@ -45,7 +45,10 @@ use toolkit_security::SecurityContext;
 pub async fn list_payments_handler(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<dyn PaymentApi>>,
-    Query(filter): Query<ListPaymentsFilter>,
+    // The contract layer's extractor, not `axum::extract::Query`: it decodes
+    // with the same `serde_html_form` codec the generated client encodes with,
+    // so this manual route stays wire-compatible with the generated ones.
+    QueryParamsExtractor(filter): QueryParamsExtractor<ListPaymentsFilter>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>>, CanonicalError> {
     let item_stream = svc.list_payments(ctx, filter);
 

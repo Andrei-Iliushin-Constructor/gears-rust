@@ -7,7 +7,7 @@ use bytes::Bytes;
 use futures_core::Stream;
 use http_body::Body;
 use http_body_util::BodyStream;
-use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use toolkit_canonical_errors::Problem;
 
 use crate::ir::binding::{HttpFieldBinding, HttpMethod, HttpMethodBindingIr};
@@ -66,12 +66,19 @@ where
     })
 }
 
-/// Build a fully-qualified URL by substituting path parameters and appending
-/// query parameters, returning [`TransportError`] on failure.
+/// Build a fully-qualified URL by substituting path parameters and appending a
+/// pre-encoded query string, returning [`TransportError`] on failure.
 ///
 /// `fields` is expected to be a JSON object whose keys correspond to the
 /// `field` names referenced by `method_binding.field_bindings`. Missing path
 /// parameters yield [`TransportError::UrlBuild`].
+///
+/// `query` is the already-encoded query string (no leading `?`), produced by
+/// [`crate::query::to_query_string`]. It arrives pre-encoded rather than as
+/// structured data on purpose: the server decodes it with the same
+/// `serde_html_form` codec, and routing it through this function's own
+/// serializer is what previously let the two ends disagree on `Vec` and nested
+/// shapes.
 ///
 /// # Errors
 /// Returns [`TransportError::UrlBuild`] when a required path parameter is missing,
@@ -81,9 +88,9 @@ pub fn build_request_url(
     base_path: &str,
     method_binding: &HttpMethodBindingIr,
     fields: &serde_json::Value,
+    query: Option<&str>,
 ) -> Result<String, TransportError> {
     let mut path = method_binding.path_template.clone();
-    let mut query_pairs: Vec<(String, String)> = Vec::new();
 
     for binding in &method_binding.field_bindings {
         match binding {
@@ -101,13 +108,9 @@ pub fn build_request_url(
                 let encoded = utf8_percent_encode(&value, PATH_SEGMENT).to_string();
                 path = path.replace(&format!("{{{param}}}"), &encoded);
             }
-            HttpFieldBinding::Query { field, param } => match fields.get(field) {
-                Some(value) if !value.is_null() => {
-                    flatten_query_value(param, value, &mut query_pairs);
-                }
-                _ => {}
-            },
-            HttpFieldBinding::Body => {}
+            // Query values are encoded by the caller; the binding entry stays in
+            // the IR for validation and spec generation.
+            HttpFieldBinding::Query { .. } | HttpFieldBinding::Body => {}
         }
     }
 
@@ -115,19 +118,9 @@ pub fn build_request_url(
     let base_p = base_path.trim_end_matches('/');
     let mut url = format!("{base}{base_p}{path}");
 
-    if !query_pairs.is_empty() {
+    if let Some(q) = query.filter(|q| !q.is_empty()) {
         url.push('?');
-        for (i, (key, value)) in query_pairs.iter().enumerate() {
-            if i > 0 {
-                url.push('&');
-            }
-            // Encode BOTH key and value: object/map-typed query params derive
-            // their keys from runtime JSON, so an unencoded `&`/`=` in a key
-            // would smuggle extra query parameters.
-            url.push_str(&urlencoded(key));
-            url.push('=');
-            url.push_str(&urlencoded(value));
-        }
+        url.push_str(q);
     }
 
     Ok(url)
@@ -205,31 +198,6 @@ fn field_as_string(
     }
 }
 
-fn flatten_query_value(param: &str, value: &serde_json::Value, out: &mut Vec<(String, String)>) {
-    match value {
-        serde_json::Value::Null => {}
-        serde_json::Value::String(s) => out.push((param.to_owned(), s.clone())),
-        serde_json::Value::Number(n) => out.push((param.to_owned(), n.to_string())),
-        serde_json::Value::Bool(b) => out.push((param.to_owned(), b.to_string())),
-        serde_json::Value::Array(items) => {
-            for item in items {
-                flatten_query_value(param, item, out);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            for (k, v) in map {
-                if !v.is_null() {
-                    flatten_query_value(k, v, out);
-                }
-            }
-        }
-    }
-}
-
-fn urlencoded(value: &str) -> String {
-    utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
-}
-
 fn truncate(mut s: String, max: usize) -> String {
     if s.len() > max {
         // `s` is a peer-controlled response body (arbitrary UTF-8); truncating
@@ -278,13 +246,17 @@ mod tests {
             "/api",
             &b,
             &serde_json::json!({ "id": "42" }),
+            None,
         )
         .unwrap();
         assert_eq!(url, "https://x.example/api/items/42");
     }
 
     #[test]
-    fn flattens_struct_into_query() {
+    fn appends_the_encoded_query_string() {
+        // The query arrives already encoded (by `crate::query::to_query_string`,
+        // the same codec the server decodes with); this function only joins it
+        // onto the URL.
         let b = binding(
             "/list",
             vec![HttpFieldBinding::Query {
@@ -296,37 +268,25 @@ mod tests {
             "https://x.example",
             "/api",
             &b,
-            &serde_json::json!({ "filter": { "status": "paid", "currency": "USD" } }),
+            &serde_json::json!({}),
+            Some("status=paid&currency=USD"),
         )
         .unwrap();
-        assert!(url.starts_with("https://x.example/api/list?"));
-        assert!(url.contains("status=paid"));
-        assert!(url.contains("currency=USD"));
+        assert_eq!(
+            url,
+            "https://x.example/api/list?status=paid&currency=USD"
+        );
     }
 
     #[test]
-    fn encodes_query_parameter_names() {
-        // An object-typed query field whose inner key contains `&`/`=` must be
-        // percent-encoded so it cannot smuggle extra query parameters.
-        let b = binding(
-            "/list",
-            vec![HttpFieldBinding::Query {
-                field: "filter".into(),
-                param: "filter".into(),
-            }],
-        );
-        let url = build_request_url(
-            "https://x.example",
-            "/api",
-            &b,
-            &serde_json::json!({ "filter": { "a=1&b": "x" } }),
-        )
-        .unwrap();
-        assert!(url.contains("a%3D1%26b=x"), "unexpected url: {url}");
-        assert!(
-            !url.contains("a=1&b=x"),
-            "raw key must not smuggle params: {url}"
-        );
+    fn omits_the_separator_for_an_empty_query() {
+        let b = binding("/list", vec![]);
+        for query in [None, Some("")] {
+            let url =
+                build_request_url("https://x.example", "/api", &b, &serde_json::json!({}), query)
+                    .unwrap();
+            assert_eq!(url, "https://x.example/api/list", "query = {query:?}");
+        }
     }
 
     #[test]
@@ -423,7 +383,8 @@ mod tests {
             }],
         );
         let err =
-            build_request_url("https://x.example", "/api", &b, &serde_json::json!({})).unwrap_err();
+            build_request_url("https://x.example", "/api", &b, &serde_json::json!({}), None)
+                .unwrap_err();
         assert!(matches!(err, TransportError::UrlBuild(_)));
     }
 }

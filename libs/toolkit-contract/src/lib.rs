@@ -6,6 +6,7 @@ pub mod error;
 pub mod grpc_repr;
 pub mod ir;
 pub mod policy;
+pub mod query;
 pub mod runtime;
 pub mod wiring;
 
@@ -26,8 +27,10 @@ pub use ir::{
     validate_grpc_binding, validate_http_binding,
 };
 pub use policy::{Policy, PolicyContext, PolicyStack, TracingPolicy};
+pub use query::{QueryParamSpec, QueryParams, QueryScalar};
 pub use toolkit_contract_macros::{
-    ContractError, ProtoBridge, consumes, contract, grpc_contract, provides, rest_contract,
+    ContractError, ProtoBridge, QueryParams, consumes, contract, grpc_contract, provides,
+    rest_contract,
 };
 pub use wiring::{ClientTuning, ClientWiring, ReconnectSettings, RetrySettings};
 

@@ -2908,6 +2908,7 @@ dependencies = [
  "rand 0.10.1",
  "secrecy",
  "serde",
+ "serde_html_form",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -9587,6 +9588,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "serde_html_form"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f0346d7a342ab90f405cfc08f25d15075f944f42fcabbc5eac923829fa6d228"
+dependencies = [
+ "form_urlencoded",
+ "indexmap 2.14.0",
+ "itoa",
+ "serde_core",
+ "zmij",
 ]
 
 [[package]]

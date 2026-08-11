@@ -92,12 +92,11 @@ pub fn register_manual_routes(
         .tag(API_TAG)
         .authenticated()
         .no_license_required()
-        .query_param(
-            "status",
-            false,
-            "Filter by payment status (pending|completed|failed)",
-        )
-        .query_param("currency", false, "Filter by ISO 4217 currency code")
+        // Even a hand-registered route should take its query parameters from
+        // the struct's `#[derive(QueryParams)]` rather than restating them:
+        // hand-written entries drift from the type the handler actually
+        // decodes, and this route already extracts a `ListPaymentsFilter`.
+        .query_params_from::<api_contracts_sdk::models::ListPaymentsFilter>()
         .handler(handlers::list_payments_handler)
         .sse_json::<PaymentSummary>(openapi, "SSE stream of PaymentSummary items")
         .standard_errors(openapi)

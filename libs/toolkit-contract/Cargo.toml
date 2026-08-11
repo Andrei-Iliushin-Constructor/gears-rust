@@ -42,7 +42,13 @@ otel = ["runtime-client", "toolkit-http/otel"]
 # use the SDK's own `axum`/`toolkit` deps + `OperationBuilder`/`OpenApiRegistry`; this feature
 # gates nothing in `toolkit-contract` itself, so it only forwards `canonical-errors` (the wire
 # `Problem` envelope shared with the generated server error path).
-rest-server = ["canonical-errors"]
+rest-server = [
+    "canonical-errors",
+    "dep:axum",
+    # The query extractor rejects with a canonical error rendered as an RFC 9457
+    # Problem, which needs `CanonicalError: IntoResponse`.
+    "toolkit-canonical-errors/axum",
+]
 # Directory-resolving REST transport: a self-healing wrapper that resolves the
 # provider endpoint from the service directory per call and rebuilds the
 # generated REST client when the endpoint changes. Gates the generated
@@ -75,6 +81,10 @@ async-trait.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
 percent-encoding = "2"
+# Query-string codec. Always on: the client serializes with it and the server
+# extractor deserializes with it, and the whole point is that both ends use the
+# same one.
+serde_html_form.workspace = true
 
 toolkit-http = { workspace = true, optional = true }
 http-body = { workspace = true, optional = true }
@@ -89,6 +99,11 @@ tonic = { workspace = true, features = ["transport"], optional = true }
 toolkit-security = { workspace = true, optional = true }
 toolkit-transport-grpc = { workspace = true, optional = true }
 toolkit-canonical-errors = { workspace = true, optional = true }
+# Needed by the generated server routes' query extractor (feature `rest-server`),
+# which is a real `FromRequestParts` so a malformed query string is rejected
+# before the handler runs — and rejected as an RFC 9457 Problem, like every
+# other error the generated server produces.
+axum = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

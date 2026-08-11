@@ -213,17 +213,34 @@ impl OpenApiRegistryImpl {
                     "boolean" => SchemaType::Type(utoipa::openapi::schema::Type::Boolean),
                     _ => SchemaType::Type(utoipa::openapi::schema::Type::String),
                 };
-                let schema = Schema::Object(ObjectBuilder::new().schema_type(schema_type).build());
+                let item_object = ObjectBuilder::new().schema_type(schema_type).build();
 
-                let param = ParameterBuilder::new()
+                let mut builder = ParameterBuilder::new()
                     .name(&p.name)
                     .parameter_in(in_)
                     .required(required)
-                    .description(p.description.clone())
-                    .schema(Some(schema))
-                    .build();
+                    .description(p.description.clone());
 
-                op = op.parameter(param);
+                if p.array {
+                    // `style: form, explode: true` is the repeated-key encoding
+                    // (`?tag=a&tag=b`). Spelling it out matters: the OpenAPI
+                    // default for a query array is `form` with `explode: true`,
+                    // but generators differ on whether they assume it, and the
+                    // wire format has to be unambiguous for a client written
+                    // against this spec to interoperate.
+                    builder = builder
+                        .style(Some(utoipa::openapi::path::ParameterStyle::Form))
+                        .explode(Some(true))
+                        .schema(Some(Schema::Array(
+                            utoipa::openapi::schema::ArrayBuilder::new()
+                                .items(item_object)
+                                .build(),
+                        )));
+                } else {
+                    builder = builder.schema(Some(Schema::Object(item_object)));
+                }
+
+                op = op.parameter(builder.build());
             }
 
             // Request body
@@ -725,6 +742,7 @@ mod tests {
                 required: true,
                 description: Some("User ID".to_owned()),
                 param_type: "string".to_owned(),
+                array: false,
             }],
             request_body: None,
             responses: vec![ResponseSpec {
