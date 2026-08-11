@@ -231,7 +231,6 @@ impl cluster_sdk::ClusterMetrics for ResetCounter {
     fn lock_op(&self, _op: &str, _result: &str) {}
     fn lock_op_duration(&self, _op: &str, _seconds: f64) {}
     fn leader_transition(&self, _transition: &str) {}
-    fn discovery_op(&self, _op: &str, _result: &str) {}
     fn watch_reset(&self, _primitive: &str) {
         self.0.fetch_add(1, Ordering::Relaxed);
     }

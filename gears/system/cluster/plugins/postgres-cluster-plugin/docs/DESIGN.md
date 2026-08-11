@@ -27,7 +27,7 @@
   - [5.2 TTL Enforcement](#52-ttl-enforcement)
   - [5.3 Blocking lock()](#53-blocking-lock)
   - [5.4 PgBouncer Constraint](#54-pgbouncer-constraint)
-- [6. Leader Election and Service Discovery](#6-leader-election-and-service-discovery)
+- [6. Leader Election](#6-leader-election)
 - [7. Configuration](#7-configuration)
 - [8. Observability](#8-observability)
 - [9. ProviderErrorKind Mapping](#9-providererrorkind-mapping)
@@ -39,7 +39,7 @@
 
 ## 1. Overview
 
-`cf-postgres-cluster-plugin` is the Postgres backend plugin for the cluster gear. It provides a native `ClusterCacheBackend` over a `sqlx::PgPool` and a native `DistributedLockBackend` over a `cluster_lock` lease row, with a single per-instance advisory lock retained purely as a liveness beacon (§5.1). Leader election and service discovery are derived from the SDK default backends over the Postgres cache — no additional tables or connections are required for those two primitives.
+`cf-postgres-cluster-plugin` is the Postgres backend plugin for the cluster gear. It provides a native `ClusterCacheBackend` over a `sqlx::PgPool` and a native `DistributedLockBackend` over a `cluster_lock` lease row, with a single per-instance advisory lock retained purely as a liveness beacon (§5.1). Leader election is derived from the SDK default backend over the Postgres cache — no additional tables or connections are required for that primitive.
 
 The plugin is the recommended deployment for **multi-instance, no-K8s** environments (DESIGN §4.2): Postgres is already deployed in every Gears environment, zero new infrastructure is required, and a conditional upsert under `synchronous_commit = on` gives ACID-correct mutual exclusion without a distributed lock service.
 
@@ -59,9 +59,8 @@ The plugin satisfies `cpt-cf-clst-component-plugins` for the Postgres backend. I
 | `ClusterCacheBackend` | Native — `cluster_cache` table + LISTEN/NOTIFY | `Linearizable` | `prefix_watch: false` (LISTEN channel is key-exact; `watch_prefix` returns `Unsupported`) |
 | `LeaderElectionBackend` | SDK default `CasBasedLeaderElectionBackend` over Postgres cache | Inherits cache — `linearizable: true` | — |
 | `DistributedLockBackend` | Native — the `cluster_lock` lease row as sole arbiter, plus one per-instance advisory lock as a liveness beacon (§5.1). Independently routable via `lock: { provider: postgres }` (§3.5), with its own pool/config — not required to be paired with the postgres cache provider | `linearizable: true` | — |
-| `ServiceDiscoveryBackend` | SDK default `CacheBasedServiceDiscoveryBackend` over Postgres cache | — | `metadata_pushdown: false` |
 
-`prefix_watch: false` means that consumers requiring `CacheCapability::PrefixWatch` cannot bind this backend without the polyfill. The service-discovery default backend uses `watch_prefix` internally and therefore falls back to `PollingPrefixWatch` on a prefix-watch-incapable cache; the wiring crate enables this fallback automatically (see §6).
+`prefix_watch: false` means that consumers requiring `CacheCapability::PrefixWatch` cannot bind this backend without the polyfill. A consumer that needs prefix-watch semantics over this cache wraps it in `PollingPrefixWatch` (ADR-010), which synthesizes them over `scan_prefix`.
 
 ## 2. Domain Model
 
@@ -326,7 +325,7 @@ A connection on which `SET synchronous_commit = on` fails (e.g. insufficient pri
 
 The cluster wiring crate (`cf-gears-cluster`) already implements config-driven per-primitive routing (`cpt-cf-clst-fr-routing-per-primitive`) — `cluster/src/wiring.rs`'s `ClusterWiring::from_config` dispatches a profile's `lock` binding through `ProviderRegistry::lock_provider(name)` and calls `ClusterLockProvider::build_lock` if a provider is registered under that name, completely independently of whichever provider serves that profile's `cache`. That mechanism is real and already works; what's been missing is a plugin that registers something under `lock_provider("postgres")`. This plugin now does, via a second, independent provider trait implementation.
 
-**`PostgresLockProvider`** implements `ClusterLockProvider` (`provider() -> "postgres"`). Its `build_lock(options)` deserializes `options` into `PostgresLockConfig` — a config type scoped to only what the lock primitive needs (`connection_string`, `pool_max_size`, `pool_acquire_timeout_ms`, `schema`, `lock_reaper_interval_ms`, `lock_name_cardinality_warn_threshold`, `pgbouncer_transaction_mode`, `replication_mode`; no `cache_reaper_interval_ms`, `read_cache_capacity`, or `sd_poll_interval_ms` — those don't exist here since there's no cache half) — and constructs a **standalone** `PostgresLockPlugin` (§3.1: `lock/mod.rs`) with its own dedicated pool.
+**`PostgresLockProvider`** implements `ClusterLockProvider` (`provider() -> "postgres"`). Its `build_lock(options)` deserializes `options` into `PostgresLockConfig` — a config type scoped to only what the lock primitive needs (`connection_string`, `pool_max_size`, `pool_acquire_timeout_ms`, `schema`, `lock_reaper_interval_ms`, `lock_name_cardinality_warn_threshold`, `pgbouncer_transaction_mode`, `replication_mode`; no `cache_reaper_interval_ms` or `read_cache_capacity` — those don't exist here since there's no cache half) — and constructs a **standalone** `PostgresLockPlugin` (§3.1: `lock/mod.rs`) with its own dedicated pool.
 
 **Always standalone, never shared.** Per the SDK provider trait's own contract ("non-cache providers do not receive the cache backend" — `cluster-sdk/src/provider.rs`), `PostgresLockProvider` never attempts to detect or reuse a pool from a co-located `cache: { provider: postgres }` binding in the same profile, even when both point at the same `connection_string`. This is a deliberate simplicity/independence trade-off: sharing would couple two providers the SDK explicitly designed to be independent, and would need its own lifecycle-ownership story (which provider's `stop()` closes the shared pool?). The cost is a second small pool (default `pool_max_size: 5`) when both primitives happen to point at the same database — considered acceptable relative to the coupling avoided. An operator who wants combined cache+lock sharing one pool still has that option: bind `cache: { provider: postgres, ... }` and omit `lock` entirely, letting the omit-default auto-wrap use the SDK's `CasBasedDistributedLockBackend` over the shared cache instead of the native lock.
 
@@ -436,7 +435,7 @@ Postgres NOTIFY ──► listen_task
 - `watch(key)` → subscribe to notifications where `notified_key == key`. Returns `Ok(CacheWatch)`.
 - `watch_prefix(prefix)` → returns `Err(ClusterError::Unsupported { feature: "prefix_watch" })`. Consumers use `PollingPrefixWatch` as the polyfill (DESIGN §3.12).
 
-`features().prefix_watch` is `false`, so the capability resolver rejects `CacheCapability::PrefixWatch` at startup for this backend. The SDK-default service-discovery backend auto-selects `PollingPrefixWatch` when `prefix_watch == false` (see §6).
+`features().prefix_watch` is `false`, so the capability resolver rejects `CacheCapability::PrefixWatch` at startup for this backend. Consumers needing prefix-watch semantics use the `PollingPrefixWatch` polyfill over `scan_prefix` (ADR-010).
 
 **Empty / unrecognized payload — Reset.** The listen_task interprets `payload.is_empty()` (or any payload not matching `<event>:<key>`) as a `Reset` signal, broadcasts `CacheWatchEvent::Reset` to every active watcher, and clears all watcher subscriptions (consumers must resubscribe). This matches ADR-003's overflow mapping for Postgres. It is the fallback for a bare `NOTIFY` from an external writer or a future format — **not** the NOTIFY-queue-overflow path: overflow aborts the committing *producer* transaction with an error and delivers no notification. Overflow does not disconnect the listener or emit a `Reset`; it surfaces to the *writer* as that write's `Provider` error and in the PostgreSQL server logs, not through this LISTEN-side recovery.
 
@@ -662,15 +661,13 @@ SELECT l.name,
  WHERE l.expires_at > now();
 ```
 
-## 6. Leader Election and Service Discovery
+## 6. Leader Election
 
-Both primitives use SDK defaults over the Postgres cache backend.
+This primitive uses the SDK default over the Postgres cache backend.
 
 **Leader election** — `CasBasedLeaderElectionBackend::new(Arc::clone(&cache))`. The cache backend is `Linearizable`, so the consistency guard passes. `LeaderElectionFeatures::linearizable == true`.
 
-**Service discovery** — `CacheBasedServiceDiscoveryBackend::new(Arc::clone(&cache))`. The cache backend declares `prefix_watch: false`. The service-discovery default backend detects this when opening its topology watch (`ensure_maintainer`/`watch`) and falls back to `PollingPrefixWatch`, using `scan_prefix` to enumerate keys under the `svc/` prefix at each polling interval; `discover` additionally reconciles from a fresh `scan_prefix` sweep on each call over a polling cache, so it reflects current backend truth rather than lagging the poll interval. The interval is configurable via the backend's `with_prefix_watch_polling` (default 5s). The operator-set `sd_poll_interval_ms` reaches it through the omit-default wiring path: the wiring reads that key from the cache binding's options (single-sourced as `cluster_sdk::provider::SD_POLL_INTERVAL_MS_OPTION`) and threads it into `with_prefix_watch_polling`, so a profile tunes its own staleness tolerance rather than inheriting the 5s default. Omitting the key — or setting it to zero — keeps that default. `ServiceDiscoveryFeatures::metadata_pushdown == false`.
-
-The wiring crate's omit-default auto-wrap (DESIGN §3.11) wires these automatically when a profile declares `cache: { provider: postgres }` and omits `leader_election` and `service_discovery`.
+The wiring crate's omit-default auto-wrap (DESIGN §3.11) wires this automatically when a profile declares `cache: { provider: postgres }` and omits `leader_election`.
 
 ## 7. Configuration
 
@@ -708,10 +705,6 @@ pub struct PostgresClusterConfig {
     /// individual sleep (§5.2). Default: 5s.
     #[serde(default = "default_lock_reaper_interval")]
     pub lock_reaper_interval_ms: u64,
-
-    /// Polling interval for the service-discovery PollingPrefixWatch. Default: 5s.
-    #[serde(default = "default_sd_poll_interval")]
-    pub sd_poll_interval_ms: u64,
 
     /// Set to true to get an InvalidConfig error at startup rather than silent
     /// mis-behaviour if the connection string points to a PgBouncer in
@@ -757,7 +750,7 @@ cluster:
         pool_max_size: 10
 ```
 
-**`PostgresLockConfig`** (standalone lock provider, §3.5) is a separate, smaller config type — it only carries the fields the lock primitive actually uses, not the cache-only ones (`cache_reaper_interval_ms`, `sd_poll_interval_ms`):
+**`PostgresLockConfig`** (standalone lock provider, §3.5) is a separate, smaller config type — it only carries the fields the lock primitive actually uses, not the cache-only ones (`cache_reaper_interval_ms`, `read_cache_capacity`):
 
 ```rust
 #[derive(Deserialize, toolkit_macros::ExpandVars)]
@@ -949,7 +942,7 @@ The variable to manage is therefore the *aggregate* notifying-transaction rate t
 
 **[Risk: PgBouncer transaction mode mis-configuration]** Silent mis-behaviour if an operator uses transaction-mode PgBouncer without the `pgbouncer_transaction_mode: true` config flag. Lock operations themselves are fine now, but the beacon is not: transaction pooling would release its advisory lock between transactions, which asserts to the fleet that this instance is dead while it still holds live locks (see §5.4). Mitigation: the startup validation flag; documentation.
 
-**[Trade-off: prefix_watch is polling-based]** `watch_prefix` is serviced by `PollingPrefixWatch`, not a native LISTEN/NOTIFY subscription. This means prefix watch events have a latency of up to the poll interval (default 5s) and the poll cost is N `get` calls per interval. Service discovery use cases that require sub-second topology change propagation should use a backend with native prefix watch (etcd, NATS).
+**[Trade-off: prefix_watch is polling-based]** `watch_prefix` is serviced by `PollingPrefixWatch`, not a native LISTEN/NOTIFY subscription. This means prefix watch events have a latency of up to the poll interval (default 5s) and the poll cost is N `get` calls per interval. Use cases that require sub-second prefix-change propagation should use a backend with native prefix watch (etcd, NATS).
 
 **[Retired: all lock operations serialize on one session]** They no longer do. Every lock statement runs on the write pool, so lock throughput is bounded by pool width like everything else, and the previous escape hatch (a set of sessions with lock-name-hash affinity) is moot. The property that motivated the single session — a held lock costing no pool connection — is unchanged and now stronger: a held lock costs no connection at all.
 
@@ -973,7 +966,7 @@ What remains open is the general case: a client-side bound on pool *statements*.
 
 **[Risk: async replication is warn-only, not enforced]** ADR-009 requires synchronous streaming replication for Postgres leader/lock safety under failover, but §3.6's `replication_mode` check only warns (`cluster.provider.replication_async`) when it detects or is told the topology is async — it never fails startup. An operator who ignores or doesn't monitor that log line can run indefinitely on an async-replicated, failover-unsafe topology. This is a deliberate choice (topology isn't always confidently detectable, and some deployments legitimately don't need HA), not an oversight — but it means this is an operational monitoring dependency, not a guarantee enforced by the plugin itself; pair the WARN log with an alert, not just a dashboard.
 
-**[Design choice: no read-path cache]** `get` is always read-through to Postgres (§4.3) — the plugin deliberately does not layer an in-process read cache in front of it. An in-process cache here would be local to each service instance, not shared across a fleet: at N instances it multiplies rather than amortizes correctness risk (each instance's cache would independently race NOTIFY-driven invalidation against concurrent reads, so different instances could transiently observe different values for the same key), while doing nothing to relieve the actual write-side bottleneck above (NOTIFY volume is driven by writers, not readers). It would also risk silently reaching the leader-election and service-discovery primitives that ride on this same cache backend (§6) specifically *because* it declares `Linearizable` consistency — caching those reads would undermine the reason this backend was chosen for them. The intended pattern is per-primitive backend selection: route a given primitive to the backend suited to its access pattern (e.g. Redis for a hot, staleness-tolerant application cache; this plugin for Postgres-backed locks/coordination), rather than asking one backend to be good at everything.
+**[Design choice: no read-path cache]** `get` is always read-through to Postgres (§4.3) — the plugin deliberately does not layer an in-process read cache in front of it. An in-process cache here would be local to each service instance, not shared across a fleet: at N instances it multiplies rather than amortizes correctness risk (each instance's cache would independently race NOTIFY-driven invalidation against concurrent reads, so different instances could transiently observe different values for the same key), while doing nothing to relieve the actual write-side bottleneck above (NOTIFY volume is driven by writers, not readers). It would also risk silently reaching the leader-election primitive that rides on this same cache backend (§6) specifically *because* it declares `Linearizable` consistency — caching those reads would undermine the reason this backend was chosen for them. The intended pattern is per-primitive backend selection: route a given primitive to the backend suited to its access pattern (e.g. Redis for a hot, staleness-tolerant application cache; this plugin for Postgres-backed locks/coordination), rather than asking one backend to be good at everything.
 
 ## 12. Open Questions
 

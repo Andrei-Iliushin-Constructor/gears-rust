@@ -3,7 +3,7 @@
 //! Two config types exist because the combined cache+lock plugin and the
 //! standalone lock-only provider (DESIGN.md §3.5) need different field sets:
 //! [`PostgresClusterConfig`] carries the cache-only fields
-//! (`cache_reaper_interval_ms`, `sd_poll_interval_ms`) that
+//! (`cache_reaper_interval_ms`, `lock_reaper_interval_ms`) that
 //! [`PostgresLockConfig`] omits. Defaults for the fields both types share are
 //! centralized in this module's `default_*` functions so the two types cannot
 //! drift (DESIGN.md §7 calls this out explicitly).
@@ -42,12 +42,6 @@ pub fn default_reaper_interval() -> u64 {
 
 /// Default TTL reaper interval for `cluster_lock`, in milliseconds. DESIGN.md §7.
 pub fn default_lock_reaper_interval() -> u64 {
-    5_000
-}
-
-/// Default polling interval for the service-discovery `PollingPrefixWatch`, in
-/// milliseconds. DESIGN.md §7.
-pub fn default_sd_poll_interval() -> u64 {
     5_000
 }
 
@@ -121,17 +115,6 @@ pub struct PostgresClusterConfig {
     #[serde(default = "default_lock_reaper_interval")]
     pub lock_reaper_interval_ms: u64,
 
-    /// Polling interval for the service-discovery `PollingPrefixWatch`, in
-    /// milliseconds. Default: 5000.
-    ///
-    /// The field name is the wiring layer's documented options-key convention
-    /// for this behavior (`cluster_sdk::provider::SD_POLL_INTERVAL_MS_OPTION`)
-    /// — `ClusterWiring::from_config`'s omit-default auto-wrap reads this key
-    /// generically off the cache provider's options to honour a non-default
-    /// cadence (PGR-D3).
-    #[serde(default = "default_sd_poll_interval")]
-    pub sd_poll_interval_ms: u64,
-
     /// Set to `true` to get an `InvalidConfig` error at startup rather than
     /// silent mis-behaviour if the connection string points to a `PgBouncer` in
     /// transaction mode. Default: `false`.
@@ -162,7 +145,6 @@ impl fmt::Debug for PostgresClusterConfig {
             .field("schema", &self.schema)
             .field("cache_reaper_interval_ms", &self.cache_reaper_interval_ms)
             .field("lock_reaper_interval_ms", &self.lock_reaper_interval_ms)
-            .field("sd_poll_interval_ms", &self.sd_poll_interval_ms)
             .field(
                 "pgbouncer_transaction_mode",
                 &self.pgbouncer_transaction_mode,
@@ -209,13 +191,12 @@ impl PostgresClusterConfig {
     /// # Errors
     /// [`ClusterError::InvalidConfig`] for an unsafe `schema`, a zero
     /// `pool_max_size`, or a zero `cache_reaper_interval_ms` /
-    /// `lock_reaper_interval_ms` / `sd_poll_interval_ms`.
+    /// `lock_reaper_interval_ms`.
     pub fn validate(&self) -> Result<(), ClusterError> {
         crate::pg_setup::validate_schema(&self.schema)?;
         reject_zero_pool_size(self.pool_max_size)?;
         reject_zero_interval(self.cache_reaper_interval_ms, "cache_reaper_interval_ms")?;
         reject_zero_interval(self.lock_reaper_interval_ms, "lock_reaper_interval_ms")?;
-        reject_zero_interval(self.sd_poll_interval_ms, "sd_poll_interval_ms")?;
         Ok(())
     }
 
@@ -236,19 +217,13 @@ impl PostgresClusterConfig {
     pub fn lock_reaper_interval(&self) -> Duration {
         Duration::from_millis(self.lock_reaper_interval_ms)
     }
-
-    /// The service-discovery polling interval as a [`Duration`].
-    #[must_use]
-    pub fn sd_poll_interval(&self) -> Duration {
-        Duration::from_millis(self.sd_poll_interval_ms)
-    }
 }
 
 /// Configuration for the standalone `PostgresLockPlugin` (DESIGN.md §3.5).
 ///
 /// A separate, smaller config type — it only carries the fields the lock
 /// primitive actually uses, not the cache-only ones
-/// (`cache_reaper_interval_ms`, `sd_poll_interval_ms`).
+/// (`cache_reaper_interval_ms`, `lock_reaper_interval_ms`).
 #[derive(Clone, Deserialize, toolkit_macros::ExpandVars)]
 #[serde(deny_unknown_fields)]
 pub struct PostgresLockConfig {

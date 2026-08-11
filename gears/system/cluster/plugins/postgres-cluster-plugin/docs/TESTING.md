@@ -74,9 +74,9 @@ Each suite goes through one shared `run_*_conformance(factory, time)` entry poin
 ```rust
 // tests/conformance.rs
 
-use cluster::defaults::{CacheBasedServiceDiscoveryBackend, CasBasedLeaderElectionBackend};
+use cluster::defaults::CasBasedLeaderElectionBackend;
 use cluster_conformance::{
-    run_cache_conformance, run_discovery_conformance, run_lock_conformance,
+    run_cache_conformance, run_lock_conformance,
     run_leader_conformance, ScenarioBackend, TimeControl,
 };
 use postgres_cluster_plugin::{PostgresClusterPlugin, PostgresLockPlugin};
@@ -142,30 +142,11 @@ async fn leader_conformance() {
     )
     .await;
 }
-
-// Service discovery is always `CacheBasedServiceDiscoveryBackend` over this
-// plugin's own Postgres cache (DESIGN.md §6); the backend auto-selects
-// `PollingPrefixWatch` internally because `prefix_watch == false` (§4.3).
-#[tokio::test]
-async fn discovery_conformance() {
-    run_discovery_conformance(
-        || async {
-            let handle = PostgresClusterPlugin::builder(test_config())
-                .build_and_start()
-                .await
-                .expect("plugin starts against test container");
-            let discovery = CacheBasedServiceDiscoveryBackend::new(handle.cache());
-            ScenarioBackend::with_teardown(discovery, async move { handle.stop().await })
-        },
-        TimeControl::Real,
-    )
-    .await;
-}
 ```
 
 Time-sensitive scenarios pass `TimeControl::Real` (a bounded real sleep), not virtual time: against this plugin's real `sqlx::PgPool` a paused/auto-advancing clock spuriously fires sqlx's own acquire timeout. In-memory/fixture callers still pass `TimeControl::Virtual`. The runner isolates each scenario into its own Postgres schema on a shared container; see the module docs in `tests/conformance.rs` for the full rationale.
 
-Before this turn, `leader_conformance`/`discovery_conformance` were missing entirely — only the cache and lock suites were wired, even though `run_leader_conformance` (`SC-LEAD-001..007`) and `run_discovery_conformance` already exist in `cluster-conformance` and this plugin exposes both primitives (SDK-default-derived, §6). There was no reason not to run them; they're added above.
+Before this turn, `leader_conformance` was missing entirely — only the cache and lock suites were wired, even though `run_leader_conformance` (`SC-LEAD-001..007`) already exists in `cluster-conformance` and this plugin exposes that primitive (SDK-default-derived, §6). There was no reason not to run it; it's added above.
 
 **Routing conformance is out of scope for this plugin.** `run_routing_conformance` does not exist in `cluster-conformance` and never will — per-primitive routing (`cpt-cf-clst-fr-routing-per-primitive`) is wiring-crate logic owned entirely by `cluster/src/wiring.rs` (`ClusterWiring::from_config` dispatching through `ProviderRegistry`), not backend logic any plugin implements or could meaningfully conformance-test in isolation. That coverage belongs to the `cluster` gear's own test suite (see `PG-LOCK-011` in §4.3 below for this plugin's one routing-adjacent integration test, which exercises the wiring crate end-to-end rather than a `cluster-conformance` entry point).
 
@@ -174,9 +155,8 @@ Before this turn, `leader_conformance`/`discovery_conformance` were missing enti
 - `CacheFeatures::prefix_watch == false` → `CacheCapability::PrefixWatch` mismatch scenario runs (expects `CapabilityNotMet`); `watch_prefix` returns `Unsupported`.
 - `LockFeatures::linearizable == true` → strong-mutual-exclusion scenario runs.
 - `LeaderElectionFeatures::linearizable == true` (inherited from the cache, §6) → `SC-LEAD-002`'s single-leader-among-contenders assertion runs, not skipped.
-- `ServiceDiscoveryFeatures::metadata_pushdown == false` → confirmed by the discovery suite.
 
-**Why `SC-SCOP-001..006` are not, and don't need to be, `cluster_conformance` functions.** The scenario catalog (`docs/scenarios/scoping.md`) marks these ☐ and `scenarios/README.md:237` lists "Scoping wrappers" as owned by `cluster-conformance`, which reads like a per-backend conformance gap. It isn't one, for this plugin or any other backend: `ScopedCacheBackend`, `ScopedDistributedLockBackend`, `ScopedLeaderElectionBackend`, and `ScopedServiceDiscoveryBackend` (`cluster-sdk/src/{cache,lock,leader,discovery}/scoped.rs`) are pure decorators — each holds an `Arc<dyn ClusterCacheBackend>` (etc.) and only ever calls the generic trait interface (`scope::apply`/`scope::strip` around a delegated call). None of them touch any backend-specific code path; the wrapped `inner` could be Postgres, standalone, or a test stub, and the prefix-apply/strip/compose logic behaves identically either way. That's exactly why each one already has its own SDK-level unit tests against a `RecordingBackend`/`RecordingCache` stub (`cluster-sdk/src/cache/scoped_tests.rs` and the inline `#[cfg(test)]` modules in `lock/scoped.rs` and `leader/scoped.rs`) — covering prefix prepend, read-path strip, and nested composition — and why `TESTING-STRATEGY.md` §3 (Layer 1) already lists "scoping round-trips" as **implemented** at that layer. Running the identical decorator logic again through `cluster_conformance` against a real Postgres container would re-exercise the same string-manipulation code already proven backend-agnostic; it would not catch anything Postgres-specific, because the decorator never reaches Postgres-specific code. (The one genuinely Postgres-specific interaction — composed scope prefixes making a key long enough to hit this plugin's 2048-byte indexed-key limit, §2.1 DESIGN.md — is already covered directly by `PG-SPEC-002`, independent of whether the long key came from scoping or anywhere else. Note the SDK caps each prefix but not their composition, so that limit is reachable through legitimate nesting.) `scenarios/README.md`'s ownership table is the one worth correcting upstream; nothing is missing from this plugin's own test plan.
+**Why `SC-SCOP-001..006` are not, and don't need to be, `cluster_conformance` functions.** The scenario catalog (`docs/scenarios/scoping.md`) marks these ☐ and `scenarios/README.md:237` lists "Scoping wrappers" as owned by `cluster-conformance`, which reads like a per-backend conformance gap. It isn't one, for this plugin or any other backend: `ScopedCacheBackend`, `ScopedDistributedLockBackend`, and `ScopedLeaderElectionBackend` (`cluster-sdk/src/{cache,lock,leader}/scoped.rs`) are pure decorators — each holds an `Arc<dyn ClusterCacheBackend>` (etc.) and only ever calls the generic trait interface (`scope::apply`/`scope::strip` around a delegated call). None of them touch any backend-specific code path; the wrapped `inner` could be Postgres, standalone, or a test stub, and the prefix-apply/strip/compose logic behaves identically either way. That's exactly why each one already has its own SDK-level unit tests against a `RecordingBackend`/`RecordingCache` stub (`cluster-sdk/src/cache/scoped_tests.rs` and the inline `#[cfg(test)]` modules in `lock/scoped.rs` and `leader/scoped.rs`) — covering prefix prepend, read-path strip, and nested composition — and why `TESTING-STRATEGY.md` §3 (Layer 1) already lists "scoping round-trips" as **implemented** at that layer. Running the identical decorator logic again through `cluster_conformance` against a real Postgres container would re-exercise the same string-manipulation code already proven backend-agnostic; it would not catch anything Postgres-specific, because the decorator never reaches Postgres-specific code. (The one genuinely Postgres-specific interaction — composed scope prefixes making a key long enough to hit this plugin's 2048-byte indexed-key limit, §2.1 DESIGN.md — is already covered directly by `PG-SPEC-002`, independent of whether the long key came from scoping or anywhere else. Note the SDK caps each prefix but not their composition, so that limit is reachable through legitimate nesting.) `scenarios/README.md`'s ownership table is the one worth correcting upstream; nothing is missing from this plugin's own test plan.
 
 ## 4. Layer 3 — Integration Tests (testcontainers)
 

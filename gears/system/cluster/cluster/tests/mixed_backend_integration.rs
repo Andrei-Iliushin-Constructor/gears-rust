@@ -23,7 +23,7 @@
 //!    different providers on two different infrastructures in one profile. This
 //!    is the closer analogue of UC-004.
 //!
-//! In both, leader election and service discovery stay on the omit-default
+//! In both, leader election stays on the omit-default
 //! auto-wrap over that profile's cache, so each profile exercises both routing
 //! modes at once.
 //!
@@ -56,7 +56,7 @@ use cluster::{ClusterConfig, ClusterWiring, ProviderRegistry};
 use cluster_sdk::cache::types::{PutRequest, Ttl};
 use cluster_sdk::{
     CacheCapability, ClusterCacheV1, ClusterError, ClusterProfile, DistributedLockV1,
-    LeaderElectionV1, ServiceDiscoveryV1,
+    LeaderElectionV1,
 };
 use postgres_cluster_plugin::{PostgresCacheProvider, PostgresLockProvider};
 use standalone_cluster_plugin::StandaloneCacheProvider;
@@ -156,7 +156,7 @@ profiles:
         .await
         .expect("a mixed-backend profile must wire against live Postgres");
 
-    // --- All four primitives resolve under the single profile (UC-004's
+    // --- All three primitives resolve under the single profile (UC-004's
     // "consumer gears see four working primitives" clause). Capability
     // validation is unchanged and still applies: requiring `Linearizable`
     // resolves only because the Postgres cache genuinely declares it
@@ -176,13 +176,6 @@ profiles:
             .resolve()
             .is_ok(),
         "leader election still rides the omit-default auto-wrap over the cache"
-    );
-    assert!(
-        ServiceDiscoveryV1::resolver(&hub)
-            .profile(EventBroker)
-            .resolve()
-            .is_ok(),
-        "service discovery still rides the omit-default auto-wrap over the cache"
     );
 
     // --- Both natively-bound backends actually work against the database.
@@ -299,13 +292,6 @@ profiles:
             .resolve()
             .is_ok(),
         "leader election rides the omit-default auto-wrap over the standalone cache"
-    );
-    assert!(
-        ServiceDiscoveryV1::resolver(&hub)
-            .profile(EventBroker)
-            .resolve()
-            .is_ok(),
-        "service discovery rides the omit-default auto-wrap over the standalone cache"
     );
 
     // The cache is in-process and knows nothing of Postgres.

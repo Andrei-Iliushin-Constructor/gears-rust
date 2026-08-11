@@ -12,7 +12,6 @@ fn cluster_config_applies_documented_defaults() {
     assert_eq!(config.schema, "public");
     assert_eq!(config.cache_reaper_interval_ms, 10_000);
     assert_eq!(config.lock_reaper_interval_ms, 5_000);
-    assert_eq!(config.sd_poll_interval_ms, 5_000);
     assert!(!config.pgbouncer_transaction_mode);
     assert_eq!(config.lock_name_cardinality_warn_threshold, 1_000);
     assert_eq!(config.replication_mode, None);
@@ -41,7 +40,6 @@ fn cluster_config_round_trips_every_field() {
         "schema": "cluster",
         "cache_reaper_interval_ms": 2_222,
         "lock_reaper_interval_ms": 3_333,
-        "sd_poll_interval_ms": 4_444,
         "pgbouncer_transaction_mode": true,
         "lock_name_cardinality_warn_threshold": 42,
         "replication_mode": "sync",
@@ -52,7 +50,6 @@ fn cluster_config_round_trips_every_field() {
     assert_eq!(config.schema, "cluster");
     assert_eq!(config.cache_reaper_interval_ms, 2_222);
     assert_eq!(config.lock_reaper_interval_ms, 3_333);
-    assert_eq!(config.sd_poll_interval_ms, 4_444);
     assert!(config.pgbouncer_transaction_mode);
     assert_eq!(config.lock_name_cardinality_warn_threshold, 42);
     assert_eq!(config.replication_mode, Some(ReplicationMode::Sync));
@@ -100,7 +97,7 @@ fn unknown_field_is_rejected() {
     // A cache-only field on the lock config is likewise unknown to it.
     let lock: Result<PostgresLockConfig, _> = serde_json::from_value(json!({
         "connection_string": "postgres://u@h/db",
-        "sd_poll_interval_ms": 1_000,
+        "cache_reaper_interval_ms": 1_000,
     }));
     assert!(lock.is_err(), "lock config must reject cache-only fields");
 }

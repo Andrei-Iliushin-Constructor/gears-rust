@@ -87,9 +87,9 @@ Forbidding remote I/O inside the critical section, combined with async timeouts 
 **Steps**:
 1. [ ] - `p1` - Identify the scope between lock acquisition and release - `inst-dt-scope`
 2. [ ] - `p1` - **FOR EACH** call within that scope - `inst-dt-foreach`
-   1. [ ] - `p1` - **IF** the call targets a remote method of one of the four cluster backend traits - `inst-dt-match`
+   1. [ ] - `p1` - **IF** the call targets a remote method of one of the three cluster backend traits - `inst-dt-match`
       1. [ ] - `p1` - Emit a deny-level diagnostic naming the offending call - `inst-dt-flag`
-3. [ ] - `p1` - Limit the initial scope to the four cluster backend traits; database-transaction enforcement is a follow-up extension - `inst-dt-scope-limit`
+3. [ ] - `p1` - Limit the initial scope to the three cluster backend traits; database-transaction enforcement is a follow-up extension - `inst-dt-scope-limit`
 
 ## 4. States (CDSL)
 
@@ -101,7 +101,7 @@ Not applicable — the lint is a static-analysis rule with no runtime entity lif
 
 - [ ] `p1` - **ID**: `cpt-cf-clst-dod-lock-lint-rule`
 
-The system **MUST** provide a workspace architecture lint rule (via `cargo gears lint`, modeled on the existing drop-zeroize lint) that flags, at deny level, cross-instance remote calls inside a cluster lock's critical section, scoped initially to the four cluster backend traits between acquisition and release.
+The system **MUST** provide a workspace architecture lint rule (via `cargo gears lint`, modeled on the existing drop-zeroize lint) that flags, at deny level, cross-instance remote calls inside a cluster lock's critical section, scoped initially to the three cluster backend traits between acquisition and release.
 
 **Implements**:
 - `cpt-cf-clst-flow-lock-lint-build-fail`
@@ -116,5 +116,5 @@ The system **MUST** provide a workspace architecture lint rule (via `cargo gears
 
 - [ ] Lock-using code that performs only local work inside the critical section builds cleanly.
 - [ ] A remote cluster backend call inside a critical section produces a deny-level diagnostic that fails the build.
-- [ ] The lint scope is restricted to the four cluster backend traits between acquisition and release; database-transaction enforcement is documented as a follow-up extension.
+- [ ] The lint scope is restricted to the three cluster backend traits between acquisition and release; database-transaction enforcement is documented as a follow-up extension.
 - [ ] Zero static-analysis violations exist in workspace consumer code at adoption.
