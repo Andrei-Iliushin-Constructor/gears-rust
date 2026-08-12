@@ -1110,6 +1110,12 @@ impl GroupRepositoryTrait for GroupRepository {
         // two `IN (...)` lists -- one parameter per id, unbounded, so a large
         // enough subtree failed in the driver rather than in the query.
         //
+        // Each predicate wraps the subquery in a derived table instead of
+        // naming `resource_group_closure` directly: MySQL rejects a `DELETE`
+        // whose subquery reads the target table (ER 1093) but materializes a
+        // derived table before deleting, which lifts the restriction.
+        // PostgreSQL and SQLite accept either form unchanged.
+        //
         // `NOT IN` here is only correct because `descendant_id` is `NOT NULL`
         // in both backend branches of the migration. Were it ever nullable, a
         // single NULL would make the predicate NULL for every row and this
@@ -1123,9 +1129,25 @@ impl GroupRepositoryTrait for GroupRepository {
         // `descendant_id = parent_id`, whose ancestors are all outside --
         // guaranteed by the `is_descendant` check the service makes before
         // calling this.
+        let desc_alias = Alias::new("st_desc");
+        let subtree_for_descendants = Query::select()
+            .expr(Expr::col((
+                desc_alias.clone(),
+                closure_entity::Column::DescendantId,
+            )))
+            .from_subquery(subtree_query.clone(), desc_alias)
+            .to_owned();
+        let anc_alias = Alias::new("st_anc");
+        let subtree_for_ancestors = Query::select()
+            .expr(Expr::col((
+                anc_alias.clone(),
+                closure_entity::Column::DescendantId,
+            )))
+            .from_subquery(subtree_query, anc_alias)
+            .to_owned();
         ClosureEntity::delete_many()
-            .filter(closure_entity::Column::DescendantId.in_subquery(subtree_query.clone()))
-            .filter(closure_entity::Column::AncestorId.not_in_subquery(subtree_query))
+            .filter(closure_entity::Column::DescendantId.in_subquery(subtree_for_descendants))
+            .filter(closure_entity::Column::AncestorId.not_in_subquery(subtree_for_ancestors))
             .secure()
             .scope_with(&scope)
             .exec(db)

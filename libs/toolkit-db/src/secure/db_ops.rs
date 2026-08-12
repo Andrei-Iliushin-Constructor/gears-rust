@@ -339,7 +339,9 @@ where
 /// symmetry does not extend to deletes: `MySQL` rejects a `DELETE` whose
 /// subquery names the target table (ER 1093), where `PostgreSQL` and `SQLite`
 /// accept it. Callers pairing this helper with a set-based `DELETE` over the
-/// same table are writing `PostgreSQL`/`SQLite`-only code.
+/// same table are writing `PostgreSQL`/`SQLite`-only code — unless the
+/// `DELETE` wraps its subquery in a derived table, which `MySQL`
+/// materializes before deleting and therefore permits.
 ///
 /// # Returns
 ///
