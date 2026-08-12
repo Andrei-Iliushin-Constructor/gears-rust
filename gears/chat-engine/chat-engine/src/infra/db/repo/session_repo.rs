@@ -741,9 +741,14 @@ impl SessionRepo for SeaSessionRepo {
             updated_at: Set(new.updated_at),
         };
         let conn = self.db.conn()?;
-        let inserted = SessionEntity::insert(model)
+        // Validate the row against the PDP-derived CREATE scope: a constrained
+        // decision (owner/resource predicates) must be satisfied by the
+        // persisted tenant_id / user_id, else the insert is `Denied`. The
+        // unchecked path is reserved for documented internal bypasses, not a
+        // request-scoped create.
+        let inserted = SessionEntity::insert(model.clone())
             .secure()
-            .scope_unchecked(scope)?
+            .scope_with_model(scope, &model)?
             .exec_with_returning(&conn)
             .await?;
         Ok(inserted.into())
@@ -1015,3 +1020,7 @@ fn map_odata_err(err: toolkit_odata::Error) -> ChatEngineError {
         other => ChatEngineError::bad_request(other.to_string()),
     }
 }
+
+#[cfg(test)]
+#[path = "session_repo_tests.rs"]
+mod session_repo_tests;
