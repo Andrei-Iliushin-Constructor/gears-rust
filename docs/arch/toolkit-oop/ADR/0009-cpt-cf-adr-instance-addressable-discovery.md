@@ -215,7 +215,7 @@ resolution is service-name-scoped"):
   service-name analogue of the role-qualified gear names in §1. A bare, shared service name is intentionally
   reachable across every advertising role.
 * **The edge exposes public routes of the resolved name.** The `api-gateway` reverse-proxy edge already keys its
-  route table on gear name; it exposes only the **public** routes (via the `.exposed()` / `x-cf-api-visibility`
+  route table on gear name; it exposes only the **public** routes (via the `.exposed()` / `x-toolkit-visibility`
   visibility split the edge introduces - a prerequisite not yet in the tree, see Consequences) of the
   names it syncs from the directory. An internal role never enters the edge's public route table because its
   **name** is internal - a role-split gear simply does not register its internal role-names as edge-eligible, or
@@ -450,7 +450,7 @@ convergence-latency optimization, not a correctness prerequisite. Until it lands
   specified by the current edge ADRs** (ADR-0003 defines only the `GatewayProvider` trait; ADR-0007 defines the
   edge auth *modes*) - they are a separate, not-yet-written directory/edge work item: `directory.proto` has
   **no `ListAllInstances` RPC**, `openapi_spec` lives on `RegisterInstanceRequest` only (not on `InstanceInfo`),
-  and there is **no `.exposed()` / `x-cf-api-visibility`** visibility split. Layer 1 therefore **must merge after
+  and there is **no `.exposed()` / `x-toolkit-visibility`** visibility split. Layer 1 therefore **must merge after
   (or reconcile with) that edge implementation**; it is **not** available today and must not be read as such.
 * **Requires amendments to sibling ADRs / PRD / DESIGN** (not just cross-references), because it changes shapes
   they assert - **ADR-0001**, **PRD `cpt-cf-fr-k8s-native`**, **DESIGN.md (§3 Profile 3)**, and **ADR-0004**
@@ -600,7 +600,7 @@ references; the amendment notes are recorded inline in each target document:
   **[ADR-0007 (Edge Architecture)](0007-cpt-cf-adr-edge-architecture.md)** (references, not amendments): the edge
   exposes the public routes of each directory **name** and keeps its single-endpoint-per-`(name, path)`
   selection; internal roles are excluded because they are *different names* - the existing
-  `OperationSpec.is_public` skip-registration ([ADR-0003 Consequences](0003-cpt-cf-adr-gateway-abstraction.md#consequences))
+  `OperationSpec.exposed` skip-registration ([ADR-0003 Consequences](0003-cpt-cf-adr-gateway-abstraction.md#consequences))
   already covers this, so no `entrypoint` predicate is added at the edge. Per-instance targeting remains an
   in-mesh/consumer concern.
 * **[ADR-0005 (Eventual Readiness)](0005-cpt-cf-adr-eventual-readiness.md)** (reference, not amendment): targeted
@@ -623,7 +623,7 @@ defines the `GatewayProvider` trait and [`cpt-cf-adr-edge-architecture`](0007-cp
 this ADR's edge story depends on: the `libs/toolkit-gateway` crate (`GatewayProvider`, `ProxyRegistry`,
 `ToolKitGatewayProvider`), the `api-gateway` embedded reverse-proxy with its directory-sync loop (poll ->
 reconcile -> register/prune), the `ListAllInstances` RPC and `InstanceInfo.openapi_spec` field, and the
-`.exposed()` / `x-cf-api-visibility` edge-visibility split. Those pieces are a **separate directory/edge work
+`.exposed()` / `x-toolkit-visibility` edge-visibility split. Those pieces are a **separate directory/edge work
 item, an ordering dependency not in the tree today** (enumerated in Consequences); if they are ultimately
 specified by amending ADR-0003 / ADR-0007 rather than a new ADR, those two move from *references* to
 *amendments*. This ADR is **additive on top of that edge** (`labels` ride on the `InstanceInfo` the edge
