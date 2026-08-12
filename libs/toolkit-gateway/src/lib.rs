@@ -17,7 +17,7 @@
 //! Providers expose only the operations a gear marks **public** on the
 //! visibility axis. `cf-gears-toolkit` emits this as the
 //! [`API_VISIBILITY_EXTENSION`] `OpenAPI` vendor extension (value
-//! [`API_VISIBILITY_PUBLIC`]) from `OperationSpec.is_exposed`; this crate mirrors
+//! [`API_VISIBILITY_PUBLIC`]) from `OperationSpec.exposed`; this crate mirrors
 //! the well-known key as a constant so it needs no dependency on
 //! `cf-gears-toolkit`.
 
@@ -38,7 +38,7 @@ pub use types::{Endpoint, GearInstance, GearName, OpenApiSpec};
 /// The `OpenAPI` vendor-extension key marking an operation as externally visible
 /// (registered at the edge gateway).
 ///
-/// Mirrors the key emitted by `cf-gears-toolkit` from `OperationSpec.is_exposed`.
+/// Mirrors the key emitted by `cf-gears-toolkit` from `OperationSpec.exposed`.
 pub const API_VISIBILITY_EXTENSION: &str = "x-toolkit-visibility";
 
 /// The [`API_VISIBILITY_EXTENSION`] value indicating a public (edge-exposed)

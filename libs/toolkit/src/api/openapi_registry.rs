@@ -177,11 +177,11 @@ impl OpenApiRegistryImpl {
                 ext.insert("x-odata-orderby".to_owned(), value);
             }
 
-            // Visibility axis (`OperationSpec.is_exposed`): mark routes that are
+            // Visibility axis (`OperationSpec.exposed`): mark routes that are
             // registered in the gateway for external access. The `GatewayProvider`
             // reads this vendor extension to select which routes to reverse-proxy.
             // The key is mirrored as a constant in `cf-gears-toolkit-gateway`.
-            if spec.is_exposed {
+            if spec.exposed {
                 ext.insert(
                     "x-toolkit-visibility".to_owned(),
                     serde_json::Value::String("public".to_owned()),
@@ -638,7 +638,7 @@ mod tests {
             }],
             handler_id: handler.to_owned(),
             authenticated: false,
-            is_exposed: false,
+            exposed: false,
             rate_limit: None,
             allowed_request_content_types: None,
             vendor_extensions: VendorExtensions::default(),
@@ -688,7 +688,7 @@ mod tests {
             }],
             handler_id: "get_test".to_owned(),
             authenticated: false,
-            is_exposed: false,
+            exposed: false,
             rate_limit: None,
             allowed_request_content_types: None,
             vendor_extensions: VendorExtensions::default(),
@@ -753,7 +753,7 @@ mod tests {
             }],
             handler_id: "get_users_id".to_owned(),
             authenticated: false,
-            is_exposed: false,
+            exposed: false,
             rate_limit: None,
             allowed_request_content_types: None,
             vendor_extensions: VendorExtensions::default(),
@@ -813,7 +813,7 @@ mod tests {
             }],
             handler_id: "post_upload".to_owned(),
             authenticated: false,
-            is_exposed: false,
+            exposed: false,
             rate_limit: None,
             allowed_request_content_types: Some(vec!["application/octet-stream"]),
             vendor_extensions: VendorExtensions::default(),
@@ -892,7 +892,7 @@ mod tests {
             }],
             handler_id: "get_test".to_owned(),
             authenticated: false,
-            is_exposed: false,
+            exposed: false,
             rate_limit: None,
             allowed_request_content_types: None,
             vendor_extensions: VendorExtensions::default(),
@@ -946,7 +946,7 @@ mod tests {
             }],
             handler_id: "get_ping".to_owned(),
             authenticated: false,
-            is_exposed: true,
+            exposed: true,
             rate_limit: None,
             allowed_request_content_types: None,
             vendor_extensions: VendorExtensions::default(),
@@ -957,7 +957,7 @@ mod tests {
         internal.path = "/calc/v1/internal".to_owned();
         internal.handler_id = "get_internal".to_owned();
         internal.operation_id = Some("internal".to_owned());
-        internal.is_exposed = false;
+        internal.exposed = false;
 
         registry.register_operation(&public);
         registry.register_operation(&internal);

@@ -279,7 +279,7 @@ pub struct OperationSpec {
     /// Auth axis: whether this operation requires a validated tenant JWT.
     /// `true` = authenticated (bearer required); `false` = anonymous (a missing
     /// bearer is allowed — a present bearer is still always re-validated).
-    /// Independent of [`is_exposed`](Self::is_exposed); maps 1:1 to the
+    /// Independent of [`exposed`](Self::exposed); maps 1:1 to the
     /// `AnonymousRoute` marker in the `OoP` per-gear middleware (`!authenticated`).
     pub authenticated: bool,
     /// Visibility axis: whether this route is registered in the gateway for
@@ -287,7 +287,7 @@ pub struct OperationSpec {
     /// inter-gear communication (`false`). Defaults to `false` (internal).
     /// Independent of [`authenticated`](Self::authenticated) — an exposed route
     /// may still require a JWT.
-    pub is_exposed: bool,
+    pub exposed: bool,
     /// Optional rate & concurrency limits for this operation
     pub rate_limit: Option<RateLimitSpec>,
     /// Optional whitelist of allowed request Content-Type values (without parameters).
@@ -510,7 +510,7 @@ impl<S> OperationBuilder<Missing, Missing, S, AuthNotSet> {
                 responses: Vec::new(),
                 handler_id,
                 authenticated: false,
-                is_exposed: false,
+                exposed: false,
                 rate_limit: None,
                 allowed_request_content_types: None,
                 vendor_extensions: VendorExtensions::default(),
@@ -932,7 +932,7 @@ where
     /// **internal by default** (not registered in the gateway). Available at any
     /// stage of the builder.
     pub fn exposed(mut self) -> Self {
-        self.spec.is_exposed = true;
+        self.spec.exposed = true;
         self
     }
 }
@@ -2126,7 +2126,7 @@ mod tests {
             .json_response(http::StatusCode::OK, "Success");
 
         assert!(builder.spec.authenticated);
-        assert!(!builder.spec.is_exposed);
+        assert!(!builder.spec.exposed);
     }
 
     #[test]
@@ -2137,12 +2137,12 @@ mod tests {
             .json_response(http::StatusCode::OK, "Success");
 
         assert!(!builder.spec.authenticated);
-        assert!(!builder.spec.is_exposed);
+        assert!(!builder.spec.exposed);
     }
 
     #[test]
     fn exposed_is_independent_of_auth() {
-        // Visibility (`is_exposed`) and auth (`authenticated`) are orthogonal:
+        // Visibility (`exposed`) and auth (`authenticated`) are orthogonal:
         // an exposed route may be authenticated or anonymous.
         let authed = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/a")
             .exposed()
@@ -2150,7 +2150,7 @@ mod tests {
             .handler(test_handler)
             .json_response(http::StatusCode::OK, "OK");
         assert!(authed.spec.authenticated);
-        assert!(authed.spec.is_exposed);
+        assert!(authed.spec.exposed);
 
         let anon = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/b")
             .exposed()
@@ -2158,7 +2158,7 @@ mod tests {
             .handler(test_handler)
             .json_response(http::StatusCode::OK, "OK");
         assert!(!anon.spec.authenticated);
-        assert!(anon.spec.is_exposed);
+        assert!(anon.spec.exposed);
     }
 
     #[test]
@@ -2171,7 +2171,7 @@ mod tests {
             .handler(test_handler)
             .json_response(http::StatusCode::OK, "OK");
         assert!(!op.spec.authenticated, "public route is anonymous");
-        assert!(op.spec.is_exposed, "public route is edge-exposed");
+        assert!(op.spec.exposed, "public route is edge-exposed");
     }
 
     #[test]
@@ -2194,7 +2194,7 @@ mod tests {
             .json_response(http::StatusCode::OK, "OK");
 
         assert!(builder.spec.license_requirement.is_none());
-        assert!(!builder.spec.is_exposed);
+        assert!(!builder.spec.exposed);
     }
 
     #[test]

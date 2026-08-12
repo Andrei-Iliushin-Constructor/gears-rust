@@ -15,7 +15,7 @@ depend on it without introducing a dependency cycle.
 
 A provider exposes only the operations a gear marks **public** on the visibility
 axis. `cf-gears-toolkit` emits this as the `x-toolkit-visibility: public` OpenAPI
-vendor extension (from `OperationSpec.is_exposed`); this crate mirrors that
+vendor extension (from `OperationSpec.exposed`); this crate mirrors that
 well-known key as the `API_VISIBILITY_EXTENSION` constant so it needs no
 dependency on `cf-gears-toolkit`.
 

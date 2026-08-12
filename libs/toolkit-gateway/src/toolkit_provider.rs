@@ -195,11 +195,11 @@ fn extract_public_routes(spec: &OpenApiSpec<'_>) -> Result<Vec<RouteTemplate>, G
             let Some(operation) = item.get(key).and_then(serde_json::Value::as_object) else {
                 continue;
             };
-            let is_exposed = operation
+            let exposed = operation
                 .get(API_VISIBILITY_EXTENSION)
                 .and_then(serde_json::Value::as_str)
                 == Some(API_VISIBILITY_PUBLIC);
-            if !is_exposed {
+            if !exposed {
                 continue;
             }
             let method =

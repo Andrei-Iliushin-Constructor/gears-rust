@@ -475,7 +475,7 @@ The existing `api-gateway` gear (`gears/system/api-gateway/src/gear.rs`) impleme
 - `OpenApiRegistry` trait for collecting `OperationSpec` entries and building OpenAPI docs.
 - Auth middleware that validates JWT via `AuthNResolverClient` and inserts `SecurityContext` into request extensions.
 - An HTTP server (`serve` lifecycle method) that binds to a socket and serves the finalized router.
-- The `OperationSpec` already has `is_exposed: bool` which can drive which routes are registered in the gateway for
+- The `OperationSpec` already has `exposed: bool` which can drive which routes are registered in the gateway for
   external access.
 
 **No reverse-proxy capability exists.** All routes are served directly from the shared in-process router. For OoP
@@ -524,7 +524,7 @@ gears, the gateway needs to reverse-proxy requests to remote OoP gears.
   opaque `anyhow::Error`, and the `OpenApiSpec` enum lets callers choose serialization without forcing every
   implementation to re-parse a string.
 - Provide `ToolKitGatewayProvider`: parses the OpenAPI spec to extract public route paths (where
-  `OperationSpec.is_exposed == true`), adds reverse-proxy routes to the built-in api-gateway using
+  `OperationSpec.exposed == true`), adds reverse-proxy routes to the built-in api-gateway using
   `toolkit-http::HttpClient` to forward requests to OoP gears. Must forward the `Authorization: Bearer <jwt>` header
   (re-validated downstream per cpt-cf-adr-two-plane-auth) on the proxied request.
 - Future: `KongGatewayProvider`, `TykGatewayProvider`.
@@ -532,7 +532,7 @@ gears, the gateway needs to reverse-proxy requests to remote OoP gears.
 ##### Responsibility boundaries
 
 - Does NOT serve HTTP traffic (the gateway itself does that).
-- Does NOT decide which routes are public (the gear declares that via `OperationSpec.is_exposed`).
+- Does NOT decide which routes are public (the gear declares that via `OperationSpec.exposed`).
 
 ##### Related components (by ID)
 

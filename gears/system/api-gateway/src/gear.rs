@@ -233,7 +233,7 @@ impl ApiGateway {
     fn build_route_policy_from_specs(&self) -> Result<auth::GatewayRoutePolicy> {
         let mut authenticated_routes = std::collections::HashSet::new();
         // Anonymous (no-auth) routes. This is the *auth* axis: routes here skip
-        // bearer-token enforcement. It is NOT external visibility (`is_exposed`);
+        // bearer-token enforcement. It is NOT external visibility (`exposed`);
         // an anonymous route may still be externally exposed or not.
         let mut anonymous_routes = std::collections::HashSet::new();
 
@@ -260,7 +260,7 @@ impl ApiGateway {
             let route_key = (spec.method.clone(), spec.path.clone());
 
             // Auth axis: `authenticated` requires a JWT; `!authenticated` is
-            // anonymous (auth-skip). Visibility (`is_exposed`) is a *separate*
+            // anonymous (auth-skip). Visibility (`exposed`) is a *separate*
             // axis (gateway registration) and does NOT affect the auth decision.
             // The builder typestate forces an explicit choice, so every spec'd
             // route lands in exactly one set; `require_auth_by_default` remains
