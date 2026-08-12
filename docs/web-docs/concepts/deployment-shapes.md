@@ -25,7 +25,7 @@ test gears together in one process, then deploy the same building blocks distrib
 ## Status
 
 Single-node and multi-node (gRPC out-of-process) are implemented. The cluster-plane coordination primitives that a large
-Kubernetes deployment relies on — distributed cache, leader election, distributed locks, service discovery — are *
+Kubernetes deployment relies on — distributed cache, leader election, distributed locks — are *
 *designed but not yet implemented**. See [Status and roadmap](../../capabilities/status-and-roadmap/) and
 the [cluster plane note](../runtime-and-lifecycle/).
 

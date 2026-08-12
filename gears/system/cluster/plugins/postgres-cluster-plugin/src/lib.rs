@@ -4,9 +4,9 @@
 //! gear (DESIGN.md §1). It provides a native `ClusterCacheBackend` over a
 //! `sqlx::PgPool` and a native `DistributedLockBackend` over a `cluster_lock`
 //! lease row, with one per-instance advisory lock kept purely as a liveness
-//! beacon (DESIGN.md §5). Leader election and service discovery are derived
-//! from the SDK default backends over the Postgres cache — no additional
-//! tables or connections are required for those two primitives (DESIGN.md §6).
+//! beacon (DESIGN.md §5). Leader election is derived from the SDK default
+//! backend over the Postgres cache — no additional tables or connections are
+//! required for that primitive (DESIGN.md §6).
 //!
 //! This is the recommended deployment for **multi-instance, no-K8s**
 //! environments (DESIGN.md §1): Postgres is already deployed in every Gears

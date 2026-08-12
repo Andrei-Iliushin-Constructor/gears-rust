@@ -62,12 +62,7 @@ resolution of the two open questions.
 | `cpt-cf-clst-fr-lock-acquire` | §3.3 | 04 distributed-lock | code |
 | `cpt-cf-clst-fr-lock-release` | §3.3, §3.7 | 04 distributed-lock | code |
 | `cpt-cf-clst-fr-lock-no-remote` | ADR-002; constraint no-remote-in-critical-section | 10 lock-lint | code |
-| `cpt-cf-clst-fr-sd-register` | §3.1, §3.3 | 05 service-discovery | code |
-| `cpt-cf-clst-fr-sd-discover` | §3.1, §3.10 | 05 service-discovery | code |
-| `cpt-cf-clst-fr-sd-watch` | §3.9 | 05 service-discovery | code |
-| `cpt-cf-clst-fr-sd-state` | ADR-008 | 05 service-discovery | code |
 | `cpt-cf-clst-fr-namespacing-scoped` | §3.8 | 07 scoping-polyfill | code |
-| `cpt-cf-clst-fr-namespacing-sd-metadata-unscoped` | §3.8; ADR-008 | 07 scoping-polyfill | code |
 | `cpt-cf-clst-fr-routing-cache-only-plugin` | §3.11; ADR-001 | 06 sdk-default-backends | code |
 | `cpt-cf-clst-fr-validation-typed-profile` | §3.6; ADR-007 | 01 sdk-foundation | code |
 | `cpt-cf-clst-fr-validation-capability-declarations` | §3.10; ADR-007 | 02 cache-primitive | code |
@@ -86,16 +81,16 @@ resolution of the two open questions.
 | `cpt-cf-clst-fr-routing-per-primitive` | §3.2, §3.13; ADR-006 | `cluster/src/wiring.rs` (`from_config` per-primitive provider dispatch), `cluster/src/provider.rs` (`ProviderRegistry`), `plugins/postgres-cluster-plugin/src/provider.rs` (`PostgresLockProvider`) | code |
 | `cpt-cf-clst-fr-routing-omit-default` | §3.11; ADR-001, ADR-006 | `cluster/src/wiring.rs` (`build_and_start` auto-fill) | code |
 | `cpt-cf-clst-fr-lifecycle-owner` | §3.7, §3.13; ADR-006 | `cluster/src/gear.rs`, `cluster/src/wiring.rs` | code |
-| `cpt-cf-clst-fr-shutdown-revoke` | §3.13; ADR-006 | `cluster/src/wiring.rs` (`ClusterHandle::stop`), `cluster-sdk/src/defaults/leader.rs`, `cluster-sdk/src/defaults/lock.rs`, `cluster-sdk/src/defaults/discovery.rs` (`ShutdownRevoke`), `plugins/standalone-cluster-plugin/src/cache.rs` (`StandaloneCache::shutdown`) | code |
+| `cpt-cf-clst-fr-shutdown-revoke` | §3.13; ADR-006 | `cluster/src/wiring.rs` (`ClusterHandle::stop`), `cluster-sdk/src/defaults/leader.rs`, `cluster-sdk/src/defaults/lock.rs` (`ShutdownRevoke`), `plugins/standalone-cluster-plugin/src/cache.rs` (`StandaloneCache::shutdown`) | code |
 | `cpt-cf-clst-fr-shutdown-ttl-cleanup` | §3.13; ADR-006 | `cluster/src/wiring.rs` (`ClusterHandle::stop`) | code |
 
-**Coverage**: 38/38 requirements map to a realizing DESIGN section or ADR and to
+**Coverage**: 33/33 requirements map to a realizing DESIGN section or ADR and to
 a feature or realizing code, with no remaining follow-ups.
 `cpt-cf-clst-fr-routing-per-primitive` is now realized: the wiring's YAML path
 dispatches each non-cache primitive against its own provider registry, and the
 Postgres plugin's standalone `PostgresLockProvider` is the first shipped native
 non-cache backend to bind through it. `cpt-cf-clst-fr-shutdown-revoke` is fully
-realized (leader, in-flight lock, service-discovery watch, and cache watch all
+realized (leader, in-flight lock, and cache watch all
 observe a terminal `Shutdown`). No orphan requirements.
 
 ## 3. Principles & Constraints → DESIGN/ADR → Feature
@@ -125,7 +120,6 @@ itself. Every in-scope feature (01–12) has at least one wired DoD marker:
 | 02 cache-primitive | `dod-cache-primitive-{backend-facade,types,resolver,watch}` |
 | 03 leader-election | `dod-leader-election-{backend-facade,config,watch,advisory}` |
 | 04 distributed-lock | `dod-distributed-lock-{backend-facade,guard}` |
-| 05 service-discovery | `dod-service-discovery-{backend-facade,types,handle,watch}` |
 | 06 sdk-default-backends | `dod-sdk-default-backends-{leader,lock,sd}` |
 | 07 scoping-polyfill | `dod-scoping-polyfill-{wrappers,polling}` |
 | 08 watch-auto-restart | `dod-watch-auto-restart-{combinator,policy}` |
@@ -140,7 +134,7 @@ No in-scope feature is missing its code markers.
 
 | Question | Resolution |
 |---|---|
-| Whether ADR-003 (cache watch backpressure) broadens to cover all three watches, or a new ADR captures the generalization | **Resolved.** ADR-003 was generalized on 2026-04-27 — it now carries a "Generalization to all three watches" section covering `LeaderWatch` and `ServiceWatch`, with the lightweight-notifications principle folded in. The decision is unchanged; no separate ADR is needed. This matches the DESIGN §7 recommendation ("broaden ADR-003"). |
+| Whether ADR-003 (cache watch backpressure) broadens to cover both watches, or a new ADR captures the generalization | **Resolved.** ADR-003 was generalized on 2026-04-27 — it now carries a "Generalization to both watches" section covering `LeaderWatch`, with the lightweight-notifications principle folded in. The decision is unchanged; no separate ADR is needed. This matches the DESIGN §7 recommendation ("broaden ADR-003"). |
 | Backend authentication and credential wiring | **Deferred (not a gap).** Owned by the platform OOP deployment design (PRD §4.2 / §7); the SDK contract exposes no authentication or authorization surface. Transport authentication, credential wiring, and tenant isolation are backend/plugin concerns resolved as part of the broader OOP design, out of scope for this change. |
 
 ## 6. Conclusion

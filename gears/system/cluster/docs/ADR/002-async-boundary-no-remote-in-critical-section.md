@@ -29,11 +29,11 @@ date: 2026-04-02
 
 ## Context and Problem Statement
 
-The cluster gears the Gears middleware's abstraction for cluster coordination: distributed cache, leader election, distributed locks, and service discovery. Every meaningful cluster operation is a remote call over the network — there is no "in-process" version of a distributed lock, and the "standalone" provider is a testing/development fixture, not the production target.
+The cluster gear is the Gears middleware's abstraction for cluster coordination: distributed cache, leader election, and distributed locks. Every meaningful cluster operation is a remote call over the network — there is no "in-process" version of a distributed lock, and the "standalone" provider is a testing/development fixture, not the production target.
 
 Two interrelated design questions emerged during review:
 
-1. **How should resource handles (`LockGuard`, `ServiceHandle`, `LeaderWatch`) clean up on scope exit?** The Rust idiom is RAII via `Drop`. But these handles represent remote resources whose release requires a network call. `Drop` is a synchronous function; Gears use Tokio and does not maintain dedicated OS threads for blocking I/O. Sync `Drop` cannot perform async network I/O reliably: `block_on` panics in a Tokio runtime, spawning a detached task is cancelled on shutdown and fails silently, and routing to a background reaper pushes the ordering problem elsewhere.
+1. **How should resource handles (`LockGuard`, `LeaderWatch`) clean up on scope exit?** The Rust idiom is RAII via `Drop`. But these handles represent remote resources whose release requires a network call. `Drop` is a synchronous function; Gears use Tokio and does not maintain dedicated OS threads for blocking I/O. Sync `Drop` cannot perform async network I/O reliably: `block_on` panics in a Tokio runtime, spawning a detached task is cancelled on shutdown and fails silently, and routing to a background reaper pushes the ordering problem elsewhere.
 
 2. **Do distributed locks need fencing tokens?** The classic Kleppmann argument says yes: a lock holder might pause and then send stale writes to the guarded resource. Pause causes that can exceed a TTL include — non-exhaustively — GC stop-the-world, OS swap-in stalls under memory pressure, partial network partition, VM suspend / hypervisor freeze (common under node overcommit), CPU overcommit / kernel scheduler stalls, container CPU throttling (cgroup CFS), NUMA / memory-pressure stalls, and host hibernation / live migration. A monotonic fencing token lets the guarded resource reject stale writes. But the scenario in which a fencing token actually helps requires *both* an unbounded pause of the holder *and* a critical section that contains remote I/O (otherwise there is no stale writer to guard against). The first half holds in any deployment; the second half is what we eliminate at the architectural level.
 
@@ -61,10 +61,9 @@ Both questions have the same root: **Gears middleware is an async-only, cooperat
 
 Chosen options: **Option 4** (no-op `Drop` + explicit async release) combined with **Option 6** (remove fencing tokens; enforce no-remote-in-critical-section via `cargo gears lint`).
 
-The `LockGuard`, `ServiceHandle`, and `LeaderWatch` types have no-op `Drop` implementations. Remote cleanup is exposed as explicit async methods:
+The `LockGuard` and `LeaderWatch` types have no-op `Drop` implementations. Remote cleanup is exposed as explicit async methods:
 
 - `LockGuard::release(self) -> Result<(), ClusterError>`
-- `ServiceHandle::deregister(self) -> Result<(), ClusterError>`
 - `LeaderWatch::resign(self) -> Result<(), ClusterError>`
 
 Consumers that forget to call these rely on the backend TTL for eventual cleanup. The TTL is bounded (seconds, not hours) and identical in behavior to the process-crash case.
@@ -83,7 +82,7 @@ The TTL safety net composes with both: any pause of duration ≥ TTL produces an
 
 This coverage is intentional and complete: bounded pauses (GC) and unbounded pauses (VM suspend) are handled by the same mechanism, because the mechanism doesn't depend on the pause being bounded.
 
-The architecture lint rule that enforces "no remote I/O in critical sections" is initially scoped to the four cluster backend traits within `try_lock` / `release` scopes. Database-transaction enforcement (treating an open `sqlx::Transaction` as a critical section) is deferred to a follow-up rule extension once the wiring crate and consumer migrations land — the lint surface for cluster locks alone is the high-value target and worth shipping first.
+The architecture lint rule that enforces "no remote I/O in critical sections" is initially scoped to the three cluster backend traits within `try_lock` / `release` scopes. Database-transaction enforcement (treating an open `sqlx::Transaction` as a critical section) is deferred to a follow-up rule extension once the wiring crate and consumer migrations land — the lint surface for cluster locks alone is the high-value target and worth shipping first.
 
 ### Consequences
 
@@ -95,7 +94,7 @@ The architecture lint rule that enforces "no remote I/O in critical sections" is
 
 ### Confirmation
 
-- Unit tests verify that `Drop` on `LockGuard`, `ServiceHandle`, and `LeaderWatch` performs no I/O (no panics under Tokio; no detached tasks spawned).
+- Unit tests verify that `Drop` on `LockGuard` and `LeaderWatch` performs no I/O (no panics under Tokio; no detached tasks spawned).
 - Integration tests verify that forgotten release results in TTL-bounded cleanup (lock becomes available within TTL+epsilon).
 - Architecture lint rule `no-remote-in-critical-section` flags violations in unit tests with known-bad inputs; passes on known-good inputs.
 - Cluster provider implementations are reviewed to confirm no fencing-token generation exists in production code paths.
@@ -301,7 +300,6 @@ This decision directly addresses the following requirements and design elements:
 - `cpt-cf-clst-fr-lock-acquire` — `try_lock` / `lock` with TTL and explicit async release.
 - `cpt-cf-clst-fr-lock-release` — `LockGuard::release(self) -> Result<(), ClusterError>` with no-op `Drop`.
 - `cpt-cf-clst-fr-leader-resign` — `LeaderWatch::resign(self)` as explicit step-down.
-- `cpt-cf-clst-fr-sd-register` — `ServiceHandle::deregister(self)` as explicit teardown.
 - `cpt-cf-clst-nfr-bounded-critical-section` — Async + timeouts + no-remote-in-critical-section structurally bounds critical sections.
 - `cpt-cf-clst-constraint-no-remote-in-critical-section` (DESIGN §2.2) — Architectural rule enforced via `cargo gears lint`.
 - DESIGN §3.3 lock contract — Method signatures and `Drop` semantics realize this ADR.

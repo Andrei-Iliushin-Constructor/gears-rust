@@ -136,7 +136,7 @@ impl MemoryCache {
 
     /// A linearizable cache that declares no native prefix watch, so
     /// `watch_prefix` returns [`ClusterError::Unsupported`] — for the
-    /// service-discovery degradation path.
+    /// prefix-watch degradation path.
     pub fn linearizable_without_prefix_watch() -> Arc<Self> {
         Self::spawn(CacheConsistency::Linearizable, false)
     }

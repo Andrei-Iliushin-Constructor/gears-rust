@@ -4,7 +4,7 @@
 //! Every suite in this crate faces the same problem: drive a watch until an
 //! event satisfies a predicate, without letting a notification/polling
 //! regression hang the whole suite (PGR-D4). [`poll_watch`] is that single
-//! strategy — the cache, discovery and leader watches all reach it through
+//! strategy — the cache and leader watches both reach it through
 //! [`PollableWatch`], so a scenario never hand-rolls a `match watch.recv()`
 //! loop with its own bounds.
 //!
@@ -40,7 +40,6 @@ use std::fmt;
 use std::time::Duration;
 
 use cluster_sdk::cache::{CacheEvent, CacheWatch, CacheWatchEvent};
-use cluster_sdk::discovery::{ServiceWatch, ServiceWatchEvent, TopologyChange};
 use cluster_sdk::error::ClusterError;
 use cluster_sdk::leader::{LeaderStatus, LeaderWatch, LeaderWatchEvent};
 
@@ -137,20 +136,6 @@ impl PollableWatch for CacheWatch {
             None => PollStep::End(WatchEnd::Dropped),
             // `Lagged`/`Reset` carry no payload, and the enum is `non_exhaustive`
             // so a future signal must not fail a scenario that predates it.
-            Some(_) => PollStep::Skip,
-        }
-    }
-}
-
-impl PollableWatch for ServiceWatch {
-    type Payload = TopologyChange;
-
-    async fn next_step(&mut self) -> PollStep<TopologyChange> {
-        match self.recv().await {
-            Some(ServiceWatchEvent::Change(change)) => PollStep::Payload(change),
-            Some(ServiceWatchEvent::Closed(err)) => PollStep::End(WatchEnd::Closed(err)),
-            None => PollStep::End(WatchEnd::Dropped),
-            // See the `CacheWatch` impl: payload-less and future signals skip.
             Some(_) => PollStep::Skip,
         }
     }

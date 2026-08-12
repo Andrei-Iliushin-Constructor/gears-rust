@@ -55,7 +55,6 @@
 )]
 
 pub mod cache;
-pub mod discovery;
 pub mod factory;
 pub mod fixture;
 pub mod leader;
@@ -67,7 +66,6 @@ pub mod watch_lifecycle;
 pub(crate) mod watch_poll;
 
 pub use cache::run_cache_conformance;
-pub use discovery::run_discovery_conformance;
 pub use factory::ScenarioBackend;
 pub use fixture::MemCache;
 pub use leader::run_leader_conformance;
