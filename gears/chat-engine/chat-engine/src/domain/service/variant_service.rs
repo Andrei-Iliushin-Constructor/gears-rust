@@ -1049,12 +1049,18 @@ impl VariantService {
     // ------------------------------------------------------------------
 
     /// Trusted prefetch of a session by id, then the PDP decision for
-    /// (`resource`, `action`). Returns the prefetched session (used downstream
-    /// for lifecycle gating / session-type resolution / owner-string stamping).
-    /// The prefetch owner pair is passed to the PDP as ABAC input; a denied /
-    /// unreachable / uncompilable decision fails closed to `Forbidden` via the
-    /// `?`-converted `EnforcerError` (DESIGN §3.5.5). Variant repo mutations
-    /// keep their internal `allow_all()` until Phase 7 (bypass registry).
+    /// (`resource`, `action`). The prefetch owner pair is passed to the PDP as
+    /// ABAC input (used downstream for lifecycle gating / session-type
+    /// resolution / owner-string stamping); a denied / unreachable /
+    /// uncompilable decision fails closed to `Forbidden` via the `?`-converted
+    /// `EnforcerError` (DESIGN §3.5.5).
+    ///
+    /// The PDP decision is applied to the ROW: an unconstrained allow returns
+    /// the prefetch directly, a constrained allow re-reads under the compiled
+    /// scope so a cross-tenant / out-of-scope target resolves to 0 rows →
+    /// `NotFound` (anti-enumeration, ADR-0021) instead of leaking the
+    /// unrestricted prefetch. Variant repo mutations keep their internal
+    /// `allow_all()` until Phase 7 (bypass registry).
     // @cpt-cf-chat-engine-seq-authz-point-op
     async fn authorize_session_op(
         &self,
@@ -1075,7 +1081,7 @@ impl VariantService {
 
         // @cpt-cf-chat-engine-interface-pep
         // @cpt-cf-chat-engine-constraint-fail-closed-authz
-        let _scope = self
+        let scope = self
             .enforcer
             .access_scope_with(
                 ctx,
@@ -1088,7 +1094,21 @@ impl VariantService {
                     .require_constraints(false),
             )
             .await?;
-        Ok(prefetch)
+
+        // Apply the PDP decision to the ROW, not just to downstream writes: a
+        // constrained decision MUST be validated by re-reading under the
+        // compiled scope, so a cross-tenant / out-of-scope target resolves to
+        // 0 rows → NotFound (anti-enumeration, ADR-0021) instead of leaking the
+        // unrestricted prefetch. An unconstrained decision (PDP allowed with no
+        // row filter) safely uses the prefetch.
+        if scope.is_unconstrained() {
+            Ok(prefetch)
+        } else {
+            self.sessions
+                .find_by_id_scoped(&scope, session_id)
+                .await?
+                .ok_or_else(|| ChatEngineError::not_found("session", session_id))
+        }
     }
 
     fn gate_lifecycle_mutation(&self, session: &Session) -> Result<()> {

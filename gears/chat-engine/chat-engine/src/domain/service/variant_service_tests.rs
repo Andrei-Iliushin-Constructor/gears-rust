@@ -461,6 +461,35 @@ async fn set_active_variant_by_index_owner_activates_sibling() {
 }
 
 #[tokio::test]
+async fn set_active_variant_by_index_wrong_tenant_returns_not_found() {
+    // Point-op scope-miss -> 404 (anti-enumeration, ADR-0021). The session is
+    // owned by tenant_a/user_a; a foreign subject gets a PDP allow constrained
+    // to its OWN owner pair, so `authorize_session_op` re-reads under that scope
+    // and resolves 0 rows. This is only correct because the point-op applies the
+    // compiled scope to the row instead of consuming the unrestricted prefetch —
+    // a regression would leak the cross-tenant session as an activatable target.
+    let db = inmem_db().await;
+    let (tenant_a, user_a, sid) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_session(&db, sid, tenant_a, user_a).await;
+    let pair = seed_message_pair(&db, sid, tenant_a, user_a).await;
+
+    let svc = build_variant_service(&db, enforcer_allow());
+    let err = svc
+        .set_active_variant_by_index(
+            &ctx_for_subject(Uuid::new_v4(), Uuid::new_v4()),
+            sid,
+            pair.assistant_message_id,
+            0,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ChatEngineError::NotFound { .. }),
+        "Expected NotFound for cross-tenant variant activation, got: {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn set_active_variant_by_index_unknown_index_is_not_found() {
     let db = inmem_db().await;
     let (tenant, user, sid) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
