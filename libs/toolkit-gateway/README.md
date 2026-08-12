@@ -3,7 +3,7 @@
 The gateway-provider abstraction for ToolKit Out-of-Process (OoP) edge routing.
 
 This crate defines the `GatewayProvider` trait — the interface the OoP bootstrap
-uses to register a gear's **public** routes with an edge gateway — together with
+uses to register a gear's **exposed** routes with an edge gateway — together with
 the typed inputs it accepts (`GearName`, `OpenApiSpec`, `Endpoint`) and its error
 type (`GatewayError`).
 
@@ -13,8 +13,8 @@ depend on it without introducing a dependency cycle.
 
 ## Route visibility
 
-A provider exposes only the operations a gear marks **public** on the visibility
-axis. `cf-gears-toolkit` emits this as the `x-toolkit-visibility: public` OpenAPI
+A provider exposes only the operations a gear marks **exposed** on the visibility
+axis. `cf-gears-toolkit` emits this as the `x-toolkit-visibility: exposed` OpenAPI
 vendor extension (from `OperationSpec.exposed`); this crate mirrors that
 well-known key as the `API_VISIBILITY_EXTENSION` constant so it needs no
 dependency on `cf-gears-toolkit`.

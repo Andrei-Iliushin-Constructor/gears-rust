@@ -435,7 +435,7 @@ mod tests {
         serde_json::json!({
             "openapi": "3.1.0",
             "info": { "title": gear, "version": "1.0.0" },
-            "paths": { path: { "get": { "x-toolkit-visibility": "public", "responses": {} } } },
+            "paths": { path: { "get": { "x-toolkit-visibility": "exposed", "responses": {} } } },
         })
         .to_string()
     }

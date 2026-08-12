@@ -65,7 +65,7 @@ surface minimal and allowing new implementations to be added without framework c
 * Gears that only expose internal APIs (no public routes) skip gateway registration entirely. The `OperationSpec.exposed`
   flag (the **visibility** axis, set via `OperationBuilder::exposed()`; default internal) on each route determines this.
   Visibility is orthogonal to authentication (`OperationBuilder::authenticated()` / `::anonymous()`): an exposed route may
-  still require a JWT. The provider selects routes via the `x-toolkit-visibility: public` OpenAPI vendor extension emitted
+  still require a JWT. The provider selects routes via the `x-toolkit-visibility: exposed` OpenAPI vendor extension emitted
   from `exposed`.
 * The `GatewayProvider` trait is async (network I/O is required for external gateway admin APIs), which constrains it to
   be used via `Box<dyn GatewayProvider>` or `Arc<dyn GatewayProvider>` rather than static dispatch.

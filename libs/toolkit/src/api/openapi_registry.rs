@@ -184,7 +184,7 @@ impl OpenApiRegistryImpl {
             if spec.exposed {
                 ext.insert(
                     "x-toolkit-visibility".to_owned(),
-                    serde_json::Value::String("public".to_owned()),
+                    serde_json::Value::String("exposed".to_owned()),
                 );
             }
 
@@ -970,7 +970,7 @@ mod tests {
             public_op
                 .get("x-toolkit-visibility")
                 .and_then(|v| v.as_str()),
-            Some("public"),
+            Some("exposed"),
             "public operation must advertise the gateway visibility extension"
         );
 
