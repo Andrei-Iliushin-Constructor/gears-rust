@@ -143,6 +143,31 @@ pub struct ParamSpec {
     pub required: bool,
     pub description: Option<String>,
     pub param_type: String, // JSON Schema type (string, integer, etc.)
+    /// Whether the parameter repeats. When set, `param_type` describes the
+    /// *item* type and the parameter renders as `type: array` with
+    /// `style: form, explode: true` — i.e. `?tag=a&tag=b`, which is how the
+    /// generated REST client encodes a `Vec<T>` query field.
+    pub array: bool,
+}
+
+impl ParamSpec {
+    /// A single-valued parameter of `param_type`.
+    fn scalar(
+        name: String,
+        location: ParamLocation,
+        required: bool,
+        description: Option<String>,
+        param_type: String,
+    ) -> Self {
+        Self {
+            name,
+            location,
+            required,
+            description,
+            param_type,
+            array: false,
+        }
+    }
 }
 
 pub trait LicenseFeature: AsRef<str> {}
@@ -371,25 +396,25 @@ where
             _ = write!(description, "\n- {}: {}", name, ops.join("|"));
             filter.allowed_fields.insert(name.clone(), ops);
         }
-        self.spec.params.push(ParamSpec {
-            name: "$filter".to_owned(),
-            location: ParamLocation::Query,
-            required: false,
-            description: Some(description),
-            param_type: "string".to_owned(),
-        });
+        self.spec.params.push(ParamSpec::scalar(
+            "$filter".to_owned(),
+            ParamLocation::Query,
+            false,
+            Some(description),
+            "string".to_owned(),
+        ));
         self.spec.vendor_extensions.x_odata_filter = Some(filter);
         self
     }
 
     fn with_odata_select(mut self) -> Self {
-        self.spec.params.push(ParamSpec {
-            name: "$select".to_owned(),
-            location: ParamLocation::Query,
-            required: false,
-            description: Some("OData v4 select expression".to_owned()),
-            param_type: "string".to_owned(),
-        });
+        self.spec.params.push(ParamSpec::scalar(
+            "$select".to_owned(),
+            ParamLocation::Query,
+            false,
+            Some("OData v4 select expression".to_owned()),
+            "string".to_owned(),
+        ));
         self
     }
 
@@ -419,13 +444,13 @@ where
                 order_by.allowed_fields.push(desc);
             }
         }
-        self.spec.params.push(ParamSpec {
-            name: "$orderby".to_owned(),
-            location: ParamLocation::Query,
-            required: false,
-            description: Some(description),
-            param_type: "string".to_owned(),
-        });
+        self.spec.params.push(ParamSpec::scalar(
+            "$orderby".to_owned(),
+            ParamLocation::Query,
+            false,
+            Some(description),
+            "string".to_owned(),
+        ));
         self.spec.vendor_extensions.x_odata_orderby = Some(order_by);
         self
     }
@@ -588,13 +613,13 @@ where
 
     /// Add a path parameter with type inference (defaults to string)
     pub fn path_param(mut self, name: impl Into<String>, description: impl Into<String>) -> Self {
-        self.spec.params.push(ParamSpec {
-            name: name.into(),
-            location: ParamLocation::Path,
-            required: true,
-            description: Some(description.into()),
-            param_type: "string".to_owned(),
-        });
+        self.spec.params.push(ParamSpec::scalar(
+            name.into(),
+            ParamLocation::Path,
+            true,
+            Some(description.into()),
+            "string".to_owned(),
+        ));
         self
     }
 
@@ -605,13 +630,13 @@ where
         required: bool,
         description: impl Into<String>,
     ) -> Self {
-        self.spec.params.push(ParamSpec {
-            name: name.into(),
-            location: ParamLocation::Query,
+        self.spec.params.push(ParamSpec::scalar(
+            name.into(),
+            ParamLocation::Query,
             required,
-            description: Some(description.into()),
-            param_type: "string".to_owned(),
-        });
+            Some(description.into()),
+            "string".to_owned(),
+        ));
         self
     }
 
@@ -623,12 +648,56 @@ where
         description: impl Into<String>,
         param_type: impl Into<String>,
     ) -> Self {
+        self.spec.params.push(ParamSpec::scalar(
+            name.into(),
+            ParamLocation::Query,
+            required,
+            Some(description.into()),
+            param_type.into(),
+        ));
+        self
+    }
+
+    /// Register every query parameter declared by a
+    /// `#[derive(toolkit_contract::QueryParams)]` struct.
+    ///
+    /// The generated REST routes use this so the spec and the wire format come
+    /// from one declaration. Fields render as scalars or, for `Vec` fields, as
+    /// `style: form, explode: true` arrays.
+    pub fn query_params_from<T: toolkit_contract::query::QueryParams>(mut self) -> Self {
+        for p in T::openapi_params() {
+            self.spec.params.push(ParamSpec {
+                name: p.name.to_owned(),
+                location: ParamLocation::Query,
+                required: p.required,
+                description: None,
+                param_type: p.openapi_type.to_owned(),
+                array: p.array,
+            });
+        }
+        self
+    }
+
+    /// Add a repeating query parameter — `?tag=a&tag=b`.
+    ///
+    /// `item_type` is the `OpenAPI` type of one element; the parameter renders
+    /// as an array with `style: form, explode: true`, which is the encoding the
+    /// generated REST client and its server extractor agree on for a `Vec<T>`
+    /// field.
+    pub fn query_param_array(
+        mut self,
+        name: impl Into<String>,
+        required: bool,
+        description: impl Into<String>,
+        item_type: impl Into<String>,
+    ) -> Self {
         self.spec.params.push(ParamSpec {
             name: name.into(),
             location: ParamLocation::Query,
             required,
             description: Some(description.into()),
-            param_type: param_type.into(),
+            param_type: item_type.into(),
+            array: true,
         });
         self
     }

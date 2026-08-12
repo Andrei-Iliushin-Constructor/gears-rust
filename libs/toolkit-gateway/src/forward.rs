@@ -245,6 +245,10 @@ fn problem(status: StatusCode, detail: String) -> Response {
         instance: None,
         trace_id: None,
         context: serde_json::Value::Object(serde_json::Map::new()),
+        // Gateway-level transport failures carry no contract error identity:
+        // they originate here, not in a gear's typed error enum.
+        error_code: None,
+        error_domain: None,
     }
     .into_response()
 }

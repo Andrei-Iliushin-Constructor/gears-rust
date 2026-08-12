@@ -13,13 +13,31 @@ use toolkit_security::{
 use toolkit_transport_grpc::extract_internal_token_grpc;
 
 use cf_system_sdks::directory::{
-    DeregisterInstanceRequest, DirectoryClient, DirectoryService, DirectoryServiceServer,
-    GetOpenApiSpecRequest, GetOpenApiSpecResponse, HeartbeatRequest, InstanceInfo,
-    ListAllInstancesRequest, ListAllInstancesResponse, ListInstancesRequest, ListInstancesResponse,
-    RegisterInstanceInfo, RegisterInstanceRequest, ResolveGrpcServiceRequest,
-    ResolveGrpcServiceResponse, ResolveRestServiceRequest, ResolveRestServiceResponse,
-    ServiceEndpoint, ServiceInstanceInfo,
+    DeregisterInstanceRequest, DirectoryClient, DirectoryInvalidArgument, DirectoryNotFound,
+    DirectoryService, DirectoryServiceServer, GetOpenApiSpecRequest, GetOpenApiSpecResponse,
+    HeartbeatRequest, InstanceInfo, ListAllInstancesRequest, ListAllInstancesResponse,
+    ListInstancesRequest, ListInstancesResponse, RegisterInstanceInfo, RegisterInstanceRequest,
+    ResolveGrpcServiceRequest, ResolveGrpcServiceResponse, ResolveRestServiceRequest,
+    ResolveRestServiceResponse, ServiceEndpoint, ServiceInstanceInfo,
 };
+
+/// Map a lookup failure onto a gRPC status, keeping "not registered" distinct
+/// from "the lookup itself failed".
+///
+/// Clients rely on this distinction: `NotFound` is reconstructed into the
+/// `DirectoryNotFound` sentinel and reported as "provider not up yet", which is
+/// a routine startup condition rather than an error. Blanket-mapping every
+/// failure to `NotFound` would make a genuine internal fault look like a
+/// missing registration and leave a consumer waiting forever without a signal.
+fn lookup_status(err: &anyhow::Error) -> Status {
+    if err.downcast_ref::<DirectoryNotFound>().is_some() {
+        Status::not_found(err.to_string())
+    } else if err.downcast_ref::<DirectoryInvalidArgument>().is_some() {
+        Status::invalid_argument(err.to_string())
+    } else {
+        Status::internal(err.to_string())
+    }
+}
 
 /// gRPC service implementation of Directory Service
 #[derive(Clone)]
@@ -92,7 +110,7 @@ impl DirectoryService for DirectoryServiceImpl {
             .api
             .resolve_grpc_service(&service_name)
             .await
-            .map_err(|e| Status::not_found(e.to_string()))?;
+            .map_err(|e| lookup_status(&e))?;
 
         Ok(Response::new(ResolveGrpcServiceResponse {
             endpoint_uri: endpoint.uri,
@@ -110,7 +128,7 @@ impl DirectoryService for DirectoryServiceImpl {
             .api
             .resolve_rest_service(&gear_name)
             .await
-            .map_err(|e| Status::not_found(e.to_string()))?;
+            .map_err(|e| lookup_status(&e))?;
 
         Ok(Response::new(ResolveRestServiceResponse {
             endpoint_uri: endpoint.uri,
@@ -128,7 +146,7 @@ impl DirectoryService for DirectoryServiceImpl {
             .api
             .get_openapi_spec(&gear_name)
             .await
-            .map_err(|e| Status::not_found(e.to_string()))?;
+            .map_err(|e| lookup_status(&e))?;
 
         Ok(Response::new(GetOpenApiSpecResponse { openapi_spec }))
     }

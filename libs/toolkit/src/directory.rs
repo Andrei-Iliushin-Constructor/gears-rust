@@ -32,7 +32,8 @@ fn openapi_spec_hash(spec: &str) -> String {
 
 // Re-export all types from contracts - this is the single source of truth
 pub use cf_system_sdks::directory::{
-    DirectoryClient, RegisterInstanceInfo, ServiceEndpoint, ServiceInstanceInfo,
+    DirectoryClient, DirectoryInvalidArgument, DirectoryNotFound, GrpcServiceInfo,
+    RegisterInstanceInfo, ServiceEndpoint, ServiceInstanceInfo,
 };
 
 /// Local implementation of `DirectoryClient` that delegates to `GearManager`
@@ -52,12 +53,19 @@ impl LocalDirectoryClient {
 
 #[async_trait]
 impl DirectoryClient for LocalDirectoryClient {
+    // Every lookup below is an in-memory `GearManager` map read, so `None` can
+    // only ever mean "nothing registered under that name" — this client has no
+    // backend and therefore no failure mode. Returning the typed
+    // `DirectoryNotFound` sentinel rather than a bare `anyhow` is what lets
+    // `DirectoryEndpointResolver` report `Ok(None)` ("provider not up yet")
+    // instead of `Err` ("the directory is broken"); the difference decides
+    // whether a routine startup race is logged at `debug` or `warn`.
     async fn resolve_grpc_service(&self, service_name: &str) -> Result<ServiceEndpoint> {
         if let Some((_gear, _inst, ep)) = self.mgr.pick_service_round_robin(service_name) {
             return Ok(ServiceEndpoint::new(ep.uri));
         }
 
-        anyhow::bail!("Service not found or no healthy instances: {service_name}")
+        Err(DirectoryNotFound::new(format!("service {service_name}")).into())
     }
 
     async fn resolve_rest_service(&self, gear_name: &str) -> Result<ServiceEndpoint> {
@@ -65,13 +73,13 @@ impl DirectoryClient for LocalDirectoryClient {
             return Ok(ServiceEndpoint::new(ep.uri));
         }
 
-        anyhow::bail!("No REST endpoint registered for gear: {gear_name}")
+        Err(DirectoryNotFound::new(format!("gear {gear_name}")).into())
     }
 
     async fn get_openapi_spec(&self, gear_name: &str) -> Result<String> {
-        self.mgr
-            .openapi_spec_of(gear_name)
-            .ok_or_else(|| anyhow::anyhow!("No OpenAPI spec registered for gear: {gear_name}"))
+        self.mgr.openapi_spec_of(gear_name).ok_or_else(|| {
+            DirectoryNotFound::new(format!("openapi spec for gear {gear_name}")).into()
+        })
     }
 
     async fn list_instances(&self, gear: &str) -> Result<Vec<ServiceInstanceInfo>> {
@@ -90,6 +98,14 @@ impl DirectoryClient for LocalDirectoryClient {
                         .map(|ep| ServiceEndpoint::new(ep.uri.clone())),
                     openapi_spec_hash: inst.openapi_spec.as_deref().map(openapi_spec_hash),
                     openapi_spec: inst.openapi_spec.clone(),
+                    // Carry every published gRPC service back so the
+                    // directory-register phase can augment (not clobber) this
+                    // instance when it adds a REST endpoint.
+                    grpc_services: inst
+                        .grpc_services
+                        .iter()
+                        .map(|(name, e)| (name.clone(), ServiceEndpoint::new(e.uri.clone())))
+                        .collect(),
                 });
             }
         }
@@ -131,6 +147,15 @@ impl DirectoryClient for LocalDirectoryClient {
                     // changes and skip the fetch + rebuild when unchanged.
                     openapi_spec_hash: inst.openapi_spec.as_deref().map(openapi_spec_hash),
                     openapi_spec: None,
+                    // Same rationale as `list_instances`: carry the published
+                    // gRPC services so a later register can augment rather than
+                    // clobber them. Available here because this reads the live
+                    // `GearInstance`.
+                    grpc_services: inst
+                        .grpc_services
+                        .iter()
+                        .map(|(name, e)| (name.clone(), ServiceEndpoint::new(e.uri.clone())))
+                        .collect(),
                 }
             })
             .collect();
@@ -198,8 +223,17 @@ mod tests {
         let dir = Arc::new(GearManager::new());
         let api = LocalDirectoryClient::new(dir);
 
-        let result = api.resolve_grpc_service("nonexistent.Service").await;
-        assert!(result.is_err());
+        let err = api
+            .resolve_grpc_service("nonexistent.Service")
+            .await
+            .unwrap_err();
+        // Asserting `is_err()` alone would pass for a bare `anyhow` too, which
+        // is what this client used to return — and which
+        // `DirectoryEndpointResolver` reads as "the directory is broken".
+        assert!(
+            err.downcast_ref::<DirectoryNotFound>().is_some(),
+            "expected the typed not-found sentinel, got: {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -262,8 +296,19 @@ mod tests {
         let dir = Arc::new(GearManager::new());
         let api = LocalDirectoryClient::new(dir);
 
-        assert!(api.resolve_rest_service("missing").await.is_err());
-        assert!(api.get_openapi_spec("missing").await.is_err());
+        // The typed sentinel is what distinguishes "provider not up yet" from
+        // a directory failure — see `DirectoryEndpointResolver`.
+        let rest_err = api.resolve_rest_service("missing").await.unwrap_err();
+        assert!(
+            rest_err.downcast_ref::<DirectoryNotFound>().is_some(),
+            "expected the typed not-found sentinel, got: {rest_err:?}"
+        );
+
+        let spec_err = api.get_openapi_spec("missing").await.unwrap_err();
+        assert!(
+            spec_err.downcast_ref::<DirectoryNotFound>().is_some(),
+            "expected the typed not-found sentinel, got: {spec_err:?}"
+        );
     }
 
     #[tokio::test]

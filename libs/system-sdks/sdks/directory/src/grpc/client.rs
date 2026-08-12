@@ -7,7 +7,10 @@ use async_trait::async_trait;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 
-use crate::api::{DirectoryClient, RegisterInstanceInfo, ServiceEndpoint, ServiceInstanceInfo};
+use crate::api::{
+    DirectoryClient, DirectoryInvalidArgument, DirectoryNotFound, RegisterInstanceInfo,
+    ServiceEndpoint, ServiceInstanceInfo,
+};
 use toolkit_transport_grpc::InternalAuthInterceptor;
 use toolkit_transport_grpc::client::{GrpcClientConfig, connect_with_retry};
 
@@ -23,6 +26,39 @@ use crate::{
 /// [`disabled`](InternalAuthInterceptor::disabled) interceptor attaches
 /// nothing (Profile 1 / no platform-plane credential).
 type AuthedChannel = InterceptedService<Channel, InternalAuthInterceptor>;
+
+/// Map a lookup RPC's `tonic::Status` onto the directory's typed sentinels.
+///
+/// The status code is the only thing distinguishing "this name is not
+/// registered" from "the directory is unreachable", and stringifying the status
+/// throws it away. Callers downcast the result: `DirectoryEndpointResolver`
+/// turns `DirectoryNotFound` into `Ok(None)` (a provider that has not come up
+/// yet — routine during startup) and anything else into a real error.
+fn lookup_error(resource: &str, status: &tonic::Status) -> anyhow::Error {
+    match status.code() {
+        tonic::Code::NotFound => DirectoryNotFound::new(resource.to_owned()).into(),
+        tonic::Code::InvalidArgument => {
+            DirectoryInvalidArgument::new(status.message().to_owned()).into()
+        }
+        code => anyhow::anyhow!(
+            "directory lookup for {resource} failed: gRPC {code:?}: {}",
+            status.message()
+        ),
+    }
+}
+
+/// Map a mutating RPC's `tonic::Status`, preserving the code in the message.
+///
+/// These calls have no not-found semantics worth typing, but a bare
+/// `"gRPC call failed"` hides whether the directory was unreachable
+/// (`Unavailable`) or rejected the request (`Internal`).
+fn call_error(op: &str, status: &tonic::Status) -> anyhow::Error {
+    anyhow::anyhow!(
+        "directory {op} failed: gRPC {:?}: {}",
+        status.code(),
+        status.message()
+    )
+}
 
 /// gRPC client for Directory API
 ///
@@ -150,7 +186,7 @@ impl DirectoryClient for DirectoryGrpcClient {
         let response = client
             .resolve_grpc_service(request)
             .await
-            .map_err(|e| anyhow::anyhow!("gRPC call failed: {e}"))?;
+            .map_err(|e| lookup_error(&format!("service {service_name}"), &e))?;
 
         let proto_response = response.into_inner();
         Ok(ServiceEndpoint::new(proto_response.endpoint_uri))
@@ -165,7 +201,7 @@ impl DirectoryClient for DirectoryGrpcClient {
         let response = client
             .resolve_rest_service(request)
             .await
-            .map_err(|e| anyhow::anyhow!("gRPC call failed: {e}"))?;
+            .map_err(|e| lookup_error(&format!("gear {gear_name}"), &e))?;
 
         let proto_response = response.into_inner();
         Ok(ServiceEndpoint::new(proto_response.endpoint_uri))
@@ -180,7 +216,7 @@ impl DirectoryClient for DirectoryGrpcClient {
         let response = client
             .get_open_api_spec(request)
             .await
-            .map_err(|e| anyhow::anyhow!("gRPC call failed: {e}"))?;
+            .map_err(|e| lookup_error(&format!("openapi spec for gear {gear_name}"), &e))?;
 
         Ok(response.into_inner().openapi_spec)
     }
@@ -194,7 +230,7 @@ impl DirectoryClient for DirectoryGrpcClient {
         let response = client
             .list_instances(request)
             .await
-            .map_err(|e| anyhow::anyhow!("gRPC call failed: {e}"))?;
+            .map_err(|e| lookup_error(&format!("instances of gear {gear}"), &e))?;
 
         let instances = response
             .into_inner()
@@ -211,7 +247,7 @@ impl DirectoryClient for DirectoryGrpcClient {
         let response = client
             .list_all_instances(tonic::Request::new(ListAllInstancesRequest {}))
             .await
-            .map_err(|e| anyhow::anyhow!("gRPC call failed: {e}"))?;
+            .map_err(|e| lookup_error("all instances", &e))?;
 
         let instances = response
             .into_inner()
@@ -252,7 +288,7 @@ impl DirectoryClient for DirectoryGrpcClient {
         client
             .register_instance(tonic::Request::new(req))
             .await
-            .map_err(|e| anyhow::anyhow!("gRPC register_instance failed: {e}"))?;
+            .map_err(|e| call_error("register_instance", &e))?;
 
         Ok(())
     }
@@ -268,7 +304,7 @@ impl DirectoryClient for DirectoryGrpcClient {
         client
             .deregister_instance(tonic::Request::new(req))
             .await
-            .map_err(|e| anyhow::anyhow!("gRPC deregister_instance failed: {e}"))?;
+            .map_err(|e| call_error("deregister_instance", &e))?;
 
         Ok(())
     }
@@ -284,7 +320,7 @@ impl DirectoryClient for DirectoryGrpcClient {
         client
             .heartbeat(tonic::Request::new(req))
             .await
-            .map_err(|e| anyhow::anyhow!("gRPC heartbeat failed: {e}"))?;
+            .map_err(|e| call_error("heartbeat", &e))?;
 
         Ok(())
     }
@@ -304,6 +340,11 @@ fn proto_instance_to_domain(proto: InstanceInfo) -> ServiceInstanceInfo {
         rest_endpoint: proto.rest_endpoint_uri.map(ServiceEndpoint::new),
         openapi_spec: proto.openapi_spec,
         openapi_spec_hash: proto.openapi_spec_hash,
+        // The list-instances proto response does not break the instance down
+        // per gRPC service, so nothing to carry back over the OoP directory
+        // transport. The in-process `LocalDirectoryClient` populates this from
+        // the live `GearInstance`.
+        grpc_services: Vec::new(),
     }
 }
 

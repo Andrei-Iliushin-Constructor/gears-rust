@@ -6,8 +6,8 @@
 //! *entire* lifecycle a real gear goes through:
 //!
 //! - gear discovery via a manually-built [`RegistryBuilder`],
-//! - the full phase sequence (`pre_init` → `init` → `post_init` → `grpc` →
-//!   `start`),
+//! - the full phase sequence (`pre_init` → `init` → proxy-wiring → `post_init`
+//!   → `grpc` → `start`), matching the in-process order,
 //! - [`HostRuntime::compose_oop_router`] building routes + `OpenAPI` from an
 //!   actual [`RestApiCapability`] gear (not a synthetic router),
 //! - a real bound HTTP server serving the gear's route,
