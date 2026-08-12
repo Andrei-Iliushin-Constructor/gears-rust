@@ -4,6 +4,10 @@
 //! - `#[get("/path/{param}")]`, `#[post(...)]`, `#[put(...)]`, `#[delete(...)]`
 //! - `#[retryable]` — marks the method as safe to retry on transport failure.
 //! - `#[streaming]` — marks the method as server-streaming (SSE).
+//! - `#[server_manual]` — skip server-route generation for this method.
+//! - `#[exposed]` / `#[internal]` — edge visibility, overriding the trait-level
+//!   `visibility` default. Internal unless said otherwise.
+//! - `#[anonymous]` — the route requires no authentication.
 //!
 //! The trait's first non-marker supertrait is recorded as the *base contract*
 //! the projection refines (e.g. `pub trait PaymentServiceRest: PaymentService`).
@@ -18,6 +22,11 @@ pub struct RestContractAttr {
     /// (ADR-0003): opt into a generated coverage assertion that every base-trait
     /// method has a REST binding (and vice-versa).
     pub require_full_coverage: bool,
+    /// Default edge visibility for every method in the trait, from
+    /// `visibility = "exposed" | "internal"`. Internal when absent, matching
+    /// `OperationBuilder`'s own default. Per-method `#[exposed]` / `#[internal]`
+    /// override it.
+    pub default_exposed: bool,
 }
 
 pub struct RestContractModel {
@@ -26,12 +35,13 @@ pub struct RestContractModel {
     pub base_trait: syn::Path,
     pub base_path: String,
     pub require_full_coverage: bool,
+    pub default_exposed: bool,
     pub methods: Vec<RestMethodModel>,
 }
 
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "these are independent per-method projection flags (retryable / streaming / optional / server_manual) parsed from distinct attributes; a bitflags enum would obscure rather than clarify the 1:1 attribute mapping"
+    reason = "these are independent per-method projection flags (retryable / streaming / optional / server_manual / anonymous) parsed from distinct attributes; a bitflags enum would obscure rather than clarify the 1:1 attribute mapping"
 )]
 pub struct RestMethodModel {
     pub ident: Ident,
@@ -53,6 +63,16 @@ pub struct RestMethodModel {
     /// author can register it by hand via `OperationBuilder`. The method stays
     /// in the generated client and the binding IR.
     pub server_manual: bool,
+    /// Edge visibility override from `#[exposed]` / `#[internal]`. `None` means
+    /// inherit the trait-level `visibility` default — which is why this is a
+    /// tri-state and not a plain `bool`: under an `exposed` default a method
+    /// still needs a way back to internal.
+    pub exposed: Option<bool>,
+    /// `true` when the method is marked `#[anonymous]` — the generated route
+    /// emits `.anonymous()` instead of `.authenticated()`. Independent of
+    /// visibility: an exposed route may still require a JWT, and an anonymous
+    /// one may stay internal.
+    pub anonymous: bool,
 }
 
 pub struct RestParam {
@@ -72,6 +92,7 @@ pub enum HttpVerb {
 mod kw {
     syn::custom_keyword!(base_path);
     syn::custom_keyword!(require_full_coverage);
+    syn::custom_keyword!(visibility);
 }
 
 impl syn::parse::Parse for RestContractAttr {
@@ -80,10 +101,12 @@ impl syn::parse::Parse for RestContractAttr {
             return Ok(Self {
                 base_path: String::new(),
                 require_full_coverage: false,
+                default_exposed: false,
             });
         }
         let mut base_path = None;
         let mut require_full_coverage = false;
+        let mut default_exposed: Option<bool> = None;
         while !input.is_empty() {
             let lookahead = input.lookahead1();
             if lookahead.peek(kw::base_path) {
@@ -103,6 +126,25 @@ impl syn::parse::Parse for RestContractAttr {
                     ));
                 }
                 require_full_coverage = true;
+            } else if lookahead.peek(kw::visibility) {
+                let _kw: kw::visibility = input.parse()?;
+                let _eq: syn::Token![=] = input.parse()?;
+                let lit: syn::LitStr = input.parse()?;
+                if default_exposed.is_some() {
+                    return Err(syn::Error::new(lit.span(), "duplicate `visibility`"));
+                }
+                default_exposed = Some(match lit.value().as_str() {
+                    "exposed" => true,
+                    "internal" => false,
+                    other => {
+                        return Err(syn::Error::new(
+                            lit.span(),
+                            format!(
+                                "unknown visibility `{other}`; expected \"exposed\" or \"internal\""
+                            ),
+                        ));
+                    }
+                });
             } else {
                 return Err(lookahead.error());
             }
@@ -113,6 +155,7 @@ impl syn::parse::Parse for RestContractAttr {
         Ok(Self {
             base_path: base_path.unwrap_or_default(),
             require_full_coverage,
+            default_exposed: default_exposed.unwrap_or(false),
         })
     }
 }
@@ -185,6 +228,7 @@ pub fn parse(attr: RestContractAttr, item: ItemTrait) -> syn::Result<RestContrac
         base_trait,
         base_path: attr.base_path,
         require_full_coverage: attr.require_full_coverage,
+        default_exposed: attr.default_exposed,
         methods,
     })
 }
@@ -209,6 +253,8 @@ fn parse_method(method: &TraitItemFn) -> syn::Result<RestMethodModel> {
     let mut retryable = false;
     let mut streaming = false;
     let mut server_manual = false;
+    let mut exposed: Option<bool> = None;
+    let mut anonymous = false;
 
     for attr in &method.attrs {
         let path = attr.path();
@@ -245,6 +291,21 @@ fn parse_method(method: &TraitItemFn) -> syn::Result<RestMethodModel> {
             streaming = true;
         } else if path.is_ident("server_manual") {
             server_manual = true;
+        } else if path.is_ident("exposed") || path.is_ident("internal") {
+            let wants_exposed = path.is_ident("exposed");
+            // Both on one method is a contradiction, not a last-one-wins:
+            // silently picking one would change what the gateway serves.
+            if exposed.is_some_and(|prev| prev != wants_exposed) {
+                return Err(syn::Error::new(
+                    attr.span(),
+                    "conflicting visibility: a method cannot be both `#[exposed]` and \
+                     `#[internal]`. Pick one, or drop both to inherit the trait's \
+                     `visibility` default",
+                ));
+            }
+            exposed = Some(wants_exposed);
+        } else if path.is_ident("anonymous") {
+            anonymous = true;
         }
     }
 
@@ -314,6 +375,8 @@ fn parse_method(method: &TraitItemFn) -> syn::Result<RestMethodModel> {
         result_types,
         optional,
         server_manual,
+        exposed,
+        anonymous,
     })
 }
 

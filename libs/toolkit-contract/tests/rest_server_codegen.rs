@@ -98,6 +98,9 @@ pub trait PairApi: Send + Sync {
         ctx: SecurityContext,
         query: SearchQuery,
     ) -> Result<SearchResponse, PairError>;
+
+    #[idempotency(SafeRead)]
+    async fn probe(&self, ctx: SecurityContext) -> Result<PairResponse, PairError>;
 }
 
 #[rest_contract(base_path = "/api/pair/v1")]
@@ -118,6 +121,14 @@ pub trait PairApiRest: PairApi {
         ctx: SecurityContext,
         query: SearchQuery,
     ) -> Result<SearchResponse, PairError>;
+
+    // Both axes at once, and deliberately in combination: a probe is reachable
+    // from outside *and* needs no credential. The two are independent, so this
+    // also pins that `.anonymous()` and `.exposed()` compose.
+    #[get("/probe")]
+    #[exposed]
+    #[anonymous]
+    async fn probe(&self, ctx: SecurityContext) -> Result<PairResponse, PairError>;
 }
 
 /// Echoes each path segment back under the name the handler bound it to, so a
@@ -149,6 +160,56 @@ impl PairApi for PairService {
             limit: query.limit,
         })
     }
+
+    async fn probe(&self, _ctx: SecurityContext) -> Result<PairResponse, PairError> {
+        Ok(PairResponse {
+            tenant: "probe".to_owned(),
+            order: "probe".to_owned(),
+        })
+    }
+}
+
+/// A second contract whose trait-level default is `exposed`, so the default and
+/// the per-method escape hatch can both be asserted.
+#[contract(gear = "demo", version = "v1")]
+pub trait EdgeApi: Send + Sync {
+    #[idempotency(SafeRead)]
+    async fn public_thing(&self, ctx: SecurityContext) -> Result<PairResponse, PairError>;
+
+    #[idempotency(SafeRead)]
+    async fn private_thing(&self, ctx: SecurityContext) -> Result<PairResponse, PairError>;
+}
+
+#[rest_contract(base_path = "/api/edge/v1", visibility = "exposed")]
+pub trait EdgeApiRest: EdgeApi {
+    // Inherits the trait default.
+    #[get("/public")]
+    async fn public_thing(&self, ctx: SecurityContext) -> Result<PairResponse, PairError>;
+
+    // Opts back out. Without `#[internal]` there would be no way down from an
+    // `exposed` default — which is why the per-method axis is a tri-state.
+    #[get("/private")]
+    #[internal]
+    async fn private_thing(&self, ctx: SecurityContext) -> Result<PairResponse, PairError>;
+}
+
+struct EdgeService;
+
+#[async_trait::async_trait]
+impl EdgeApi for EdgeService {
+    async fn public_thing(&self, _ctx: SecurityContext) -> Result<PairResponse, PairError> {
+        Ok(PairResponse {
+            tenant: "pub".to_owned(),
+            order: "pub".to_owned(),
+        })
+    }
+
+    async fn private_thing(&self, _ctx: SecurityContext) -> Result<PairResponse, PairError> {
+        Ok(PairResponse {
+            tenant: "priv".to_owned(),
+            order: "priv".to_owned(),
+        })
+    }
 }
 
 async fn start_generated_server() -> (String, serde_json::Value) {
@@ -163,8 +224,11 @@ async fn start_generated_server() -> (String, serde_json::Value) {
         },
     );
 
+    let edge: Arc<dyn EdgeApi> = Arc::new(EdgeService);
+
     let openapi = OpenApiRegistryImpl::new();
-    let app = register_pair_api_rest_routes(Router::new(), &openapi, svc).layer(secctx_layer);
+    let router = register_pair_api_rest_routes(Router::new(), &openapi, svc);
+    let app = register_edge_api_rest_routes(router, &openapi, edge).layer(secctx_layer);
 
     let doc = openapi.build_openapi(&OpenApiInfo::default()).unwrap();
     let spec = serde_json::to_value(&doc).unwrap();
@@ -278,6 +342,88 @@ async fn openapi_documents_query_params_including_arrays() {
     let limit = by_name("limit");
     assert_eq!(limit["schema"]["type"], "integer");
     assert_eq!(limit["required"], true);
+}
+
+/// The visibility axis reaches the `OpenAPI` document.
+///
+/// The gateway selects what to reverse-proxy by looking for
+/// `x-toolkit-visibility: public` and skipping everything else, with no
+/// fallback. Before this axis existed in the macro, a contract-declared route
+/// could never carry the extension, so no contract endpoint could serve
+/// external traffic in Profile 2/3 at all.
+#[tokio::test]
+async fn exposed_operations_carry_the_visibility_extension() {
+    let (_, spec) = start_generated_server().await;
+
+    let visibility = |path: &str| spec["paths"][path]["get"]["x-toolkit-visibility"].clone();
+
+    // `#[exposed]` on an otherwise internal-by-default trait.
+    assert_eq!(
+        visibility("/api/pair/v1/probe"),
+        serde_json::json!("public")
+    );
+
+    // Absent, not `"internal"` — the extension is omitted entirely for internal
+    // routes, which is what the gateway's `!= Some("public")` check relies on.
+    assert!(
+        visibility("/api/pair/v1/search").is_null(),
+        "an internal operation must not carry the extension at all"
+    );
+}
+
+/// A trait-level `visibility = "exposed"` default applies to every method, and
+/// `#[internal]` opts a single one back out.
+#[tokio::test]
+async fn trait_level_visibility_default_applies_and_is_overridable() {
+    let (_, spec) = start_generated_server().await;
+
+    let visibility = |path: &str| spec["paths"][path]["get"]["x-toolkit-visibility"].clone();
+
+    assert_eq!(
+        visibility("/api/edge/v1/public"),
+        serde_json::json!("public"),
+        "method with no marker should inherit the trait default"
+    );
+    assert!(
+        visibility("/api/edge/v1/private").is_null(),
+        "`#[internal]` must override an `exposed` trait default"
+    );
+}
+
+/// The auth axis is independent of visibility and no longer hardcoded.
+///
+/// `.anonymous()` also transitions the builder's license typestate on its own,
+/// so this compiling at all is half the assertion — a generated
+/// `.anonymous().no_license_required()` would not typecheck.
+///
+/// The registry emits a `security` requirement only for authenticated
+/// operations and omits the key entirely otherwise. That is safe here because
+/// the generated document sets no root-level `security` default, so the
+/// gateway's lookup (operation `security`, else document default, else
+/// anonymous) resolves an omitted key to anonymous.
+#[tokio::test]
+async fn anonymous_operations_carry_no_security_requirement() {
+    let (_, spec) = start_generated_server().await;
+
+    let security = |path: &str| spec["paths"][path]["get"]["security"].clone();
+
+    assert!(
+        security("/api/pair/v1/probe").is_null(),
+        "an anonymous operation must not carry a security requirement"
+    );
+
+    let authenticated = security("/api/pair/v1/search");
+    assert!(
+        authenticated.as_array().is_some_and(|r| !r.is_empty()),
+        "a default operation must still be authenticated, got: {authenticated}"
+    );
+
+    // No root-level default, so an omitted operation-level key really does mean
+    // anonymous rather than inheriting one.
+    assert!(
+        spec["security"].is_null(),
+        "document must set no security default"
+    );
 }
 
 #[tokio::test]

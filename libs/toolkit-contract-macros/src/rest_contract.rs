@@ -26,6 +26,9 @@ const HTTP_ATTRS: &[&str] = &[
     "retryable",
     "streaming",
     "server_manual",
+    "exposed",
+    "internal",
+    "anonymous",
 ];
 
 fn streaming_idents(method: &RestMethodModel) -> Option<(Type, Type)> {
@@ -1290,11 +1293,32 @@ fn generate_method_route(method: &RestMethodModel, model: &RestContractModel) ->
         },
     };
 
+    // Auth axis. `.anonymous()` lands in `LicenseSet` on its own, so
+    // `.no_license_required()` must NOT follow it — that method only exists on
+    // `LicenseNotSet`. `.authenticated()` leaves the license state unset, hence
+    // the pairing.
+    let auth_registration = if method.anonymous {
+        quote! { .anonymous() }
+    } else {
+        quote! { .authenticated().no_license_required() }
+    };
+
+    // Visibility axis, independent of auth: an exposed route may still require a
+    // JWT, and an anonymous one may stay internal. Per-method `#[exposed]` /
+    // `#[internal]` override the trait's `visibility` default; absent both, the
+    // default applies. `.exposed()` is `Self -> Self` at any builder stage, so
+    // its position in the chain is free.
+    let exposed_registration = if method.exposed.unwrap_or(model.default_exposed) {
+        quote! { .exposed() }
+    } else {
+        quote! {}
+    };
+
     quote! {
         router = ::toolkit::api::OperationBuilder::#http_verb_method(#full_path)
             .operation_id(#operation_id)
-            .authenticated()
-            .no_license_required()
+            #auth_registration
+            #exposed_registration
             #(#path_param_registrations)*
             #query_param_registration
             #request_registration
