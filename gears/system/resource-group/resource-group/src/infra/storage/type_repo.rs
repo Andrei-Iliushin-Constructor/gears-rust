@@ -44,9 +44,11 @@ impl TypeRepository {
     /// Batch-resolve full types (junction references) for a whole page of
     /// models in a constant number of queries, regardless of page size.
     ///
-    /// One query per junction table across the whole page, one combined
-    /// id->code resolution query for every referenced parent/membership
-    /// type, then assembles each `ResourceGroupType` in memory (RG-12).
+    /// One query per junction table across the whole page, one id->code
+    /// resolution pass for every referenced parent/membership type (chunked
+    /// against the backend's bind ceiling, since the referenced set grows
+    /// with the junction rows, not the page), then assembles each
+    /// `ResourceGroupType` in memory (RG-12).
     async fn load_full_types_batch(
         db: &impl DBRunner,
         models: &[gts_type::Model],
@@ -79,21 +81,23 @@ impl TypeRepository {
             .chain(membership_rows.iter().map(|r| r.membership_type_id))
             .collect();
 
-        let code_by_id: std::collections::HashMap<i16, String> = if referenced_ids.is_empty() {
-            std::collections::HashMap::new()
-        } else {
-            let ids: Vec<i16> = referenced_ids.into_iter().collect();
-            GtsTypeEntity::find()
-                .filter(gts_type::Column::Id.is_in(ids))
+        // One entry per junction row across the whole page -- data-controlled,
+        // not page-controlled -- so the id list is chunked against the bind
+        // ceiling like every other list-valued predicate here. An empty list
+        // yields no chunks and no query.
+        let ids: Vec<i16> = referenced_ids.into_iter().collect();
+        let mut code_by_id: std::collections::HashMap<i16, String> =
+            std::collections::HashMap::with_capacity(ids.len());
+        for chunk in ids.chunks(toolkit_db::secure::max_bind_params_for(db)) {
+            let found = GtsTypeEntity::find()
+                .filter(gts_type::Column::Id.is_in(chunk.to_vec()))
                 .secure()
                 .scope_with(&scope)
                 .all(db)
                 .await
-                .map_err(|e| DomainError::database(e.to_string()))?
-                .into_iter()
-                .map(|m| (m.id, m.schema_id))
-                .collect()
-        };
+                .map_err(|e| DomainError::database(e.to_string()))?;
+            code_by_id.extend(found.into_iter().map(|m| (m.id, m.schema_id)));
+        }
 
         let mut parents_by_type: std::collections::HashMap<i16, Vec<String>> =
             std::collections::HashMap::new();
