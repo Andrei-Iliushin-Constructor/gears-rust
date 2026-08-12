@@ -19,6 +19,9 @@ name = "file_parser"
 workspace = true
 
 [dependencies]
+# Local dependencies
+file-parser-sdk = { package = "cf-gears-file-parser-sdk", version = "0.1.0", path = "../file-parser-sdk" }
+
 # Core dependencies
 anyhow = { workspace = true }
 async-trait = { workspace = true }
