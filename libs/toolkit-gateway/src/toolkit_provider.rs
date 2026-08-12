@@ -15,7 +15,7 @@ use crate::error::GatewayError;
 use crate::provider::{GatewayProvider, InstanceSpec};
 use crate::registry::{InstanceRoutes, ProxyRegistry, RouteTemplate};
 use crate::types::{Endpoint, GearInstance, GearName, OpenApiSpec};
-use crate::{API_VISIBILITY_EXTENSION, API_VISIBILITY_EXPOSED};
+use crate::{API_VISIBILITY_EXPOSED, API_VISIBILITY_EXTENSION};
 
 /// HTTP method keys recognized when scanning an `OpenAPI` path item.
 const HTTP_METHOD_KEYS: [&str; 7] = ["get", "put", "post", "delete", "patch", "head", "options"];

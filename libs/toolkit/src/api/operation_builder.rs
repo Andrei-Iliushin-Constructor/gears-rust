@@ -1018,7 +1018,9 @@ where
     ///
     /// # Example
     /// ```rust
-    /// # use toolkit::api::operation_builder::{OperationBuilder, LicenseFeature};
+    /// # use toolkit::api::operation_builder::{
+    /// #     OperationBuilder, LicenseFeature, CORE_GLOBAL_BASE_LICENSE_FEATURE,
+    /// # };
     /// # use axum::{extract::Json, Router };
     /// # use serde::{Serialize};
     /// #
