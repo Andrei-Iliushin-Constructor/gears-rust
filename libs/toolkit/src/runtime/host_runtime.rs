@@ -7,11 +7,19 @@
 //! - `pre_init` (system gears only)
 //! - DB migrations (gears with DB capability)
 //! - `init` (all gears)
+//! - proxy-wiring (`#[toolkit::consumes]` clients; feature-gated)
 //! - `post_init` (system gears only; runs after *all* `init` complete)
 //! - REST wiring (gears with REST capability; requires a single REST host)
 //! - gRPC registration (gears with gRPC capability; requires a single gRPC hub)
 //! - start/stop (stateful gears)
 //! - `OoP` spawn / wait / stop (host-only orchestration)
+//!
+//! Both lifecycle paths — in-process (`run_phases_internal`) and `OoP`
+//! (`run_oop_serving`) — run these in the same relative order. Proxy-wiring in
+//! particular must stay before `start`: a gear resolving a consumed contract
+//! during its own `start` has to find the client in the `ClientHub` regardless
+//! of profile. The `OoP` path additionally has no REST-wiring, directory-register
+//! or spawn phases (`oop_serve` owns those concerns).
 
 use axum::Router;
 use std::collections::HashSet;
@@ -585,6 +593,31 @@ impl HostRuntime {
 
     /// This provides a global barrier between initialization-time registration
     /// and subsequent phases that may rely on a fully-populated runtime registry.
+    /// `init` -> proxy-wiring -> `post_init`, the segment both lifecycle paths
+    /// share.
+    ///
+    /// Extracted so the two paths cannot disagree on it. They did once: the
+    /// `OoP` path ran proxy-wiring *after* `start`, because the call was dropped
+    /// where a retired untyped `resolve_deps` stopgap used to sit rather than
+    /// chosen deliberately. A gear resolving a consumed contract during its own
+    /// `start` then found nothing in the `ClientHub` under Profile 2/3 while
+    /// working fine in Profile 1.
+    ///
+    /// Everything after this segment legitimately differs — the in-process path
+    /// composes a REST router, the `OoP` path leaves that to `oop_serve`.
+    ///
+    /// Keeping this a single private method is what enforces the invariant: if
+    /// a future change inlines the three calls back into both paths, this method
+    /// becomes dead code and the workspace's `-D warnings` build fails.
+    async fn run_init_wiring_post_init(&self) -> Result<(), RegistryError> {
+        self.run_init_phase().await?;
+
+        #[cfg(feature = "contract-directory-rest-client")]
+        self.run_proxy_wiring_phase().await?;
+
+        self.run_post_init_phase().await
+    }
+
     ///
     /// System gears run first, followed by user gears, preserving topo order.
     async fn run_post_init_phase(&self) -> Result<(), RegistryError> {
@@ -1269,15 +1302,8 @@ impl HostRuntime {
             return Ok(());
         }
 
-        // 3. Init phase (system gears first)
-        self.run_init_phase().await?;
-
-        // 3b. Proxy-wiring phase (consumer discovery; after init, before post-init)
-        #[cfg(feature = "contract-directory-rest-client")]
-        self.run_proxy_wiring_phase().await?;
-
-        // 4. Post-init phase (barrier after ALL init; system gears only)
-        self.run_post_init_phase().await?;
+        // 3. Init -> proxy-wiring -> post-init (shared with the OoP path)
+        self.run_init_wiring_post_init().await?;
 
         // 5. REST phase (synchronous router composition)
         let _router = self.run_rest_phase().await?;
@@ -1438,17 +1464,12 @@ impl HostRuntime {
             self.run_pre_init_phase()?;
             #[cfg(feature = "db")]
             self.run_db_phase().await?;
-            self.run_init_phase().await?;
-            self.run_post_init_phase().await?;
+            // Init -> proxy-wiring -> post-init, shared with the in-process path
+            // so a gear resolving a consumed contract during `start` finds the
+            // client in the hub under both profiles.
+            self.run_init_wiring_post_init().await?;
             self.run_grpc_phase().await?;
             self.run_start_phase().await?;
-            // Consumer wiring: registers typed REST clients into the hub and
-            // gates `/readyz` on their resolution (replaces the untyped
-            // resolve_deps/ResolvedRestEndpoints stopgap). Gated on the same
-            // feature as the in-process path; without it no consumer clients are
-            // generated, so there is nothing to wire.
-            #[cfg(feature = "contract-directory-rest-client")]
-            self.run_proxy_wiring_phase().await?;
             started = true;
             // The gear lifecycle has populated the ClientHub. If an in-process
             // authn stack (e.g. a linked authn-resolver gear) registered a
@@ -1845,6 +1866,71 @@ mod tests {
                 "post_init:sys_a",
             ]
         );
+    }
+
+    /// The in-process and `OoP` paths must agree on where proxy-wiring sits.
+    ///
+    /// They did not: the `OoP` path ran it *after* `start`, so a gear resolving
+    /// a consumed contract during its own `start` found nothing in the
+    /// `ClientHub` under Profile 2/3 while working under Profile 1. Both paths
+    /// now go through `run_init_wiring_post_init`, which pins the order.
+    ///
+    /// This test covers the two observable endpoints of that segment. The
+    /// wiring step between them is a no-op here (no `#[toolkit::consumes]`
+    /// registration is linked into this test binary), so what actually stops
+    /// the paths diverging again is the shared method itself — inlining it back
+    /// into both call sites makes it dead code and fails the `-D warnings`
+    /// build.
+    #[tokio::test]
+    async fn init_wiring_post_init_runs_as_one_ordered_segment() {
+        #[derive(Clone)]
+        struct TrackHooks {
+            events: Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl Gear for TrackHooks {
+            async fn init(&self, _ctx: &GearCtx) -> anyhow::Result<()> {
+                self.events.lock().await.push("init".to_owned());
+                Ok(())
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl SystemCapability for TrackHooks {
+            fn pre_init(&self, _sys: &crate::runtime::SystemContext) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            async fn post_init(&self, _sys: &crate::runtime::SystemContext) -> anyhow::Result<()> {
+                self.events.lock().await.push("post_init".to_owned());
+                Ok(())
+            }
+        }
+
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let gear = Arc::new(TrackHooks {
+            events: events.clone(),
+        });
+
+        let mut builder = RegistryBuilder::default();
+        builder.register_core_with_meta("sys", &[], gear.clone() as Arc<dyn Gear>);
+        builder.register_system_with_meta("sys", gear.clone() as Arc<dyn SystemCapability>);
+        let registry = builder.build_topo_sorted().unwrap();
+
+        let runtime = HostRuntime::new(
+            registry,
+            Arc::new(EmptyConfigProvider) as Arc<dyn ConfigProvider>,
+            DbOptions::None,
+            Arc::new(ClientHub::new()),
+            CancellationToken::new(),
+            Uuid::new_v4(),
+            None,
+        );
+
+        runtime.run_init_wiring_post_init().await.unwrap();
+
+        assert_eq!(events.lock().await.clone(), vec!["init", "post_init"]);
     }
 
     #[tokio::test]
