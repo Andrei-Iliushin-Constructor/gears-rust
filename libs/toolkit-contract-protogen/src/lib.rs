@@ -1,3 +1,5 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 //! Generate idiomatic `.proto` files from `ContractIr` + `GrpcBindingIr`
 //! plus caller-supplied `JsonSchema` definitions.
 //!

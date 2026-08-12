@@ -1,7 +1,7 @@
 //! Consumer gear definition and wiring.
 //!
-//! `#[toolkit::consumes]` emits — behind this crate's `directory-rest-client`
-//! feature — a `ConsumerRegistration` that the runtime's proxy-wiring phase
+//! `#[toolkit::consumes]` emits a `ConsumerRegistration` that the runtime's
+//! proxy-wiring phase
 //! replays at startup: if the `api-contracts` provider already registered a
 //! local `PaymentApi` in the `ClientHub`, that impl wins; otherwise a
 //! directory-resolving REST client is wired under `dyn PaymentApi`. This gear's

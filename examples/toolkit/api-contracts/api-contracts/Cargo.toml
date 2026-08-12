@@ -9,20 +9,9 @@ description = "api-contracts example module — PaymentApi with local and HTTP t
 rust-version.workspace = true
 
 [features]
-default = ["rest-client", "directory-rest-client", "rest-server"]
-rest-client = ["api-contracts-sdk/rest-client"]
+default = []
 # OpenTelemetry in generated clients: W3C traceparent propagation + RED metrics.
-otel = ["rest-client", "api-contracts-sdk/otel"]
-# Server-side route generation: pulls the macro-emitted
-# `register_payment_api_rest_routes()` from the SDK.
-rest-server = ["api-contracts-sdk/rest-server"]
-directory-rest-client = [
-    "rest-client",
-    "api-contracts-sdk/directory-rest-client",
-    # Enable the runtime proxy-wiring phase + discovery wiring in toolkit so the
-    # #[toolkit::consumes] ConsumerRegistration is replayed at startup.
-    "toolkit/contract-directory-rest-client",
-]
+otel = ["api-contracts-sdk/otel"]
 grpc-client = [
     "api-contracts-sdk/grpc-client",
     "toolkit-contract/grpc-client",
@@ -34,8 +23,14 @@ grpc-client = [
 workspace = true
 
 [dependencies]
-api-contracts-sdk.workspace = true
-toolkit-contract = { workspace = true, features = ["runtime-client"] }
+# Neither side is optional. `rest-server` because `src/api/rest/` calls the
+# generated `register_payment_api_rest_routes()` unconditionally — this gear
+# exists to serve the contract, so a build without routes is meaningless.
+# `rest-client` because `tests/runtime_eventual_readiness.rs` uses
+# `#[toolkit::consumes]`, whose output names `PaymentApiRestResolvingClient`
+# unconditionally, and integration tests inherit the package feature table.
+api-contracts-sdk = { workspace = true, features = ["rest-client", "rest-server"] }
+toolkit-contract = { workspace = true, features = ["runtime-client", "rest-server"] }
 toolkit.workspace = true
 toolkit-macros.workspace = true
 toolkit-canonical-errors.workspace = true

@@ -516,8 +516,9 @@ fn generate_client_impl(model: &RestContractModel, support: &TokenStream) -> Tok
 ///
 /// The wrapper holds an `Arc<DirectoryResolvingClient<XxxRestClient>>` and
 /// delegates each base-trait method through it (see
-/// [`generate_resolving_client_impl`]). Gated behind `directory-rest-client`
-/// (which enables `rest-client`, so `XxxRestClient` exists).
+/// [`generate_resolving_client_impl`]). Shares the `rest-client` gate with
+/// [`XxxRestClient`](generate_client_struct): the wrapper is a thin layer over
+/// that client and cannot exist without it.
 fn generate_resolving_client_struct(
     model: &RestContractModel,
     support: &TokenStream,
@@ -533,7 +534,7 @@ fn generate_resolving_client_struct(
     );
 
     quote! {
-        #[cfg(feature = "directory-rest-client")]
+        #[cfg(feature = "rest-client")]
         #[doc = #doc]
         pub struct #resolving_ident {
             __inner: ::std::sync::Arc<
@@ -541,7 +542,7 @@ fn generate_resolving_client_struct(
             >,
         }
 
-        #[cfg(feature = "directory-rest-client")]
+        #[cfg(feature = "rest-client")]
         impl #resolving_ident {
             /// Build a resolving client that discovers `from_gear` via `resolver`.
             ///
@@ -584,7 +585,7 @@ fn generate_resolving_client_impl(model: &RestContractModel, support: &TokenStre
         .map(|m| generate_resolving_method(m, &client_ident, trait_path, support));
 
     quote! {
-        #[cfg(feature = "directory-rest-client")]
+        #[cfg(feature = "rest-client")]
         #[::async_trait::async_trait]
         impl #trait_path for #resolving_ident {
             #(#methods)*

@@ -28,7 +28,11 @@ runtime-client = [
     "dep:rand",
     "dep:async-stream",
 ]
-# Used by rest_contract codegen to gate the generated client struct.
+# Client-side REST: gates the `runtime::resolving` module here, and in the SDK
+# crate the `rest_contract` codegen puts both the generated `<Trait>RestClient`
+# and its directory-resolving wrapper `<Trait>RestResolvingClient` behind this
+# same name. The wrapper is a thin layer over the plain client and needs no
+# dependencies of its own, so splitting it into its own feature bought nothing.
 rest-client = ["runtime-client"]
 # OpenTelemetry in generated clients. Activates `toolkit-http/otel`, which makes
 # the transport actually inject W3C `traceparent` (real distributed-trace
@@ -39,9 +43,9 @@ rest-client = ["runtime-client"]
 otel = ["runtime-client", "toolkit-http/otel"]
 # Server-side REST route registration: gates the generated `register_<trait>_routes()` function
 # and server-side OperationBuilder integration. The generated routes live in the SDK crate and
-# use the SDK's own `axum`/`toolkit` deps + `OperationBuilder`/`OpenApiRegistry`; this feature
-# gates nothing in `toolkit-contract` itself, so it only forwards `canonical-errors` (the wire
-# `Problem` envelope shared with the generated server error path).
+# use the SDK's own `axum`/`toolkit` deps + `OperationBuilder`/`OpenApiRegistry`. Here it gates
+# only `query::QueryParamsExtractor`, which is why it needs `axum` plus `canonical-errors` (the
+# wire `Problem` envelope shared with the generated server error path).
 rest-server = [
     "canonical-errors",
     "dep:axum",
@@ -49,11 +53,6 @@ rest-server = [
     # Problem, which needs `CanonicalError: IntoResponse`.
     "toolkit-canonical-errors/axum",
 ]
-# Directory-resolving REST transport: a self-healing wrapper that resolves the
-# provider endpoint from the service directory per call and rebuilds the
-# generated REST client when the endpoint changes. Gates the generated
-# `<Trait>ResolvingClient` struct and the `runtime::resolving` module.
-directory-rest-client = ["rest-client"]
 # Conversion of `TransportError` into `toolkit_canonical_errors::CanonicalError`.
 # Pull this in when SDKs want their `Result<_, CanonicalError>` to absorb
 # transport-layer failures via `?` without per-call mapping.

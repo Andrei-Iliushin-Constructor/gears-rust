@@ -10,8 +10,9 @@ rust-version.workspace = true
 
 [features]
 default = []
-# `toolkit-contract/rest-client` transitively pulls `canonical-errors` so the
-# `From<TransportError> for CanonicalError` impl is available.
+# Enables both generated clients: the plain `<Trait>RestClient` and its
+# directory-resolving wrapper `<Trait>RestResolvingClient`. Transitively pulls
+# `canonical-errors` so `From<TransportError> for CanonicalError` is available.
 rest-client = [
     "toolkit-contract/rest-client",
     "dep:toolkit-http",
@@ -22,12 +23,6 @@ rest-client = [
 # OpenTelemetry in the generated clients: real W3C `traceparent` propagation +
 # RED client metrics. Forwards `toolkit-contract/otel` (→ `toolkit-http/otel`).
 otel = ["rest-client", "toolkit-contract/otel"]
-# Directory-resolving REST transport: enables the generated
-# `<Trait>ResolvingClient` wrapper (self-healing endpoint discovery).
-directory-rest-client = [
-    "rest-client",
-    "toolkit-contract/directory-rest-client",
-]
 grpc-client = [
     "toolkit-contract/grpc-client",
     "dep:tonic",

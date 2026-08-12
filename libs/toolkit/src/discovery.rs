@@ -5,9 +5,10 @@
 //! [`ConsumerRegistration`]s emitted by `#[toolkit::consumes]` that the
 //! runtime's proxy-wiring phase replays at startup.
 //!
-//! Gated behind the `contract-directory-rest-client` feature so the HTTP/
-//! discovery plumbing is only compiled into builds that actually consume a
-//! contract over a discovered REST transport.
+//! Unconditional: consuming another gear over a discovered REST transport is
+//! the normal case, and `#[toolkit::consumes]` emits its registration
+//! unconditionally too. Putting this behind a feature only created a way to
+//! build a gear whose declared dependencies were silently never wired.
 
 use std::sync::Arc;
 

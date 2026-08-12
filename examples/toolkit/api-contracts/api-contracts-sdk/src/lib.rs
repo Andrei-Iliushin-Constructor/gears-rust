@@ -33,10 +33,7 @@ pub use error::{PaymentError, PaymentResourceError};
 pub use rest::{PaymentApiRest, payment_api_rest_http_binding};
 
 #[cfg(feature = "rest-client")]
-pub use rest::PaymentApiRestClient;
-
-#[cfg(feature = "directory-rest-client")]
-pub use rest::PaymentApiRestResolvingClient;
+pub use rest::{PaymentApiRestClient, PaymentApiRestResolvingClient};
 
 // v2 re-exports, mirroring the v1 set above. `#[toolkit::provides]` resolves
 // `payment_api_v2_ir` / `PaymentApiV2RestClient` / `payment_api_v2_rest_http_binding`
@@ -45,10 +42,7 @@ pub use contract_v2::{PaymentApiV2, payment_api_v2_ir};
 pub use rest_v2::{PaymentApiV2Rest, payment_api_v2_rest_http_binding};
 
 #[cfg(feature = "rest-client")]
-pub use rest_v2::PaymentApiV2RestClient;
-
-#[cfg(feature = "directory-rest-client")]
-pub use rest_v2::PaymentApiV2RestResolvingClient;
+pub use rest_v2::{PaymentApiV2RestClient, PaymentApiV2RestResolvingClient};
 
 #[cfg(feature = "grpc-client")]
 pub use grpc::{PaymentApiGrpc, PaymentApiGrpcClient, payment_api_grpc_binding};

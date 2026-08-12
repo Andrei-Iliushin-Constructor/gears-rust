@@ -2,23 +2,23 @@
 //! consumes a contract provided by another gear, wired via eventual-readiness
 //! directory discovery.
 //!
-//! Applied on the **gear struct** (alongside `#[toolkit::gear]`). Emits, behind
-//! the `directory-rest-client` feature, a non-capturing `fn` plus an
-//! `inventory::submit!` of a [`toolkit::discovery::ConsumerRegistration`] that
-//! the runtime's proxy-wiring phase replays at startup. The wiring closure:
+//! Applied on the **gear struct** (alongside `#[toolkit::gear]`). Emits a
+//! non-capturing `fn` plus an `inventory::submit!` of a
+//! [`toolkit::discovery::ConsumerRegistration`] that the runtime's proxy-wiring
+//! phase replays at startup. The wiring closure:
 //!   1. short-circuits if a compile-time (local) impl is already in the
 //!      `ClientHub` — a co-located provider wins;
 //!   2. otherwise registers a directory-resolving REST client under the
 //!      contract trait, which lazily resolves the provider endpoint per call.
 //!
-//! **Required feature.** The generated wire fn + `inventory::submit!` are gated
-//! on `#[cfg(feature = "directory-rest-client")]`, evaluated in the *consuming
-//! gear crate*. That crate MUST declare a feature named exactly
-//! `directory-rest-client` that turns on both `<sdk>/directory-rest-client`
-//! (so `<Contract>RestResolvingClient` exists) and
-//! `toolkit/contract-directory-rest-client` (so `toolkit::discovery` + the
-//! runtime proxy-wiring phase exist). If that feature is absent the wiring
-//! silently compiles out — declare it (see the api-contracts example crate).
+//! **Requirements on the consuming crate.** The emission is unconditional, so
+//! the crate needs a `toolkit` dependency (for `ClientHub`, `discovery` and the
+//! `inventory` re-export) and its contract SDK built with `rest-client`, which
+//! is what makes `<Contract>RestResolvingClient` exist. A missing SDK feature is
+//! a hard `cannot find type` error rather than silently-dropped wiring; this
+//! attribute used to sit behind a `directory-rest-client` feature evaluated in
+//! the consuming crate, which turned a forgotten feature into a gear that
+//! started fine and never found its provider.
 //!
 //! **Gear name is derived from the struct ident.** The emitted `owner_gear` is
 //! the kebab-case of the annotated struct's name, because the runtime uses it
@@ -185,7 +185,6 @@ pub fn generate(attr: &ConsumesAttr, item: &ItemStruct) -> SynResult<TokenStream
     Ok(quote! {
         #item
 
-        #[cfg(feature = "directory-rest-client")]
         #[doc(hidden)]
         #[allow(non_snake_case)]
         fn #wire_fn(
@@ -220,7 +219,6 @@ pub fn generate(attr: &ConsumesAttr, item: &ItemStruct) -> SynResult<TokenStream
             ::std::result::Result::Ok(::toolkit::discovery::WireOutcome::Remote)
         }
 
-        #[cfg(feature = "directory-rest-client")]
         ::toolkit::inventory::submit! {
             ::toolkit::discovery::ConsumerRegistration {
                 owner_gear: #owner_gear,

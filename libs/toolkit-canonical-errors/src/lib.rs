@@ -1,3 +1,5 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 extern crate self as toolkit_canonical_errors;
 
 pub mod builder;

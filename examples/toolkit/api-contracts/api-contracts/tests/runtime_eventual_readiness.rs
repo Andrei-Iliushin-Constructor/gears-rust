@@ -54,8 +54,8 @@ const PROVIDER_GEAR: &str = "payment-provider";
 
 // ----- Consumer: declares the dependency via the macro under test -----------
 
-/// The macro emits a `ConsumerRegistration` (behind `directory-rest-client`)
-/// that the proxy-wiring phase replays. The struct itself is inert.
+/// The macro emits a `ConsumerRegistration` that the proxy-wiring phase
+/// replays. The struct itself is inert.
 #[toolkit::consumes(contract = api_contracts_sdk::PaymentApi, from = "payment-provider")]
 struct PaymentConsumer;
 

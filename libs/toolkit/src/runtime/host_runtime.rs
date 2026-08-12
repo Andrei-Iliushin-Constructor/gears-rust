@@ -80,7 +80,6 @@ pub const DEFAULT_SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::
 /// `gears.<owner_gear>.config.consumer_wiring.<dep_gear>` (a base endpoint URI
 /// string). This is the dev/test escape hatch that bypasses service discovery;
 /// returns `None` when unset.
-#[cfg(feature = "contract-directory-rest-client")]
 fn static_endpoint_override(
     cfg: &dyn ConfigProvider,
     owner_gear: &str,
@@ -102,9 +101,7 @@ pub struct HostRuntime {
     grpc_installers: Arc<GrpcInstallerStore>,
     client_hub: Arc<ClientHub>,
     /// Per-gear config, retained for the proxy-wiring phase to read a consumer's
-    /// static-endpoint override (dev/test escape hatch, ADR-0004). Only read
-    /// under `contract-directory-rest-client`.
-    #[cfg_attr(not(feature = "contract-directory-rest-client"), allow(dead_code))]
+    /// static-endpoint override (dev/test escape hatch, ADR-0004).
     gears_cfg: Arc<dyn ConfigProvider>,
     /// Process-level dependency-resolution + draining signal, published in
     /// `client_hub` for the `/readyz` probe and updated by the proxy-wiring
@@ -419,7 +416,6 @@ impl HostRuntime {
     /// client, so this phase never waits on provider availability (ADR-0007).
     /// A no-op when no consumer is registered, preserving the phase-order
     /// invariants relied on by existing tests.
-    #[cfg(feature = "contract-directory-rest-client")]
     #[allow(
         clippy::unused_async,
         reason = "kept async for symmetry with the other `run_*_phase` steps awaited in sequence by `run_gear_phases`; the awaited work runs in a spawned readiness-probe task"
@@ -612,7 +608,6 @@ impl HostRuntime {
     async fn run_init_wiring_post_init(&self) -> Result<(), RegistryError> {
         self.run_init_phase().await?;
 
-        #[cfg(feature = "contract-directory-rest-client")]
         self.run_proxy_wiring_phase().await?;
 
         self.run_post_init_phase().await
@@ -1700,7 +1695,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "contract-directory-rest-client")]
     #[test]
     fn static_endpoint_override_reads_nested_consumer_wiring_key() {
         struct MapCfg(std::collections::HashMap<String, serde_json::Value>);
@@ -1743,7 +1737,6 @@ mod tests {
     /// Regression guard: the macro used to emit `stringify!(StructIdent)`, so
     /// the lookup asked for `gears.ApiContractsConsumer` — a key no config
     /// declares — and the escape hatch could never fire.
-    #[cfg(feature = "contract-directory-rest-client")]
     #[test]
     fn static_endpoint_override_is_keyed_by_kebab_gear_name() {
         struct MapCfg(std::collections::HashMap<String, serde_json::Value>);

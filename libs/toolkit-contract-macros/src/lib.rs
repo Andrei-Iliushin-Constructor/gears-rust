@@ -73,7 +73,7 @@ pub fn provides(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// dependency wired via eventual-readiness directory discovery.
 ///
 /// Applied on the gear struct (alongside `#[toolkit::gear]`). Emits a
-/// `ConsumerRegistration` (behind `directory-rest-client`) that the runtime's
+/// `ConsumerRegistration` that the runtime's
 /// proxy-wiring phase replays: a compile-time local impl wins, otherwise a
 /// directory-resolving REST client is registered. Does NOT inject a topo-sort
 /// dependency — see `toolkit_contract_macros::consumes` docs.
