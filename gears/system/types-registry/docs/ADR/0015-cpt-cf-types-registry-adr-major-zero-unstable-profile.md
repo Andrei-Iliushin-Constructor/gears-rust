@@ -102,13 +102,33 @@ Nothing else about the relation reaches a v0 entity either: ADR-0003 records the
 
 ### The quarantine rule
 
-**A managed entity whose own last segment carries a major of 1 or higher MUST NOT reference or derive from an entity whose last segment carries major 0.** The prohibition is on a **direct** edge — a `$ref` target, the immediate derivation base, or an `x-gts-ref` **that names an entity**. GTS §9.6 lets an `x-gts-ref` name none: `gts.*` constrains a field to hold some valid identifier, and a relative JSON pointer such as `/$id` or `./properties/id` addresses the holder's own document. Those are outside the rule, and the bound is worth stating rather than leaving to be discovered — a stable entity may hold a field whose runtime value names an unstable one. That is not the leak below: the value is data validated where it is used, not a document inlined into an effective form, so it cannot redefine what its holder accepts. The corresponding property of the whole resolution closure follows by induction rather than needing to be checked: an entity that carried the exemption transitively would itself have had to be admitted holding a direct edge to an unstable target, which this rule refuses. That is the same shape of argument ADR-0003 uses to reach a whole-history guarantee from a candidate-versus-baseline check.
+**A managed entity whose own last segment carries major 1 or higher MUST NOT reference or derive from an entity whose last segment carries major 0.** The rule applies to each **direct** edge:
 
-Its base case is a **precondition rather than a theorem**, and the difference is worth stating because the induction rests on it. The GTS grammar has always admitted major 0 (§2.1), and the managed identity profile said nothing about it until now, so a registry that has been running can in principle hold a v0 entity — and a stable entity that already references one. Rejecting only new edges would then leave the quarantine asserted but not established. Enabling the rule therefore requires the base case to hold, established by a **preflight scan**: one pass over `dependency` joined to `entity.gts_id`, looking for a subject whose own last segment carries a major of 1 or higher and a target whose carries 0. It is the same comparison admission performs, run once. A deployment where the scan is empty — which is every deployment that has admitted only stable majors, and the expected case for a first release under this profile — satisfies the base case and needs nothing further. A deployment where it is not empty must resolve the offending edges before the rule is enabled, since no grandfathering is offered: an exempt edge left in place is exactly the leak the rule exists to prevent.
+* a `$ref` target;
+* the immediate derivation base;
+* an `x-gts-ref` that **names an entity**.
 
-Without it the profile is not a profile but a leak. A `$ref` floats to the current revision, so a stable `customer.v1~` referencing an unstable `address.v0~` has its own accepted-instance set redefined whenever the address author reshapes — and, critically, **with no revision of `customer.v1~` at all**: §1.1 of DESIGN records that a current-state projection is recomputed when a floating dependency advances without producing an authored revision here. ADR-0005's dependent revalidation does not catch this, because it establishes that the dependent remains *valid*, not that it remains compatible with what it accepted yesterday. The owner of `customer.v1~` would lose a guarantee it made to its own consumers through an act of a different owner. That is the opposite of localizing responsibility.
+GTS §9.6 also permits an `x-gts-ref` that names no entity. `gts.*` constrains a field to contain some valid identifier; relative JSON pointers such as `/$id` and `./properties/id` address the holder's document. They are outside the rule. A stable entity may therefore contain a runtime value naming an unstable entity: the value is validated where used and does not redefine what its holder accepts.
 
-The rule costs no new machinery and no registry state at all. A candidate's direct references are its immediate derivation base plus the `$ref` targets and the entity-naming `x-gts-ref` targets in the submitted document, and a major version is readable from each of those identifiers — from the longest valid identifier prefix where the value is a pattern, and from nothing at all where it names no entity and there is accordingly nothing to check — so the check is a static property of what the caller sent — the same standing ADR-0014's dialect check has, and the same place in the admission sequence. ADR-0011 is what keeps it well-posed: the boundary is closed, so every target named in a managed document is a Managed Entity whose identifier the platform is entitled to interpret.
+The whole resolution closure follows by induction. Any transitive path to v0 must contain a stable entity with a direct edge to v0, which admission refuses. ADR-0003 uses the same argument shape to derive a whole-history guarantee from candidate-versus-baseline checks.
+
+The induction's base case is a **precondition, not a theorem**. GTS has always admitted major 0, while the managed profile previously assigned it no special meaning. An existing registry could therefore already contain a stable entity referencing v0. Refusing only new edges would assert quarantine without establishing it.
+
+Enabling the rule requires a **preflight scan**: join `dependency` to `entity.gts_id` and find any subject whose last-segment major is at least 1 with a target whose is 0. This is the admission comparison run once.
+
+An empty scan establishes the base case; that is expected for a first release where only stable majors were admitted. A non-empty scan requires remediation before enablement. There is no grandfathering because every retained edge is the leak the rule exists to prevent.
+
+Without quarantine, the profile leaks. A `$ref` floats, so reshaping unstable `address.v0~` can redefine the accepted-instance set of stable `customer.v1~` that references it — **without any authored revision of `customer.v1~`**. DESIGN §1.1 recomputes its current-state projection when the dependency advances.
+
+ADR-0005 dependent revalidation only proves that `customer.v1~` remains *valid*. It does not prove compatibility with what that type accepted yesterday. One owner could therefore withdraw another owner's guarantee, the opposite of localized responsibility.
+
+The rule needs no new machinery or state. Admission already has the direct edges: immediate derivation base, `$ref` targets, and entity-naming `x-gts-ref` targets. The target major comes from:
+
+* the identifier itself;
+* the longest valid identifier prefix when the value is a pattern;
+* nowhere when `x-gts-ref` names no entity, leaving nothing to check.
+
+This is a static property of the submission, checked beside ADR-0014's dialect profile. ADR-0011's closed boundary makes it well-posed: every target named by a managed document is Managed and its identifier is platform-interpretable.
 
 The relation is one-way and that is deliberate. An unstable type **MAY** build on a stable one — weaker on stronger is sound, and it is the normal case, since a new type under development usually derives from a published base. Only stronger-on-weaker is refused.
 
@@ -127,9 +147,19 @@ The fifth objection — *"derivation crosses ownership: a tenant deriving from a
 
 The profile is defined for Type Schemas, and two consequences follow for Instances.
 
-**Major 0 carries no meaning on a registered Instance identifier and MUST be refused there.** ADR-0006 establishes that successive Instance values have no compatibility relation at all, so there is nothing for the profile to exempt — an Instance value is already free to change. Admitting a marker that means "unenforced evolution" onto an entity whose evolution was never enforced would leave the marker meaning two things, and a reader could no longer conclude anything from seeing it. The restriction is one comparison at admission and joins the two the managed Instance profile already carries: no explicit UUID tail (ADR-0001) and no minor version (ADR-0004). The reasoning is shared with the last of those, which ADR-0004 refuses on an Instance identifier unconditionally and for exactly this argument, while admitting it on a Type Schema identifier under every prefix.
+**Major 0 carries no meaning on a registered Instance identifier and MUST be refused there.** ADR-0006 defines no compatibility relation between successive Instance values; they are already free to change. Marking them “unenforced evolution” would make major 0 mean two things and destroy the inference a reader makes from it.
 
-**A registered Instance MUST NOT conform to a v0 Type Schema.** ADR-0006 forbids a schema revision from becoming current while an affected registered Instance would cease to be valid. Applied to a v0 schema that rule would restore exactly the block this decision exists to remove; waived, it would leave admitted Instances failing validation against their own current schema while `instance.validated_type_schema_revision_no` records a revalidation that no longer holds. Refusing the combination is the only option that leaves both records truthful. The cost is real and is accepted: a control-plane type and its Instances cannot be developed together under the unstable profile, and such a type is published at v1 from the start.
+Admission therefore adds one comparison to the managed Instance identity profile, alongside:
+
+* no explicit UUID tail (ADR-0001);
+* no minor version (ADR-0004);
+* no major 0.
+
+ADR-0004 refuses minors on Instance identifiers for the same reason while admitting them on Type Schema identifiers under every prefix.
+
+**A registered Instance MUST NOT conform to a v0 Type Schema.** ADR-0006 otherwise blocks a schema revision that makes an affected Instance invalid. Applying that rule to v0 would restore the evolution block this ADR removes. Waiving it would leave invalid Instances while `instance.validated_type_schema_revision_no` falsely records successful revalidation.
+
+Refusing the combination keeps both records truthful. The accepted cost is that a control-plane type and its Instances cannot be co-developed under v0; such a type starts at v1.
 
 ### Nothing is stored
 
@@ -246,9 +276,13 @@ Marking a not-yet-settled contract by a convention in its version string, rather
 * [Google AIP-181](https://google.aip.dev/181) makes stability an explicit, named property of an API component, with `alpha` describing something that "undergoes rapid iteration with a known set of users" and is expressed in the version string as `v1alpha`. It is the same choice of carrier, from the same body of guidance this gear already draws on for resource revisions and freshness validation.
 * [Azure Resource Manager](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/resource-providers-and-types) uses dated API versions with a `-preview` suffix, again in the string a caller sends, with no compatibility guarantee and an independent retirement schedule.
 
-**And the closest product category does not do it at all.** Confluent Schema Registry, AWS Glue Schema Registry, Google Pub/Sub Schemas, and Azure Event Hubs Schema Registry have no analogue: compatibility is configured per subject as policy — the option ADR-0003 examined and rejected — and none encodes stability in the identifier a consumer stores. The convention is therefore borrowed from package and API versioning rather than from schema registries, and that is a deliberate choice rather than an oversight: those registries govern message schemas resolved at write time by a producer, whereas a GTS Type is also depended upon by other Types through a floating reference.
+**The closest product category does not use this model.** Confluent, AWS Glue, Google Pub/Sub, and Azure Event Hubs schema registries configure compatibility per subject. None encodes stability in the consumer-held identifier.
 
-That last difference is why one part of this decision has **no** precedent in any of the systems above. In every one of them the risk is accepted by a consumer choosing to depend on an unstable artifact, and nothing prevents a *stable* artifact from depending on an unstable one — Cargo, Go, and npm all permit a `1.0` crate or module to depend on a `0.x` one, leaving the resulting exposure to the author's judgement. Consumer opt-in is not sufficient here, because a floating `$ref` transfers the exposure to an owner who never opted in and never sees a verdict. The quarantine rule is the platform's own addition.
+Borrowing from package and API versioning rather than schema registries is deliberate. Those registries govern message schemas resolved by producers at write time; other GTS Types also depend on a GTS Type through floating references.
+
+One part of this decision has **no** precedent above. Cargo, Go, and npm allow stable artifacts to depend on unstable ones, leaving the exposure to author judgement.
+
+Consumer opt-in is insufficient here. A floating `$ref` transfers instability to another owner who neither opted in nor sees a verdict. The quarantine rule is therefore a platform-specific addition.
 
 ### Relationship to the GTS specification
 

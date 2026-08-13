@@ -214,7 +214,9 @@ Dependency availability propagates when the target is part of the semantic contr
 
 ### Why the semantic model is recorded even though P1 does not exercise it
 
-This ADR selects a model whose observable effect in P1 is nil: §P1 implementation latitude shows that the write-time invariants leave no state in which a dependency can make a visible entity unavailable, so no closure is materialized and none is traversed. Recording the decision anyway is the point rather than an oversight. The alternative is to leave the semantics implicit in whatever the storage happens to do, and then discover at the first new availability input — a managed tenant enablement override under `cpt-cf-types-registry-fr-tenant-enablement`, or tenant relocation entering scope — that `AVAILABLE` silently changed meaning for results consumers already hold.
+This model has no observable P1 effect. As §P1 implementation latitude shows, write-time invariants leave no state where a dependency makes a visible entity unavailable. No closure is materialized or traversed.
+
+Recording the semantics is still necessary. Otherwise storage behavior defines them implicitly, and the first new availability input — managed tenant enablement under `cpt-cf-types-registry-fr-tenant-enablement`, or tenant relocation — could silently change what `AVAILABLE` means for existing consumers.
 
 ### What would change the P1 latitude
 

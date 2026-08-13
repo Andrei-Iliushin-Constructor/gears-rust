@@ -115,21 +115,42 @@ Every live external entity result must include at least:
 
 Producing the resolved effective schema and the effective trait artifacts is a **mandatory** capability, not an optional one, and the decision turns on what the alternative leaves a consumer holding.
 
-If a plugin could omit them, a consumer needing the effective form of an external type would have to fetch every base in the chain and resolve it locally — several round trips and a reimplementation of GTS resolution in every consumer, which is the duplication Types Registry exists to remove. There is no degraded mode here: an absent resolved schema is a dead end rather than a smaller answer, because Types Registry will not produce one either. ADR-0011 forbids external documents from entering a managed resolution closure and ADR-0014 forbids reading their `$schema`, so the platform cannot fill the gap on the plugin's behalf.
+If a plugin omits the artifacts, a consumer must fetch every base and resolve the chain locally. That means several round trips and a GTS resolution implementation in every consumer — precisely the duplication Types Registry removes.
 
-The obligation is affordable because a plugin is already a full registry adapter rather than a translation shim, and this ADR's own consequences say so: batch resolving, querying, pagination, revision and freshness semantics, Registry Reference retention, and tombstones are all on it already. It is also well-posed because ADR-0011 closes the boundary: an externally managed entity's whole derivation chain lies inside one Source Claim and is served by one plugin, so the plugin holds every document it needs. The plugin may keep its own storage and computation to do it; the obligation is on the plugin, not on the vendor catalogue behind it.
+There is no degraded mode: an absent resolved schema is a dead end, not a smaller answer. Types Registry cannot fill the gap because ADR-0011 keeps external documents out of managed closures and ADR-0014 forbids inspecting their `$schema`.
+
+The obligation is affordable because a plugin is already a full registry adapter responsible for batch resolution, querying, pagination, revision and freshness semantics, Registry Reference retention, and tombstones.
+
+It is also well-posed. ADR-0011's closed boundary keeps an external entity's whole derivation chain inside one Source Claim, served by one plugin. The plugin therefore has every required document and may use its own storage and computation. The obligation applies to the adapter, not necessarily to the vendor catalogue behind it.
 
 Two consequences follow.
 
 Conformance testing must cover **how** the artifacts are computed, not only that they are returned and stable. `$ref` inlining, `allOf` composition along the `$id` chain, trait-value merge under JSON Merge Patch per GTS §9.7.5, and materialization of declared defaults before the completeness check all have specified semantics; a plugin that returns a plausibly-shaped but differently-computed artifact hands consumers a silently wrong schema, which is worse than returning nothing.
 
-The shape is uniform across origins and the guarantee is not, and that must be documented rather than inferred. For a Managed Entity a resolved schema means the closure was Draft-07 throughout, every base was checked for derivation compatibility, and the revision chain is backward compatible. For an Externally Managed Entity it means the source computed it under its own rules, of which Types Registry validates none. A practical corollary: the dialect may be anything GTS admits, since ADR-0014 forbids the platform from inspecting it, so a consumer validating against an external resolved schema must be prepared for Draft 2019-09 or 2020-12.
+The response shape is uniform across origins; its guarantees are not:
+
+| Origin | Meaning of a resolved schema |
+|---|---|
+| Managed | The closure is Draft-07, every base passed derivation compatibility, and the revision chain is backward compatible. |
+| External | The source computed the artifact under rules Types Registry does not validate. |
+
+ADR-0014 forbids inspecting an external dialect, so consumers must be prepared for any dialect GTS admits, including Draft 2019-09 and 2020-12.
 
 Per-level content-model classification is deliberately **not** required of a plugin. It is not a resolution artifact but metadata about the platform's own compatibility policy, which is not enforced on the external side; asking a source to report compliance with a mode the platform does not apply to it would be asking for a number with no meaning. ADR-0003 has since confined that reporting to refusals for managed entities too, so there is no asymmetry left to explain.
 
 Source lifecycle assertions must map to the platform `ACTIVE` or `DELETED` Lifecycle Status. That vocabulary has two values in P1 for every origin: ADR-0008 defers `DEPRECATED` on the external side as well as the managed one, so there is no third value to map onto.
 
-A source may still assert that an entity is deprecated, and Types Registry exposes such an entity as `ACTIVE`. That is not an approximation: a deprecated entity discourages new adoption and is otherwise fully usable, so `ACTIVE` says what is true of it in P1. Types Registry must not require the source to identify a successor, because ADR-0008 decides that deprecation is owner intent rather than a consequence of version succession. The assertion is not relayed to consumers, and the plugin contract must state that plainly, because a vendor whose registry deprecates types will otherwise assume the signal reaches them. A source may transition an entity directly to `DELETED` whether or not it previously deprecated it. A source-side pending candidate is not an Externally Managed logical entity and must not be returned through ordinary federation resolving or discovery. A `DELETED` source entity may be returned only by an operation whose contract explicitly includes tombstone or history information. **The exact read is such an operation**, whether the caller supplies a GTS Identifier or a Registry Reference: `lifecycle_status` sits in its default field set precisely so that a tombstone can be read, which is how a gear holding a stored reference distinguishes a retired contract from an identifier that never existed (DESIGN §3.3, *Read results*). The restriction therefore bites on discovery, search, and query assistance, which exclude deleted entities entirely — none of them is answering about a key the caller named. Reverse resolution of a deleted entity likewise succeeds and reports it deleted; that is what the source's retained tombstone is for. The source must never rebind its GTS Identifier or Registry Reference to a different logical entity.
+A source may assert deprecation, but Types Registry exposes that entity as `ACTIVE`. This is exact for P1: deprecation discourages adoption while the entity remains usable. ADR-0008 treats deprecation as owner intent, so Types Registry neither requires a successor nor relays the source assertion. The plugin contract must say so explicitly.
+
+Source lifecycle maps as follows:
+
+* an entity may move directly to `DELETED`, with or without prior source-side deprecation;
+* a pending source candidate is not an Externally Managed logical entity and must not appear in ordinary resolution or discovery;
+* a `DELETED` entity appears only in operations whose contract includes tombstone or history information.
+
+**Exact read is such an operation**, by GTS Identifier or Registry Reference. Its default `lifecycle_status` lets a gear distinguish a retired contract from an identifier never issued (DESIGN §3.3, *Read results*). Reverse resolution likewise returns the tombstone as deleted.
+
+Discovery, search, and query assistance exclude deleted entities because they do not answer about a caller-supplied exact key. The source must never rebind a GTS Identifier or Registry Reference to a different logical entity.
 
 For one exact external entity:
 
@@ -137,7 +158,14 @@ For one exact external entity:
 * changed canonical content must produce a different `external_revision`;
 * Types Registry does not assume that revisions are numeric, monotonic, or comparable across entities or sources.
 
-Revision and hash are protocol metadata. Types Registry validates the returned hash against canonical content when that content is present, and validates revision/hash consistency against caller- or cache-supplied conditional metadata when available. Cross-request conformance of a plugin's revision contract is verified by plugin contract tests and source monitoring; it does not require Types Registry to persist prior values. Types Registry exposes the metadata for conditional requests, which `cpt-cf-types-registry-fr-cache-freshness-metadata` makes a P1 obligation rather than a permission, and delegates the conditional read itself to the owning plugin through the capability required above. It does not persist the metadata as registry state.
+Revision and hash are protocol metadata. Types Registry:
+
+* validates the returned hash against canonical content when present;
+* validates revision/hash consistency against caller- or cache-supplied conditional metadata when available;
+* exposes both for conditional requests and delegates conditional reads to the owning plugin;
+* never persists them as registry state.
+
+Plugin contract tests and source monitoring verify the revision contract across requests without requiring prior values in Types Registry. `cpt-cf-types-registry-fr-cache-freshness-metadata` makes this conditional metadata a P1 obligation.
 
 ### Platform admission
 
@@ -151,7 +179,9 @@ External Registry Sources cannot provide Aliases, and Externally Managed Entitie
 
 A plugin call carries the plane-appropriate authenticated context through `SourceSecurityContext`: `Tenant(&SecurityContext)` on the tenant plane or `Platform(&PlatformSecurityContext)` on the platform plane. The wrapper preserves ToolKit's two authenticated context types across the in-process P1 plugin call. The call also carries the Context Tenant the question is about; it is **optional**, because a platform-plane read may ask no tenant-specific question at all.
 
-A plugin **MAY** apply its own checks on top of the platform's, and those checks **MAY only deny**. Narrowing is safe: the worst outcome is an entity the caller cannot see, which is indistinguishable from one that does not exist. Widening is not available to a plugin, because access is a platform decision and remains one; a source that could grant what Types Registry refused would place an authorization outcome in a component the platform does not operate. This is the same directional rule the ownership assertion above does *not* need — there a source speaks about its own content, here it would be speaking about a platform decision.
+A plugin **MAY** add checks, but they **MAY only deny**. Narrowing makes an entity invisible, indistinguishable from absence. Widening would let an unoperated source override a platform authorization decision and is forbidden.
+
+The ownership assertion does not need this directional rule. There the source describes content it owns; here it would be deciding platform access.
 
 A plugin does not supply a `resource_version` and Types Registry does not ask for one. That value exists solely as the optimistic-concurrency precondition of a write, PRD §4.2 keeps authoritative management of external sources out of scope, and a token supplied for an operation that does not exist would be a lever attached to nothing — a plugin returning a constant would look like concurrency control while detecting no conflict. Freshness is carried uniformly across both origins by the validator instead.
 
@@ -179,7 +209,7 @@ All P1 Types Registry operations that require the source fail closed. In particu
 * Each plugin must implement platform-compatible batch resolving, querying, pagination, revision/freshness, Registry Reference retention, and tenant-state behavior.
 * Plugin caches must remain correct across plugin instances, pods, and data centers according to the source contract.
 * External entity history and reverse resolution may be unavailable if a plugin is removed without migration; plugin removal and replacement therefore require preservation of issued Registry References and tombstones.
-* Cross-source dependency and impact queries must be federated through plugin capabilities; Types Registry does not reconstruct them from local projections.
+* Source-internal dependency handling and tooling remain source-owned. Types Registry neither reconstructs them from projections nor exposes cross-source dependency or reverse-impact queries (ADR-0011).
 * The source ordering and query contract become correctness-critical and are decided in ADR-0007.
 
 ### Confirmation

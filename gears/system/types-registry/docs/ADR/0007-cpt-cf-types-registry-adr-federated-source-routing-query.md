@@ -61,17 +61,42 @@ The architectural rules of the selected model are:
 * Each Registry Source Plugin declares validated source claims, served entity kinds, and a priority.
 * Active source claims cannot overlap another active source claim or the managed identifier space. Priority determines consultation order; it never authorizes shadowing.
 * Plugins are ordered by `(priority ASC, plugin GTS Instance Identifier ASC)`.
-* Exact GTS Identifiers are routed to the single source whose claim matches the identifier. Under ADR-0011 a claim pattern is a **rooted single-segment** wildcard pattern: exactly one segment, no `~`, with the wildcard at a token boundary inside it (`gts.<vendor>.*` through `gts.<vendor>.<package>.<namespace>.<type>.*`). The owning claim of an identifier is therefore selected from its **first segment alone**, and because a wildcard segment accepts every remaining segment including the chain separator, an externally managed entity's whole derivation chain lies inside one claim and is served by one plugin. That is what makes the managed and externally managed identifier spaces disjoint rather than merely rule-separated. A multi-segment claim is rejected at activation, because it would slice into a chain whose base segment may be managed.
+* Exact GTS Identifiers are routed to the single source whose claim matches the identifier. ADR-0011 constrains that routing:
+  * a claim is a **rooted single-segment** wildcard pattern: it contains no `~` and carries the wildcard at a token boundary (`gts.<vendor>.*` through `gts.<vendor>.<package>.<namespace>.<type>.*`);
+  * its wildcard accepts the rest of the identifier, including `~` chain separators, so the claim matching the first GTS chain segment owns every identifier chained beneath it and an externally managed derivation chain stays within one source; and
+  * activation rejects a multi-segment claim because it could slice into a chain whose base is managed.
 * Opaque Registry References that are not managed locally are resolved through the ordered plugin chain because the UUID does not encode its source.
 * Wildcard queries select every source whose claim intersects the requested pattern.
 * Federated lists use source-major order: managed storage first, followed by matching plugins in resolver order. Global field ordering across sources is not supported by this model.
 * Query assistance returns a complete, bounded Registry Reference set or fails; a partial expansion is never a usable domain query constraint.
-* A required source failure is not `NOT_FOUND`, source exhaustion, or a partial success. Operations that require a complete result fail closed.
-* An active source must satisfy the complete platform capability contract for every entity kind it claims. For a claimed Type Schema kind that contract includes producing the resolved effective schema and the effective trait artifacts, because Types Registry will not compute them for external content and a consumer has no way to obtain them otherwise (ADR-0002). ADR-0011's closed boundary bounds that contract by removing two candidate capabilities outright rather than by grading them. Dependency registration toward managed identifiers is not a capability at all, because the boundary leaves nothing to register. Neither is reverse dependency-impact lookup — not merely because managed deletion is decided from local state, but because the boundary empties it and nothing consumes what is left: it could only ever report external dependents of an externally managed entity, never anything about a Managed Entity, and Types Registry exposes no operation on either plane that enumerates dependents, since a caller asking what a change would break is answered by the Dry Run of that mutation. **The profile therefore has no optional or advisory tier**: every capability in it is mandatory for each claimed entity kind and authoritative in its result, so no plugin output degrades with a warning in place of failing closed. That is one rule to conform to rather than two, and it leaves nothing that a plugin author must read the contract to discover they may skip. Registry Source Plugins are read-only with respect to Types Registry state. Optional optimizations may over-return candidates for platform filtering, but cannot introduce false negatives or weaken correctness.
+* A source failure remains distinct from `NOT_FOUND` for the affected exact or batch key; unaffected batch keys may still succeed. List, search, and query operations that require a complete page or set fail as a whole rather than reinterpret failure as exhaustion or partial success.
+* An active source must satisfy the complete platform capability contract for every entity kind it claims:
+  * batch forward and reverse resolution, retaining reverse resolution after deletion;
+  * complete bounded candidate queries with opaque pagination;
+  * lifecycle, ownership/visibility, and tenant-state assertions;
+  * revision/hash and conditional-read semantics;
+  * structured source failures; and
+  * for a claimed Type Schema kind, resolved effective schema and trait artifacts, because Types Registry does not compute them for external content and consumers cannot obtain them otherwise (ADR-0002).
+* ADR-0011 excludes two capabilities rather than making them optional:
+  * dependency registration toward managed identifiers is excluded because ADR-0011 leaves no cross-boundary dependency to register;
+  * reverse dependency-impact lookup is excluded because it could report only external dependents of an external entity, while Types Registry exposes no dependent-enumeration operation and mutation Dry Run answers the actionable impact question.
+* Every applicable listed capability is mandatory and authoritative for each claimed kind. The profile has no optional or advisory tier and no output may degrade to a warning instead of failing closed.
+* Registry Source Plugins are read-only with respect to Types Registry state.
+* Candidate-query implementations may over-return for platform filtering, but cannot introduce false negatives or weaken correctness.
 
-The ordered walk carries no memo and no circuit breaker, and P1 adds neither. A `uuid → owning plugin` memo would speed up only a repeated **positive** resolution, while the case that costs most is the negative one — a reference held by no source walks the whole chain, because `NOT_FOUND` requires every source to answer authoritatively. That case cannot be memoized: a source may register the identifier at any time and nothing signals it, since the routing generation moves only when claims do. A circuit breaker changes no outcome either, because under fail-closed an open breaker must still yield a source failure rather than absence; it is resource protection, and timeouts, concurrency limits, and per-source failure classification already live in the plugin client adapter. Batching keeps the cost proportional to the number of plugins rather than to the number of references, and claim counts are single digits by design. Revisit if measurement against the benchmark profile shows otherwise; that profile must therefore fix the plugin count and the share of references not resolved locally.
+P1 adds neither a routing memo nor a circuit breaker:
 
-The detailed plugin capability profile, resolution algorithms, pagination contract, continuation-token contents, response validation, query-assistance expansion, and failure outcomes are specified in [DESIGN](../DESIGN.md): §3.3, *Registry Source Plugin contract*, for the trait, its models, and the obligations a conditional read puts on a plugin; §3.2, *Federation Router*, for claim matching, ordering, and the platform invariants every response is checked against; and §3.6 for the federated resolution and type-filter-expansion sequences.
+* A `uuid → owning plugin` memo helps only repeated positive resolution. It cannot cache the expensive negative case because a source may register the identifier without changing the routing generation; authoritative `NOT_FOUND` still requires every source to answer.
+* An open circuit breaker must remain a source failure under fail-closed semantics, not become absence. Timeouts, concurrency limits, and per-source failure classification already provide resource protection.
+* Batching keeps cost proportional to plugin count rather than reference count; claim counts are expected to remain single digits.
+
+Measurement may reopen this choice. The benchmark profile must therefore fix plugin count and the share of references not resolved locally.
+
+Construction details belong to [DESIGN](../DESIGN.md):
+
+* §3.2, *Federation Router*: claim matching, ordering, response validation, pagination, query expansion, and failure mapping;
+* §3.3, *Registry Source Plugin contract*: trait, models, capability profile, and conditional reads; and
+* §3.6: federated resolution and type-filter-expansion sequences.
 
 ### Consequences
 
@@ -81,7 +106,8 @@ The detailed plugin capability profile, resolution algorithms, pagination contra
 * Source-major ordering is deterministic and avoids a global merge, but it cannot provide global ordering by an entity field.
 * Pagination correctness depends on stable plugin configuration and source cursor contracts.
 * Source-claim intersection becomes a platform prerequisite for wildcard routing, and it reduces to a pattern-containment test the platform GTS implementation is expected to provide, so no bespoke intersection algorithm is needed.
-* A rooted claim is broader than a complete-identifier claim, so it captures every chained identifier beneath it and the blast radius of a mis-specified claim grows. In exchange, claim overlap becomes trivially decidable — for this grammar the platform matcher's containment test reduces to one field list being a prefix of the other — and a vendor's external namespace and the managed identifier space cannot nest, which vendor namespace planning must account for.
+* A rooted claim captures every chained identifier beneath it, increasing the blast radius of a mis-specified claim. In exchange, overlap reduces to prefix containment.
+* External and managed namespaces cannot nest, so vendor namespace planning must allocate disjoint roots.
 * Registry Source Plugins must provide a richer, completeness-preserving registry contract than ordinary ToolKit plugins — but a read-only one.
 
 ### Confirmation
@@ -146,7 +172,7 @@ Registry References become source-qualified values instead of opaque UUIDs.
 
 ## More Information
 
-The normative design elaboration is [DESIGN](../DESIGN.md) §3.2 and §3.3, as listed under the decision above. ADR-0002 separately decides that externally managed definitions and tenant state remain source-owned and are delegated live rather than projected into Types Registry.
+ADR-0002 separately decides that externally managed definitions and tenant state remain source-owned and are delegated live rather than projected into Types Registry. The DESIGN allocations are listed under the decision above.
 
 ## Traceability
 

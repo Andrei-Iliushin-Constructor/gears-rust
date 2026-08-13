@@ -88,7 +88,12 @@ A Managed Entity has exactly one ownership scope:
 * **Global** — platform-owned. Potentially visible to every tenant.
 * **Tenant-owned** — owned by one tenant, recorded as `owner_tenant_id`.
 
-An Externally Managed Entity carries the same two scopes, asserted by its owning Registry Source Plugin rather than recorded here. The division of labour is that the source states a **flat** fact — this entity is platform-wide, or it belongs to tenant X — and Types Registry expands it into the directed descendant relation below. That split matches what each side can actually know: a plugin already receives a tenant identity on every request, because ADR-0002 requires it to return tenant enablement state for one, but it need not know the tenant hierarchy, and under this arrangement it does not have to.
+An Externally Managed Entity carries the same two scopes, asserted by its Registry Source Plugin rather than stored here. Responsibilities split along what each side knows:
+
+* the source states a **flat** fact: the entity is platform-wide or belongs to tenant X;
+* Types Registry expands that fact into the directed descendant relation below.
+
+ADR-0002 already gives the plugin a tenant identity so it can return enablement state. The plugin need not know the tenant hierarchy.
 
 The scope is mandatory in a plugin response, so there is no default to get wrong in either direction; an absent assertion, or one naming a tenant the platform does not know, is an `INVALID_SOURCE_RESPONSE` rather than a silently invisible or silently universal entity.
 
@@ -110,7 +115,14 @@ Two relations must not be confused.
 
 **Derivation creates a new family with its own owner.** Where a tenant may derive at all, the derived type starts a new version family owned by the deriving tenant, which controls its successors and gains no authority over the base or the base's family.
 
-**Visibility permits derivation; it no longer implies it.** This ADR first stated that a tenant may derive from *any* visible type, including one owned by an ancestor or by the platform. That is now the shape of the rule rather than the rule: whether a base is open to a given vendor is decided per GTS Identifier Region by `cpt-cf-types-registry-fr-registration-policy`, whose default is closed. A visible base is a base a tenant *may be* permitted to derive from; the region has to admit both the vendor its candidate names and tenant ownership of the result. The reseller case this ADR is built around is unaffected — a tenant deriving beneath its own vendor namespace is admitted by the one entry that onboards that vendor — and what changed is that a platform contract is not extensible by every tenant that can see it.
+**Visibility permits derivation; it does not imply it.** A tenant may derive only from a visible base whose GTS Identifier Region permits both:
+
+* the vendor named by the candidate;
+* tenant ownership of the result.
+
+`cpt-cf-types-registry-fr-registration-policy` decides both per region and defaults closed. Visibility therefore makes a base *eligible* for derivation, while region policy grants extensibility.
+
+The reseller case remains: one entry onboarding a vendor permits a tenant to derive beneath its own namespace. A platform contract, however, is no longer extensible by every tenant that can see it.
 
 This asymmetry is the point: descendants extend the type system by deriving, not by editing what an ancestor published.
 
@@ -134,21 +146,46 @@ The objection is worth answering directly, because a namespace two tenants draw 
 
 **Data isolation** is the property that one tenant cannot read or change another's. It is intact and nothing above weakens it: visibility is the directed descendant relation, a conflict response carries only that the name is unavailable, an out-of-scope reverse resolution is indistinguishable from an unissued reference, and no read result carries an owning tenant identifier on either plane. **Namespace partitioning** — whether the space of *names* is per-tenant — is a separate question, and the answer here is deliberately no.
 
-What crosses the boundary is therefore one bit: *this identifier is unavailable*. And `cpt-cf-types-registry-fr-registration-authority` narrows even that, by requiring the grant check to run **before** the identifier-availability check. A caller with no grant covering the region receives one response whether the name is free, held by a visible entity, held by an invisible one, or held by a tombstone or a Source Claim reservation, so the bit is legible only to a subject that already holds authority over that part of the namespace — in practice, the vendor whose prefix it is. That is a stronger position than the public analogues below, where anyone who can reach the API can probe.
+Only one bit crosses the boundary: *this identifier is unavailable*. `cpt-cf-types-registry-fr-registration-authority` narrows even that by requiring the grant check **before** identifier availability.
 
-Per-tenant namespaces are not an alternative that was passed over; they are incompatible with three decisions this gear rests on. A chained identifier would stop being unambiguous, since `A~B~` would denote different types depending on whose context resolved it, and a `$ref` would need a tenant to resolve at all. ADR-0001 derives the Registry Reference deterministically from the identifier, so two tenants holding one string would derive one reference — repairable only by folding the tenant into the derivation, which destroys the portability that made it deterministic. And the reseller topology this ADR is built around requires a descendant to derive from a contract an ancestor published, which presupposes one namespace for both.
+A caller without a covering grant receives the same response whether the name is:
+
+* free;
+* held by a visible or invisible entity;
+* reserved by a tombstone or Source Claim.
+
+Only a subject already authorized for that namespace region — normally its vendor — can observe availability. This is narrower than public registries where any API caller can probe names.
+
+Per-tenant namespaces are incompatible with three existing decisions:
+
+* `A~B~` would denote different types by tenant context, and every `$ref` would need that context to resolve;
+* ADR-0001 deterministically derives one Registry Reference from one identifier. Including the tenant would destroy its portability;
+* a descendant deriving from an ancestor's contract requires both to share one namespace.
 
 ### The contract exposes whether the caller owns an entity, not who does
 
 Ownership is stored, asserted, and evaluated; it is not returned as a tenant identifier. A read result carries a boolean — the Context Tenant is the owner, or it is not — and no `owner_tenant_id`. On the platform plane, where there is no Context Tenant unless one is named, even the boolean is absent.
 
-Three reasons, and the first is the one that decides it. A tenant identifier is not actionable: nothing in the platform lets one tenant ask another for anything through Types Registry, so the value answers no question its holder can act on. It is also a disclosure this ADR did not otherwise make — a tenant seeing an ancestor-owned contract would learn that ancestor's identity, and by browsing enough of them, the shape of the hierarchy above it, which §Visibility deliberately keeps flowing in one direction. And for an externally managed entity it would additionally surface the vendor's own tenant mapping.
+An owning tenant identifier is not exposed because:
+
+* it is not actionable — Types Registry offers no tenant-to-tenant request path;
+* it reveals an ancestor's identity and, cumulatively, the hierarchy above the caller, which §*Visibility is directed down the tenant tree* deliberately keeps flowing in one direction;
+* for an external entity, it also reveals the vendor's tenant mapping.
+
+The first reason is decisive: the value answers no question its holder can act on.
 
 The boolean is deliberately not named for authority. Owning an entity is necessary for managing it and not sufficient: `cpt-cf-types-registry-fr-registration-authority` also requires a grant covering the candidate identifier. A field called "manageable" would promise more than it knows. The composite question — may I change this — is answered by the caller from the boolean and the entity's origin, since no write path reaches an externally managed entity however its source assigns it.
 
 The **global versus tenant-owned** distinction is not exposed either; it was considered and rejected — see *Sub-choices within the selected option*, below.
 
-A read may name a **Context Tenant** — the platform's term for the tenant scope root of an operation, which may differ from the subject's own — and the availability verdict is then computed for it rather than for the subject. This is not a hole in the directed relation, because the two tenants govern different things: **visibility is evaluated for the subject, availability for the Context Tenant.** Their visible sets are not nested — an entity owned by a descendant is visible to that descendant and not to its parent — so evaluating visibility for the Context Tenant instead would let an ancestor read a descendant's private contracts by naming it. The platform PDP checks that the subject's tenant is an ancestor of the one named.
+A read may name a **Context Tenant**, the tenant scope root of an operation, which may differ from the subject's tenant. The two identities govern different checks:
+
+| Check | Evaluated for |
+|---|---|
+| Visibility | Requesting subject |
+| Availability | Context Tenant |
+
+Their visible sets are not nested. Evaluating visibility for the Context Tenant would let an ancestor read a descendant's private contracts merely by naming that descendant. The platform PDP therefore checks that the subject's tenant is an ancestor of the Context Tenant, but visibility remains subject-based.
 
 The same rule governs the filter. Discovery selects by scope — mine, or everything visible — and never by a supplied tenant identifier. Accepting one would reopen on the read surface what `cpt-cf-types-registry-fr-registration-authority` closes on the write surface, where ownership is derived from the `SecurityContext` and never accepted as request data: a caller could otherwise probe for its own ancestors by filtering on a guessed identifier and observing whether the result is empty.
 
@@ -158,7 +195,11 @@ An ancestor may be unable to delete its own contract because a descendant regist
 
 This is correct behaviour, not a defect. The ancestor published a contract into its subtree and something took a dependency on it; unilateral deletion would break that dependent whether or not the ancestor can see it. The registry is enforcing the contract, not obstructing the owner.
 
-The disclosure boundary still holds. A blocked deletion reports the number of blocking dependents and nothing that identifies them, their owners, or their content. That leaves the owner unable to resolve the block alone, which is deliberate: resolution requires either the dependents' owners to remove them or a platform-authority operation that can see across the boundary. Types Registry exposes the count so the owner can distinguish "blocked" from "failed", and platform operators retain an authorized path to enumerate the dependents: a Dry Run deletion on the platform plane, which runs the same check and is not bound by this disclosure rule. There is no separate enumeration operation.
+The disclosure boundary still holds. A blocked tenant-plane deletion reports only the dependent count — no identities, owners, or content.
+
+The owner may therefore be unable to resolve the block alone. Resolution requires either the dependent owners to remove them or platform authority to inspect across the boundary. A platform-plane Dry Run deletion runs the same check and may enumerate those dependents; there is no separate enumeration API.
+
+The count lets the tenant distinguish “blocked” from a general failure without widening disclosure.
 
 The same restraint governs **Dry Run diagnostics**, and it has to be said explicitly because the temptation runs the other way. A Dry Run exists to tell a caller precisely what would go wrong, so its natural instinct is to name the offending dependent — but a tenant-plane Dry Run refused by a dependent the caller cannot see must report a count and no identity, exactly as the real deletion does. A rehearsal that discloses more than the act it rehearses would make the disclosure boundary optional.
 
@@ -187,22 +228,40 @@ Visibility never implies authority. The matrix below is the P1 baseline; concret
 | Delete | Platform authority | Owning tenant |
 | Exact resolve, batch resolve | Any tenant | Owner subtree only |
 | Discovery, search, query assistance | Any tenant | Owner subtree only |
-| Derive a new type from it | Any tenant that can see it; the derived type is owned by the deriving tenant | Any tenant in the owner subtree; same rule |
+| Derive a new type from it | Any tenant that can see it, where registration policy admits the candidate and a covering PDP grant authorizes it; the derived type is owned by the deriving tenant | Any tenant in the owner subtree, subject to the same policy and grant checks |
 | Publish a Version Successor | Platform authority | Owning tenant only, never a descendant |
 
-**The platform plane has no human actor.** Its callers are gears and maintenance jobs, authenticated as workloads; a person acts on it only by invoking a job, never by holding a credential for it. That is why the Register row above names a gear and a job rather than a role: there is no platform counterpart to the Tenant Administrator, and inventing one would put a human credential on the surface that can author global contracts and read across every tenant. The deliberateness that ADR-0013 requires of a purge lives in the decision to run the job, not in a person calling an endpoint.
+**The platform plane has no human actor.** Gears and maintenance jobs authenticate as workloads. A person may trigger a job but never holds a platform-plane credential.
+
+The Register row therefore names gears and jobs, not a role. Introducing a platform equivalent of Tenant Administrator would expose a human credential able to author global contracts and read every tenant. ADR-0013's deliberate purge act is the decision to run the job, not a person calling an endpoint.
 
 Two further properties of the plane follow from the matrix rather than being added to it.
 
-**It reads across every tenant, unfiltered by visibility.** There is no requesting tenant, so the descendant relation has no left-hand side and nothing to evaluate — and the PDP is not consulted in its place. Under `cpt-cf-adr-two-plane-auth` a `PlatformSecurityContext` is never passed to the tenant `PolicyEnforcer`, and platform-plane handlers are AuthZ-exempt by that model's term: the authenticated platform workload identity is the authorization, with any narrowing expressed as workload policy over that identity rather than as a grant over a subject. The authorization matrix below is therefore a tenant-plane matrix; the platform plane has one row, and it is the plane itself. This is not a convenience: the purge dry run of ADR-0013 reports what would be released broken down by owner across tenant boundaries, and the operator path this ADR promises for enumerating a blocked deletion's dependents exists precisely to see entities the deleting tenant cannot. Consequently the non-disclosure rule above — that an out-of-scope entity is indistinguishable from a missing one — is a property of the tenant surface and does not hold here. Ownership disclosure does **not** widen with it: an entity read carries no owning tenant identifier on either plane, and the one operation that must name owners, the purge dry run of ADR-0013, carries them in its own report rather than through the entity model.
+**The platform plane reads across every tenant without visibility filtering.** With no requesting tenant, the descendant relation has no left-hand side. The tenant PDP is not substituted for it.
+
+Under `cpt-cf-adr-two-plane-auth`:
+
+* `PlatformSecurityContext` never reaches the tenant `PolicyEnforcer`;
+* the authenticated workload identity authorizes a platform handler;
+* any narrowing is workload policy, not a subject grant.
+
+The matrix above is therefore tenant-plane policy; the platform plane authorizes the plane itself. This is required for ADR-0013 purge reports grouped by owner and for enumerating dependents invisible to a deleting tenant.
+
+Tenant non-disclosure does not apply on this plane, but ownership disclosure still does not widen. Entity reads expose no owner tenant on either plane; purge names owners only in its job-specific report.
 
 **It cannot create a tenant-owned entity.** Ownership is derived from the requesting context and is never request data; a platform-plane request has no tenant context, so there is nothing an owner could be derived from. This is a consequence of the rule rather than a separate prohibition, and it leaves purge as the only cross-tenant mutation — destructive maintenance under an operator rather than authoring.
 
-That second property has a corollary this ADR does not resolve. Ordinary deletion belongs to the owning tenant, and ADR-0013 requires an entity to be `DELETED` before it can be purged. When a tenant is removed from the platform, its entities therefore have no one left who can delete them and no operation by which the platform can: the owner is gone and the platform plane cannot author in its place. Tenant offboarding is out of scope here for the same reason relocation is, and it is recorded as an open question rather than left to be discovered — it also has to decide what becomes of dependents in other tenants that reference the departing tenant's contracts.
+This leaves one unresolved corollary. Ordinary deletion belongs to the owner, while ADR-0013 requires `DELETED` before purge. After tenant removal, no owner remains to delete its entities, and the platform plane cannot author on its behalf.
+
+Tenant offboarding is therefore an open question, like tenant relocation. It must also decide what happens to cross-tenant dependents of the departing tenant's contracts.
 
 Startup registration by platform gears is a platform-plane operation and authenticates as such rather than carrying a tenant `SecurityContext`. A tenant-plane registration derives the owning tenant from the request's `SecurityContext`, and the resulting entity is tenant-owned. **Ownership is never request data.** A tenant-plane request body that carries an owner is rejected rather than honoured, and there is no payload field by which a caller selects `global`.
 
-Three of this ADR's own rules depend on that. "Within its own scope" in the Register row is a definition rather than a check only while the owner *is* the requesting tenant; if the caller states it, the row becomes a comparison that something has to enforce. §Ownership is immutable already assumes it, since "the owner of a candidate is derived from the requesting context, so correcting it means submitting again" is meaningless if the caller supplies the owner. And `entity.owner_tenant_id` is the column SecureORM scopes every read on, so accepting it from a request body would populate a security-scoping column from caller-controlled input.
+Three rules depend on ownership never being request data:
+
+* “Within its own scope” remains a definition because the requesting tenant *is* the owner, not a caller-supplied value to compare.
+* §*Ownership is immutable, and a mistake is repaired by purge* assumes the candidate owner is derived from the request context; otherwise correcting a candidate by resubmitting it from the correct context would be meaningless.
+* `entity.owner_tenant_id`, which SecureORM uses for read scoping, never comes from caller-controlled payload.
 
 "Within its own scope" in the Register row bounds the *ownership* of the result, not the region of the namespace a tenant may name. Those are different limits, and leaving the second unstated would make the global identifier namespace first-come-first-served: a tenant could occupy `gts.<other-vendor>.<package>...` merely by registering it before that vendor did. Authority over a region of the namespace is therefore a **grant**, evaluated by the platform PDP against the candidate's canonical GTS Identifier, and specified by `cpt-cf-types-registry-fr-registration-authority`. Two consequences belong here because they interact with this ADR's own rules:
 
@@ -210,7 +269,9 @@ Three of this ADR's own rules depend on that. "Within its own scope" in the Regi
 * the grant governs writing, never reading. Visibility remains the directed descendant relation above, so a subject may hold a grant over a region it cannot fully see, and may see contracts it holds no grant to modify. This is the same separation the matrix already asserts, applied to the namespace rather than to the individual entity;
 * **a grant creates an entity only where registration policy already admits the candidate,** and what it admits is configuration rather than a constant. `cpt-cf-types-registry-fr-registration-policy` decides per GTS Identifier Region whether candidates there may be tenant-owned and which vendors they may name, both closed by default, and it is evaluated from the candidate's identifier and plane before the PDP is consulted. This is a bound on what a grant can reach rather than a grant of its own, so the two never disagree: a region the policy closes cannot be opened by any grant, and a grant is never asked about a candidate the policy has already refused. The bound applies where ownership comes into being — a candidate creating a new logical entity — not to a revision or deletion of one already admitted, so closing a region stops the next entity rather than freezing what it admitted. Withdrawing ongoing write authority stays the grant's job, the revocable half of the pair.
 
-  The bound exists because of §Ownership is immutable. The requested owner must equal the family's stored owner, so a platform contract admitted as tenant-owned is not repairable by revision — repair is a deletion followed by the purge that releases the identifier, which ADR-0013 separates as the destructive operation and keeps behind deployment policy. That is why the default is closed rather than merely narrow: an omitted entry refuses a registration, which the registrant reports immediately, while an over-broad one is discovered only after an entity exists under an owner nothing can change. Opening a region is consequently a deliberate act with a named beneficiary, and the corollary above — that a departed tenant's entities have no one left to delete them — cannot arise where a region was never opened to a tenant at all.
+  The bound exists because of §*Ownership is immutable, and a mistake is repaired by purge*. The requested owner must equal the family's stored owner, so revision cannot repair a platform contract admitted as tenant-owned. Repair requires delete and ADR-0013 purge, the destructive operation guarded by deployment policy.
+
+  The default is therefore closed, not merely narrow. A missing entry refuses registration immediately; an over-broad entry may be discovered only after an entity has an owner that cannot change. Opening a region is a deliberate act with a named beneficiary. The offboarding problem above cannot arise where tenant ownership was never admitted.
 
   Under the shipped declarations that includes `gts.cf.toolkit.*`, where GTS §3.6 has the pattern cover the whole derivation chain beneath the prefix, so a type derived from a platform base type and an Instance of either are inside it rather than beside it.
 
@@ -222,7 +283,7 @@ Three of this ADR's own rules depend on that. "Within its own scope" in the Regi
 * A platform contract is extensible per region rather than uniformly. Two deployments of the same release can differ in which of the platform's own types third parties may derive from, which is deliberate — it is the XaaS operator's decision — and it means a derived type admitted in one deployment may be refused in another.
 * A tenant can build on ancestor contracts without any ability to alter them, which is the property that makes a shared contract safe to publish downward.
 * A blocked deletion can require platform-operator involvement. This is an accepted operational cost of not disclosing dependents across the boundary.
-* Identifier existence is observable at registration time to any caller willing to attempt a registration. This is bounded to the name and is documented rather than hidden.
+* Identifier existence is observable at registration time only after registration policy admits the candidate and the caller presents a covering grant. It is bounded to the name; unauthorized callers cannot distinguish free and occupied identifiers.
 * Moving a tenant in the hierarchy changes the visible audience of every entity it owns and of every entity visible to it. That is a platform-level operation whose interaction with Types Registry needs its own analysis; it is out of scope here.
 
 ### Confirmation
@@ -230,7 +291,7 @@ Three of this ADR's own rules depend on that. "Within its own scope" in the Regi
 This decision is confirmed when:
 
 * a tenant-owned entity resolves and appears in discovery for its owner and every descendant, and is absent — indistinguishably from never having existed — for ancestors, siblings, and unrelated tenants;
-* a descendant can derive a new type from an ancestor-owned type, owns the resulting family, and is rejected when it attempts to publish a successor in the ancestor's family;
+* a descendant whose candidate is admitted by registration policy and authorized by a covering grant can derive a new type from an ancestor-owned type, owns the resulting family, and is rejected when it attempts to publish a successor in the ancestor's family;
 * a candidate deriving from a base whose region fails to admit *either* its vendor *or* tenant ownership — each parameter tested on its own — is refused before the PDP is consulted, with a reason naming configuration rather than authorization, and the same candidate is admitted once that region is opened;
 * a tenant deriving beneath its own vendor namespace is admitted by the single entry that onboards that vendor, with no entry per type;
 * closing a region after it admitted an entity leaves that entity's owner able to revise and to delete it, so nothing is frozen by a configuration change and the purge repair stays reachable;
@@ -279,11 +340,18 @@ Full-tree visibility was rejected because it inverts the direction that matters.
 
 **Where the extensibility of a region is decided** had three candidates once a stakeholder asked that a vendor be able to close its contracts to other vendors' derivations.
 
-A **PDP grant** was the first, and it is where the question naturally belongs — the grant model already matches a GTS pattern against the candidate's identifier, and it is operator-owned and audited. It was rejected as the sole mechanism because it has no evaluation point on the platform plane, which authorizes a workload rather than a subject and where every gear in one process shares that identity, so a rule keyed on *which vendor is registering* is unenforceable there. What is enforceable on both planes is the vendor the candidate's own identifier names, which is not a grant at all but a property of the request. The grant model is unchanged and still governs *who* may write in a region; policy governs *what that region admits*.
+A **PDP grant** is the natural home for write authority: it already matches GTS patterns and is operator-owned and audited. It cannot be the only mechanism because the platform plane authorizes a workload, not a subject, and every gear in one process shares that identity. A rule keyed on *which vendor is registering* is therefore unenforceable there.
+
+Both planes can inspect the vendor named by the candidate identifier; that is a request property, not a grant. The division is:
+
+* grants decide *who* may write in a region;
+* registration policy decides *what the region admits*.
 
 A **property in the authored GTS document** — the registrant marking its own type open or closed — was rejected because the deciding actor is wrong, and because such a property travels with content the registrant supplies. The requirement is that a platform operator, not the gear developer who published the type, decides which vendors may extend it. The release still ships the entries that make a stock deployment correct, but they are the platform's own defaults rather than a per-type authority: an operator may open any region, and no entry a type's author writes constrains that.
 
-**A constant in the code** was the prior state — one hard-coded `gts.cf.toolkit.*` reservation — and it was rejected on evidence: review found it covered two identifiers out of the whole `cf` space, leaving every other platform contract outside the very bound this section relies on. Widening the constant was rejected too, since a prefix wide enough to cover the platform's own base types also covers the vendor derivations beneath them, which is the extension path this ADR exists to keep open. A per-region table with a closed default expresses both, and the platform's vendor identity stays a single build-time value rather than a literal repeated at each decision point.
+**A constant in code** was the prior design: one hard-coded `gts.cf.toolkit.*` reservation. Review found it covered only two identifiers and left the rest of the `cf` platform space outside the bound.
+
+Widening the prefix would also cover vendor derivations beneath platform base types, closing the extension path this ADR preserves. A closed-default per-region table expresses both cases. The platform vendor identity remains one build-time value rather than a literal repeated at each check.
 
 The **global versus tenant-owned** distinction is not exposed either. It was considered: it discloses nothing about the hierarchy and would let a management view group a catalogue into platform contracts, inherited contracts, and one's own. It is left out because no requirement or actor names that grouping, and the discovery filter is narrowed to match rather than left able to select a bucket the response cannot explain. Adding both back later is additive.
 
@@ -296,7 +364,9 @@ The **global versus tenant-owned** distinction is not exposed either. It was con
 * [AWS Organizations](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies.html) applies policy downward through an organizational hierarchy, with the parent's declarations binding descendants and no reverse flow — the same directionality adopted here.
 * [Amazon S3 general purpose buckets](https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html) are the closest large-scale precedent for a name space shared across tenant boundaries: they "exist in a global namespace, which means that each bucket name must be unique across all AWS accounts in all the AWS Regions within a partition", and a name taken by one account is unavailable to every other. AWS accepts the same one-bit disclosure this ADR accepts, and without the grant-ordering rule that narrows it here.
 
-  Two details make the comparison more useful than a coincidence of shape. On releasing a name, AWS says a deleted bucket's name "might become available again in the global namespace for anyone to re-create", but "might not become available immediately, and in some cases might not become available again at all" — an unresolved hazard stated as vagueness. Types Registry faces the same hazard in a sharper form, because a deterministic Registry Reference reproduces itself when a name is reused, and answers it explicitly instead: an identifier is never rebound, the tombstone is permanent, and ADR-0013's purge is the single named exception, disabled by default. And AWS is under visible counter-pressure — general purpose buckets have acquired an account-scoped naming form, and directory buckets never used the global namespace — which is a reminder that a global namespace is a cost accepted for a reason rather than a free property. Here the reason is that GTS identifiers are meaningful across vendors by design, and the vendor-structured prefix plus the grant model of `cpt-cf-types-registry-fr-registration-authority` is what keeps the space governed rather than first-come-first-served.
+  The comparison adds two useful cautions. First, AWS describes name reuse after deletion as uncertain. Types Registry faces a sharper hazard because deterministic Registry References reproduce on reuse, so it gives an explicit rule instead: tombstones reserve identifiers permanently, with disabled-by-default ADR-0013 purge as the single exception.
+
+  Second, AWS has added account-scoped forms, while directory buckets never used its global namespace. A global namespace is a cost accepted for a reason, not a free property. Here the reason is cross-vendor GTS identity; vendor prefixes and `cpt-cf-types-registry-fr-registration-authority` grants keep that space governed rather than first-come-first-served.
 
 ## Traceability
 

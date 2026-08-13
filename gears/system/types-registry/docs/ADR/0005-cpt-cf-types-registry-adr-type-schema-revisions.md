@@ -66,7 +66,7 @@ This ADR does not define concrete table names, route paths, cache transport, rev
 | Schema revision | An immutable canonical Type Schema definition admitted for one logical Type Schema. |
 | Current revision | The admitted revision returned by ordinary resolution and used for new validations. |
 | Admission candidate | Proposed canonical content undergoing validation before initial admission or before it can replace the current revision. It is not yet a Schema revision. |
-| Admission status | Candidate or operation state such as `pending`, `succeeded`, or `failed`; the full per-candidate vocabulary is ADR-0012's, and it is separate from logical-entity Lifecycle Status. |
+| Candidate status | Per-candidate workflow and outcome state — `pending`, `running`, `succeeded`, `unchanged`, or `failed` under ADR-0012 — distinct from operation progress and logical-entity Lifecycle Status. |
 | Revision number | A server-assigned monotonically increasing integer scoped to one logical Type Schema. |
 | Content hash | A digest of the canonical schema content used to bind validation, idempotency, and diagnostics to exact bytes or canonical semantics. |
 | Dependency revision vector | The exact revisions or equivalent freshness tokens of registered dependencies used while validating a candidate. It is in-flight concurrency-control state held for the duration of one validation attempt, not part of the admitted revision. |
@@ -138,13 +138,13 @@ The two baselines in step 4 fail differently, and ADR-0012 keeps them apart. A c
 
 Creation of a new logical Type Schema carries `must_not_exist` instead. A retry submitted after the entity exists therefore fails `precondition_failed`; it is not absorbed as an idempotent no-op, whatever its content, because request-level retry safety is supplied by the `Idempotency-Key` replay of ADR-0012, which returns the original operation without consulting current state. Content equality answers a different question and is evaluated per candidate by the worker: content equal to the current authored revision creates no revision and does not advance `resource_version`, and that candidate terminates `unchanged`. An existing divergent identity follows ADR-0004's update or conflict rules.
 
-Before initial admission there is no public logical Type Schema and no entity Lifecycle Status. A failed initial candidate may remain as an operation or audit artifact, but it does not create a logical entity or tombstone, issue a Registry Reference for domain persistence, or establish a permanent GTS ID reservation. While an update candidate is `PENDING`, an existing logical Type Schema retains its current revision and its Lifecycle Status.
+Before initial admission there is no public logical Type Schema and no entity Lifecycle Status. A failed initial candidate may remain as an operation or audit artifact, but it does not create a logical entity or tombstone, issue a Registry Reference for domain persistence, or establish a permanent GTS ID reservation. While an update candidate is `pending`, an existing logical Type Schema retains its current revision and its Lifecycle Status.
 
 ### Retention and deletion
 
 * Every admitted Type Schema revision is retained for the lifetime of the registry identity, including after logical deletion, while Registry References or registered dependents may still exist. Retention after deletion is not only about resolving a reference, which a tombstone alone would satisfy: P1 permits deletion while live domain data still conforms, and the owning gear retiring that data needs the contract itself. ADR-0013 records the invariant and why it refuses to erase the payload.
 * Admitted revisions are never physically removed by a retention period, time-to-live, or background policy. Physical removal happens only through the explicit platform-level purge operation decided by ADR-0013, which is operator-invoked and never automatic.
-* Logical entity lifecycle is separate from admission and definition revisions. `PENDING` is an Admission Status; the managed logical entity lifecycle contains `ACTIVE` and `DELETED` in P1 under ADR-0008. Admitting an internal Schema revision does not change Lifecycle Status, and neither does admitting a higher-major Version Successor. Lifecycle transitions do not duplicate unchanged schema content into new revisions, but they do advance registry state/cache metadata and produce the required operation or audit record.
+* Logical entity lifecycle is separate from candidate workflow and definition revisions. A `pending` candidate is not a logical entity state; the managed lifecycle contains `ACTIVE` and `DELETED` in P1 under ADR-0008. Admitting an internal Schema revision does not change Lifecycle Status, and neither does admitting a higher-major Version Successor. Lifecycle transitions do not duplicate unchanged schema content into new revisions, but they do advance registry state/cache metadata and produce the required operation or audit record.
 * Failed candidates may be retained as operation artifacts under a separate retention policy; they are not admitted revisions and never participate in ordinary resolution or compatibility history.
 * Whether a given class of content may be held under these terms is a platform data-classification question rather than a registry one. Types Registry stores what it admits and applies no content policy of its own.
 
@@ -160,7 +160,16 @@ This list is the **default field projection**: what an ordinary read returns whe
 
 The enforced compatibility mode and per-level evolvability are **not selectable at all**, and that is a stronger statement than keeping them out of the default set. An ordinary read asked for no comparison, so it carries no compatibility reporting: the mode follows from the identifier the caller already holds, and the classification is an input to a verdict rather than something the registry reports (ADR-0003). What a read does carry, in the provenance group, is the one fact of the minor-version profile that a caller cannot derive: whether ADR-0004's `force` waived the cross-minor check for an admitted minor.
 
-The revision number is deliberately absent from the contract in P1, and not merely demoted. A revision number is only meaningful if some operation accepts one, and none does: reads take an identifier or a reference, write preconditions take `resource_version`, conditional reads take the validator, and this ADR already forbids ordinary resolution from selecting a historical revision. Exposing a number nothing consumes invites the reader to compare it across installations, where revision counters are unrelated. The content hash is the better handle for the diagnostic case precisely because equal content produces equal hashes anywhere. Revision numbers remain what they are inside the registry — revision identity, foreign-key targets, ordering — and return to the contract if and when a revision-history surface arrives with an operation that accepts one.
+The revision number is deliberately absent from the P1 contract. No operation accepts one:
+
+* reads take an identifier or Registry Reference;
+* write preconditions take `resource_version`;
+* conditional reads take the validator;
+* ordinary resolution cannot select historical revisions.
+
+Exposing an unusable number invites comparison across installations whose counters are unrelated. Content hash is the portable diagnostic handle because equal content hashes equally anywhere.
+
+Revision numbers remain internal identity, foreign-key targets, and ordering. They return to the contract only with a revision-history surface that accepts them.
 
 Client and server caches key logical identity separately from revision freshness. A cached schema is current only while its revision or ETag is current under the Types Registry cache protocol.
 

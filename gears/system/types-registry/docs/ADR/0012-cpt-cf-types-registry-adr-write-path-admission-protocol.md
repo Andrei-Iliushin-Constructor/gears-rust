@@ -43,7 +43,9 @@ decision-makers: Constructor Fabric Steering Committee
 
 Registration must support a bounded batch because one candidate may depend on another candidate that does not exist yet.
 
-Admission also cannot be bounded by the size of the request. Every input a caller supplies is capped — the authored document, the resolution closure, the number of candidates — but admitting a content revision additionally revalidates every transitive dependent of the target, and the number of dependents is deliberately uncapped, because the platform base types are widely depended upon by design. A revision to one of them is therefore work whose size follows from registry state rather than from the payload, and putting it on an HTTP request would make the platform's most common contracts the ones most expensive to change. That is a P1 property and holds whatever else the write path acquires later.
+Admission also cannot be bounded by the size of the request. The authored document, resolution closure, and candidate count are capped, but admitting a content revision additionally revalidates every transitive dependent of the target. The dependent count is deliberately uncapped because platform base types are widely depended upon by design.
+
+The work for revising such a type therefore follows from registry state, not payload size. Keeping it on an HTTP request would make the platform's most common contracts the most expensive to change. That is a P1 property and holds whatever else the write path acquires later.
 
 P2 semantic hooks point the same way and are the second reason rather than the first: they may outlive an HTTP request, so a contract that was synchronous in P1 would have to be withdrawn when they arrive.
 
@@ -115,7 +117,14 @@ For startup:
 
 Chosen options, one per dimension: **always-asynchronous execution with no synchronous no-op path**, **request idempotency plus an explicit entity resource-version precondition**, **dependency-aware partial admission with atomic dependency groups**, and **caller-side read, reconcile, conditional registration, retry, and readiness gating**.
 
-They are selected together because each protects a different one of the three concurrency forms the problem statement keeps apart, and none of them has to be withdrawn when P2 hooks make an operation's duration unbounded. A single acceptance shape means no successful response depends on load, timing, or whether a batch happened to change anything; a request key replays a request while a resource version guards a write, so a retry and a stale writer are answered differently; partial admission lets independent candidates progress without abandoning dependency ordering or cycle atomicity; and caller-side reconciliation keeps Types Registry off the platform boot path, which no server-side barrier could.
+Together they provide:
+
+* one acceptance shape that does not depend on load, timing, or whether the batch changes anything;
+* a request key for replay and a resource version for stale-write protection;
+* independent candidate progress without losing dependency ordering or cycle atomicity;
+* caller-side readiness gating without putting Types Registry on the platform boot path.
+
+None of these choices has to be withdrawn when P2 hooks make operation duration unbounded.
 
 The sections below state each choice in full.
 
@@ -125,9 +134,14 @@ A new registration request has exactly one successful acceptance result: `202 Ac
 
 A synchronous `200 OK / unchanged` acceptance for an all-equal batch is not offered either — see *Sub-choices within the selected option*, below.
 
-The state is reachable, and the earlier claim that it was not overstated the case: submitting content identical to what was just read, under `match_resource_version(v)`, satisfies its own precondition and needs no other writer. What the preconditions do rule out is the *interesting* way of arriving at it — one where the content became equal underneath the caller. `must_not_exist` yields `precondition_failed` once the entity exists, and `match_resource_version(v)` fails once the content has moved, because content can only have become equal by someone writing it, which advances the version past `v`. So an all-equal batch is never a race the server has to resolve; it is a redundant submission, and it is answered as one.
+An all-equal batch is reachable: content identical to what was just read satisfies `match_resource_version(v)` without another writer. It is a redundant submission, not a race the server must resolve.
 
-`unchanged` is therefore a **guarantee** rather than a path: a redundant submission creates no revision and no `resource_version` increment. Both the operation status and the per-candidate status carry the value for that reason.
+The preconditions rule out the raced form:
+
+* `must_not_exist` yields `precondition_failed` once the entity exists;
+* `match_resource_version(v)` fails once another write advances the version, even if that write makes the content equal.
+
+`unchanged` is therefore a **guarantee** rather than an acceptance path: a redundant submission creates no revision and no `resource_version` increment. The operation's per-candidate result records that outcome.
 
 The acceptance transaction stores the operation and its candidates and enqueues the operation UUID through the ToolKit transactional outbox. Request identity and workflow state are one record. A separate request record would exist only to hold a synchronous no-op receipt, and with no such path there is no request without an operation. The operation carries the scoped `Idempotency-Key`, its fingerprint, the plane, and the principal. The outbox owns leases, retry, duplicate delivery, and dead letters; the operation owns client-visible progress. A worker performs checks outside a long transaction and commits bounded admission units in short transactions.
 
@@ -135,7 +149,16 @@ This keeps one mutation contract when P2 hooks arrive. Hooks increase operation 
 
 ### Request identity, content equality, and optimistic locking are distinct
 
-`Idempotency-Key` is mandatory for a registration batch and is scoped to the caller's plane, owning tenant, **and requesting principal**. The principal participates so that one subject's key cannot return another subject's response — and with it another subject's Registry References and resource versions — inside one tenant. Its stored fingerprint covers at least the canonical request body, operation kind, ownership scope, the dry-run mode below, every candidate precondition, and every per-candidate check waiver — in P1 the `force` of ADR-0004, which the write path accepts only where deployment configuration has enabled it and otherwise refuses in envelope validation. The mode, the preconditions, and the waivers are named separately from the body although all three travel in it, because each one omitted from the fingerprint is a silent lost write: a submission differing from a stored one only in a mode, a precondition, or a waiver would replay that one's stored operation and never execute.
+`Idempotency-Key` is mandatory for a registration batch and is scoped to the caller's plane, owning tenant, **and requesting principal**. Including the principal prevents one subject's key from returning another subject's Registry References and resource versions inside the same tenant.
+
+The stored fingerprint covers at least:
+
+* the canonical request body and operation kind;
+* the ownership scope and dry-run mode;
+* every candidate precondition;
+* every per-candidate check waiver — in P1, ADR-0004's `force`.
+
+The write path accepts `force` only when deployment configuration enables it; otherwise envelope validation refuses it. Mode, preconditions, and waivers are explicit fingerprint inputs even though they travel in the body. Omitting any of them could make a distinct submission replay the stored operation and never execute: a silent lost write.
 
 A repeat with the same scoped key and fingerprint returns the immutable stored operation without re-evaluating current registry state:
 
@@ -155,7 +178,13 @@ The worker enforces the precondition in the commit transaction. A mismatch is a 
 
 Dependency freshness is internal concurrency control. Validation records the dependency revision vector. If the target precondition still holds but a dependency changes before commit, the worker revalidates within a bounded retry policy. This internal retry does not weaken the caller's target precondition.
 
-**A compatibility baseline is a third thing again, and ADR-0004 is what keeps it out of this machinery.** For a minor-bearing candidate the baseline is the preceding minor, which is neither the target nor a dependency: no reference edge crosses a minor boundary, so it is absent from the dependency vector, and it must stay absent from the `dependency` relation as well — an edge there would make deletion safety refuse to delete `v1.0~` while `v1.1~` exists, which ADR-0008 permits and ADR-0004 relies on. Under contiguity the baseline is named by the candidate's own identifier rather than selected from family state, so there is nothing to snapshot and nothing a concurrent admission can move. What the commit transaction adds is one keyed existence test under the family lock — is `vM.(n-1)~` still admitted, `ACTIVE` or `DELETED` — because a concurrent delete-and-purge could have removed it during validation. Its absence fails the candidate retryably, which is the same outcome as a base that is not yet registered rather than a caller-precondition failure; the caller declared nothing about that identifier, so there is nothing of the caller's to report as stale.
+**A compatibility baseline is a third thing again, and ADR-0004 keeps it out of this machinery.** For a minor-bearing candidate, the baseline is the preceding minor. It is neither the target nor a dependency: reference edges do not cross minor boundaries, so the baseline is absent from the dependency vector.
+
+It must also remain absent from the `dependency` relation. Such an edge would make deletion safety refuse to delete `v1.0~` while `v1.1~` exists, although ADR-0008 permits that deletion and ADR-0004 relies on it.
+
+Contiguity names the baseline from the candidate identifier; family state does not select it. There is therefore nothing to snapshot or for a concurrent admission to move. The commit transaction only tests, under the family lock, that `vM.(n-1)~` is still admitted as `ACTIVE` or `DELETED`, because concurrent delete-and-purge could remove it during validation.
+
+Absence fails the candidate retryably, like a base not yet registered. It is not a caller-precondition failure: the caller declared no condition about the baseline identifier.
 
 ### Dry run is a mode of the operation, not an operation of its own
 
@@ -169,7 +198,15 @@ The acceptance shape does not change. A dry run returns `202` with an operation 
 
 A dry run is not a guarantee of admission and must not be presented as one. Its verdict is relative to the state it observed: a target's `resource_version` may advance, a dependency may admit a new revision, or the entity may be deleted before the real submission.
 
-**Purge is not one of the kinds this ADR governs, and its dry run is its own.** ADR-0013 makes purge a synchronous platform-plane job that creates no operation, so nothing here reaches it: no acceptance shape, no request key, no per-candidate row, no outbox message. The reasons this path exists do not apply to it — P2 hooks do not run on purge, so its duration is bounded by local database work; its candidates are found by a scan rather than named by a caller, so there is nothing to persist per candidate; and it has no gear-facing contract to keep stable across P2. What ADR-0013 does keep is the *property* that makes a dry run worth having, which is that it be a mode of the same code rather than a second implementation of the check sequence. That property is what this decision was protecting, and it survives outside this path.
+**Purge is outside this ADR, and its dry run is separate.** ADR-0013 defines purge as a synchronous platform-plane job with no operation, request key, per-candidate row, or outbox message.
+
+The asynchronous-path reasons do not apply:
+
+* P2 hooks do not run on purge, so local database work bounds its duration;
+* a scan discovers its candidates, so there are no caller-named candidates to persist;
+* it has no gear-facing contract that must remain stable across P2.
+
+ADR-0013 does retain the important dry-run property: it is a mode of the same purge code, not a second implementation of its checks.
 
 ### The public operation has one status and per-candidate results
 
@@ -179,15 +216,49 @@ The outcome is not on the operation. It is the set of per-candidate statuses, ke
 
 The caller loses nothing it has to fetch. The operation resource carries its items, a batch is bounded at 100, and a caller asking *which* candidate failed — the common case — reads them regardless.
 
-Each exact candidate GTS Identifier has one result with status `pending`, `running`, `succeeded`, `unchanged`, or `failed`. `unchanged` is preferred to `not_modified` and `already_registered`: it reads correctly whatever the caller was attempting and does not overload HTTP `304 Not Modified`. It is nonetheless reachable **only for an update of a registration**, and that follows from the preconditions rather than being an extra rule: a deletion is a lifecycle transition with no redundant branch, and a create declares `must_not_exist`, which fails outright once the entity is there — so a candidate can only be proved redundant if it declared the `resource_version` it read. The database enforces both restrictions.
+Each exact candidate GTS Identifier has one result with status `pending`, `running`, `succeeded`, `unchanged`, or `failed`. The term `unchanged` is preferred to `not_modified` and `already_registered`: it is intent-neutral and does not overload HTTP `304 Not Modified`. The status itself remains update-only, as follows.
 
-A terminal success returns the Registry Reference always, and the resulting resource version wherever one was allocated — which is every committed result, including a deletion, and an `unchanged` result, which returns the version that did not move. A **dry-run `succeeded`** is the one exception: it predicts a commit whose version was never allocated, so it carries none, while a dry-run `unchanged` carries the existing version it read. It does **not** return a revision number: no P1 operation accepts one, so exposing it would offer a handle attached to nothing, and the caller's next write is preconditioned on `resource_version` (ADR-0005, ADR-0006). A failure returns a structured reason, and **that reason is the only carrier of what the check found** — ADR-0003 confines compatibility reporting to refusal, so no successful item carries a verdict, a mode, or a classification, and `operation_item` needs no payload column beyond the existing one.
+`unchanged` is reachable **only for a registration update**, as a consequence of preconditions:
+
+* deletion is a lifecycle transition with no redundant branch;
+* creation declares `must_not_exist`, which fails once the entity exists;
+* only a candidate carrying the `resource_version` it read can be proved redundant.
+
+The database enforces the first two restrictions.
+
+A terminal success always returns the Registry Reference. It also returns a resulting resource version for every committed result, including deletion. An `unchanged` result returns the version that did not move.
+
+A **dry-run `succeeded`** is the exception: it predicts a commit whose version was never allocated, so it carries none. A dry-run `unchanged` carries the existing version it read.
+
+The result does **not** return a revision number. No P1 operation accepts one, so it would be a handle attached to nothing; the caller's next write instead uses `resource_version` (ADR-0005, ADR-0006).
+
+A failure returns a structured reason, and **that reason is the only carrier of what the check found**. ADR-0003 confines compatibility reporting to refusal, so successful items carry no verdict, mode, or classification. `operation_item` therefore needs no payload column beyond the existing one.
 
 There is no separate public Admission Status vocabulary and no pending logical entity. An operation is the request-progress resource; an entity exists only after an admission unit commits.
 
-**Operations are retained until nothing points at them, and then bounded by a retention window.** Pinning is by **revision and not by outcome**: an operation is reachable from every revision it produced, so it lives as long as those revisions do, which is until purge — this is also why neither revision table duplicates the admitting principal. What a retention sweep may remove is everything unpinned. Three classes are unpinned from the start: dry runs, which produce no revision by construction; operations in which no candidate succeeded; and **successful deletions**, since a lifecycle transition creates no content revision. A predicate written over candidate status rather than over the revision references would exclude the first and third from the sweep forever, which is the opposite of what this rule says. A fourth class is unpinned *later*: an operation whose revisions ADR-0013's purge removed, since purge deletes revisions and leaves operation items alone. It has to be named, because the sweep reaches it without any rule being written for it.
+**Operations are retained until nothing points at them, then bounded by a retention window.** Pinning is by **revision, not outcome**. An operation remains reachable from every revision it produced and therefore lives until those revisions are purged. This is also why revision tables do not duplicate the admitting principal.
 
-Removing any of them releases its scoped request key, so a replay presented afterwards executes afresh. That is harmless for each of the four. A dry run has no effect by definition. An operation that admitted nothing either fails again or succeeds because the world changed. A swept successful deletion fails its own precondition, the entity being already `DELETED` with a `resource_version` past what the replay carries. And a swept operation whose entity was purged re-executes as an **ordinary registration of a free identifier** — it admits a new logical entity rather than restoring the purged one, subject to current authorization and to the precondition it carried. Purge releases an identifier for reuse and reserves nothing against it, so this is not a purge being undone: it is a caller re-submitting a request against a namespace where the name is available again. This is not a breach of ADR-0013: that decision reserves the removal of admitted content and identity to one operator-invoked act, and an unpinned operation is neither.
+The retention sweep may remove any unpinned operation:
+
+| When unpinned | Operation class | Why |
+|---|---|---|
+| From completion | Dry run | It creates no revision. |
+| From completion | No candidate succeeded | It created no revision. |
+| From completion | Successful deletion | A lifecycle transition creates no content revision. |
+| After purge | Its revisions were removed | Purge deletes revisions but leaves operation items. |
+
+A status-based sweep would retain dry runs and successful deletions forever. The sweep must instead test revision references.
+
+Removal releases the scoped request key, so a later replay executes afresh:
+
+| Removed operation | Replay result |
+|---|---|
+| Dry run | Harmless because it has no effect. |
+| Nothing admitted | Fails again, or succeeds because registry state changed. |
+| Successful deletion | Fails its stale precondition: the entity is already `DELETED` at a later `resource_version`. |
+| Revisions purged | Runs as an ordinary registration of a free identifier, subject to current authorization and its original precondition. |
+
+In the last case, a precondition that permits creation can create a new logical entity; it does not restore the purged one. An original update carrying `match_resource_version` instead fails because the entity is absent. Purge releases the identifier for reuse and reserves nothing against it. This does not breach ADR-0013, which reserves removal of admitted content and identity to one operator-invoked act; replay of an unpinned operation is neither.
 
 ### Batches use dependency-aware partial admission
 
@@ -203,7 +274,14 @@ The candidate dependency graph is resolved with the submitted candidates as an o
 
 This is called **dependency-aware partial admission**, not best effort. “Best effort” does not state dependency ordering, overlay resolution, or cycle atomicity.
 
-**The graph carries one implicit edge kind alongside the authored ones.** Two minors of one major have no reference between them, so nothing in the authored graph orders them, yet `vM.n~` must be admitted after `vM.(n-1)~` when both are in one batch. An implicit predecessor edge derived from the identifiers supplies that order, and a failed lower minor blocks the higher one rather than letting it be admitted over a gap. The edge is for determinism rather than for soundness: without it the higher minor simply fails retryably and succeeds on the next reconciliation cycle, which is the behaviour `cpt-cf-types-registry-fr-two-phase-init` already requires. Two properties make it cheap — the chain is acyclic by construction, since the numbering is strict, so it never creates a cyclic component; and it never becomes a row in the `dependency` relation, for the reason given above.
+**The graph carries one implicit edge kind alongside authored edges.** Two minors of one major do not reference each other, yet `vM.n~` must follow `vM.(n-1)~` when both occur in a batch. An identifier-derived predecessor edge supplies that order. If the lower minor fails, it blocks the higher one rather than admitting it over a gap.
+
+This edge provides determinism, not soundness. Without it, the higher minor fails retryably and succeeds on the next reconciliation cycle, as `cpt-cf-types-registry-fr-two-phase-init` already requires.
+
+The edge:
+
+* cannot create a cyclic component because strictly increasing minor numbers form an acyclic chain;
+* is never stored in the `dependency` relation, for the compatibility-baseline reason above.
 
 The batch cannot mix ownership scopes. All candidates are tenant-owned by the one tenant context, or all are global under platform authority. The version-family row remains the single ownership authority, so concurrent first registration cannot make one family global and tenant-owned or assign it to two tenants.
 
@@ -255,7 +333,7 @@ This decision is confirmed when:
 * two minors of one major in one batch are admitted in ascending order, and the higher one is blocked when the lower one fails;
 * equal authored content creates no revision and does not advance resource version, and `unchanged` is reachable only for an update: a deletion and a `must_not_exist` create are both refused that status by the stored-state constraint as well as by the worker;
 * a dry-run `succeeded` carries no resulting resource version while a dry-run `unchanged` carries the existing one, and both carry the derived Registry Reference;
-* an operation whose revisions a purge removed becomes sweepable, and a replay presented after the sweep re-executes as an ordinary registration of a now-free identifier rather than restoring the purged entity;
+* an operation whose revisions purge removed becomes sweepable; after the sweep, replay of an original `must_not_exist` create may register a new logical entity under the free identifier, while replay of a `match_resource_version` update fails because the entity is absent — neither restores the purged entity;
 * independent valid candidates commit when another dependency branch fails;
 * a failed in-batch dependency blocks its dependants;
 * the operation status takes only `pending`, `running`, or `completed`, and no operation-level field states whether the batch succeeded — a caller establishes that from the candidate statuses, and a mixed batch is `completed` exactly as a wholly successful one is;
@@ -324,7 +402,15 @@ A synchronous `200 OK / unchanged` acceptance for an all-equal batch is not offe
 
 It is a mode rather than a separate validation operation for one reason. A separate operation is a second implementation of the ordered check sequence, and the two drift; a drifted check that passes before deployment and fails at admission is the exact failure a pre-deployment gate exists to prevent. As a mode it is the same code path with the commit suppressed, so drift is not merely discouraged but unrepresentable. It is consequently orthogonal to `kind` rather than three further values in it.
 
-**Neither vocabulary carries cancellation, expiry, or a blocked candidate.** No requirement, actor, or use case asks to cancel a mutation in flight; when P2 hooks make an operation's duration genuinely unbounded the question becomes real and can be answered then. Expiry would be redundant rather than unwanted: an operation whose worker dies is redelivered by the outbox and its commits are idempotent, so terminality arrives only once retries are exhausted, and at that point the items already say what happened — the ones that committed `succeeded`, the rest `failed` with a structured reason; an operation that stalls past its timeout is completed the same way. Per-candidate outcomes state this more precisely than a merged operation status could, since they keep *some candidates were rejected* apart from *the worker gave up*. A candidate that an in-batch dependency prevented from being evaluated is likewise `failed`, under a reason of its own. The rule behind all three is that **a status distinguishes outcomes that differ in effect and a reason distinguishes causes** — `succeeded` and `unchanged` differ in **state effect** — the first changed the entity, whether by a new revision or by a lifecycle transition that creates none, while the second proved the submission redundant and changed nothing — whereas every way of producing nothing differs only in cause.
+**Neither vocabulary carries cancellation, expiry, or a blocked candidate.**
+
+* **Cancellation:** no P1 requirement, actor, or use case asks to cancel a mutation in flight. P2 hooks may make this worth a separate decision later.
+* **Expiry:** outbox redelivery and idempotent commits recover a dead worker. After retries are exhausted, terminal `succeeded` and `unchanged` items retain their outcomes; remaining non-terminal items become `failed` with structured reasons. A timeout is completed the same way.
+* **Blocked candidate:** a candidate that an in-batch dependency prevents from being evaluated is `failed` with a distinct reason.
+
+Per-candidate outcomes keep “some candidates were rejected” distinct from “the worker gave up,” which a merged operation outcome would obscure.
+
+The governing rule is: **status distinguishes effects; reason distinguishes causes**. `succeeded` changed the entity, through a revision or a lifecycle transition. `unchanged` proved the submission redundant and changed nothing. All failed ways of producing nothing differ only by reason.
 
 ## More Information
 

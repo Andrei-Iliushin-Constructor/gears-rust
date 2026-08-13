@@ -83,13 +83,25 @@ Ordinary deletion is unchanged everywhere. Every deployment, including developme
 
 Purge removes the records of a `DELETED` entity and releases its identifier for registration as a new logical entity. It is the operation development needs, and the one that can corrupt data.
 
-**A content purge is not production-safe, and the reason names the invariant that keeps the payload of a deleted entity.** P1 deletion sees only registry state — `cpt-cf-types-registry-fr-lifecycle` says plainly that a Type Schema **MAY** be deleted while live domain data still conforms to it, and that this stands as a limitation until the P2 owning-gear Validation Hooks close it. The gear holding that data is then the one that has to retire, migrate, export, or re-type it, and under `cpt-cf-types-registry-principle-contract-not-object` doing so is its job rather than the registry's. It cannot do any of it from a tombstone: an availability verdict says the contract is gone, while deciding what to do with an object requires the contract itself — the resolved effective schema, the effective traits, and the authored document behind them. Erasing the payload on deletion would therefore strand exactly the data that deletion left behind, and it would do so silently, since nothing in the registry can see that the data exists. That is why an exact read of a deleted entity still serves its content groups (DESIGN §3.3, *Read results*).
+**A content purge is not production-safe.** P1 deletion sees only registry state. `cpt-cf-types-registry-fr-lifecycle` therefore permits deleting a Type Schema while live domain data still conforms to it; P2 owning-gear Validation Hooks may close that limitation later.
+
+The gear holding that data must retire, migrate, export, or re-type it under `cpt-cf-types-registry-principle-contract-not-object`. A tombstone is insufficient: availability says the contract is gone, but handling an object requires its authored document, resolved effective schema, and effective traits.
+
+Deleting that payload would silently strand the very data logical deletion leaves behind, because the registry cannot see it. An exact read of a deleted entity therefore still serves its content groups (DESIGN §3.3, *Read results*).
 
 The invariant reaches the **current** revision at deletion — the one every surviving object validates against, since ADR-0003 makes each revision accept everything its predecessors accepted. It does not by itself justify retaining the earlier ones; what those are retained for is DESIGN open question D4.
 
 The tombstone, the mapping, and any other durable record of the identity are removed in **one transaction**. A partial removal that leaves a mapping behind would let the identifier be re-registered while a stale record still points at the old entity.
 
-Before purge, a deleted entity is still readable by an exact key and reports itself deleted and unavailable, which is how a gear holding a stored reference distinguishes a retired contract from an unknown one. Purge removes that distinction: between purge and re-registration the old Registry Reference resolves to nothing, indistinguishable from a reference that was never issued. After re-registration of the same identifier it resolves again, to the new logical entity, because deterministic derivation makes identifier and reference the same fact — the reference cannot be retired while the identifier is reusable. That is the rebinding hazard this operation carries, and it is the reason it is disabled by default rather than something a stronger removal rule could eliminate.
+The observable states are:
+
+| Stage | Old Registry Reference |
+|---|---|
+| Before purge | Resolves to a deleted, unavailable entity, distinguishing a retired contract from an unknown one. |
+| After purge | Resolves to nothing, like a reference never issued. |
+| After re-registration | Resolves to the new logical entity under the reused identifier. |
+
+Deterministic derivation makes identifier and reference the same fact: the reference cannot remain retired while the identifier is reusable. This unavoidable rebinding hazard is why purge is disabled by default.
 
 ### Everything that records the identity
 
@@ -99,9 +111,14 @@ The **version-family record** binds the family key to an ownership scope. If it 
 
 The **operation history** names the identifier on every candidate item that named it, and it is deliberately **not** in this enumeration: purge leaves those rows untouched. An earlier form of this decision deleted them, on the reasoning that a re-registration would otherwise leave a history in which one identifier string spans two logical entities. That reasoning was wrong twice over.
 
-It gave up more than it bought. ADR-0012 promises that a matching `Idempotency-Key` returns the immutable stored operation with a result for every candidate of the original request; deleting an item silently retracts one of those results, and not only during a retention transition, since a mixed batch stays pinned by another candidate's revision for as long as that revision lives. And it could not be made race-free: acceptance reads no registry state and therefore takes no `version_family` lock, so a candidate accepted a moment after the purge looked would be deleted before its worker ever ran — or, under a different delete order, execute against the re-registration. Serializing acceptance behind the family locks would have put a lock acquisition on the one path this design keeps free of registry reads, to protect a record whose only reader already holds it.
+Deleting operation items would give up two properties:
 
-And what it bought was not needed. An operation record is a receipt for a **request**, reachable only by its own operation id and by the scoped idempotency key of the principal that submitted it. There is no identifier-keyed operation query, so nothing can splice two entities into one entity history through this table; an entity's own history is its revisions, and those purge does remove. Nothing in the row is a Registry Reference or an entity kind either; the strongest handle it holds is a `resource_version`, and §*Optimistic tokens do not survive purge* below states exactly what that is worth. The residual ambiguity is that a retained receipt may name an identifier that no longer exists, or one a later registrant reused; that is a true statement about a past request in both cases, and purge unpins every operation whose only revisions it removed, so the retention sweep clears the bulk of them within its window.
+* ADR-0012 promises immutable replay with a result for every original candidate. Removing an item retracts that result, including from a mixed batch pinned by another candidate's surviving revision.
+* It cannot be race-free. Acceptance reads no registry state and takes no `version_family` lock, so purge could remove a newly accepted candidate before its worker runs, or let it execute against re-registration. Locking acceptance would add registry locking to a deliberately read-free path merely to protect a receipt.
+
+It would buy nothing necessary. An operation is a **request receipt**, reachable only by operation ID or by the submitting principal's scoped idempotency key. No identifier-keyed operation query can splice two incarnations into one entity history; revisions are the entity history, and purge removes them.
+
+The row contains neither Registry Reference nor entity kind. Its strongest handle is `resource_version`, whose limits §*Optimistic tokens do not survive purge* states. A retained receipt may name an absent or reused identifier, but remains a true record of the past request. Purge also unpins operations whose only revisions it removed, allowing the retention sweep to clear most within its window.
 
 ### Optimistic tokens do not survive purge
 
@@ -128,27 +145,60 @@ Purge requires the entity to be `DELETED`, and re-evaluates the deletion precond
 
 **A minor may be purged only from the top of its major.** Where ADR-0004's minors are in use, the minors of one major that a purge releases **MUST** form a suffix of that major's admitted sequence: releasing `v1.1~` while `v1.2~` is still admitted is refused, with the higher minors listed, exactly as an exact identifier still pinned by an Instance is refused with those Instances listed below.
 
-**Purge and admission serialize on the same row, and the protocol is part of this decision rather than of a repository.** Purge **MUST** acquire the `version_family` row of every family its pattern touches before it evaluates eligibility, and **MUST** hold those rows until it commits; where a pattern spans several families it **MUST** acquire them in a deterministic order so that two concurrent purges cannot deadlock. **Admission uses the same order**, since ADR-0012 admits a cyclic component atomically and such a unit may span several families; one canonical order shared by both operations is what makes the pair deadlock-free rather than merely each of them internally consistent. Without that, both rules above have the same hole in opposite directions: a purge that established `v1.0~` as eligible could delete it after a concurrent admission of `v1.1~` confirmed its existence under the family lock but before that admission committed, leaving `v1.1~` standing over a gap with its baseline gone; and a purge that established no higher minor exists could release `v1.1~` after a concurrent admission committed `v1.2~`. Neither is caught by the deletion preconditions, because no dependency edge joins two minors — that absence is deliberate (ADR-0004) and is exactly why the suffix rule exists. The family row is already the serialization point for ownership and for ADR-0004's admission rules, so this adds a lock scope rather than a lock.
+**Purge and admission serialize on the same row; the protocol is part of this decision.**
 
-This one precondition is unlike the others in that it protects a guarantee rather than a foreign key, and it is here because purge is the one operation that could otherwise withdraw it silently. ADR-0004 requires the minors of a major to be contiguous, and treats a `DELETED` predecessor as present precisely so that a released number cannot be reoccupied — a re-registered `v1.1~` would be checked against `v1.0~` and would leave `v1.1~ ≤ v1.2~` unestablished, which is the branch contiguity exists to prevent, and consumers have already been told that any higher minor of a stable, unforced major is a safe upgrade. Purge cannot preserve the number by remembering it, since leaving nothing behind is what purge *is*; so the rule lands on what may be released rather than on what is retained. Together the two give one invariant: the admitted minors of a major are always `{0..k}`, and the sequence grows and shrinks only at its end.
+* Before evaluating eligibility, purge **MUST** acquire every `version_family` row touched by its pattern and hold those rows through commit.
+* Multi-family purge **MUST** acquire them in deterministic order.
+* Admission **MUST** use the same order because an atomic cyclic unit may span families.
 
-It is also the one hazard of this operation that Types Registry **can** decide, which is why it is a check and not a documented risk. The rest — whether a domain row still holds the Registry Reference — is unknowable here and stays with deployment policy and operator judgement, as §What guards purge says. Nothing else about purge is constrained by it: a pattern selecting a whole major or a whole family satisfies the rule trivially, since it releases every minor there is, and the refusal therefore bites only on an exact-identifier purge aimed into the middle of a sequence. The cost is that an operator wanting one middle minor gone must retire the tail above it first, and where a higher minor is still `ACTIVE` the middle one cannot be purged at all — which is the correct reading of a sequence consumers were told they may walk.
+One shared order makes the pair deadlock-free, not merely each operation internally consistent.
 
-**Purge is synchronous and creates no operation.** It runs to completion inside the request and returns its report in the response. This is the one mutation that does not use the asynchronous write path of ADR-0012, and the reasons that made that path mandatory for registration and deletion are all absent here. P2 Validation Hooks do not apply to purge, so its duration is bounded by local database work rather than by a counterparty — which is what made an unbounded operation necessary elsewhere. Its work is a scan and a delete over managed storage, with no GTS resolution, no compatibility checking, and no plugin call, since ADR-0011 leaves every dependent local. And it has no caller to keep a stable contract for: it is an operator-invoked platform-plane job, disabled by default, not a gear-facing API whose response shape has to survive P2.
+Without serialization, either race could create a gap:
 
-Three things follow, and each is a subtraction rather than a special case. There is **no `Idempotency-Key` and no replay record**: re-running a purge of the same pattern finds the already-released identifiers absent and reports them as not matched, so the operation is naturally repeatable and needs no stored request identity to make it so. There is **no per-candidate row**, because the caller names no candidates — the pattern is expanded by a scan and the outcome per identifier is in the response, not in storage. And there is **nothing for a later purge to erase**: purge writes no history of its own, and it leaves the operation items naming the identifiers it releases in place for the reasons §*Everything that records the identity* gives, so the question of whether a purge might delete its own record does not arise in either direction.
+* purge deems `v1.0~` eligible, admission confirms it as the baseline for `v1.1~`, then purge removes it before admission commits;
+* purge sees no successor to `v1.1~`, admission commits `v1.2~`, then purge removes `v1.1~`.
 
-A candidate still in flight therefore needs no special treatment. An operation accepted before the purge and worked afterwards keeps its rows; if it was registering a released identifier it registers a new logical entity, which is what releasing the identifier means, and if it was deleting one it fails as absent. Neither outcome is a corrupted record, and neither requires purge to serialize against acceptance.
+Deletion preconditions do not catch these races because ADR-0004 deliberately stores no dependency edge between minors. The family row already serializes ownership and minor admission, so this extends lock scope rather than adding a lock.
+
+Unlike other purge preconditions, the suffix rule protects a guarantee rather than a foreign key. ADR-0004 requires contiguous minors and counts a `DELETED` predecessor as present so its number cannot be reoccupied.
+
+Otherwise, re-registering purged `v1.1~` would check it against `v1.0~` while existing `v1.2~` leaves `v1.1~ ≤ v1.2~` unestablished. That silently breaks the promised safe-upgrade chain of a stable, unforced major.
+
+Purge cannot reserve the number because leaving no identity record is its purpose. The restriction must therefore govern what may be released. Together the rules keep admitted minors at `{0..k}`, growing and shrinking only at the end.
+
+This is the one purge hazard Types Registry **can** decide, so it is a check rather than a documented risk. Whether a domain row still holds the Registry Reference is unknowable and remains with deployment policy and operator judgement, as §*What guards purge* explains.
+
+A pattern selecting a whole major or family satisfies the suffix rule only when every higher selected minor is also eligible and released. If an `ACTIVE` higher minor is skipped, a lower minor cannot be released. The rule therefore constrains the actual release set, not merely the pattern.
+
+To purge a middle minor, an operator must first retire the tail above it. That is the necessary cost of a sequence consumers were promised they could walk.
+
+**Purge is synchronous and creates no operation.** It completes within the request and returns its report directly. The reasons for ADR-0012's asynchronous registration and deletion path are absent:
+
+* P2 Validation Hooks do not apply, so only local database work bounds duration;
+* the work is a managed-storage scan and delete, with no GTS resolution, compatibility check, or plugin call;
+* it is a disabled-by-default, operator-invoked platform job, not a gear-facing contract that must survive P2.
+
+Three absences follow:
+
+* **No `Idempotency-Key` or replay record.** Re-running the pattern reports released identifiers as unmatched, making the job naturally repeatable.
+* **No per-candidate row.** A scan expands the pattern, and per-identifier outcomes live in the response.
+* **No registry operation history to erase.** Purge writes no registry operation row of its own and leaves prior operation items intact for the reasons in §*Everything that records the identity*. Its external job audit is separate.
+
+A candidate still in flight therefore needs no special treatment. An operation accepted before purge keeps its rows when worked afterwards. A registration carrying `must_not_exist` may admit a new logical entity under the released identifier; an update carrying `match_resource_version` fails because the entity is absent; a deletion likewise fails as absent. None is a corrupted record, and purge need not serialize against acceptance.
 
 The audit trail is therefore the job's own record rather than a registry row. What such a record must contain, who may read it, and how long it is kept is PRD open question 2, which covers registry mutations generally and is not settled by this decision.
 
 It is delivered as a platform maintenance job rather than as tenant-facing API surface. That follows from what it is: a non-tenant-scoped platform operation authenticated on the platform plane with `PlatformSecurityContext` rather than a propagated tenant context, batch-shaped, and potentially wide in scope. A job also gives the operation a natural place for the property that matters most in practice — a **dry run** that reports exactly which identifiers would be released before anything is removed, broken down by owner, since one pattern can cross tenant boundaries.
 
-The job takes a **GTS pattern**, which is what makes it usable and also what keeps referential integrity intact. A registered Instance's identifier begins with the identifier of the Type Schema it conforms to, so any prefix pattern that selects a schema necessarily selects every Instance that could pin one of its revisions — a structural property of the chained identifier, not a coincidence. The job removes matched Instances before matched Type Schemas, and the pins never obstruct it. An exact identifier carrying no wildcard selects only itself; there the job **MUST** verify that no Instance still pins the target and refuse with those Instances listed rather than failing on a constraint.
+The job takes a **GTS pattern**, making it usable while preserving referential integrity. A registered Instance identifier begins with its Type Schema identifier. A prefix pattern selecting a schema therefore also selects every Instance that could pin its revisions — a property of chained identifiers.
+
+The job removes matched Instances before matched Type Schemas, so pins do not obstruct it. An exact identifier without a wildcard selects only itself; the job then **MUST** verify that no Instance pins the target and refuse with those Instances listed rather than fail on a constraint.
 
 A pattern selects candidates; it does not waive preconditions. The job reports how many entities matched, how many were eligible, why each of the rest was skipped, and — for the dry run — the owner of every identifier it would release. All of that is in the response, computed while the entities are still in hand, which is what a synchronous shape buys: a dry run removes nothing, so the owner of a matched entity is a read away rather than something that has to be recorded before the entity disappears.
 
-That dry run is a facility of this job rather than an application of the general dry-run mode of ADR-0012, since purge does not travel that path. What it keeps from that mode is the property that made it worth having: it is a **mode of the same code**, running the identical check sequence and stopping before the removal, so the report cannot drift from what the real purge would do. It needs no request-identity rule to stay distinct from a real purge, because there is no stored request to be replayed. And it proves nothing about a purge invoked later, since an entity's eligibility can change in between.
+This dry run belongs to the purge job, not ADR-0012's general write path. It keeps the essential property: a **mode of the same code** that runs identical checks and stops before removal, preventing drift from real purge.
+
+It needs no request-identity rule because purge stores no replayable request. It also guarantees nothing about a later invocation; eligibility may change in between.
 
 Purging a Registry Source Plugin removes its Source Claims with it. No extra ordering is needed: deleting the plugin Instance — a precondition of purging it — already retired those claims and released the foreign key by which they pinned its revisions. The job deletes the claim rows and bumps the routing generation in the same transaction, so cached routing and live federated cursors observe the change.
 
@@ -158,7 +208,11 @@ Purge never runs on a schedule, on a timer, or as a consequence of any retention
 
 ADR-0001 guarantees that a logically deleted GTS Identifier cannot be rebound to a new logical entity. Purge is the single, named exception to that guarantee, and it is the reason the guarantee is stated as a property of ordinary operation rather than of the storage layer.
 
-Retired Source Claim reservations from ADR-0011 are released by the same exception. A Registry Source Plugin is a registered Instance, so purging it removes its reservations along with its identity, and the claimed identifier space becomes registrable again. Placing those reservations out of scope would carve out an identical hazard for different treatment, since a released claim space rebinds a persisted reference exactly as a released identifier does. ADR-0011 offers no runtime takeover operation, so purge is the only in-product way to reuse a reserved space, and it is the wider of the two available: it releases the space to whoever asks next, including a managed registration. The narrower one is outside the product — a migration that retargets the claim rows to a named successor, leaving the space reserved throughout.
+The same exception releases ADR-0011's retired Source Claim reservations. A Registry Source Plugin is a registered Instance, so purging it removes its identity and reservations; the claimed space becomes registrable again.
+
+Excluding reservations would treat the same hazard differently: releasing a claim space can rebind a persisted reference just like releasing an identifier. ADR-0011 has no runtime takeover, so purge is the only in-product reuse path. It releases the space to the next registrant, including a managed one.
+
+The narrower alternative is an out-of-product migration that retargets claim rows to a named successor while keeping the space continuously reserved.
 
 ### Consequences
 
@@ -179,13 +233,13 @@ This decision is confirmed when:
 * purge removes the entity record, its revisions, and the forward and reverse mapping in one transaction, after which the old Registry Reference resolves to nothing and is indistinguishable from an unissued reference;
 * purge removes the version-family record once its last member is gone, and a subsequent registration of the released identifier under a different owner, or of the other entity kind, succeeds;
 * purging a Registry Source Plugin removes its retired Source Claims, after which a Managed Entity can be registered in the space they reserved, while deleting that plugin without purging it leaves the reservations in force;
-* purge leaves every operation item naming a released identifier in place, so a same-key replay still returns a result for every candidate of the original request;
+* purge leaves every operation item naming a released identifier in place, so a same-key replay returns every original candidate result while the operation remains retained; once the now-unpinned operation is swept, ADR-0012's fresh-execution rules apply according to the original precondition;
 * a `resource_version` held across purge and re-registration is exercised deliberately, on every backend and for an update and a deletion alike: while the new incarnation is behind the old counter the stale token fails `precondition_failed`, and once it has caught up the token is **accepted** — the test asserts the documented behaviour of §*Optimistic tokens do not survive purge* rather than a guarantee it does not make, and the same case is run for a write accepted before the purge and executed after it;
 * a purge returns its report in the response and creates no operation, no operation item, and no outbox message; re-running it over the same pattern reports the already-released identifiers as unmatched rather than failing, so repeatability needs no stored request identity;
 * registration of a new logical entity under a purged identifier succeeds and resolves under the same Registry Reference as the purged one;
 * purge rejects an entity that is not `DELETED`, and one that still has a registered dependent, with the precondition re-evaluated from managed storage while every plugin is unreachable;
 * purge of `v1.1~` is rejected while `v1.2~` is admitted, with the higher minors listed, and succeeds once they are released;
-* a purge concurrent with an operation already accepted for a matched identifier leaves that operation intact and reachable by its key, and the operation reaches `completed` with every candidate terminal: a registration of a released identifier admits a new logical entity, a deletion of one fails as absent;
+* a purge concurrent with an operation already accepted for a matched identifier leaves that operation intact and reachable by its key, and the operation reaches `completed` with every candidate terminal: a registration with `must_not_exist` may admit a new logical entity, while an update with `match_resource_version` and a deletion both fail as absent;
 * a purge concurrent with an admission into the same family produces no gap in either direction — neither a minor admitted over a purged predecessor nor a predecessor released under a concurrently admitted successor — which is exercised by driving both against the same family row; a pattern releasing every minor of a major is accepted; and after purging a whole major, re-registering `v1.0~` and then `v1.1~` re-establishes the sequence from scratch — proving the released numbers are reoccupied only in order;
 * a pattern that selects a Type Schema also selects every Instance conforming to it, Instances are removed before schemas, and no foreign key obstructs the job; an exact identifier still pinned by an Instance is refused with those Instances listed;
 * the job reports matched, eligible, and skipped counts with a reason per skipped entity, and a dry run reports the identifiers that would be released, broken down by owner, and removes nothing;
@@ -229,7 +283,12 @@ Alternatives considered while shaping the option above, recorded here rather tha
 
 The alternative is to split it in two, adding a content purge that removes retained revisions while keeping the identity tombstone, on the ground that removing content without releasing the identifier would be production-safe. It would not be, and the paragraph below says why. With that the argument for a split goes: what remains is one act with one risk profile and one guard.
 
-A non-reusable incarnation identifier, carried on the entity and in every write precondition, would close the numeric half. It is **declined**, for two reasons. It would have to survive purge to be non-reusable, which makes it exactly the kind of durable record of a released identity that §*Everything that records the identity* requires purge to remove — a monotonic per-identifier counter tells the next registrant that the name was used before, and re-registration would stop being a fresh start. And it would close the narrower half of a hazard while leaving the wider one open, buying a guarantee only for callers that hold a version token and not for the ones that hold a reference. The registry instead keeps ordinary optimistic locking exact **within one incarnation**, which is the scope every other guarantee in this document has.
+A non-reusable incarnation identifier carried by each entity and write precondition would prevent numeric token collision. It is **declined** for two reasons:
+
+* To be non-reusable, it must survive purge. That is precisely the durable record of a released identity that §*Everything that records the identity* requires purge to remove; a monotonic per-identifier counter means re-registration is not a fresh start.
+* It protects callers holding a version token while leaving the wider Registry Reference rebinding hazard open.
+
+Optimistic locking therefore remains exact **within one incarnation**, the scope of every other guarantee in this ADR.
 
 ## More Information
 

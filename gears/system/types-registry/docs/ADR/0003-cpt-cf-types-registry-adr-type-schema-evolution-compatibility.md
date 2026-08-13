@@ -130,7 +130,13 @@ Transitivity then yields the guarantee at the granularity a consumer cares about
 
 The argument requires the chain to stay intact, which ADR-0005 guarantees — every revision is checked against the then-current revision, no admitted revision is removed, and the current pointer never moves backward. Across minor boundaries one further rule keeps it intact, and ADR-0004 owns it because it is a property of identity rather than of compatibility: **the minors of a major are contiguous and open at `M.0`.** Without it the sequence branches at a shared predecessor, the endpoints stop being comparable, and the guarantee above is not established.
 
-**Contiguity, and not mere ordering, is what makes the baseline sound under concurrency**, and the distinction belongs here because it is this ADR's argument that depends on it. Ordering the admitted minors is not enough: this check runs before the commit transaction, so if the baseline were *the highest minor admitted below the candidate* it would be a function of state that a concurrent admission could change between selection and commit — two successors submitted at once would both select the member below them, one would commit, and the other would satisfy ordering against a definition it was never compared with. Contiguity removes that by naming the baseline in the candidate's own identifier: the predecessor of `vM.n~` is `vM.(n-1)~`, so there is nothing for a concurrent admission to move. What admission re-asks at commit is only whether that identifier is still there, `ACTIVE` or `DELETED`; a deleted predecessor is still the baseline, since deletion does not unaccept what that minor accepted.
+**Contiguity, not mere ordering, makes the baseline sound under concurrency.** The check runs before the commit transaction. If the baseline were *the highest admitted minor below the candidate*, concurrent admission could change it between selection and commit:
+
+1. Two successors select the same lower member.
+2. One commits.
+3. The other still satisfies ordering but was never checked against the newly committed predecessor.
+
+Contiguity instead names the baseline in the candidate identifier: `vM.n~` always uses `vM.(n-1)~`. At commit, admission only rechecks that this identifier still exists as `ACTIVE` or `DELETED`. Deletion does not unaccept the predecessor's instances, so a deleted predecessor remains the baseline.
 
 **Only the intra-entity half of the chain is structural**, because only there is a consumer carried onto the new revision by a floating reference. The cross-minor edge underwrites no mechanism, which is why ADR-0004 permits `force` to waive it for one candidate and why nothing may waive the other. A major containing a forced step still has a well-formed sequence; what it no longer has is the guarantee stated above about its endpoints.
 
@@ -144,11 +150,15 @@ Because a checker upgrade can change the verdict for an unchanged pair of schema
 
 That record exists because **the transitivity argument holds only within one version of the compatibility relation.** A chain whose edges were admitted under different semantics proves nothing about its endpoints, since an edge accepted under superseded rules may not satisfy the current relation at all.
 
-**What the platform does when that happens is deliberately not decided in P1.** The condition cannot arise before the first specification revision or checker correction after launch, because at launch every admitted edge is checked under one rule version — so any response built now would be built without the one input that would inform it: which rule changed, and how many majors it actually touches. GTS 0.13 against 0.12 shows the shape such a change takes, correcting OP#8 verdicts for open content models, enums, and `const` fields. A correction of that kind reaches a narrow class of schemas, and comparing recorded versions cannot tell an affected chain from an unaffected one — only revalidating the retained revisions can, and what to do with the ones that fail is a policy question with no P1 consumer.
+**P1 deliberately does not decide the response to changed checker semantics.** The condition cannot arise until the first specification revision or checker correction after launch; every initial edge uses one rule version. A policy chosen now would therefore lack its key inputs: what changed and how many majors are affected.
+
+GTS 0.13 versus 0.12 illustrates the shape: corrected OP#8 verdicts affect open content models, enums, and `const` fields. Recorded version differences cannot distinguish affected from unaffected chains; only revalidation can. What to do with failures is a policy question with no P1 consumer.
 
 Recording the versions is therefore the whole of the P1 obligation, and it is the part that cannot be added afterwards: a verdict that was never attributed to a rule version cannot be attributed to one retroactively. ADR-0014 protects that record from the second way a chain could span two semantics, by pinning the dialect for the life of a major.
 
-**The consequence is stated rather than left implicit.** Until a response is defined, a semantic change of the relation can leave a major's whole-history statement unestablished with nothing to signal it: the registry keeps admitting revisions, each soundly checked against its own baseline under the new rules, while the older edges stay as they were. The exposure does not compound — every edge admitted afterwards still satisfies `Valid(rev_n) ⊆ Valid(rev_n+1)`, so it narrows the set of instances at risk rather than widening it — but it does not clear either, and no operation reports it. PRD carries this as a risk.
+**Until that response exists, a semantic change can silently unestablish a major's whole-history statement.** New revisions remain sound against their immediate baselines under the new rules; older edges retain their original verdicts.
+
+The exposure does not compound: each new edge still satisfies `Valid(rev_n) ⊆ Valid(rev_n+1)`, narrowing rather than widening the instances at risk. It also does not clear, and no operation reports it. PRD records this risk.
 
 ### Content model is classified, not mandated
 
@@ -226,9 +236,7 @@ This decision is confirmed when:
 * trait-composed schemas are accepted when the effective outer level is closed even though trait sub-schemas are not;
 * a refused candidate carries the cause and the offending schema location, optionally with the forward-direction result labelled advisory, while an admitted candidate carries no verdict, no enforced mode, and no per-level classification — and neither does any read;
 * no compatibility result presents a tolerant-reader, casting, or default-materialization claim as schema compatibility;
-* each admitted revision records the specification and implementation versions in force at its admission, whether or not a check ran;
-* every admitted revision records the specification and implementation versions in force at its admission — including revisions admitted with no comparison, where they attribute an engine and not a verdict — and a chain whose checked edges span two of them is identifiable from that record alone;
-* a Dry Run against such an entity is refused with the same cause rather than passing on the candidate's own merits;
+* every admitted revision records the specification and implementation versions in force at its admission — including revisions admitted with no comparison, where they attribute an engine and not a verdict — and a chain whose checked edges span two versions is identifiable from that record alone;
 * the platform GTS implementation passes GTS 0.13 conformance for open-model property addition and removal and for both enum directions;
 * no result presents a source's own evolution behaviour as the platform guarantee, and no admission or federation check reads a source assertion about it.
 

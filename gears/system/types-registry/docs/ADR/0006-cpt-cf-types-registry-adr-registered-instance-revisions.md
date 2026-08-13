@@ -67,7 +67,7 @@ This ADR does not apply to runtime domain objects stored by owning gears or to E
 | Instance revision | One immutable admitted canonical value of the logical registered Instance. |
 | Current revision | The Instance revision returned by ordinary resolution. |
 | Admission candidate | Proposed canonical Instance content undergoing validation before initial admission or before it can replace the current revision. It is not yet an Instance revision. |
-| Admission status | Candidate or operation state such as `pending`, `succeeded`, or `failed`; the full per-candidate vocabulary is ADR-0012's, and it is separate from logical-entity Lifecycle Status. |
+| Candidate status | Per-candidate workflow and outcome state — `pending`, `running`, `succeeded`, `unchanged`, or `failed` under ADR-0012 — distinct from operation progress and logical-entity Lifecycle Status. |
 | Conforming Type Schema revision | The exact Type Schema revision used to validate an Instance revision at admission time. |
 | Content hash | A digest of canonical Instance content used for idempotency, validation binding, and diagnostics. |
 
@@ -131,7 +131,7 @@ Types Registry validates the candidate without a long-lived database lock, then 
 
 The first is the caller's baseline and the other two are internal, and they fail differently. A caller-precondition mismatch is a terminal per-candidate `precondition_failed`: Types Registry neither overwrites a concurrent change nor rebases the update onto it. A conforming schema or dependency that moved during validation causes the worker to revalidate within a bounded retry policy, without weakening the caller's precondition.
 
-Before initial admission there is no public logical registered Instance and no entity Lifecycle Status. A failed initial candidate may remain as an operation or audit artifact, but it does not create a logical entity or tombstone, issue a Registry Reference for domain persistence, or establish a permanent GTS ID reservation. While an update candidate is `PENDING`, an existing logical Instance retains its current revision and its Lifecycle Status.
+Before initial admission there is no public logical registered Instance and no entity Lifecycle Status. A failed initial candidate may remain as an operation or audit artifact, but it does not create a logical entity or tombstone, issue a Registry Reference for domain persistence, or establish a permanent GTS ID reservation. While an update candidate is `pending`, an existing logical Instance retains its current revision and its Lifecycle Status.
 
 ### Retention
 
@@ -158,7 +158,7 @@ The following do not create an Instance content revision by themselves:
 
 Those mutations advance the relevant registry state/cache token and create the required operation or audit record.
 
-`PENDING` is an Admission Status, not a logical Instance Lifecycle Status. The managed logical Instance lifecycle contains `ACTIVE` and `DELETED` in P1 under ADR-0008.
+A `pending` candidate is not a logical Instance Lifecycle Status. The managed logical Instance lifecycle contains `ACTIVE` and `DELETED` in P1 under ADR-0008.
 
 Admitting an internal Instance revision does not change Lifecycle Status, and neither does admitting a higher-major Version Successor (ADR-0008).
 
@@ -172,7 +172,11 @@ Ordinary registered Instance resolution returns:
 
 As with a Type Schema, this list is the **default field projection** rather than a minimum, and the caller selects content explicitly. The canonical value is therefore not returned unless asked for — which reads oddly for an Instance, whose value is most of what it is, and is nonetheless right: reverse-resolving a batch of stored references to display their identifiers is a common operation that has no use for the values, and paying for them by default would make the cheap case expensive.
 
-Neither the Instance revision number nor the conforming Type Schema revision appears in the contract at all, for the reason ADR-0005 gives: no P1 operation accepts a revision number, so exposing one offers a handle attached to nothing. The conforming revision is worse than merely useless, and this is the reason it is removed rather than made selectable. A caller seeing that a value was validated against schema revision 4 while the schema reports a later current revision would conclude the value is validated by an outdated schema. That conclusion is false: this ADR and ADR-0005 together forbid a new schema revision from becoming current while any affected registered Instance would cease to be valid, so the current value is always valid against the current schema. The stored number records when that was last re-established, which is an internal fact about revalidation work rather than a statement about the value's standing.
+Neither the Instance revision number nor its conforming Type Schema revision appears in the contract. As ADR-0005 explains, no P1 operation accepts a revision number, so exposing one creates an unusable handle.
+
+The conforming revision is actively misleading. A caller seeing validation against schema revision 4 beside a later current revision could conclude that the value is outdated. That is false: this ADR and ADR-0005 prevent a schema revision from becoming current if an affected registered Instance would become invalid. The current Instance value is therefore valid against the current schema.
+
+The stored schema revision records when revalidation was last established. It is internal work provenance, not the value's current standing.
 
 The conforming Type Schema identifier is also absent, for a plainer reason: GTS §11.1 makes it the Instance identifier's chain up to and including the last `~`, so the caller already holds it and the SDK derives it with a method call rather than string parsing.
 

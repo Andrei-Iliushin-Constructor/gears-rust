@@ -55,7 +55,9 @@ The choice is coupled to identity mutability:
 
 Optional minor versions appear flexible but give otherwise similar GTS IDs different stability semantics. A `$ref` may be immutable and pinned in one family but mutable and floating in another. A major-only GTS ID can also be both a concrete identifier and, in pattern matching, a selector that covers minor-versioned candidates. This ambiguity affects exact resolution, deterministic Registry References, caches, derived types, federation, and version-membership queries.
 
-There is nevertheless one thing only a minor can express, and a major-only profile has no substitute for it. Under a mutable major-only entity every `$ref`, `x-gts-ref`, and derivation base floats to the current revision, so an owner publishing a compatible change hands that change to every dependent at once, whether or not the dependent asked for it. Backward compatibility makes that safe and does not make it *wanted*: an owner may want the new definition addressable and adopted deliberately, leaving existing dependents on what they already resolve. A new major expresses non-adoption but throws away the compatibility statement along with it, since a new major is precisely how an incompatible change is published. The gap is a successor that is addressable separately, is checked to be a safe upgrade, and is not applied to anybody automatically.
+Only a minor can express one useful property. Under a mutable major-only entity, every `$ref`, `x-gts-ref`, and derivation base floats to the current revision. Publishing a compatible change therefore gives it to every dependent, whether requested or not. Backward compatibility makes that safe; it does not make it *wanted*.
+
+An owner may instead want a separately addressable safe upgrade that existing dependents adopt deliberately. A new major provides non-adoption but discards the compatibility statement, because it denotes an incompatible change. A minor fills that gap: separately addressable, checked as a safe upgrade, and never applied automatically.
 
 This ADR establishes the platform-facing identity policy. The enforced Type Schema Evolution Compatibility mode is decided by ADR-0003. Internal revision representation and retention are decided separately by ADR-0005 and ADR-0006. The lifecycle of the members of a version family — how many may be usable at once, and whether deprecation exists — is decided by ADR-0008.
 
@@ -116,7 +118,11 @@ Major-only remains the recommendation and the overwhelmingly common case. It is 
 
 This is what a minor means, and it is the only thing it means.
 
-A `$ref`, a derivation base, and an `x-gts-ref` that names an entity at all all name an exact identifier — including its minor where it carries one — and under ADR-0003 a reference to a mutable entity floats to its current revision. (The qualification matters only in that GTS §9.6 also lets an `x-gts-ref` name nothing: `gts.*` constrains a field to hold some valid identifier and a relative JSON pointer names a location in the holder's own document. Neither pins anything, so neither is a boundary this section is about.) **A minor-bearing entity is not mutable**, so nothing floats to it at all: it is admitted once, with one revision, and its authored content never changes again. A change means publishing the next minor, which is a different identifier and therefore a different Registry Reference, and which no existing dependent is carried onto. A dependent adopts it by being re-authored to name it, which is an act of its own owner.
+A `$ref`, derivation base, or `x-gts-ref` that names an entity names its exact identifier, including its minor. Under ADR-0003, a reference to a mutable entity floats to its current revision.
+
+GTS §9.6 also permits an `x-gts-ref` that names no entity: `gts.*` constrains a field to contain some valid identifier, while a relative JSON pointer names a location in the holder's document. Neither pins an entity and neither is a boundary discussed here.
+
+**A minor-bearing entity is not mutable.** It is admitted once with one revision, and its authored content never changes. Publishing the next minor creates a different identifier and Registry Reference; existing dependents do not move. Adoption requires the dependent's owner to re-author its reference.
 
 Mutability is consequently a property of the shape rather than a setting on it, and the two shapes divide cleanly:
 
@@ -143,7 +149,14 @@ The division is worth contrasting with the closures the registry *does* hold. `c
 
 Deployment configuration governing where a minor may be written was considered and rejected — see *Sub-choices within the selected option*, below.
 
-**No mixing, one major at a time.** Within one **major** either every member carries a minor or none does, and the shape is fixed by the first member of that major to be admitted. This needs no stored policy and no column, and — once the contiguity rule below is in force — it needs no scan of the family either, because the shape of a major is decided by exactly one identifier in each direction: a minor-bearing major opens at `vM.0~` and a major-only one is `vM~`. So a minor-bearing candidate is refused while `vM~` exists, and a major-only candidate is refused while `vM.0~` exists, both keyed lookups under the lock admission already holds for the ownership check. Kind exclusivity still reads one arbitrary member, since kind is a property of the family rather than of a major.
+**No mixing, one major at a time.** Within one **major**, either every member carries a minor or none does. The first admitted member fixes the shape.
+
+No policy column or family scan is needed once contiguity applies. Exactly one identifier decides each direction:
+
+* a minor-bearing major opens at `vM.0~`, so a minor-bearing candidate is refused while `vM~` exists;
+* a major-only candidate is refused while `vM.0~` exists.
+
+Both are keyed lookups under the ownership-check lock. Kind exclusivity still reads one arbitrary member because kind belongs to the family, not the major.
 
 **The grain is the major and not the family, because the compatibility chain is.** A new major starts a chain of its own and inherits nothing from the one before it, so there is no property of `v1` that `v2` would be preserving by copying its shape. A family may therefore hold a major-only `v1~` beside a minor-bearing `v2.0~`, `v2.1~`. What a consumer pays for that is one look at an identifier, and it pays that anyway: adopting a new major is a re-pointing whatever the shapes are.
 
@@ -169,13 +182,17 @@ The consumer-facing statement is that **moving from any minor to any higher mino
 
 The second half is not tidiness: without it the rule reads *either `n-1` is admitted or the major is empty*, and "the major is empty" is a fact about state again. Pinning the opening minor removes the last state-dependent clause.
 
-**What contiguity buys is that the baseline is named by the candidate rather than selected from state.** The predecessor of `vM.n~` is `vM.(n-1)~`, derivable from the submitted identifier alone, so no concurrent admission can change which definition the check should have used. The race is removed by construction instead of being closed by a lock, and admission needs no snapshot of the family to compare against at commit — only the keyed question *does `vM.(n-1)~` exist*, re-asked inside the commit transaction because a concurrent delete-and-purge could have removed it during validation. A candidate whose predecessor is absent fails retryably, which is the shape `cpt-cf-types-registry-fr-two-phase-init` already requires of a candidate whose base is not yet registered.
+**Contiguity makes the candidate name its baseline instead of selecting one from state.** The submitted `vM.n~` identifies `vM.(n-1)~`, so concurrent admission cannot change which definition must be checked. This removes the race by construction rather than by locking a family snapshot.
+
+At commit, admission only re-asks the keyed question *does `vM.(n-1)~` exist?* Concurrent delete-and-purge may have removed it during validation. An absent predecessor fails retryably, matching `cpt-cf-types-registry-fr-two-phase-init` for a base not yet registered.
 
 Strict ordering is then a consequence rather than a second rule: the admitted minors of a major are always exactly `{0..k}`, so the only admissible new one is `k+1`, and every lower number is already occupied by an identifier that cannot be registered twice.
 
 **Existence counts a deleted predecessor.** `vM.(n-1)~` satisfies the rule whether it is `ACTIVE` or `DELETED`, and its retained definition is the baseline in either case. Deletion does not unaccept the instances that minor accepted, so skipping a deleted predecessor and checking against the one below it would reintroduce the branch through an ordinary lifecycle act. This is the property ADR-0008 leaves intact: it declined to **store or expose** a newest member, and neither a keyed existence test nor a retained definition is that.
 
-**Purge is not an exception, and it is the only operation that could have been.** Releasing an identifier is the one act that removes a predecessor, so a purged `v1.1~` would otherwise leave `v1.2~` admitted over a gap and reoccupiable by a definition checked against `v1.0~` alone. ADR-0013 closes it by permitting a purge to release only a suffix of a major's minors. The two rules compose into one invariant worth stating: **the admitted minors of a major are always `{0..k}`, and the sequence grows and shrinks only at its end.** That is the rare purge hazard decidable from local state, which is why it is a precondition there rather than a documented risk.
+**Purge is not an exception, and it is the only operation that could have been.** Releasing an identifier removes a predecessor. Without another rule, purging `v1.1~` could leave `v1.2~` over a gap and allow `v1.1~` to be reoccupied by content checked only against `v1.0~`.
+
+ADR-0013 therefore permits purge to release only a suffix of a major's minors. Together the rules establish one invariant: **admitted minors are always `{0..k}`, and the sequence grows and shrinks only at its end.** The hazard is decidable from local state, so purge enforces it as a precondition rather than documenting it as a risk.
 
 An unstable Type Schema is exempt from the check and nothing else, since what ADR-0015 exempts is the enforced mode: a minor on a major-0 identifier is checked against nothing, while contiguity still holds and its major still opens at `v0.0~`.
 
@@ -183,9 +200,18 @@ An unstable Type Schema is exempt from the check and nothing else, since what AD
 
 A registration may carry `force`, which **skips the cross-minor compatibility check for that candidate and does nothing else**. It is admissible only where that check would otherwise run — on a minor that has a predecessor in its major — and is refused on a major-only candidate, on the first minor of a major, and on a major-0 candidate, in each case because there is no check to skip and a flag that silently does nothing is a trap.
 
-**The waiver is off unless a deployment turns it on.** `force` is governed by one **global, run-time deployment configuration value, disabled by default**, read at process start so that changing it requires a restart. Where it is disabled the flag is **refused with a named reason rather than ignored**, on a Dry Run exactly as on a real submission, and the reason names the deployment configuration rather than the candidate, so a caller can tell a deployment that has not enabled the waiver from a candidate that has nothing to waive. That is the same discipline ADR-0013 applies to purge, and for the same reason: a control that silently does nothing reads as a control that is in force. It stops one step short of purge's, though, and deliberately: purge is simply absent from the surface where it is disabled, while a request field cannot advertise itself by existing, so availability here is discovered by attempted use and by operator-facing documentation of the value, and no capability endpoint is added to carry one boolean.
+**The waiver is off unless a deployment turns it on.** One **global run-time configuration value, disabled by default**, governs `force`. It is read at process start, so a change requires restart.
 
-Default-off follows from what this ADR already says about the flag. It is a rare deliberate act, and reaching for it repeatedly is a sign the major should have been a v0 or should become a new major; an exception that a caller can take unilaterally is not an exception. With it off, every successive edge of a **stable** major is checked under BACKWARD with no per-edge waiver, and `force` is a local relaxation an operator opted into. Major 0 is exempt from any enforced mode whatever the flag says, so the claim is about the force axis and about stable majors rather than platform-wide.
+When disabled:
+
+* Dry Run and real submissions refuse `force` identically rather than ignore it;
+* the named reason identifies deployment configuration, distinguishing it from a candidate with nothing to waive.
+
+As with ADR-0013's purge control, silently ignoring a control would make it appear effective. Unlike disabled purge, however, a request field cannot disappear from the API surface. Availability is therefore learned through attempted use and operator documentation; no capability endpoint is added for one boolean.
+
+Default-off follows from the flag's purpose. It is a rare deliberate act; repeated use means the contract likely belongs in major 0 or a new major. An exception callers can take unilaterally is not an exception.
+
+With the flag off, every successive edge of a **stable** major is checked under BACKWARD without a per-edge waiver. `force` is a local relaxation opted into by an operator. Major 0 remains exempt from any enforced mode, so this claim concerns stable majors and the force axis, not the whole platform.
 
 The value is **global and read at run time**; a build-time gate and a per-identifier-region variant were both considered and rejected — see *Sub-choices within the selected option*, below.
 
@@ -195,7 +221,9 @@ It is safe in the sense that matters at admission: the identifier is new, so not
 
 Everything else stands: derivation compatibility against the whole base chain, the dialect profile, the ADR-0015 quarantine, the identifier profile, the contiguity rule, and reference resolvability. `force` is not a general escape from admission and must not be described as one.
 
-**A forced step is recorded and exposed, and that is the condition on which it was accepted.** An unrecorded one would leave two identifiers that look like an ordinary minor succession while the guarantee a reader infers from that shape has silently been withdrawn — the failure ADR-0015 avoided by putting its marker in the identifier. The fact is not derivable from anything retained, so it is stored, on the revision beside `gts_spec_version` and `gts_impl_version`, which record the same category of thing: how the verdict was reached, here that none was. It is read back through the `provenance` projection of DESIGN §3.3.
+**A forced step is recorded and exposed; that is a condition of accepting it.** Otherwise two identifiers would look like an ordinary minor succession while silently withdrawing the inferred guarantee — the failure ADR-0015 avoids by putting its marker in the identifier.
+
+The fact is not derivable from retained data. It is stored on the revision beside `gts_spec_version` and `gts_impl_version`, which likewise record how a verdict was reached — here, that there was none. DESIGN §3.3 exposes it through the `provenance` projection.
 
 Two consequences of it being per-entity are stated rather than mechanised. The safe-upgrade statement holds across a run of minors **only if no member of that run was forced**, and the interval to inspect is precise: the flag records the edge *entering* a minor, so a move from `s` to `t` is established only if none of `s+1 … t` carries it. A forced edge entering `s` itself is irrelevant — the consumer is already there. And the registry offers no aggregate for that, because it would be a fold over facts the caller is already reading.
 
@@ -390,13 +418,40 @@ That entry was faulted for producing "two admission, compatibility, and lifecycl
 
 Three narrower alternatives were considered while shaping the option above and are recorded here rather than in *Decision Outcome*, which states what was chosen.
 
-**Deployment configuration governing where a minor may be written.** It would buy one property — an operator stopping their own authors from using minors — and charge a third prefix-policy system over the identifier space beside Source Claims and grants, the only clause of the managed identifier profile whose verdict is not readable from the identifier, a per-installation answer to whether an identifier is well-formed at all, and no record afterwards of which configuration was in force when a family was created. ADR-0015 declined the same purchase for the adjacent marker, on the ground that the control is review rather than a check; a minor is the weaker case, since using one *narrows* what an owner may do to its consumers rather than widening it.
+**Deployment configuration governing where a minor may be written.** This would let operators prevent their authors from using minors, at the cost of:
 
-**A build-time gate for `force` instead of a run-time one.** The guard classes differ. Purge is a data-corruption primitive — it releases an identifier, deterministic derivation reproduces the reference, and a stored domain row rebinds — so its absence is worth being a property of the artefact. `force` breaks a statement and nothing else: the identifier is new, nobody is broken by the act. What an auditor needs to establish is *whether any edge was forced*, not whether one could have been, and `compat_forced` answers that permanently and per entity regardless of the flag's current value. The configuration governs the future; provenance records the past. A build flag would give a stronger claim about capability that nobody needs, while making a legitimate rare operation require a redeploy — and, since one binary serves many deployments, would turn a deployment choice into a product one.
+* a third prefix-policy system beside Source Claims and grants;
+* the only managed identifier rule not readable from the identifier itself;
+* installation-specific answers to whether an identifier is well formed;
+* no retained record of the configuration under which a family was created.
 
-**A per-identifier-region `force` policy instead of a global one.** It would be a third prefix-policy system over the identifier space beside Source Claims and grants; it would be the one clause of the managed profile written in the vocabulary of identifiers whose verdict nonetheless depends on installation state, so a reader of `gts.acme.crm.order.type.v1.3~` could not tell whether the waiver was permissible there; and because pattern regions overlap and change, *which regions were permitted at the time* is a question `compat_forced` cannot answer, where *whether the waiver was permitted* collapses into one it can. The one carve-out that would have justified regions — never on platform contracts — is unnecessary, since everything under `gts.cf.*` is major-only by lint and `force` is refused on a major-only candidate outright. Should regional granularity ever be wanted, it belongs in **authorization** rather than configuration: a `force-register` action evaluated by the PDP against the candidate identifier, reusing the pattern matching, precedence, and audit the grant model already has. That is additive, and this ADR declines to build it before a consumer names it.
+ADR-0015 rejected the same trade for the adjacent marker because review, not admission, owns that control. A minor is an even weaker case: it *narrows* what an owner may do to consumers rather than widening it.
 
-**The *strictly higher* ordering rule instead of contiguity.** *Strictly higher than every minor already admitted* orders sequential admissions correctly and lets a concurrent pair through: with `v1.0` admitted, `v1.1` and `v1.2` submitted at once both select `v1.0` as their baseline outside the commit transaction, `v1.1` commits, and `v1.2` then satisfies *strictly higher* against `v1.1` and commits without ever having been checked against it. The failure is asymmetric, which is what makes it dangerous: the reverse interleaving refuses `v1.2` first and is visible, while the ascending one looks entirely legitimate and leaves `v1.1~ ≤ v1.2~` unestablished. The weaker variant *either `n-1` is admitted or the major is empty* fails the same way — `v1.5` and `v1.7` submitted concurrently into an empty major both qualify as first, are both checked against nothing, and both commit unrelated. Contiguity removes the race by construction; either ordering rule would have needed a commit-time snapshot protocol to close it.
+**A build-time gate for `force` instead of a run-time one.** Purge and `force` need different guards. Purge can cause stored rows to rebind after it releases an identifier, so making the capability absent from the artefact is valuable. `force` only withdraws a compatibility statement on a new identifier; the admission itself breaks nobody.
+
+An auditor needs to know *whether an edge was forced*, not whether forcing was possible. `compat_forced` records that permanently per entity, regardless of the current flag. Configuration governs the future; provenance records the past.
+
+A build flag would add an unnecessary capability claim, make a legitimate rare operation require redeployment, and turn a deployment choice into a product choice because one binary serves many deployments.
+
+**A per-identifier-region `force` policy instead of a global one.** It would introduce:
+
+* a third prefix-policy system beside Source Claims and grants;
+* an identifier-profile verdict dependent on installation state and therefore unreadable from `gts.acme.crm.order.type.v1.3~` itself;
+* historical ambiguity because overlapping regions change, while `compat_forced` records only whether the waiver occurred.
+
+The plausible carve-out — forbidding `force` on platform contracts — is unnecessary. Repository lint keeps `gts.cf.*` major-only, and major-only candidates refuse `force`.
+
+If regional control gains a consumer, it belongs in **authorization**: a PDP `force-register` action over the candidate identifier can reuse grant pattern matching, precedence, and audit. That addition does not require building a separate configuration policy now.
+
+**The *strictly higher* ordering rule instead of contiguity.** *Strictly higher than every admitted minor* orders sequential admission but fails under concurrency:
+
+1. With `v1.0` admitted, concurrent `v1.1` and `v1.2` both select `v1.0` as their baseline outside the transaction.
+2. `v1.1` commits.
+3. `v1.2` now satisfies *strictly higher* yet commits without being checked against `v1.1`.
+
+The asymmetry makes this dangerous: the reverse interleaving visibly refuses `v1.2`, while the ascending one looks valid but leaves `v1.1~ ≤ v1.2~` unestablished.
+
+The weaker rule *either `n-1` is admitted or the major is empty* has the same race. Concurrent `v1.5` and `v1.7` in an empty major can both qualify as first, be checked against nothing, and commit unrelated. Contiguity removes both races by construction; either alternative would need a commit-time snapshot protocol.
 
 ## More Information
 
@@ -404,13 +459,21 @@ Three narrower alternatives were considered while shaping the option above and a
 
 Two clauses of this decision narrow or relax what the specification describes, and each sits inside latitude the specification grants explicitly.
 
-**Admitting minors, and constraining how they are numbered.** §2.1 makes the minor optional in the grammar, and §4.2 names both shapes a successive definition may take — a new MINOR, or replacement under an unchanged identifier — while leaving the choice to the implementation and noting that the relationship between a definition published under `v1~` and definitions published under `v1.0~`, `v1.1~` is not defined by the specification. This ADR answers that question for the managed profile: within one major the two shapes never mix, and where minors are used they are contiguous and open at `M.0`. Requiring contiguity is a narrowing of the grammar in the same way ADR-0001 forbids an explicit UUID tail and ADR-0014 pins the dialect, and for the same reason — to keep a platform guarantee decidable.
+**Admitting minors, and constraining how they are numbered.** GTS §2.1 makes the minor optional. §4.2 allows a successive definition either to use a new MINOR or replace content under the same identifier. It leaves that choice to implementations and does not define the relationship between `v1~` and `v1.0~`, `v1.1~`.
+
+This ADR defines the managed profile: the shapes never mix within a major, and minors are contiguous from `M.0`. This narrows the grammar just as ADR-0001 forbids an explicit UUID tail and ADR-0014 pins the dialect — to keep a platform guarantee decidable.
 
 **The `force` waiver is a platform extension, and this ADR does not claim the specification authorizes it.** The honest position is a boundary rather than a licence, and it is drawn here so that nobody has to infer it.
 
-What the specification clearly leaves open is *which* mode a registry enforces and *how* it publishes successive definitions: §6 item 6 makes both implementation-defined, and §4.3 repeats that the enforced mode is outside its scope and may differ between namespaces. What it does not clearly authorize is declaring BACKWARD and then not applying it to one candidate. §5.3 requires a production registry to be capable of validating each successive definition and of rejecting incompatible changes that violate the declared mode, and while the requirement is stated as a capability — which this registry has and exercises by default — reading it as permitting a per-edge exception would be a stretch this ADR declines to make.
+The specification clearly leaves *which* mode a registry enforces and *how* it publishes successors open: §6 item 6 makes both implementation-defined, and §4.3 says the enforced mode is out of scope and may vary by namespace.
 
-**So the limitation is stated instead.** For a forced edge, `Valid(v1.n-1) ⊆ Valid(v1.n)` was never established, and the GTS type-safety guarantee for minor-version evolution does not hold across that step. A product or deployment profile that exposes `force` therefore does not claim unqualified §5.3 conformance — client restraint is not a server property. A deployment that must make that claim leaves the flag **disabled, which is its default**, so the server validates every successive definition and refuses a request carrying the flag rather than relying on nobody sending one; the platform offers it because an owner reshaping an unpublished successor is better served by a recorded, bounded, single-step exception than by churning the identifier that consumers have persisted. Everything else the specification asks of a registry is unaffected — derivation compatibility per §4.1 and OP#12, trait validation per OP#13, identifier and reference validity — because `force` reaches one relation and one edge.
+It does not clearly authorize declaring BACKWARD and then skipping it for one candidate. §5.3 requires a production registry to validate successive definitions and reject incompatible changes under its declared mode. Although framed as a capability — which this registry has and exercises by default — treating it as authorization for per-edge exceptions would be a stretch this ADR declines.
+
+**So the limitation is stated instead.** A forced edge never establishes `Valid(v1.n-1) ⊆ Valid(v1.n)`, and the GTS minor-evolution type-safety guarantee does not hold across it. A product or deployment exposing `force` therefore does not claim unqualified §5.3 conformance; client restraint is not a server property.
+
+A deployment requiring that claim leaves the flag **disabled, its default**. The server then validates every successor and refuses `force` instead of relying on callers not to use it. The platform still offers the waiver because a recorded, bounded exception for an unpublished successor can be safer than changing an identifier consumers already persisted.
+
+Everything else remains unaffected: derivation compatibility under §4.1 and OP#12, trait validation under OP#13, and identifier and reference validity. `force` reaches only one relation and one edge.
 
 It differs from ADR-0015 in exactly this respect and the difference is worth keeping visible. There a whole major declares no enforced mode, which §4.3 and §6 do plainly permit; here an enforced major has one unestablished step. If the specification is ever asked to accommodate this, a recorded per-edge waiver is the shape to propose.
 

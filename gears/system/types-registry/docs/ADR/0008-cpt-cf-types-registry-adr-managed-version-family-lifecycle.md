@@ -125,7 +125,16 @@ When it is introduced it will be **authored**: an explicit operation on one memb
 
 `DEPRECATED` is deferred out of P1 on the external side too, so the P1 Lifecycle Status vocabulary is `ACTIVE` or `DELETED` for every entity the platform exposes.
 
-Keeping it observable for externally managed entities alone does not survive the argument above. Deferral of managed deprecation rests on there being no named consumer; a source-asserted one has no consumer either, and the status is advisory by construction — this ADR's own reason for calling deferral safe is that "a deprecated entity would behave identically to an active one". A vocabulary value that no managed entity can hold, that changes no behaviour, and that only appears when a deployment happens to have an external source configured, is a third case every consumer must handle for no decision it can make. Retaining it would also leave P1 consumers unable to test their handling of it against managed entities, which is where such handling rots.
+External-only deprecation has no stronger case. Managed deprecation is deferred because it has no named consumer; a source assertion has none either, and the status is advisory. As stated above, a deprecated entity behaves exactly like an active one in P1.
+
+Retaining the value would make every consumer handle a third case that:
+
+* no managed entity can hold;
+* changes no behavior;
+* appears only when an external source is configured;
+* cannot be tested against managed entities.
+
+The source assertion is therefore not exposed as a P1 lifecycle value.
 
 Two rules for the federation contract follow, and ADR-0002 states them there:
 

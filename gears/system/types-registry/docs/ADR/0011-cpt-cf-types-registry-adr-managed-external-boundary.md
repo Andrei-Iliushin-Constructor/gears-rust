@@ -98,7 +98,14 @@ A Managed Entity may not reference or derive from an Externally Managed Entity, 
 
 That is the whole rule, with no exception. ADR-0002's enumeration of prohibited persistence stands in full: an external entity's definition, identifier, revision, content hash, lifecycle, tenant state, availability, dependencies, caches, tombstones, and Registry Reference mapping are source-authoritative and are never stored.
 
-One exception has a real argument behind it: an external identifier held as a label on a dependency edge, on the ground that the set of things depending on a Managed Entity is a fact about that Managed Entity rather than about the source. The argument is sound and the exception is still unnecessary, because closing the boundary removes the thing it would record. There is no **registered or platform-observable** external dependent to label: derivation across the boundary is impossible by construction, and the one crossing that remains representable — a reference from inside an external schema document — is undetectable by design, since plugins have no write path and returned content is never parsed. A label needs something the platform can put in it, and this leaves nothing.
+One plausible exception is an external identifier stored as a dependency-edge label. The rationale is sound: dependents of a Managed Entity look like a fact about that entity, not source state.
+
+The exception is still unnecessary because a closed boundary leaves nothing observable to record:
+
+* cross-boundary derivation is structurally impossible;
+* an external document may still reference a managed identifier, but the platform cannot detect it because plugins have no write path and returned content is never parsed.
+
+There is therefore no **registered or platform-observable** external dependent from which to obtain a label.
 
 ### No references across the boundary, in either direction
 
@@ -155,7 +162,7 @@ It also makes the genuinely dangerous form unrepresentable. A mid-chain claim su
 
 Chain coverage itself is supplied by the matcher rather than by a separate rule. `gts-id` matches segment-wise and field-wise; a wildcard token replaces a whole token, and once a wildcard segment is reached it accepts every remaining segment including the chain separator. This is the "implicit derived-type coverage" of GTS §3.6, and under the closed boundary it is exactly what a claim needs.
 
-Overlap is decided by the platform matcher's containment primitive, which for rooted single-segment patterns reduces to "one field list is a prefix of the other". It runs over the whole claim set, with no stored upper bound and no index to narrow candidates first: claim counts are single digits by design — that is what the previous paragraph buys by not pinning the wildcard to the version — so a string range would only have been a pre-filter the matcher had to confirm anyway. `database.sql` records the same beside the table.
+Overlap is decided by the platform matcher's containment primitive, which for rooted single-segment patterns reduces to "one field list is a prefix of the other". It runs over the whole claim set, with no stored upper bound and no index to narrow candidates first. Claim counts are expected to remain in single digits because the grammar permits broad vendor, package, and namespace prefixes instead of requiring one claim per versioned type. A string range would therefore only pre-filter candidates that the matcher must confirm anyway. `database.sql` records the same beside the table.
 
 Deciding overlap is not the whole of enforcing it. The invariant is the *absence* of an overlapping row, which no unique index expresses and no row can be locked to protect, and the check runs outside the commit transaction on the asynchronous write path — so two activations, or an activation and a managed registration, could each observe no overlap and both commit. The serialization point that closes that window, and the generation bump that commits with it, are specified in [DESIGN §3.2, *Registry Source Plugin registration*](../DESIGN.md#registry-source-plugin-registration).
 
@@ -169,7 +176,11 @@ What it examines is exactly what Types Registry owns and can enumerate: types de
 
 **Live reverse-impact query is not retained at all,** and closing the boundary is what emptied it. It could report nothing **platform-authoritative** about a Managed Entity: no externally managed entity may depend on one, so any dependent a source named would be one the rule forbids and the platform does not recognize — and, because a reference from inside an external document is undetectable here, the platform could neither confirm nor refute it. What remained was external dependents of an *externally managed* entity: a question entirely inside the source's own universe, which the source's own tooling answers better.
 
-Carrying that remainder as an optional diagnostic does not survive one further step either. Types Registry exposes no operation on either plane that enumerates dependents, and none is planned, because what a caller actually wants — *would this deletion or revision be refused, and by what* — is answered by the Dry Run of that same mutation. So the report would have a producer, a router willing to relay it, and no caller. It is therefore out of the capability profile of ADR-0007 entirely rather than in it as optional, which is also what leaves that profile with no advisory tier and `cpt-cf-types-registry-principle-fail-closed` with no exception: this is the only output the platform would otherwise have allowed to degrade with a warning instead of failing. Re-introducing it alongside a surface that renders it is additive.
+An optional diagnostic also has no consumer. Types Registry exposes no dependent-enumeration operation on either plane; callers instead ask *would this mutation be refused, and why?* through that mutation's Dry Run.
+
+A reverse-impact report would therefore have a producer and router but no caller. ADR-0007 excludes it rather than making it optional. The capability profile consequently has no advisory tier, and `cpt-cf-types-registry-principle-fail-closed` needs no exception for a warning-only plugin output.
+
+Adding both a diagnostic and a surface that renders it later remains additive.
 
 **Deletion is independent of all of this in both directions.** It consults no source and is blocked by nothing a source could report, because it reads managed storage alone. A source that has built on a managed contract in a way the platform cannot see does not gain a veto by reporting it.
 
@@ -177,7 +188,12 @@ The principle this was an example of is unaffected: authoritative decisions read
 
 ### A retired Source Claim reserves its space until purge
 
-A Registry Source Plugin is itself a registered Instance, so its Source Claims follow that Instance through the ordinary lifecycle. Deleting the Instance retires its claims, which are then retained as **reservations**: Types Registry refuses to register a Managed Entity whose identifier matches a retired claim, and refuses to activate a different plugin's claim over it. Retirement therefore needs no operation of its own, and it is a governance act rather than an observation of liveness — an unreachable plugin keeps its claims, and a request that needs it fails closed, because a claimed identifier space that flickers with plugin health would defeat the point of claiming it.
+A Registry Source Plugin is a registered Instance, so its Source Claims follow ordinary lifecycle. Deleting the Instance retires its claims and retains them as **reservations**. Types Registry then refuses both:
+
+* a Managed Entity matching a retired claim;
+* another plugin claim overlapping it.
+
+Retirement needs no separate operation. It is governance, not a liveness observation: an unreachable plugin keeps its claims, and requests needing it fail closed. Claimed space must not flicker with plugin health.
 
 Without the reservation, the same identifier could be re-registered as managed and deterministic Registry References would silently rebind persisted domain references to a different entity.
 
@@ -204,7 +220,13 @@ A vendor that wants a type derived from a platform contract registers it as a **
 
 The managed profile it lands in is narrower than the GTS grammar, and this actor should know which narrowings it will meet. One it might have feared is not there: a vendor arriving with a minor-versioned catalogue does not have to **flatten** it into major-only identifiers, because ADR-0004 admits minor versions under every prefix — the platform keeps its own contracts major-only through a lint over their source, not through an admission rule.
 
-What it does have to do is **renumber** a catalogue whose minors have gaps or do not start at `.0`. ADR-0004 requires the minors of a major to be contiguous and to open at `M.0`, because that is what makes the compatibility baseline a function of the candidate's identifier rather than of registry state. A catalogue of `v1.0`, `v1.3`, `v1.7` is registrable as `v1.0`, `v1.1`, `v1.2`, at the cost that those identifiers no longer match the vendor's own upstream numbering. That cost is real and lands here rather than in ADR-0004, because this is the section that tells the actor which path to take: the alternatives are a new major, or keeping the catalogue on an External Registry Source, which serves a self-contained universe under no platform numbering rule at all.
+It may have to **renumber** a catalogue whose minors have gaps or do not start at `.0`. ADR-0004 requires contiguous minors from `M.0`, making the compatibility baseline a function of the candidate identifier rather than registry state.
+
+For example, upstream `v1.0`, `v1.3`, `v1.7` can become managed `v1.0`, `v1.1`, `v1.2`, but the identifiers then diverge from upstream numbering. The actor has three choices:
+
+* accept that renumbering;
+* publish a new major;
+* keep the self-contained catalogue in an External Registry Source, where platform numbering rules do not apply.
 
 An External Registry Source is for a vendor whose type universe is **self-contained** — a pre-existing registry that is authoritative for its own contracts and does not build on the platform's. That is the case federation was introduced to serve.
 
@@ -289,11 +311,23 @@ Retained here because it was the alternative to registration under the asymmetri
 
 Alternatives considered while shaping the option above, recorded here rather than in *Decision Outcome*, which states what was chosen.
 
-**Making the reference detectable was considered and is rejected, permanently rather than deferred.** The federation router already validates every external response against platform invariants, and it could additionally extract GTS references from returned content and reject a response referring outside its source's claims. That is declined for three reasons. It would put content parsing on the live read path, where it also cannot always run — a reverse-resolution result need not carry a document. It would make Types Registry read source-owned content in order to enforce a platform rule, which is the precedent ADR-0002 exists to prevent, and it would acquire a parsing failure mode for content whose validity is not the platform's business. And it would convert a stated limitation into a hard integration barrier: a vendor whose existing registry references platform contracts would become unintegrable rather than integrable-with-a-documented-gap. The boundary is therefore declared in both directions and enforced in one, deliberately.
+**Making the reference detectable was considered and permanently rejected.** The router could parse returned content, extract GTS references, and reject references outside the source's claims. This is declined because:
+
+* parsing would enter the live read path and cannot always run — reverse resolution need not return a document;
+* Types Registry would interpret source-owned content to enforce a platform rule, contrary to ADR-0002, and acquire content-validity failures it does not own;
+* an existing vendor registry referencing platform contracts would become impossible to integrate rather than integrable with a documented gap.
+
+The boundary is therefore deliberately declared in both directions and enforced in one.
 
 The alternative grammar — a claim matches a complete canonical identifier and never by chain prefix — would serve one purpose: stopping a plugin that claims a base type's namespace from silently capturing managed types derived from that base. It has to work *against* the matcher's implicit coverage to do so, and the protection is unnecessary once managed derivation from an external base is forbidden outright, because no managed derivation inside an external claim remains to capture.
 
-**The wildcard position is deliberately not pinned to the version.** Pinning it there — admitting only the last form above — would reduce claim overlap to equality of the pattern string, which is marginally simpler to enforce. It would also force one claim per type family, so a source serving three hundred types would need three hundred claims and every new type at the vendor would require a Types Registry control-plane change. That is a coarse projection of the source's type inventory, which is the class of coupling ADR-0002 exists to prevent, and it degrades silently: the vendor adds a type, no claim covers it, and the identifier becomes registrable as managed. Overlap decidability is not worth that running cost.
+**The wildcard position is deliberately not pinned to the version.** Version-only wildcarding would reduce overlap to pattern-string equality, but at substantial operating cost:
+
+* one claim per type family — hundreds for a large source;
+* a Types Registry control-plane change for every new vendor type;
+* silent failure when a new type lacks a claim and becomes registrable as managed.
+
+That is a coarse projection of source inventory, precisely the coupling ADR-0002 avoids. Marginally simpler overlap detection does not justify it.
 
 ## More Information
 

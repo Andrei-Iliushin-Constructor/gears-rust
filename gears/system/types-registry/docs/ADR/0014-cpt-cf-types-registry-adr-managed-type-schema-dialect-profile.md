@@ -48,7 +48,12 @@ Those two statements together leave a gap that the specification does not close.
 
 Types Registry cannot leave that unanswered, because both of its central relations are defined over accepted-instance sets. ADR-0003 enforces `Valid(current) ⊆ Valid(candidate)` and derives its soundness from the transitivity of set inclusion; `cpt-cf-types-registry-fr-validate-type-derivation` enforces `Valid(derived) ⊆ Valid(base)` over the whole chain. Neither relation is well-posed when the two sets are defined under different validation semantics.
 
-The gap is not merely unspecified in the platform GTS implementation — it is resolved there in a way that hides it. When `resolve_schema_refs` inlines a referenced type at a non-root position, it removes the embedded fragment's `$id` and `$schema`, on the stated ground that they are meaningful only at a type root. When the effective traits schema is composed along the `$id` chain, the dialect is taken from the **leaf** document and re-injected into the composed schema, precisely because every ancestor's `$schema` was stripped during embedding. The consequence is uniform and silent: **the referring document's dialect governs the entire resolved closure, and every base's declared dialect is discarded.** Mixing does not fail; it reinterprets.
+The platform GTS implementation resolves this gap silently rather than leaving it open:
+
+* `resolve_schema_refs` removes `$id` and `$schema` from a referenced type inlined below the root;
+* effective trait composition takes the dialect from the **leaf** and re-injects it after stripping ancestor `$schema` values.
+
+Consequently, **the referring document's dialect governs the whole resolved closure and every base dialect is discarded.** Mixing does not fail; it reinterprets content.
 
 That reinterpretation is unsafe in both directions, because JSON Schema ignores keywords it does not recognise rather than rejecting them. Constraints therefore disappear without an error.
 
@@ -113,7 +118,9 @@ The restriction applies to Type Schemas. A registered Instance is a value docume
 
 The dialect recorded by the initial admitted revision of a logical entity is the dialect of that entity. A content revision **MUST NOT** change it.
 
-**The pin is on the major, not on the identifier**, wherever ADR-0004's minors are in use. The first revision of a new minor is checked for backward compatibility against the current revision of the preceding minor, so that edge is a comparison of accepted-instance sets exactly as an edge between two revisions of a major-only entity is, and *Why mixing breaks evolution* below applies to it word for word: two definitions declaring different dialects make the inclusion ill-posed, and a successor that changes only `$schema` would be a semantic change with no visible content. A minor must therefore declare the dialect its major was admitted under.
+**The pin is on the major, not the identifier**, where ADR-0004 minors are used. The first revision of a new minor is checked against the current revision of the preceding minor, so that edge compares accepted-instance sets just like two revisions of a major-only entity.
+
+Different dialects make that inclusion ill-posed, and a successor changing only `$schema` can still change semantics. Every minor must therefore declare the dialect under which its major was admitted.
 
 That is also why a new minor is **not** a route out of a dialect. The remedy for an owner who needs a different one is the same as for any change the enforced mode cannot admit: a new major identity, under ADR-0004. A new major starts a chain of its own, which is precisely what makes a dialect change well-posed there and ill-posed anywhere else.
 
