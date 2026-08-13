@@ -965,7 +965,7 @@ Paths match the tenant surface, but listeners, credentials, and OpenAPI document
 
 - Reads span owners without visibility filtering; `404` means absent.
 - Reads and batches may name a Context Tenant to obtain its exact Tenant Availability verdict.
-- `owned_by_caller` is absent because no caller tenant exists.
+- `owned_by_context_tenant` is absent because no Context Tenant was supplied.
 - Authoring is global-only. The separate operator purge job is the sole cross-tenant mutation.
 
 #### Parameters
@@ -1191,7 +1191,7 @@ pub struct EntitySnapshot {
     pub lifecycle_status: Option<LifecycleStatus>,
     pub availability: Option<Availability>,
     /// Whether the Context Tenant owns it; absent without a Context Tenant.
-    pub owned_by_caller: Option<bool>,
+    pub owned_by_context_tenant: Option<bool>,
     pub content_hash: Option<ContentHash>,
 
     // Explicit groups; absent when not selected or inapplicable.
@@ -1310,7 +1310,7 @@ pub struct RegistrationItemResult {
 
 ##### Platform trait differences
 
-Platform reads cross tenant visibility for diagnostics; the PDP is not substituted. Both planes use `EntitySnapshot`: `owned_by_caller` exists only with a Context Tenant, while owning tenant is absent from SDK snapshots and appears only in the separate operator purge report defined by ADR-0013. Platform availability is present only when `tenant_id` is supplied; tenant calls default it to the subject tenant.
+Platform reads cross tenant visibility for diagnostics; the PDP is not substituted. Both planes use `EntitySnapshot`: `owned_by_context_tenant` exists only with a Context Tenant, while owning tenant is absent from SDK snapshots and appears only in the separate operator purge report defined by ADR-0013. Platform availability is present only when `tenant_id` is supplied; tenant calls default it to the subject tenant.
 
 `cpt-cf-types-registry-fr-registration-authority` and `cpt-cf-adr-platform-plane-auth` separate planes by listener and context type, not path prefix. The same `PlatformTypesRegistryClient` signature supports embedded or remote use without exposing credentials. Callers are authenticated workloads; humans act through jobs.
 
