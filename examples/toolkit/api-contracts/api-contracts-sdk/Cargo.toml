@@ -7,6 +7,7 @@ authors.workspace = true
 repository.workspace = true
 description = "SDK for the api-contracts example module — PaymentApi contract, models, and errors"
 rust-version.workspace = true
+publish = false
 
 [features]
 default = []

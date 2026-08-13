@@ -121,7 +121,11 @@ uuid = { workspace = true, features = ["v4"] }
 # (feature = "rest-server") references `::toolkit::api::{OperationBuilder,
 # OpenApiRegistry}`, so exercising that codegen in this crate's own tests needs
 # `toolkit` + `utoipa` (for the `ToSchema` bound on request/response DTOs).
-toolkit = { workspace = true }
+# Path-only, no version on purpose — not `workspace = true`, which would carry one:
+# cargo drops a path-only dev-dependency from the published manifest. With a version,
+# publishing this crate demands that exact `toolkit` release from crates.io, and it is
+# published *after* us (it depends on this crate), so the release fails.
+toolkit = { package = "cf-gears-toolkit", path = "../toolkit" }
 utoipa = { workspace = true }
 # otel_propagation.rs (feature = "otel"): builds an in-process (no exporter)
 # SdkTracerProvider to prove the generated client span's trace_id propagates

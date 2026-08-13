@@ -7,6 +7,7 @@ authors.workspace = true
 repository.workspace = true
 description = "api-contracts example — consumer gear that resolves PaymentApi from another gear via ClientHub"
 rust-version.workspace = true
+publish = false
 
 [features]
 default = []

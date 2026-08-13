@@ -344,6 +344,10 @@ validate-gear-names:
 check-packaging-metadata:
 	@$(PYTHON) tools/scripts/check_packaging_metadata.py
 
+## Validate that examples/apps/tools are unpublishable and release-plz.toml matches the workspace
+check-release-config:
+	@$(PYTHON) tools/scripts/check_release_config.py
+
 # -------- Code security checks --------
 
 .PHONY: deny fips-policy security
