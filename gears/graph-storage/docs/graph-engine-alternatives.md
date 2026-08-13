@@ -33,18 +33,18 @@ during 2024–2026.
 
 | Engine | OSI license | 1M–500M | Vector | Cypher | Multi-tenant | K8s | Health 2026 | Deciding fact |
 |---|---|---|---|---|---|---|---|---|
-| **PG + AGE + pgvector** | ✅ Apache 2.0 | ⚠️ shape-limited | ✅ | ⚠️ subset | ✅ | ✅ CNPG | ⚠️ slow cadence | Only fully-OSI single engine with all four capabilities |
-| **ArcadeDB** | ✅ Apache 2.0 | ⚠️ unproven | ⚠️ beta | ✅ 97.8% TCK v9 | ✅ | ✅ Helm+Raft | ✅ active | Passes all criteria on paper; every pillar < 8 months old |
-| FalkorDB | ❌ SSPL | ⚠️ RAM-bound | ✅ | ✅ subset | ✅ 10K+ graphs | ✅ | ✅ active | Best measured performance; license-blocked |
-| Neo4j Community | ✅ GPLv3 | ✅ disk, 34B cap | ✅ | ✅ reference | ❌ single DB | ⚠️ no HA | ✅ | Multi-DB / RBAC / clustering / online backup = Enterprise-only |
-| Dgraph v25 | ✅ Apache 2.0 | ✅ distributed | ✅ | ❌ DQL/GraphQL | ✅ namespaces | ✅ Helm+HA | ⚠️ | Fully Apache 2.0 since v25 — but no Cypher |
-| LadybugDB (Kùzu fork) | ✅ MIT | ✅ LDBC SF100 | ✅ | ✅ | ⚠️ app-managed | ⚠️ embedded | ❌ 10-mo fork | Kùzu archived Oct 2025 (Apple acqui-hire) |
-| Memgraph | ❌ BSL (tightened Jan 2026) | ⚠️ RAM = 2× data | ✅ | ✅ | ❌ Enterprise | ⚠️ HA = Enterprise | ✅ | Jan 2026 license change removed the SaaS grant |
-| Apache HugeGraph | ✅ Apache 2.0 | ✅ | ❌ in dev | ⚠️ Gremlin-first | ✅ + RBAC | ⚠️ no Helm | ⚠️ | Vector index not shipped in server core |
-| TuGraph | ✅ Apache 2.0 | ✅ | ⚠️ immature | ✅ + ISO GQL | ✅ | ❌ Docker only | ❌ | No release since 03/2025, mid-rewrite |
-| NebulaGraph | ⚠️ open-core | ✅ | ❌ Enterprise v5 | ⚠️ nGQL | ✅ | ✅ operator | ⚠️ | Vector + ISO GQL are Enterprise-only |
-| ArangoDB | ❌ BSL 1.1 | ✅ | ✅ flagged | ❌ AQL | ✅ | ✅ operator | ⚠️ pivoting | Community binary: no commercial production, 100 GiB cap |
-| JanusGraph | ✅ Apache 2.0 | ✅ | ❌ | ❌ Gremlin | ⚠️ | ❌ 3 clusters | ⚠️ | Needs Cassandra + Elasticsearch — heaviest ops burden |
+| **PG + AGE + pgvector** | ✅ Apache 2.0 | ⚠ shape-limited | ✅ | ⚠ subset | ✅ | ✅ CNPG | ⚠ slow cadence | Only fully-OSI single engine with all four capabilities |
+| **ArcadeDB** | ✅ Apache 2.0 | ⚠ unproven | ⚠ beta | ✅ 97.8% TCK v9 | ✅ | ✅ Helm+Raft | ✅ active | Passes all criteria on paper; every pillar < 8 months old |
+| FalkorDB | ❌ SSPL | ⚠ RAM-bound | ✅ | ✅ subset | ✅ 10K+ graphs | ✅ | ✅ active | Best measured performance; license-blocked |
+| Neo4j Community | ✅ GPLv3 | ✅ disk, 34B cap | ✅ | ✅ reference | ❌ single DB | ⚠ no HA | ✅ | Multi-DB / RBAC / clustering / online backup = Enterprise-only |
+| Dgraph v25 | ✅ Apache 2.0 | ✅ distributed | ✅ | ❌ DQL/GraphQL | ✅ namespaces | ✅ Helm+HA | ⚠ | Fully Apache 2.0 since v25 — but no Cypher |
+| LadybugDB (Kùzu fork) | ✅ MIT | ✅ LDBC SF100 | ✅ | ✅ | ⚠ app-managed | ⚠ embedded | ❌ 10-mo fork | Kùzu archived Oct 2025 (Apple acqui-hire) |
+| Memgraph | ❌ BSL (tightened Jan 2026) | ⚠ RAM = 2× data | ✅ | ✅ | ❌ Enterprise | ⚠ HA = Enterprise | ✅ | Jan 2026 license change removed the SaaS grant |
+| Apache HugeGraph | ✅ Apache 2.0 | ✅ | ❌ in dev | ⚠ Gremlin-first | ✅ + RBAC | ⚠ no Helm | ⚠ | Vector index not shipped in server core |
+| TuGraph | ✅ Apache 2.0 | ✅ | ⚠ immature | ✅ + ISO GQL | ✅ | ❌ Docker only | ❌ | No release since 03/2025, mid-rewrite |
+| NebulaGraph | ⚠ open-core | ✅ | ❌ Enterprise v5 | ⚠ nGQL | ✅ | ✅ operator | ⚠ | Vector + ISO GQL are Enterprise-only |
+| ArangoDB | ❌ BSL 1.1 | ✅ | ✅ flagged | ❌ AQL | ✅ | ✅ operator | ⚠ pivoting | Community binary: no commercial production, 100 GiB cap |
+| JanusGraph | ✅ Apache 2.0 | ✅ | ❌ | ❌ Gremlin | ⚠ | ❌ 3 clusters | ⚠ | Needs Cassandra + Elasticsearch — heaviest ops burden |
 
 Also eliminated: **OrientDB** (effectively unmaintained; founder points to ArcadeDB),
 **Kùzu** (archived), **GraphScope** (analytics platform, not a storage service),
