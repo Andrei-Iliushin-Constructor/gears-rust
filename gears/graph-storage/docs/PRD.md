@@ -178,7 +178,7 @@ Several platform initiatives need to persist and query relationships between het
 
 ### 3.1 Gear-Specific Environment Constraints
 
-- Requires PostgreSQL 16 or later with the `pgvector` extension available and permission to create extensions in the gear's database; no other PostgreSQL extensions are required
+- Requires PostgreSQL with the `pgvector` extension available and permission to create extensions in the gear's database; the baseline is PostgreSQL 16 or later, and the SQL/PGQ graph-query backend activates on PostgreSQL 19 or later (see ADR-0001); no other PostgreSQL extensions are required
 - Requires an embedding provider: either an in-process ONNX model runtime bundled with the gear or network access to a remote embedding inference endpoint, per deployment configuration
 - Graph analytics loads a bounded projection of the graph topology into memory; deployments must budget memory for the configured analytics node ceiling
 - Depends on the file-storage gear when heavy-content offloading is enabled; the graph gear itself never stores blobs
@@ -737,7 +737,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 
 | Dependency | Description | Criticality |
 |------------|-------------|-------------|
-| PostgreSQL 16+ with pgvector | Single storage backend: relational source of truth, full-text, JSONB, and vector indexes | p1 |
+| PostgreSQL with pgvector (baseline 16+, SQL/PGQ backend on 19+) | Single storage backend: relational source of truth, full-text, JSONB, vector indexes, and graph queries | p1 |
 | ToolKit framework | Gear lifecycle, REST OperationBuilder, SecureORM, ClientHub, canonical errors | p1 |
 | AuthZ Resolver gear | Policy decisions and access scopes for every operation | p1 |
 | Types Registry gear | Platform registration of the gear's GTS base types and permission instances | p1 |
@@ -762,6 +762,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 | Community detection and sampled betweenness differ from prototype outputs | Consumers expecting NetworkX-identical numbers are surprised | PRD explicitly waives numeric parity; determinism and ordering guarantees are documented per algorithm |
 | A single tenant's ingest or analytics load starves others | Platform-wide latency degradation | Batch size limits, analytics ceiling and cache, operation-level permissions, observability of per-tenant load |
 | Shared ontologies evolve incompatibly across producers | Ingest failures or semantic drift between producers | Immutable schemas per GTS version, conflict-rejecting registration, family patterns that keep older derived types valid |
+| SQL/PGQ availability slips (PostgreSQL 19 adoption or variable-length path support in PG20+) | The target graph-query backend arrives later than planned | The recursive-CTE backend serves the full fixed-depth API on PostgreSQL 16+ indefinitely; the traversal port isolates the swap; a dedicated traversal mirror remains the measured-bottleneck contingency (ADR-0001) |
 
 ## 13. Open Questions
 
@@ -771,6 +772,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 - Are edge payload attributes worth indexing in v1, or do edge filters remain type-only until a concrete consumer needs attribute-level edge filtering?
 - What is the retention policy for phantom nodes that are never replaced by real nodes — permanent visibility, TTL-based cleanup, or producer-triggered pruning?
 - Does the gear expose a graph export format (such as the prototype's cfs-map document) in v1, and who are its consumers?
+- Does the gear expose a consumer-facing bounded graph-pattern query endpoint (a declarative graph-query DSL, e.g., derived from SQL/PGQ patterns) in a later version? Raw query languages cannot be exposed in a multi-tenant platform, so the shape and bounds of such a DSL — and which consumers need it — remain to be defined.
 
 ## 14. Traceability
 
