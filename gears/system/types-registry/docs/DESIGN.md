@@ -80,7 +80,8 @@ Storage follows the same split. A revision is the immutable admission snapshot o
 | `cpt-cf-types-registry-fr-ref-tracking` | Flat dependency edge set between managed entities covering `$ref`, `x-gts-ref`, and Instance-to-schema; authoritative for deletion safety, evaluated without contacting any plugin and without consuming plugin-supplied data. Admission additionally refuses an edge from a stable subject to an unstable target, so the quarantine of ADR-0015 is a property of which edges may be written rather than a filter applied when they are read. |
 | `cpt-cf-types-registry-fr-type-query-assistance` | Pattern compiled to a range predicate over the canonical identifier, post-filtered by the GTS matcher, expanded source-major, and returned as one complete bounded set of Registry References or a structured limit failure. |
 | `cpt-cf-types-registry-fr-tenant-ownership` | Ownership scope stored on every Managed Entity; visibility evaluated as the directed descendant relation using the tenant ancestor chain, with disclosure bounded to name availability on the registration surface. |
-| `cpt-cf-types-registry-fr-registration-authority` | Global writes accepted only on the platform plane under `PlatformSecurityContext`; tenant writes authorized by the PDP against the candidate's GTS Identifier as a resource property, evaluated before identifier availability so the bounded name-availability disclosure cannot become a namespace probe. `gts.cf.toolkit.*` is reserved outright: refused on the tenant plane and never tenant-owned in P1, decided from the identifier before the PDP is consulted so no grant configuration can reach it. |
+| `cpt-cf-types-registry-fr-registration-authority` | Global writes accepted only on the platform plane under `PlatformSecurityContext`; tenant writes authorized by the PDP against the candidate's GTS Identifier as a resource property, evaluated before identifier availability so the bounded name-availability disclosure cannot become a namespace probe. Which regions admit tenant ownership, and which vendors they admit at all, is `cpt-cf-types-registry-fr-registration-policy`: closed by default and decided from the identifier before the PDP is consulted, so no grant can bring a new entity into a closed region — while a revision or deletion of one already admitted there remains an ordinary grant question. |
+| `cpt-cf-types-registry-fr-registration-policy` | Two parameters per GTS Identifier Region — tenant ownership and admitted vendors — both closed by default, resolved per parameter by exact-then-longest-pattern match, shipped closed by the release and opened only by deployment configuration; evaluated on both planes at step 3 of the acceptance path, before the PDP, for a candidate that would create a logical entity and not for a revision or a deletion of one, and refused as configuration rather than as an authorization decision. |
 | `cpt-cf-types-registry-fr-tenant-availability` | Verdict computed by the registry from the entity's own state and the requesting tenant's ancestor chain, as one SQL predicate; never recomputed by consumers. In P1 no dependency can make a visible entity unavailable, so no closure is traversed. |
 | `cpt-cf-types-registry-fr-lifecycle` | `ACTIVE` and `DELETED` for Managed Entities; no newest-member statement, with exact family enumeration offered as a discovery filter instead; deletion blocked from local state while any registered dependent exists. |
 | `cpt-cf-types-registry-fr-externally-managed-entities` | No row, column, or projection of an external entity anywhere in §3.7; results enter live, are checked against the platform invariants of §3.2 — identifier integrity, derived reference equality, claim conformance, entity kind, ownership scope, revision and hash consistency — and leave. The managed-only tail of the read result sits in an `Origin` variant rather than in nullable fields, so a write precondition on an external entity does not compile. Returned content is never parsed, so the external half of the boundary rule is declared and not enforced. |
@@ -303,7 +304,7 @@ Visibility of a tenant-owned entity is the directed descendant relation, so the 
 
 - [ ] `p2` - **ID**: `cpt-cf-types-registry-constraint-unbounded-retention`
 
-Retention is unbounded by policy: no time-to-live and no background sweep ever removes an admitted revision, and the one operation that removes anything physically also releases the GTS Identifier and is therefore disabled in production. Admitted content in a production deployment is consequently unremovable.
+Retention is unbounded by policy: no time-to-live and no background sweep ever removes an admitted revision, and the one operation that removes anything physically also releases the GTS Identifier and is therefore disabled by default. Admitted content is consequently unremovable wherever it stays disabled, which is the expected steady state for production; ADR-0013 leaves enabling it an operator decision for a specific planned migration, kept exceptional by the rebinding hazard.
 
 Nor can the payload of a deleted entity be dropped while its identity is kept, which would otherwise be the obvious middle ground. ADR-0013 records the invariant that closes it: P1 permits deleting a Type Schema while live domain data still conforms to it, and the owning gear retiring that data needs the contract rather than a tombstone (§3.3, *Read results*).
 
@@ -456,7 +457,7 @@ Every mutation of registry state — initial admission, content revision, lifecy
 
 The component owns the candidate lifecycle and the single write contract: the dry-run mode and the suppression of the commit under it, request-identity resolution against a stored fingerprint, operation and candidate creation, dependency ordering, content-equality no-op detection inside an operation, the ordered validation sequence, optimistic concurrency against the caller-observed entity resource version and the dependency freshness used during validation, allocation of the next revision number on success, and durable status and diagnostics for every asynchronous candidate GTS Identifier. It is the only component that writes entity state.
 
-It also owns the position of the authorization check: **authorization runs first, before identifier availability is evaluated at all**, per `cpt-cf-types-registry-fr-registration-authority`. The plane is decided by the context type rather than by the endpoint — a candidate whose requested owner is global is admissible only under `PlatformSecurityContext`, and a tenant-scoped candidate is authorized by the platform PDP for the requesting subject, the action, and the candidate's canonical GTS Identifier supplied as a resource property.
+It also owns the position of the authorization check: **authorization runs before identifier availability is evaluated at all**, per `cpt-cf-types-registry-fr-registration-authority`, and is itself preceded by the registration-policy gate of §3.2, which is configuration rather than authorization. One order: identifiers, policy, authorization, the remaining static checks, and availability last. The plane is decided by the context type rather than by the endpoint — a candidate whose requested owner is global is admissible only under `PlatformSecurityContext`, and a tenant-scoped candidate is authorized by the platform PDP for the requesting subject, the action, and the candidate's canonical GTS Identifier supplied as a resource property.
 
 ##### Acceptance path
 
@@ -468,11 +469,11 @@ The no-op fast path is the caller's, not the server's: ADR-0012 offers no synchr
 
 The normal caller workflow is read-before-write. It batch-reads the exact identifiers it owns, compares the returned canonical authored content with the desired definitions, and does not POST candidates that are already equal. A missing candidate is submitted with no `expected_resource_version`; an existing but different one carries the `resource_version` the read returned. The tenant REST plane derives the owner from `SecurityContext`; ownership is not caller-controlled request data. Platform gears use the SDK platform plane and `PlatformSecurityContext` for global definitions.
 
-Everything on the acceptance path is decided from the request itself — the submitted identifiers and documents, the plane, and one deployment value. **No registry state is read.** That is why each of the following is a synchronous refusal rather than a candidate accepted and then failed as an asynchronous item, which would defer a verdict the API already holds.
+Everything on the acceptance path is decided from the request itself — the submitted identifiers and documents, the plane, and deployment configuration that is read at process start: the `force` switch and the registration policy of §3.2. **No registry state is read.** That is why each of the following is a synchronous refusal rather than a candidate accepted and then failed as an asynchronous item, which would defer a verdict the API already holds.
 
 1. **Envelope and batch size** — refuses more than 100 candidates.
 2. **Candidate identifiers** — refuses a non-canonical GTS Identifier, or a duplicate within the batch.
-3. **Reserved namespace** — refuses a candidate matching `gts.cf.toolkit.*` on the tenant plane (*Tenant-plane authorization*, below).
+3. **Registration policy** — for a candidate that would create a new logical entity, refuses it **unless** its GTS Identifier Region admits the vendor its own last segment carries **and**, where the candidate would be tenant-owned, admits tenant ownership there. Either parameter failing refuses; the ownership half is not evaluated for a global candidate (*Registration policy*, below). A revision and a deletion are not gated here.
 4. **Registration authority** — refuses more than one ownership and authorization scope in the batch, a global candidate off the platform plane, and a candidate not covered by a grant.
 5. **Managed identifier profile** — refuses an explicit UUID tail on any candidate (ADR-0001), and a minor or major 0 in the **last segment** of a registered Instance identifier (ADR-0004, ADR-0015). A minor on a Type Schema identifier is admissible under any prefix.
 6. **Declared dialect, Type Schema candidates** — refuses an absent top-level `$schema`, a value outside the accepted Draft-07 spellings, and a `$schema` below the document root that differs from it (ADR-0014).
@@ -482,7 +483,7 @@ Everything on the acceptance path is decided from the request itself — the sub
 
 Three properties of that order are load-bearing rather than conventional.
 
-**Steps 3 and 4 precede any existence lookup**, so an unauthorized caller cannot distinguish a free identifier from a taken one by attempting a registration; and 3 precedes 4 because the reserved namespace is decided from the identifier and the plane alone, so consulting the PDP first could only produce an allow that has to be discarded.
+**Steps 3 and 4 precede any existence lookup**, so an unauthorized caller cannot distinguish a free identifier from a taken one by attempting a registration; and 3 precedes 4 because registration policy is decided from the identifier, the plane, and configuration alone, so consulting the PDP first could only produce an allow that has to be discarded.
 
 **Every clause of 5 and 7 is static** — decidable from the candidate identifier and one deployment value, which is what permits them on a path that reads nothing. *First minor of a major* is static only because ADR-0004's contiguity rule reduces it to `n == 0`. Whether *this* family may hold a minor, and whether the waived check would have failed, are questions for the worker under the version-family lock (*Dependency-aware partial admission*, below).
 
@@ -621,7 +622,7 @@ Authority over part of the GTS namespace is granted, never acquired by registeri
 
 **What Types Registry does** is one call, at step 4 of the acceptance path and therefore before any existence lookup: it supplies the subject, the action, and the candidate's canonical GTS Identifier as a resource property, and consumes a boolean. No new authorization primitive is needed — the platform's canonical permission GTS Type already accepts a GTS wildcard pattern in `resource_type`, and matching follows GTS §3.6, so a grant covering `gts.<vendor>.<package>.*` authorizes registration inside that region and nothing outside it. The decision is cheap: the identifier is fully known before the check, so there is no result set to filter and the answer is boolean — `require_constraints: false`, the PEP "non-resource decision" case — and because the identifier is itself the resource property, the PDP needs no knowledge of registry storage.
 
-**One region is not grantable at all.** A candidate matching `gts.cf.toolkit.*` is refused on the tenant plane and cannot be tenant-owned in P1. The refusal happens in envelope validation, before the PDP is consulted, so no grant configuration can reach it; and under GTS §3.6 it covers the whole derivation chain beneath the prefix, so a type derived from a platform base, and an Instance of either, are inside the reservation rather than beside it. It also subsumes two checks that would otherwise exist separately: a Source Claim projection and a permission Instance both carry identifiers inside the reservation, so neither the Control-Plane Validator nor the authorization model needs an ownership rule of its own. `cpt-cf-types-registry-fr-registration-authority` records why the reservation is deliberately broader than the entities that need it.
+**Some regions admit no new entity at all**, and which ones is configuration rather than a constant: *Registration policy*, below. Where a candidate would create one, a grant is consulted only if policy already admits it, so the two never disagree — step 3 refuses before step 4 runs. A revision or deletion of one already admitted reaches step 4 whatever the region's policy says today, which is what keeps a closed region from freezing what it admitted. The platform's own contracts are closed there under the shipped declarations, which subsumes two checks that would otherwise exist separately: a Source Claim projection and a permission Instance both carry identifiers inside `gts.cf.toolkit.*`, so neither the Control-Plane Validator nor the authorization model needs an ownership rule of its own.
 
 **Three things this gear deliberately does not decide.**
 
@@ -640,6 +641,84 @@ The platform plane authorizes by a different mechanism rather than a variation o
 What stands in its place is authentication of a **workload**: `InternalAuthMiddleware` validates an `X-ToolKit-Internal-Token` service-account token in the first phase and an mTLS SPIFFE identity after, and produces the `PlatformIdentity` inside the context. Any narrowing beyond *is this a platform workload at all* is workload policy over that identity and lives outside this gear. Purge carries a second, unrelated guard: deployment policy decides whether the operation exists in a deployment at all (ADR-0013).
 
 **The consequence is worth stating rather than leaving to be discovered: any authenticated platform workload can author, revise, or delete any global entity, including one another gear registered.** Nothing in Types Registry narrows that, and `owning_gear` does not — it is caller-declared attribution that nothing authorizes on (*`owning_gear`*, §3.3). What bounds it in practice: global authoring is a startup reconciliation of definitions compiled into the binary, every mutation is audited with the operation and its candidates, and the plane is reachable only from inside the trust boundary, on a separate listener, by a workload the platform issued an identity to. A deployment wanting per-gear narrowing adds it as workload policy on `PlatformIdentity`.
+
+##### Registration policy
+
+Registration policy is a deployment allowlist for **new logical entities**. For each GTS Identifier Region it answers two independent questions:
+
+1. Which vendors may appear in the candidate's last identifier segment?
+2. May an entity in this region be tenant-owned?
+
+Both answers are closed by default: no vendor is allowed and tenant ownership is disabled. The only exception is the platform vendor on a global candidate, described below. A missing entry therefore causes an immediate refusal instead of silently admitting an entity whose owner cannot later be changed.
+
+Policy and authorization solve different problems. Policy decides **what a region admits**; a grant decides **who may write there**. Policy runs first, before the PDP and before any registry lookup, so a grant cannot open a region that policy has closed.
+
+**Policy entries.** A key is either an exact canonical GTS Identifier or a GTS pattern with one trailing wildcard on a token boundary. Each entry may set `allowed_vendors`, `tenant_ownable`, or both. For example:
+
+| Entry | `allowed_vendors` | `tenant_ownable` | Meaning |
+|---|---|---|---|
+| `gts.acme.*` | `[acme]` | `true` | Onboard `acme` in its own namespace, including derivations |
+| `gts.cf.core.rg.type.v1~*` | `[acme]` | `true` | Let `acme` create tenant-owned derivations of the resource-group type |
+| `gts.cf.core.rg.type.v1~` | `[]` | `false` | Keep the base type itself closed |
+| `gts.cf.toolkit.plugins.plugin.v1~*` | `["*"]` | `false` | Allow any vendor globally in the plugin region, but not tenant ownership |
+
+The exact base-type entry matters because `gts.cf.core.rg.type.v1~*` also matches the base type itself. It can therefore be treated differently from its derivation subtree.
+
+**Resolution is per parameter.** `allowed_vendors` and `tenant_ownable` are resolved separately:
+
+1. Find the matching entry with the longest literal prefix that names the parameter. An exact key is more specific than any pattern.
+2. Skip matching entries that omit that parameter; a less-specific entry may still provide it.
+3. If no entry provides it, use the closed default.
+
+Within `allowed_vendors`, the selected set replaces rather than extends a less-specific set. Because a wildcard can appear only at the end, matching regions are nested and cannot produce an ambiguous tie.
+
+Entries come from the platform release and from the deployment's `registration_policy` map (§3.8). If both sources contain the same key, deployment values replace the corresponding release values; an omitted parameter keeps the release value at that key. Resolution then runs over the merged entries.
+
+**Exact keys use equality, not GTS pattern matching.** GTS treats a bare Type identifier used as a pattern as covering its derived types. Equality is required here so an exact key can decide only the base type while a separate `~*` key decides its subtree.
+
+**How a candidate is checked.** The vendor is always taken from the candidate's last segment, never from the caller:
+
+| Candidate | Vendor rule | Ownership rule |
+|---|---|---|
+| Global, platform vendor (`cf`) | Always admitted | Global by construction |
+| Global, any other vendor | Vendor must be in `allowed_vendors` | Global by construction |
+| Tenant-owned, including vendor `cf` | Vendor must be in `allowed_vendors` | `tenant_ownable` must be `true` |
+
+The implicit platform-vendor allowance applies only to global candidates, ensuring that configuration cannot prevent the platform from registering its own contracts. A tenant-owned candidate gets no such exception: admitting `cf` there must be explicit. `allowed_vendors: ["*"]` includes `cf` and every other vendor.
+
+For example, under the entries above:
+
+- `gts.cf.core.rg.type.v1~acme.crm._.order.v1~` may be tenant-owned;
+- the same identifier with `fabrikam` in its last segment is refused;
+- `gts.cf.core.rg.type.v1~` is refused as tenant-owned by its exact entry;
+- `gts.acme.crm._.thing.v1~cf.evil._.x.v1~` is refused as tenant-owned because the resolved vendor set contains `acme`, not `cf`.
+
+**Minors belong to their Version Family, not to this table.** All minors of one major share one family row and owner (§3.3). A successor inherits that owner, so policy needs no entry per minor.
+
+**The release ships nothing open.** It contains only the closed `gts.*` default. A stock deployment still registers platform contracts because global candidates carrying the platform vendor use the implicit allowance above. Nothing under `gts.cf.*` is opened to other vendors or to tenants.
+
+Onboarding another vendor normally requires entries for more than its own namespace. Permissions and plugins declared by its gears live below platform base types, so the deployment must also name the vendor in those regions:
+
+```yaml
+"gts.acme.*":                            { allowed_vendors: [acme], tenant_ownable: true }
+"gts.cf.toolkit.authz.permission.v1~*":  { allowed_vendors: [acme] }
+"gts.cf.toolkit.plugins.plugin.v1~*":    { allowed_vendors: [acme] }
+```
+
+Those platform regions do not ship open because `~*` cannot mean "Instances only": it matches both Instances and derived types. Opening them to every vendor would therefore also pre-approve third-party extensions. A missing entry instead refuses the gear's first registration and identifies the missing region and parameter. How another gear could contribute release entries for a region it owns is deferred as D5 in §4.
+
+**Policy gates creation, not the life of an existing entity.** The candidate precondition identifies the operation without a registry read: an absent `expected_resource_version` declares creation, while a present value declares revision. Revisions and deletions bypass policy. Closing a region therefore prevents new entities without preventing existing owners from revising or deleting theirs; ongoing write authority remains controlled by grants.
+
+If a region was opened by mistake, correction is deletion followed by identifier purge under ADR-0013. The policy in force is not stored on revisions (§3.8, *None of the four is stored*).
+
+**A refusal is configuration, not permission.** It identifies the region and the parameter that failed, is distinguishable from an invalid identifier or denied grant, and is returned before the PDP runs. This reveals only a decision derived from the submitted identifier and deployment policy, never whether the identifier already exists.
+
+**Four matcher properties this relies on** are pinned by §4, *Implementation prerequisites*:
+
+- `X~*` matches both `X~` and everything derived from it;
+- `X~acme.*` requires the `acme` segment and does not match `X~`;
+- a trailing wildcard matches derived types and Instances alike;
+- a major-only pattern such as `…v1~*` also matches that major's minors, such as `…v1.3~`.
 
 ##### Responsibility boundaries
 
@@ -852,7 +931,7 @@ This section covers the whole surface: registration, deletion, purge, the read a
 
 #### Tenant REST contract
 
-The routes below are the **tenant** surface, served on the business listener. The handler receives `SecurityContext`; `owner_tenant_id` is taken from that context and is never accepted in a request body. Nothing here can produce a global entity — that is a platform-plane operation on the separate listener — and nothing here can name an identifier under `gts.cf.toolkit.*`, which is refused on this plane before authorization runs.
+The routes below are the **tenant** surface, served on the business listener. The handler receives `SecurityContext`; `owner_tenant_id` is taken from that context and is never accepted in a request body. Nothing here can produce a global entity — that is a platform-plane operation on the separate listener — and nothing here can bring a new entity into a region registration policy leaves closed, which is refused before authorization runs — a revision or deletion of one already admitted there is not.
 
 **Endpoints Overview**:
 
@@ -1658,7 +1737,7 @@ Every GTS Type Schema and registered Instance declared in this repository — ev
 
 The check lives in an architecture lint over the source that declares the identifier. It is a string literal in a macro argument and the repository already lints GTS identifiers in that position, so this is an addition to the existing `DE09xx` family in `cargo-gears`.
 
-One consequence is accepted: the lint reaches identifiers **declared in this repository** and nothing else, so a `gts.cf.*` Type Schema submitted through the API is admitted like any other. The one region the registry does reserve, `gts.cf.toolkit.*` under *Tenant-plane authorization*, is reserved against tenant **ownership** and says nothing about versions.
+One consequence is accepted: the lint reaches identifiers **declared in this repository** and nothing else, so a `gts.cf.*` Type Schema submitted through the API is admitted like any other. What registration policy closes, under *Registration policy*, it closes against tenant **ownership** or against a vendor the region does not admit — two independent parameters, so a region open to one may be closed to the other — and neither says anything about versions.
 
 #### Registry Source Plugin contract
 
@@ -1774,11 +1853,11 @@ pub struct SourceEntity {
     pub ownership: OwnershipScope,
     /// The same two-valued `LifecycleStatus` a consumer sees. P1 has no status
     /// between `Active` and `Deleted` (PRD §5.3, `cpt-cf-types-registry-fr-lifecycle`),
-    /// and deprecation is deferred past P1 for managed and externally managed
-    /// entities alike (ADR-0008). **A source that considers an entity deprecated
-    /// reports it `Active`.** The entity is still usable, and P1 neither carries
-    /// nor relays the distinction. `Deleted` is not the fallback: it is terminal,
-    /// there is no restore, and a domain row may still hold the reference.
+    /// and deprecation is deferred past P1 for both origins alike (ADR-0008).
+    /// **A source that considers an entity deprecated reports it `Active`**: the
+    /// entity is still usable, and P1 neither carries nor relays the distinction.
+    /// `Deleted` is not the fallback — it is terminal, there is no restore, and a
+    /// domain row may still hold the reference.
     pub lifecycle: LifecycleStatus,
     /// Present exactly when `SourceCall::tenant_id` was.
     pub tenant_enablement: Option<TenantEnablement>,
@@ -2109,7 +2188,7 @@ Admission work is dispatched through the leased ToolKit outbox, which supplies m
 
 - [ ] `p1` - **ID**: `cpt-cf-types-registry-tech-deployment-config`
 
-Two capability switches, one retention window, and five input bounds are per-deployment rather than per-request, and they live in the gear's typed configuration at the ToolKit path `gears.<name>.config`, the gear's registered name being `types-registry`:
+Two capability switches, one retention window, one registration policy, and five input bounds are per-deployment rather than per-request, and they live in the gear's typed configuration at the ToolKit path `gears.<name>.config`, the gear's registered name being `types-registry`:
 
 ```yaml
 gears:
@@ -2124,6 +2203,17 @@ gears:
         resolution_closure: 64
         batch_candidates: 100
         expansion_references: 1000
+      registration_policy:               # §3.2, Registration policy
+        "gts.acme.*":                     # onboard one vendor
+          allowed_vendors: [acme]
+          tenant_ownable: true
+        "gts.cf.core.rg.type.v1~*":       # open one platform type to it
+          allowed_vendors: [acme]
+          tenant_ownable: true
+        "gts.cf.toolkit.authz.permission.v1~*":   # its gear's own permissions
+          allowed_vendors: [acme]
+        "gts.cf.toolkit.plugins.plugin.v1~*":     # and its own plugins
+          allowed_vendors: [acme]
 ```
 
 The gear loads it with `ctx.config_or_default()`, so an absent or empty `config` block yields exactly the defaults above — which is what makes a stock deployment a deployment with `force` and purge unavailable, rather than one that fails to start. Existing repository configurations write `config: {}` for this gear, and that continues to mean the same thing.
@@ -2134,21 +2224,23 @@ The gear loads it with `ctx.config_or_default()`, so an absent or empty `config`
 | `allow_purge` | bool | `false` | Whether the purge operation exists in this deployment at all. Where false it is unavailable and reported as unavailable |
 | `operation_retention` | duration | `30d` | How long a terminal, unpinned operation is kept before the sweep may remove it |
 | `limits.*` | size or count | §3.2 | The five admission and query bounds of §3.2, *Bounded inputs*, which records what each default is derived from |
+| `registration_policy` | map of GTS pattern to `allowed_vendors` and `tenant_ownable` | empty | The only layer that opens anything: the release ships every region closed (§3.2), so this map is where the vendors a deployment serves are named. An empty map leaves everything closed; an entry that is not a valid GTS pattern, or that names an unknown parameter, fails startup rather than being skipped. `allowed_vendors: ["*"]` admits any vendor and so turns that check off for its region, and an omitted parameter is not a narrowing — it leaves that one to the release entry under the same key, or, where the release has none, to the longest other matching entry that names it (§3.2, *Resolution is per parameter*). Both are silent in their effect, so the value in force belongs in operator-facing documentation; a registrant learns it from a refusal naming the region and the parameter (§3.2) |
 
-**The limits differ in kind from the three values above them, and the difference has to be stated.** A capability switch and a retention window change what a deployment *offers*; a limit changes what a request *is*, so two installations with different limits accept different requests. That is deliberate — an operator with unusually large schemas should not need a rebuild — and it costs one guarantee: a Dry Run's verdict is relative to the installation's configuration as well as to its state, which `cpt-cf-types-registry-constraint-single-installation` records alongside the same point about entities. **A refusal therefore names the bound it hit and the value in force**, never the raw comparison, so a caller whose batch passes in one environment and fails in another learns why without an operator.
+**The limits differ in kind from the four values above them, and the difference has to be stated.** A capability switch, a retention window, and a registration policy change what a deployment *offers*; a limit changes what a request *is*, so two installations with different limits accept different requests. That is deliberate — an operator with unusually large schemas should not need a rebuild — and it costs one guarantee: a Dry Run's verdict is relative to the installation's configuration as well as to its state, which `cpt-cf-types-registry-constraint-single-installation` records alongside the same point about entities. **A refusal therefore names the bound it hit and the value in force**, never the raw comparison, so a caller whose batch passes in one environment and fails in another learns why without an operator.
 
 Four rules govern all of them, and each is a property this design relies on elsewhere.
 
 **They are read at process start and are not hot-reloadable.** Changing one requires a restart. That keeps "what was in force" at the granularity of a process lifetime and removes the class of confusion where a value was on for a few seconds mid-admission — which matters more for a limit than for a switch, since a limit raised mid-batch would let one operation accept what a retry of it refuses.
 
-**A disabled capability is refused distinguishably, never silently dropped.** A control that quietly does nothing reads as a control that is in force, which is the defect this design refuses elsewhere for a permission with no evaluation point. The two capabilities express that differently, and neither needs a capability-discovery surface:
+**A disabled capability is refused distinguishably, never silently dropped.** A control that quietly does nothing reads as a control that is in force, which is the defect this design refuses elsewhere for a permission with no evaluation point. The three controls express that differently, and none needs a capability-discovery surface:
 
 * **purge** is absent from the platform surface where it is disabled — the route is not registered and the operation does not appear in that listener's OpenAPI document, so its availability is legible without asking;
 * **`force`** is a request field and cannot be absent that way, so a request carrying it is refused with a reason that names the deployment configuration rather than the candidate. That is discovery by attempted use, and it is accepted: the alternative is a deployment-capabilities endpoint whose only consumers would be one boolean and a route that already advertises itself by existing. Operator-facing documentation of the value is the other half.
+* **`registration_policy`** is not a request field either, so the same shape applies with the reason naming the region and the parameter rather than the candidate (§3.2, *A refusal is configuration, not permission*). Reporting the whole table on a read surface was left out for the reason above plus one: it names the vendors a deployment serves, which is a disclosure the tenant plane has no reason to carry.
 
 **Acceptance is the authority point, and the worker does not recheck.** `allow_compatibility_force` is evaluated once, synchronously, when the request is accepted; the accepted candidate is then durable in `operation_item.request_payload` together with its flag, and the worker honours what was accepted. This matters because any replica may run the worker and a rolling restart can leave replicas holding opposite values — with acceptance as the single authority point, a forced candidate accepted by an enabled replica commits wherever it is executed, and disabling the value takes effect for **new acceptances only**. What that does *not* buy is agreement across replicas mid-rollout: while a restart is in flight, whether a new `force` request is accepted depends on which replica serves it, and `allow_purge` likewise changes route and OpenAPI presence per replica. The window is bounded by the rollout and an operator wanting a hard cutover drains first; the alternative — reading the value from shared state on every request — would trade a bounded rollout window for a per-request dependency on that store, and neither boolean is worth it. Neither the flag's state nor a configuration generation is persisted, because the accepted request already carries the decision, and `type_schema_revision.compat_forced` records the outcome.
 
-**None of the three is stored, and none is scoped to a region of the identifier space.** Nothing records which value was in force when a revision was admitted, because nothing needs to: `type_schema_revision.compat_forced` states whether the waiver was actually applied, which is the question an auditor has, and purge leaves its effect rather than a record. ADR-0004 records why regional scoping is declined for `force` — it would be a third prefix-policy system beside Source Claims and grants — and why regional granularity, if it is ever wanted, belongs to the authorization model instead.
+**None of the four is stored.** Nothing records which value was in force when a revision was admitted, because nothing needs to: `type_schema_revision.compat_forced` states whether the waiver was actually applied, which is the question an auditor has, purge leaves its effect rather than a record, and a registration policy either refused a candidate, leaving no entity to annotate, or admitted one, whose ownership the entity row carries. `registration_policy` is the one of the four **scoped to a region of the identifier space**, that being its whole subject. For the other three the scoping is declined, and ADR-0004 records why for `force` — it would be a third prefix-policy system beside Source Claims and grants — and why regional granularity, if it is ever wanted, belongs to the authorization model instead.
 
 **Client-side configuration is separate and has a different owner.** The SDK cache knobs of §3.3, *The client-side cache*, live in the consuming gear's process and are that gear's trade, not this one's.
 
@@ -2170,6 +2262,7 @@ Design decisions this document deliberately leaves unmade. Two rules govern the 
 | D2 | What an Alias resolution returns. An Alias is a Managed Entity with its own Registry Reference (ADR-0001) and `cpt-cf-types-registry-fr-id-resolution` already requires reverse resolution to preserve the exact client-supplied Alias identifier while exposing target metadata separately, so the P1 reference contract does not change. What is undecided is the projection: whether a read of an Alias carries the target's authored and effective documents inline, a reference to them, or neither, and whether `$select` addresses the Alias or the target when the two differ. Whether an Alias may target another Alias, and whether its target may be retargeted after admission, are requirement questions and are PRD open question 6 | `cpt-cf-types-registry-fr-aliasing` |
 | D3 | How discovery excludes contracts an owner does not want adopted. A GTS wildcard has no negation and `GET /entities` has no stability parameter, so a catalogue view that wants published contracts only cannot express it (ADR-0015). The answer must decide whether it is a new parameter or a value of an existing one, and whether it reaches Externally Managed Entities, whose majors the platform does not interpret. It should be shaped to carry deprecation too if that is ever introduced, rather than becoming the first of two adjacent booleans | `cpt-cf-types-registry-fr-type-query-assistance` |
 | D4 | Whether retention should eventually reach **admitted revisions**, and with them the operations that produced them. P1 sweeps only unpinned operations (§3.2, *Operation retention*) and keeps every revision until purge, which is right while the registry holds contracts rather than volume. Three things have to be settled before it could reach further: what an **earlier** revision is retained *for* once ADR-0003 has established that admission never reads history — the current revision has a named consumer even after deletion, the owning gear retiring domain data that still conforms to it (ADR-0013), and its predecessors have none, so a rule has to say which revisions are no longer needed; where the admitting principal lives once an operation may outlive nothing, since both revision tables deliberately do not duplicate it and reach it through `operation_item_id` instead; and how any such sweep is reconciled with ADR-0013, which reserves the removal of admitted content to one operator-invoked act precisely so that no background process can do it | `cpt-cf-types-registry-component-operation-store`, ADR-0005, ADR-0006, ADR-0013 |
+| D5 | By what contract a gear **other than `types-registry`** declares a build-time registration-policy entry for a region it owns. P1 needs none, because the release ships no region open at all (§3.2, *The release ships nothing open*): every opening is deployment configuration, so no aggregation across gears happens. What has to be settled before a second declarer exists is where the declaration lives — an attribute on the base type, or a manifest — and then how entries from several gears aggregate: identical keys, a key nested inside another gear's region, and whether a gear may name a region it does not own, which is the case that turns a declaration into an authority claim | `cpt-cf-types-registry-fr-registration-policy`, ADR-0009 |
 
 ### Benchmark profile
 
@@ -2179,7 +2272,7 @@ Design decisions this document deliberately leaves unmade. Two rules govern the 
 
 Five items block implementation rather than design. One is a deployment step rather than an external dependency: **the ADR-0015 quarantine preflight**. Because the GTS grammar has always admitted major 0 while the managed profile said nothing about it, the induction that makes the quarantine rule a closure property rests on a base case that has to be established rather than assumed — one pass over `dependency` joined to `entity.gts_id` for a stable subject holding a direct edge to a major-0 target. An empty result satisfies it; a non-empty one must be resolved before the rule is enabled, since ADR-0015 offers no grandfathering. A first release under this profile is expected to be empty, which makes it a check rather than a migration. Three are external to this design; the fourth is the *Benchmark profile* above, which does not exist yet and which two P1 NFRs name as their verification approach.
 
-**The platform GTS implementation must be confirmed to provide seven capabilities**, which `cpt-cf-types-registry-constraint-gts-implementation` depends on. This is a prerequisite rather than an asserted fact, because the design must not turn on the state of one pinned release: what the registry depends on is the behaviour, and confirming it belongs to the implementation that picks the version. If a capability is absent the answer is a change request against the implementation, never a local approximation.
+**The platform GTS implementation must be confirmed to provide eight capabilities**, which `cpt-cf-types-registry-constraint-gts-implementation` depends on. This is a prerequisite rather than an asserted fact, because the design must not turn on the state of one pinned release: what the registry depends on is the behaviour, and confirming it belongs to the implementation that picks the version. If a capability is absent the answer is a change request against the implementation, never a local approximation.
 
 1. **The tri-state verdict of OP#8** — compatible, incompatible, and *undecided as a distinct third answer*, since `cpt-cf-types-registry-principle-fail-closed` rejects a candidate whose compatibility cannot be established and cannot do so if undecided is reported as either of the other two. This one cannot be approximated at all: collapsing undecided into either neighbour breaks fail-closed in one direction or rejects valid evolution in the other.
 2. **Per-level classification of the resolved effective schema** as open, closed, or partially open, computed after reference resolution rather than read off an authored keyword. ADR-0003 makes it load-bearing.
@@ -2187,7 +2280,8 @@ Five items block implementation rather than design. One is a deployment step rat
 4. **Property addition and removal discriminated per content model in each direction** — the discrimination a looser check is most likely to miss.
 5. **The checker's own specification and implementation versions**, so that every admitted revision records the engine in force at its admission. A checker upgrade can change the verdict for an unchanged pair of schemas; what the platform does when the relation changes meaning is deferred by ADR-0003, and this record is what keeps that decision available.
 6. **A document-level comparison entry point** that resolves both sides and fails rather than comparing unresolved documents, which would silently answer a different question from the one asked.
-7. **Pattern containment** — does one pattern cover another — which the Source Claim overlap test needs. Claim matching needs no anchoring workaround beyond it: under the rooted single-segment grammar anchoring is a grammar check rather than a matching concern, and under ADR-0011's closed boundary a claim cannot slice into a chain, so the matcher's implicit coverage of the chains derived from a bare type-id pattern is exactly what a claim wants.
+7. **The four matching properties of §3.2, *Registration policy***, which decide what a policy entry reaches rather than how it is implemented: a bare trailing wildcard covers its own root, a partially specified one does not, a trailing wildcard ignores the type marker, and a major-only pattern reaches that major's minors. All four hold in the pinned matcher — `gts-id`, `GtsIdPattern::matches_views`, tests `test_trailing_chain_wildcard_matches_empty_suffix`, `test_prefixed_chain_wildcard_requires_a_suffix`, `test_trailing_wildcard_ignores_type_marker` — so this item pins them rather than asking for them. An upgrade that changes any one changes a policy rule, which is why they are listed here and not left to be rediscovered.
+8. **Pattern containment** — does one pattern cover another — which the Source Claim overlap test needs. Claim matching needs no anchoring workaround beyond it: under the rooted single-segment grammar anchoring is a grammar check rather than a matching concern, and under ADR-0011's closed boundary a claim cannot slice into a chain, so the matcher's implicit coverage of the chains derived from a bare type-id pattern is exactly what a claim wants.
 
 **The `toolkit-db/preview-outbox` feature's status must be explicitly accepted**, since P1 depends on the leased outbox and will not introduce a parallel lease implementation. This is a sign-off rather than a blocker: `ledger`, `file-storage`, and `chat-engine` already depend on the feature, so the platform's de facto position is that the preview marker denotes maturity and not disuse. What has to be confirmed is that Types Registry may rely on it under the same terms.
 

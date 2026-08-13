@@ -99,11 +99,11 @@
 -- preceding segment held exactly as written, and the trailing `~` of a type
 -- identifier normalized away (ADR-0004):
 --
---   gts.acme.crm.customer.v1~                 -> gts.acme.crm.customer
---   gts.acme.crm.customer.v1.3~               -> gts.acme.crm.customer
---   gts.cf.core.events.type.v1~acme.order.v1~  -> gts.cf.core.events.type.v1~acme.order
---   gts.cf.core.events.type.v2~acme.order.v1~  -> gts.cf.core.events.type.v2~acme.order
---   gts.cf.core.events.topic.v1~acme.orders.v1 -> gts.cf.core.events.topic.v1~acme.orders
+--   gts.acme.crm.customer.type.v1~   -> gts.acme.crm.customer.type
+--   gts.acme.crm.customer.type.v1.3~ -> gts.acme.crm.customer.type
+--   gts.cf.core.events.type.v1~acme.crm.order.type.v1~   -> gts.cf.core.events.type.v1~acme.crm.order.type
+--   gts.cf.core.events.type.v2~acme.crm.order.type.v1~   -> gts.cf.core.events.type.v2~acme.crm.order.type
+--   gts.cf.core.events.topic.v1~acme.crm.orders.topic.v1 -> gts.cf.core.events.topic.v1~acme.crm.orders.topic
 --
 -- A minor in a PRECEDING segment survives verbatim, exactly as a major does:
 -- `gts.A.v1.2~B.v3~` keys on `gts.A.v1.2~B`.
