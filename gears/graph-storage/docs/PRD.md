@@ -178,7 +178,7 @@ Several platform initiatives need to persist and query relationships between het
 
 ### 3.1 Gear-Specific Environment Constraints
 
-- Requires PostgreSQL with the `pgvector` extension available and permission to create extensions in the gear's database; the baseline is PostgreSQL 16 or later, and the SQL/PGQ graph-query backend activates on PostgreSQL 19 or later (see ADR-0001); no other PostgreSQL extensions are required
+- Requires PostgreSQL 19 or later with the `pgvector` extension and permission to create extensions in the gear's database; SQL/PGQ graph queries are used from the first release (see ADR-0001). Until PostgreSQL 19 GA (expected September/October 2026) deployments run a pinned PG19 beta image with pgvector built from a pinned source revision; no other PostgreSQL extensions are required
 - Requires an embedding provider: either an in-process ONNX model runtime bundled with the gear or network access to a remote embedding inference endpoint, per deployment configuration
 - Graph analytics loads a bounded projection of the graph topology into memory; deployments must budget memory for the configured analytics node ceiling
 - Depends on the file-storage gear when heavy-content offloading is enabled; the graph gear itself never stores blobs
@@ -737,7 +737,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 
 | Dependency | Description | Criticality |
 |------------|-------------|-------------|
-| PostgreSQL with pgvector (baseline 16+, SQL/PGQ backend on 19+) | Single storage backend: relational source of truth, full-text, JSONB, vector indexes, and graph queries | p1 |
+| PostgreSQL 19+ with pgvector (pinned beta image until GA) | Single storage backend: relational source of truth, full-text, JSONB, vector indexes, and SQL/PGQ graph queries | p1 |
 | ToolKit framework | Gear lifecycle, REST OperationBuilder, SecureORM, ClientHub, canonical errors | p1 |
 | AuthZ Resolver gear | Policy decisions and access scopes for every operation | p1 |
 | Types Registry gear | Platform registration of the gear's GTS base types and permission instances | p1 |
@@ -762,7 +762,8 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 | Community detection and sampled betweenness differ from prototype outputs | Consumers expecting NetworkX-identical numbers are surprised | PRD explicitly waives numeric parity; determinism and ordering guarantees are documented per algorithm |
 | A single tenant's ingest or analytics load starves others | Platform-wide latency degradation | Batch size limits, analytics ceiling and cache, operation-level permissions, observability of per-tenant load |
 | Shared ontologies evolve incompatibly across producers | Ingest failures or semantic drift between producers | Immutable schemas per GTS version, conflict-rejecting registration, family patterns that keep older derived types valid |
-| SQL/PGQ availability slips (PostgreSQL 19 adoption or variable-length path support in PG20+) | The target graph-query backend arrives later than planned | The recursive-CTE backend serves the full fixed-depth API on PostgreSQL 16+ indefinitely; the traversal port isolates the swap; a dedicated traversal mirror remains the measured-bottleneck contingency (ADR-0001) |
+| PostgreSQL 19 GA slips, or a PG19 beta regression hits the pinned stack | The gear ships on a beta database longer than planned | The stack is pinned (beta image + pgvector revision) and validated by the PG19 spike and the prototype's full test suite; the recursive-CTE backend can serve the whole fixed-depth API if a PGQ-specific regression appears; re-pin to stock at GA |
+| SQL/PGQ variable-length paths arrive later than PG20 | The CTE backend carries variable-depth expansion longer | The traversal port isolates the split; consumers see no API difference; a dedicated traversal mirror remains the measured-bottleneck contingency (ADR-0001) |
 
 ## 13. Open Questions
 

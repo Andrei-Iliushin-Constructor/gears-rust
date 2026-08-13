@@ -4,7 +4,7 @@ date: 2026-08-13
 decision-makers: Graph Storage design review
 ---
 
-# ADR-0001: Graph persistence uses a single PostgreSQL store with a staged traversal backend targeting SQL/PGQ
+# ADR-0001: Graph persistence uses a single PostgreSQL 19 store with SQL/PGQ active from v1
 
 <!-- toc -->
 
@@ -17,7 +17,7 @@ decision-makers: Graph Storage design review
 - [Pros and Cons of the Options](#pros-and-cons-of-the-options)
   - [A. PostgreSQL source of truth plus Apache AGE traversal mirror](#a-postgresql-source-of-truth-plus-apache-age-traversal-mirror)
   - [B. Dedicated graph database as the primary store](#b-dedicated-graph-database-as-the-primary-store)
-  - [C. Single PostgreSQL with a staged traversal backend (CTE now, SQL/PGQ target)](#c-single-postgresql-with-a-staged-traversal-backend-cte-now-sqlpgq-target)
+  - [C. Single PostgreSQL 19 with SQL/PGQ from v1 and a CTE variable-depth backend](#c-single-postgresql-19-with-sqlpgq-from-v1-and-a-cte-variable-depth-backend)
   - [D. Single PostgreSQL with recursive-CTE traversal only](#d-single-postgresql-with-recursive-cte-traversal-only)
 - [More Information](#more-information)
 - [Traceability](#traceability)
@@ -39,7 +39,7 @@ The decision is which storage and traversal topology the productized Rust gear c
 - Graph-query capability must survive beyond currently known scenarios; a design with no declarative graph-query path is not acceptable.
 - `cpt-cf-graph-storage-fr-tenant-isolation` requires tenant scoping through the platform's secure ORM (and RLS-compatible SQL) on every query path; AGE Cypher executes outside both, so tenant predicates would be hand-written and separately audited in a second dialect.
 - `cpt-cf-graph-storage-fr-graph-traversal` and `cpt-cf-graph-storage-fr-neighborhood-projection` are fixed-depth, bounded queries (reference scenario depth <= 3) — the workload shape SQL/PGQ covers in its initial release (variable-length paths are expected in PG20+).
-- Timeline: PostgreSQL 19 GA lands September/October 2026, before the gear's realistic production date; pgvector already compiles against PG19 (upstream PG19 support issue closed July 2026). An AGE-based initial phase would live in production for approximately zero time before its planned exit becomes available.
+- Timeline: the gear is expected to ship before PostgreSQL 19 GA (September/October 2026), so waiting for GA is not an option — but neither is a temporary AGE phase. The PG19 validation spike ([SPIKE-pg19-sqlpgq.md](../SPIKE-pg19-sqlpgq.md)) proved the target stack is usable today: pgvector builds and runs against PG19 beta2 (upstream support landed July 2026), HNSW and GRAPH_TABLE work end to end. The gear therefore starts directly on PG19, and an AGE bridge would be built, audited, and torn down within the same release window for no benefit.
 - Rust cost of AGE: there is no mature agtype driver for Rust — the gear team would have to write and own agtype (de)serialization and Cypher passthrough for a component scheduled for removal; ingest would dual-write and deployments would need a custom AGE+pgvector image.
 - Apache AGE supports PostgreSQL 16–18 as of 2026, but new PostgreSQL majors historically arrive late (per its own 2026 roadmap discussion) — carrying AGE couples the platform's PostgreSQL upgrades to AGE's release cadence, including the PG19 move itself.
 - Prototype experience: AGE 1.5.0 silently dropped `SET` combined with relationship `MERGE`, required dollar-quoted Cypher with bind-parameter workarounds, and its dual-write added bridge identifiers and drift-repair concerns — while relational tables already held the truth.
@@ -50,27 +50,27 @@ The decision is which storage and traversal topology the productized Rust gear c
 
 - A. PostgreSQL source of truth plus Apache AGE traversal mirror (prototype topology)
 - B. Dedicated graph database (ArcadeDB / FalkorDB class) as the primary store
-- C. Single PostgreSQL instance with a staged traversal backend behind a port: recursive-CTE backend for compatibility, SQL/PGQ backend as the target on PostgreSQL 19+
+- C. Single PostgreSQL 19 instance with graph queries behind a port: SQL/PGQ backend active from v1, recursive-CTE backend for variable depth and fallback
 - D. Single PostgreSQL instance with recursive-CTE traversal only, no graph-query language path
 
 ## Decision Outcome
 
-Chosen option: "C. Single PostgreSQL instance with a staged traversal backend targeting SQL/PGQ", because it keeps every required query shape in one engine under one tenancy enforcement layer, preserves a declarative graph-query capability with a standards-track future (SQL:2023 SQL/PGQ, growing per PostgreSQL major), and avoids building a Rust AGE bridge that the platform's own engine evaluation already schedules for demolition.
+Chosen option: "C. Single PostgreSQL 19 instance with SQL/PGQ active from v1", because it keeps every required query shape in one engine under one tenancy enforcement layer, makes the declarative graph-query capability (SQL:2023 SQL/PGQ, growing per PostgreSQL major) available from the first release rather than deferring it, and avoids building a Rust AGE bridge that the platform's own engine evaluation already schedules for demolition.
 
 Concretely:
 
 1. Relational tables remain the single source of truth; no dual writes, no mirror.
-2. Graph queries execute behind a `GraphQueryPort` in the domain layer with two engine-native backends:
-   - **Recursive-CTE backend** (compatibility): depth-bounded iterative/recursive SQL over the indexed edge table; serves PostgreSQL 16–18 deployments and variable-depth expansion until SQL/PGQ gains variable-length paths (expected PG20+).
-   - **SQL/PGQ backend** (target): `CREATE PROPERTY GRAPH` over the node and edge tables; `GRAPH_TABLE` pattern queries that compose with pgvector KNN and full-text predicates in a single SQL statement, inherit normal indexes, `EXPLAIN`, RLS, and secure-ORM scoping. Activated on PostgreSQL 19+, verified by a readiness capability probe.
-3. Apache AGE is not carried into the Rust gear; it remains a prototype-only mechanism.
+2. The gear's baseline database is PostgreSQL 19 or later. Graph queries execute behind a `GraphQueryPort` in the domain layer with two engine-native backends, both shipped in v1:
+   - **SQL/PGQ backend** (active from v1 for fixed-depth query shapes): `CREATE PROPERTY GRAPH` over the node and edge tables; `GRAPH_TABLE` pattern queries that compose with pgvector KNN and full-text predicates in a single SQL statement, inherit normal indexes, `EXPLAIN`, RLS, and secure-ORM scoping. Readiness verifies the server major version and property-graph presence.
+   - **Recursive-CTE backend**: depth-bounded iterative/recursive SQL over the indexed edge table; serves bounded variable-depth expansion until SQL/PGQ gains variable-length paths (expected PG20+) and remains available as a configuration-selected fallback. On pure hop expansion it measured about 2x faster than the PGQ hop chain in the spike — both far inside the latency budget, so the composition and declarativity of SQL/PGQ win the fixed-depth default.
+3. Apache AGE is not carried into the Rust gear; it remains a mechanism of the prototype's pre-PG19 history (the prototype itself has moved to this same PG19 stack).
 4. Contingency (from the engine evaluation): if hot multi-hop traversal becomes the measured bottleneck, swap the *traversal mirror behind the port* — candidates ArcadeDB (re-evaluate Q1 2027: server-mode vector DDL, incremental HNSW, HA stability) and FalkorDB (gated on an SSPL legal opinion or commercial license) — never the system of record. Decision triggers are measured metrics (p95 of 2–3-hop API queries, ingest throughput, metrics job duration), not node counts.
 
 ### Consequences
 
-- The gear requires only the pgvector extension on stock PostgreSQL; the baseline is PostgreSQL 16+, and the SQL/PGQ backend activates on 19+. No custom database image is needed, unlike the prototype's AGE+pgvector build.
+- The gear's baseline is PostgreSQL 19+, which is beta until roughly October 2026. Until PG19 GA and a pgvector release targeting it, deployments run a pinned PG19 beta image with pgvector built from a pinned upstream revision — exactly the stack the validation spike ran and the prototype's PG19 branch ships. This temporary self-built image is a deliberate, time-boxed cost (unlike the AGE image, which was permanent); after GA the image returns to stock PostgreSQL plus released pgvector, and no graph extension is ever needed.
 - The `GraphQueryPort` contract must be defined so both backends (and a future external mirror) satisfy it: seed resolution, bounded expansion, per-hop edge-type filters, budgets, truncation semantics.
-- A PG19 validation spike must run before the traversal implementation freezes: build PG19 beta + pgvector from source, define the property graph over the prototype schema, and benchmark `GRAPH_TABLE` against the CTE backend on the reference fixed-depth query shapes.
+- The PG19 validation spike has run (2026-08-13, [SPIKE-pg19-sqlpgq.md](../SPIKE-pg19-sqlpgq.md)) and binds two implementation rules on the SQL/PGQ backend: patterns must be direction-explicit (the undirected shorthand plans as an all-vertex probe), and neighborhood expansion must chain `GRAPH_TABLE` as a 1-hop primitive with per-hop dedup (multi-hop chain patterns enumerate paths and explode on hubs).
 - Until PG20-class SQL/PGQ, variable-depth expansion stays on the CTE backend even on PG19 — the port hides which backend serves which request shape.
 - Consumer-facing declarative graph queries (a bounded pattern DSL over the port) become a possible later API addition; whether and when to expose one is tracked as a PRD open question.
 - The edge table's index design (tenant, source, target, type) remains the performance backbone for both backends and must be treated as such in DESIGN and benchmarks.
@@ -78,8 +78,9 @@ Concretely:
 
 ### Confirmation
 
-- Integration benchmarks enforce `cpt-cf-graph-storage-nfr-traversal-latency` on the reference graph (100k nodes / 500k edges, depth 3, 1,000-node budget) for the active backend on each supported PostgreSQL major.
-- The PG19 spike report (GRAPH_TABLE vs. recursive CTE on reference shapes) is reviewed before traversal implementation freeze.
+- Integration benchmarks enforce `cpt-cf-graph-storage-nfr-traversal-latency` on the reference graph (100k nodes / 500k edges, depth 3, 1,000-node budget) for both backends.
+- The PG19 spike report ([SPIKE-pg19-sqlpgq.md](../SPIKE-pg19-sqlpgq.md)) validated the stack ahead of implementation: pgvector on PG19 beta2, GRAPH_TABLE hop-chain vs. recursive CTE (p95 8.8 ms vs. 4.1 ms at reference shape), and single-statement KNN + graph + FTS composition; it is re-run at PG19 GA and PG20 beta.
+- The prototype (`studio-graph-storage`, PG19 branch) runs the same stack end to end: migrations, both traversal backends, and the full integration suite on PG19 beta2 + pgvector-from-source.
 - Adversarial multi-tenant tests confirm neither backend crosses tenants (`cpt-cf-graph-storage-nfr-tenant-zero-leak`).
 - Code review confirms no second storage engine, no AGE dependency, and no extension beyond pgvector.
 
@@ -107,18 +108,17 @@ ArcadeDB- or FalkorDB-class engine holds the graph; PostgreSQL is not the system
 - Bad, because full-text and hybrid search would need re-verification against a Lucene-class engine, and vector + relational + graph consistency crosses engine boundaries.
 - Bad, because there is no independent evidence for either candidate above a few million nodes, against a 1M–500M requirement.
 
-### C. Single PostgreSQL with a staged traversal backend (CTE now, SQL/PGQ target)
+### C. Single PostgreSQL 19 with SQL/PGQ from v1 and a CTE variable-depth backend
 
-Relational node/edge/chunk tables with tsvector, JSONB GIN, and pgvector indexes; graph queries behind a port with engine-native backends.
+Relational node/edge/chunk tables with tsvector, JSONB GIN, and pgvector indexes; graph queries behind a port with engine-native backends, SQL/PGQ active from the first release.
 
-- Good, because one engine serves lexical, vector, attribute, and graph queries over the same consistent rows, and graph+vector+FTS compose in a single SQL statement under SQL/PGQ.
+- Good, because one engine serves lexical, vector, attribute, and graph queries over the same consistent rows, and graph+vector+FTS compose in a single SQL statement under SQL/PGQ — verified by the spike at ~20-40 ms end to end.
 - Good, because tenant scoping stays in the single secure-ORM/RLS enforcement path for every query shape, in both backends.
-- Good, because a declarative, standards-track graph-query language (SQL/PGQ) is preserved as the long-term capability — the flexibility requirement — without a second engine or extension.
-- Good, because deployment is stock PostgreSQL with one common extension, and ingest writes once.
-- Good, because the port makes the traversal engine swappable: a dedicated mirror can be added later per the contingency plan without touching the system of record.
-- Neutral, because the SQL/PGQ backend is gated on PostgreSQL 19 adoption; the CTE backend carries older deployments in the interim.
+- Good, because the declarative, standards-track graph-query language (SQL/PGQ) — the flexibility requirement — is available from v1, without a second engine or extension.
+- Good, because ingest writes once, and the port makes the traversal engine swappable: a dedicated mirror can be added later per the contingency plan without touching the system of record.
+- Neutral, because PG19 is beta until roughly October 2026: the gear ships on a pinned beta image with pgvector built from source, re-pinned to stock at GA — a time-boxed operational cost the spike and the prototype have already de-risked.
 - Bad, because SQL/PGQ's initial release lacks variable-length paths and shortest-path (expected PG20+); bounded variable-depth stays on the CTE backend until then.
-- Bad, because two backend implementations of the port must be maintained during the transition window.
+- Bad, because two backend implementations of the port must be maintained until PG20-class SQL/PGQ can absorb variable depth.
 
 ### D. Single PostgreSQL with recursive-CTE traversal only
 
@@ -131,7 +131,7 @@ All graph queries are hand-written bounded SQL; no graph-query language path, ev
 
 ## More Information
 
-The full engine evaluation — 12-engine scoreboard with license verification, FalkorDB and ArcadeDB smoke tests, the AGE growth map to 500M nodes, the SQL/PGQ exit analysis, and the rejected three-engine (Qdrant + NebulaGraph + PG) architecture — is preserved as [graph-engine-alternatives.md](../graph-engine-alternatives.md) alongside this ADR. Fact base as of August 2026: PostgreSQL 19 Beta 2 released 2026-07-16 with SQL/PGQ in core (GA expected September/October 2026); pgvector upstream closed its PG19 support issue 2026-07-29; Apache AGE releases cover PostgreSQL 16–18 with PG19 support not yet scheduled.
+The full engine evaluation — 12-engine scoreboard with license verification, FalkorDB and ArcadeDB smoke tests, the AGE growth map to 500M nodes, the SQL/PGQ exit analysis, and the rejected three-engine (Qdrant + NebulaGraph + PG) architecture — is preserved as [graph-engine-alternatives.md](../graph-engine-alternatives.md) alongside this ADR. The PG19 stack itself was validated hands-on in [SPIKE-pg19-sqlpgq.md](../SPIKE-pg19-sqlpgq.md), and the `studio-graph-storage` prototype has been migrated to the same stack (PG19 beta2 + pgvector from source, AGE removed, both traversal backends), so every element of this decision runs today. Fact base as of August 2026: PostgreSQL 19 Beta 2 released 2026-07-16 with SQL/PGQ in core (GA expected September/October 2026); pgvector upstream closed its PG19 support issue 2026-07-29; Apache AGE releases cover PostgreSQL 16–18 with PG19 support not yet scheduled.
 
 ## Traceability
 

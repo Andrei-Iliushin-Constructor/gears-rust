@@ -1,10 +1,27 @@
 # Spike Report — SQL/PGQ on PostgreSQL 19 beta2 with pgvector
 
+
+<!-- toc -->
+
+- [Environment](#environment)
+- [Findings](#findings)
+  - [F1. pgvector on PG19 beta2: works](#f1-pgvector-on-pg19-beta2-works)
+  - [F2. Variable-length quantifiers: not supported (as expected)](#f2-variable-length-quantifiers-not-supported-as-expected)
+  - [F3. Undirected edge patterns plan catastrophically — use directed unions](#f3-undirected-edge-patterns-plan-catastrophically--use-directed-unions)
+  - [F4. Multi-hop chain patterns have path semantics — unusable for neighborhoods](#f4-multi-hop-chain-patterns-have-path-semantics--unusable-for-neighborhoods)
+  - [F5. The viable PGQ shape: directed 1-hop primitive + per-hop dedup](#f5-the-viable-pgq-shape-directed-1-hop-primitive--per-hop-dedup)
+  - [F6. Single-statement composition: confirmed](#f6-single-statement-composition-confirmed)
+  - [F7. DDL notes](#f7-ddl-notes)
+- [Consequences for the gear](#consequences-for-the-gear)
+- [Caveats](#caveats)
+
+<!-- /toc -->
+
 **Date:** 2026-08-13 · **Status:** complete · **Companion to:** [ADR-0001](./ADR/0001-cpt-cf-graph-storage-adr-single-postgres-store.md) (Confirmation gate)
 
 **Question:** does the SQL/PGQ target backend hold up — does pgvector build and run on PG19, does `GRAPH_TABLE` serve the gear's fixed-depth neighborhood shapes within the latency budget, and does graph+vector+FTS compose in one statement?
 
-**Verdict: the staged strategy holds.** pgvector builds and works on PG19 beta2. SQL/PGQ is viable as the target backend, but only in the *hop-primitive* shape (directed 1-hop `GRAPH_TABLE` chained with per-hop dedup) — naive multi-hop chain patterns and the undirected shorthand are unusable on hub-heavy graphs in the initial PG19 implementation. The recursive-CTE backend remains ~2.5x faster and stays the v1 default; single-statement KNN → graph → FTS composition is confirmed.
+**Verdict: the PG19 stack is usable today — the gear can start on SQL/PGQ from v1.** pgvector builds and works on PG19 beta2. SQL/PGQ is viable, but only in the *hop-primitive* shape (directed 1-hop `GRAPH_TABLE` chained with per-hop dedup) — naive multi-hop chain patterns and the undirected shorthand are unusable on hub-heavy graphs in the initial PG19 implementation. The recursive-CTE backend measured ~2.5x faster on pure hop expansion; both are far inside the latency budget, so ADR-0001 puts SQL/PGQ in front for fixed-depth shapes from v1 (composition and declarativity win) with the CTE backend carrying variable depth and serving as fallback. Single-statement KNN → graph → FTS composition is confirmed.
 
 ## Environment
 
@@ -45,7 +62,7 @@ Depth<=3 undirected neighborhood, random seeds (hubs included), single client, 2
 | Recursive CTE (visited-set BFS) | 14,384 | 0.75 ms | 4.06 ms | 30.5 ms | 48.9 ms |
 | PGQ hop-primitive chain | 6,094 | 2.16 ms | 8.75 ms | 59.2 ms | 81.0 ms |
 
-Both are orders of magnitude inside the 1 s p95 NFR (`cpt-cf-graph-storage-nfr-traversal-latency`) at reference-scale data; the CTE backend is ~2.5x faster and stays the v1 default. The PGQ overhead is per-hop query-shape bookkeeping the planner cannot yet collapse.
+Both are orders of magnitude inside the 1 s p95 NFR (`cpt-cf-graph-storage-nfr-traversal-latency`) at reference-scale data. The PGQ overhead is per-hop query-shape bookkeeping the planner cannot yet collapse; since both backends clear the budget with two orders of magnitude to spare, the latency difference does not decide the default — ADR-0001 does (SQL/PGQ for fixed-depth shapes from v1, CTE for variable depth and fallback).
 
 ### F6. Single-statement composition: confirmed
 
@@ -57,9 +74,10 @@ One SQL statement combining pgvector HNSW KNN (top-5 seeds) -> PGQ 1-hop expansi
 
 ## Consequences for the gear
 
-1. ADR-0001's staged strategy is validated end to end; no changes to the decision.
+1. The gear starts directly on PostgreSQL 19 with the SQL/PGQ backend active from v1 — this spike is what de-risked that choice ahead of PG19 GA (the gear ships earlier than GA; deployments pin the beta image and a pgvector source revision until then). Recorded in ADR-0001.
 2. The `GraphQueryPort` PGQ backend must generate direction-explicit, hop-primitive SQL (F3, F5) — recorded in DESIGN § Traversal Backend Sketch.
-3. Re-run this spike at PG19 GA (planner may improve; percentiles will shift) and at PG20 betas (quantifier support would collapse the hop chain into one pattern).
+3. The `studio-graph-storage` prototype has been migrated to this exact stack (PG19 beta2 + pgvector from source, AGE removed, sql/pgq hop backends), giving the gear a running reference implementation.
+4. Re-run this spike at PG19 GA (planner may improve; percentiles will shift) and at PG20 betas (quantifier support would collapse the hop chain into one pattern).
 
 ## Caveats
 

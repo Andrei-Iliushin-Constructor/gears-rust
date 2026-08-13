@@ -59,7 +59,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-fr-vector-search` | Vector arm: provider-embedded query against HNSW cosine indexes over node and chunk vectors, folded to nodes |
 | `p1` | `cpt-cf-graph-storage-fr-hybrid-search` | Search Service runs both arms independently and fuses with RRF, reporting per-arm ranks |
 | `p1` | `cpt-cf-graph-storage-fr-type-filtering` | GTS family patterns compiled to safe SQL patterns with literal-punctuation escaping, applied in every search arm |
-| `p1` | `cpt-cf-graph-storage-fr-graph-traversal` | Traversal Service expands breadth-first through the GraphQueryPort: depth-bounded recursive SQL on PostgreSQL 16–18 and for variable depth, SQL/PGQ `GRAPH_TABLE` patterns on PostgreSQL 19+, per ADR-0001 |
+| `p1` | `cpt-cf-graph-storage-fr-graph-traversal` | Traversal Service expands breadth-first through the GraphQueryPort: SQL/PGQ `GRAPH_TABLE` hop patterns from v1 for fixed-depth shapes (direction-explicit, per-hop dedup), depth-bounded recursive SQL for variable depth until PG20-class quantifiers, per ADR-0001 |
 | `p1` | `cpt-cf-graph-storage-fr-neighborhood-projection` | Projection Service returns degree-ordered, budget-truncated neighborhoods with phantom toggle and metric annotations |
 | `p1` | `cpt-cf-graph-storage-fr-tabular-projection` | Projection Service serves OData-filtered, paginated node tables over annotated (indexed) payload attributes |
 | `p2` | `cpt-cf-graph-storage-fr-graph-metrics` | Analytics Service computes degree, PageRank, components over a topology-only projection per ADR-0004 |
@@ -70,7 +70,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-fr-rest-api` | Versioned REST under `/api/graph-storage/v1` with OpenAPI schemas, RFC-9457 problems, documented limits |
 | `p1` | `cpt-cf-graph-storage-fr-sdk-client` | SDK crate with `GraphStorageClientV1` trait registered in ClientHub; local client delegates to domain services |
 | `p2` | `cpt-cf-graph-storage-fr-observability` | Structural tracing spans (batch sizes, arm timings, frontier sizes, cache hits) and OTel metrics; payload content never logged |
-| `p1` | `cpt-cf-graph-storage-fr-readiness` | Readiness checks: DB, pgvector presence, migrations, embedding provider, dimension agreement — with named problems |
+| `p1` | `cpt-cf-graph-storage-fr-readiness` | Readiness checks: DB, server major version (>= 19), pgvector presence, property-graph presence, migrations, embedding provider, dimension agreement — with named problems |
 
 #### NFR Allocation
 
@@ -87,7 +87,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 
 | ADR ID | Decision | Materialized By |
 |--------|----------|-----------------|
-| [`cpt-cf-graph-storage-adr-single-postgres-store`](./ADR/0001-cpt-cf-graph-storage-adr-single-postgres-store.md) | Single PostgreSQL store (pgvector only); graph queries behind the GraphQueryPort with staged engine-native backends — recursive CTE (PG16+ compatibility, variable depth) and SQL/PGQ (target, PG19+); Apache AGE not carried into the gear; dedicated traversal mirror as a measured-bottleneck contingency | `cpt-cf-graph-storage-principle-single-source-of-truth`, `cpt-cf-graph-storage-component-traversal-service`, `cpt-cf-graph-storage-component-storage-layer` |
+| [`cpt-cf-graph-storage-adr-single-postgres-store`](./ADR/0001-cpt-cf-graph-storage-adr-single-postgres-store.md) | Single PostgreSQL 19+ store (pgvector only); graph queries behind the GraphQueryPort with SQL/PGQ active from v1 (fixed-depth shapes) and recursive CTE for variable depth; pinned beta image until PG19 GA; Apache AGE not carried into the gear; dedicated traversal mirror as a measured-bottleneck contingency | `cpt-cf-graph-storage-principle-single-source-of-truth`, `cpt-cf-graph-storage-component-traversal-service`, `cpt-cf-graph-storage-component-storage-layer` |
 | [`cpt-cf-graph-storage-adr-unified-node-model`](./ADR/0002-cpt-cf-graph-storage-adr-unified-node-model.md) | One typed node model; owned vs. reference semantics via GTS base types; provenance-gated scope replacement | `cpt-cf-graph-storage-principle-reference-not-replica`, `cpt-cf-graph-storage-principle-provenance-survives-resync`, `cpt-cf-graph-storage-component-ontology-registry`, `cpt-cf-graph-storage-component-ingest-pipeline` |
 | [`cpt-cf-graph-storage-adr-metadata-partitioning`](./ADR/0003-cpt-cf-graph-storage-adr-metadata-partitioning.md) | Common columns + schema-declared indexed/vectorized attributes + payload ceiling with file-storage offload | `cpt-cf-graph-storage-principle-metadata-only-graph`, `cpt-cf-graph-storage-component-ontology-registry`, `cpt-cf-graph-storage-component-projection-service` |
 | [`cpt-cf-graph-storage-adr-analytics-in-rust`](./ADR/0004-cpt-cf-graph-storage-adr-analytics-in-rust.md) | In-process Rust analytics with per-metric determinism contracts; NetworkX parity waived | `cpt-cf-graph-storage-component-analytics-service` |
@@ -124,7 +124,7 @@ flowchart TD
         ONNX["onnx-embedding-plugin (default)"]
         REMOTE["remote-embedding-plugin"]
     end
-    PG[("PostgreSQL 16+ with pgvector")]
+    PG[("PostgreSQL 19+ with pgvector")]
 
     CLIENT -->|ClientHub local client| DOMAIN
     REST --> DOMAIN
@@ -191,7 +191,7 @@ Every operation has explicit bounds validated at the API edge: batch sizes, resu
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-constraint-postgres-pgvector`
 
-The storage backend is PostgreSQL with the pgvector extension: baseline PostgreSQL 16 or later, with the SQL/PGQ graph-query backend activating on PostgreSQL 19 or later (detected by a readiness capability probe). No other extensions and no other database engines are supported; the gear does not target multi-engine portability because tsvector, JSONB indexing, pgvector, and SQL/PGQ are load-bearing.
+The storage backend is PostgreSQL 19 or later with the pgvector extension; SQL/PGQ is load-bearing from the first release, and readiness verifies the server major version and property-graph presence. Until PostgreSQL 19 GA, deployments run a pinned PG19 beta image with pgvector built from a pinned source revision (validated by the PG19 spike and the prototype); the image returns to stock PostgreSQL plus released pgvector at GA. No other extensions and no other database engines are supported; the gear does not target multi-engine portability because tsvector, JSONB indexing, pgvector, and SQL/PGQ are load-bearing.
 
 #### GTS Draft-07 Contracts
 
@@ -407,7 +407,7 @@ Depth-limited expansion is the graph-native query shape; it needs dedicated, ben
 
 ##### Responsibility scope
 
-Owns the `GraphQueryPort` and its engine-native backends: the recursive-CTE backend (depth-bounded iterative SQL over the indexed edge table; PostgreSQL 16–18 and variable-depth shapes) and the SQL/PGQ backend (`CREATE PROPERTY GRAPH` over node/edge tables, `GRAPH_TABLE` patterns; PostgreSQL 19+, selected via readiness capability probe). Seed resolution (explicit keys and/or hybrid hits); breadth-first expansion treating edges as undirected; per-hop edge-type restriction; output node-type filtering; node/edge budgets with seeds-survive-truncation semantics; hydrated subgraph responses with truncation status.
+Owns the `GraphQueryPort` and its engine-native backends, both shipped in v1: the SQL/PGQ backend (`CREATE PROPERTY GRAPH` over node/edge tables, direction-explicit `GRAPH_TABLE` hop patterns; serves fixed-depth shapes from the first release) and the recursive-CTE backend (depth-bounded iterative SQL over the indexed edge table; serves bounded variable-depth shapes until PG20-class quantifiers, and acts as the configuration-selected fallback). Seed resolution (explicit keys and/or hybrid hits); breadth-first expansion treating edges as undirected; per-hop edge-type restriction; output node-type filtering; node/edge budgets with seeds-survive-truncation semantics; hydrated subgraph responses with truncation status.
 
 ##### Responsibility boundaries
 
@@ -550,7 +550,7 @@ The public surfaces are defined in the PRD as `cpt-cf-graph-storage-interface-re
 
 ### 3.5 External Dependencies
 
-- PostgreSQL with pgvector (storage; HNSW cosine indexes): baseline 16+, SQL/PGQ graph-query backend on 19+ (SQL:2023 property graph queries in core; pgvector upstream supports PG19 as of July 2026).
+- PostgreSQL 19+ with pgvector (storage; HNSW cosine indexes; SQL:2023 property graph queries in core, used from v1). Until PG19 GA: pinned beta image with pgvector built from a pinned source revision (upstream PG19 support landed July 2026).
 - ONNX Runtime and a MiniLM-class sentence-embedding model (default embedding plugin), or a remote inference endpoint (alternative plugin), per ADR-0005.
 - Rust graph and algorithm crates for the analytics component (petgraph-family), per ADR-0004.
 
@@ -725,11 +725,11 @@ The `studio-graph-storage` prototype validates this design's data model and retr
 
 ### Traversal Backend Sketch
 
-Both backends implement the same `GraphQueryPort` contract (seeds, bounded expansion, per-hop filters, budgets, truncation semantics).
+Both backends implement the same `GraphQueryPort` contract (seeds, bounded expansion, per-hop filters, budgets, truncation semantics) and ship in v1.
 
-**Recursive-CTE backend**: iterative frontier expansion (one bounded recursive CTE, or per-hop queries when per-hop edge-type filters differ): frontier(depth 0) = seeds; each hop joins the edge table on both directions with the tenant predicate, optional edge-type set, and a visited-set exclusion; expansion stops at the depth bound or node budget. Benchmarks decide between single-CTE and per-hop execution.
+**SQL/PGQ backend** (active from v1 for fixed-depth shapes): a `CREATE PROPERTY GRAPH` definition over the node and edge tables (vertex label from `graph_type`, edge label with source/destination keys); fixed-depth neighborhood queries compile to `GRAPH_TABLE` pattern matches that join freely with pgvector KNN and tsvector predicates in the same statement and inherit indexes, `EXPLAIN`, RLS, and secure-ORM scoping.
 
-**SQL/PGQ backend** (PostgreSQL 19+): a `CREATE PROPERTY GRAPH` definition over the node and edge tables (vertex label from `graph_type`, edge label with source/destination keys); fixed-depth neighborhood queries compile to `GRAPH_TABLE` pattern matches that join freely with pgvector KNN and tsvector predicates in the same statement and inherit indexes, `EXPLAIN`, RLS, and secure-ORM scoping. Until SQL/PGQ gains variable-length paths (expected PG20+), bounded variable-depth requests route to the CTE backend; the port hides the split.
+**Recursive-CTE backend**: iterative frontier expansion (one bounded recursive CTE, or per-hop queries when per-hop edge-type filters differ): frontier(depth 0) = seeds; each hop joins the edge table on both directions with the tenant predicate, optional edge-type set, and a visited-set exclusion; expansion stops at the depth bound or node budget. Serves bounded variable-depth requests until SQL/PGQ gains variable-length paths (expected PG20+) and remains the configuration-selected fallback; the port hides the split.
 
 The PG19 validation spike gating the traversal implementation freeze (ADR-0001 Confirmation) has run against PG19 beta2 + pgvector built from source — see [SPIKE-pg19-sqlpgq.md](./SPIKE-pg19-sqlpgq.md). Two binding implementation rules follow from it: the PGQ backend must emit direction-explicit patterns (the undirected shorthand plans as an all-vertex probe on the initial PG19 implementation), and neighborhood expansion must chain `GRAPH_TABLE` as a directed 1-hop primitive with per-hop dedup (multi-hop chain patterns enumerate paths and explode on hubs). Measured at reference shape (200k nodes / 660k edges, depth <= 3, random seeds): CTE p95 4.1 ms, PGQ hop-chain p95 8.8 ms — both far inside the NFR budget; single-statement KNN + graph + FTS composition confirmed at ~20-40 ms.
 
