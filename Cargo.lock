@@ -1675,7 +1675,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-account-management-sdk"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "async-trait",
  "cf-gears-tenant-resolver-sdk",
@@ -1782,7 +1782,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-authz-resolver"
-version = "0.1.34"
+version = "0.1.35"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1801,7 +1801,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-authz-resolver-sdk"
-version = "0.3.18"
+version = "0.3.19"
 dependencies = [
  "async-trait",
  "cf-gears-tenant-resolver-sdk",
@@ -2824,7 +2824,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-tenant-resolver-sdk"
-version = "0.3.18"
+version = "0.3.19"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit",
@@ -2871,7 +2871,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit"
-version = "0.6.22"
+version = "0.6.23"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2995,7 +2995,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-contract"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3177,7 +3177,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-http"
-version = "0.6.11"
+version = "0.6.12"
 dependencies = [
  "bytes",
  "cf-gears-rustls-corecrypto-provider",
@@ -3407,7 +3407,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-types-registry"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "anyhow",
  "async-trait",

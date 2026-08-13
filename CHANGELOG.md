@@ -9,6 +9,42 @@ release-plz updates this file in the Release PR.
 
 ## [Unreleased]
 
+## [0.1.35](https://github.com/constructorfabric/gears-rust/compare/cf-gears-authz-resolver-v0.1.34...cf-gears-authz-resolver-v0.1.35) - 2026-08-13
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit, cf-gears-authz-resolver-sdk, cf-gears-types-registry
+
+## [0.1.33](https://github.com/constructorfabric/gears-rust/compare/cf-gears-types-registry-v0.1.32...cf-gears-types-registry-v0.1.33) - 2026-08-13
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit
+
+## [0.3.19](https://github.com/constructorfabric/gears-rust/compare/cf-gears-authz-resolver-sdk-v0.3.18...cf-gears-authz-resolver-sdk-v0.3.19) - 2026-08-13
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit, cf-gears-tenant-resolver-sdk
+
+## [0.5.5](https://github.com/constructorfabric/gears-rust/compare/cf-gears-account-management-sdk-v0.5.4...cf-gears-account-management-sdk-v0.5.5) - 2026-08-13
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit, cf-gears-tenant-resolver-sdk
+
+## [0.3.19](https://github.com/constructorfabric/gears-rust/compare/cf-gears-tenant-resolver-sdk-v0.3.18...cf-gears-tenant-resolver-sdk-v0.3.19) - 2026-08-13
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit
+
+## [0.6.23](https://github.com/constructorfabric/gears-rust/compare/cf-gears-toolkit-v0.6.22...cf-gears-toolkit-v0.6.23) - 2026-08-13
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit-contract
+
 ## [0.1.4](https://github.com/constructorfabric/gears-rust/compare/cf-gears-event-broker-sdk-v0.1.3...cf-gears-event-broker-sdk-v0.1.4) - 2026-08-13
 
 ### Other

@@ -19,7 +19,7 @@ workspace = true
 
 [dependencies]
 # Local dependencies
-tenant-resolver-sdk = { package = "cf-gears-tenant-resolver-sdk", version = "0.3.18", path = "../../tenant-resolver-sdk" }
+tenant-resolver-sdk = { package = "cf-gears-tenant-resolver-sdk", version = "0.3.19", path = "../../tenant-resolver-sdk" }
 resource-group-sdk = { package = "cf-gears-resource-group-sdk", version = "0.2.5", path = "../../../resource-group/resource-group-sdk" }
 types-registry-sdk = { package = "cf-gears-types-registry-sdk", version = "0.3.4", path = "../../../types-registry/types-registry-sdk" }
 types-registry = { workspace = true }
