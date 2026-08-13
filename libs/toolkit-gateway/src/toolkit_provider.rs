@@ -15,7 +15,7 @@ use crate::error::GatewayError;
 use crate::provider::{GatewayProvider, InstanceSpec};
 use crate::registry::{InstanceRoutes, ProxyRegistry, RouteTemplate};
 use crate::types::{Endpoint, GearInstance, GearName, OpenApiSpec};
-use crate::{API_VISIBILITY_EXTENSION, API_VISIBILITY_PUBLIC};
+use crate::{API_VISIBILITY_EXPOSED, API_VISIBILITY_EXTENSION};
 
 /// HTTP method keys recognized when scanning an `OpenAPI` path item.
 const HTTP_METHOD_KEYS: [&str; 7] = ["get", "put", "post", "delete", "patch", "head", "options"];
@@ -160,7 +160,7 @@ impl GatewayProvider for ToolKitGatewayProvider {
 ///
 /// Walks the document's JSON form (uniformly for all [`OpenApiSpec`] variants)
 /// and returns every `(method, path)` whose operation carries
-/// `x-toolkit-visibility: public`. A document with no public operations yields an
+/// `x-toolkit-visibility: exposed`. A document with no public operations yields an
 /// empty list (not an error).
 ///
 /// # Errors
@@ -195,11 +195,11 @@ fn extract_public_routes(spec: &OpenApiSpec<'_>) -> Result<Vec<RouteTemplate>, G
             let Some(operation) = item.get(key).and_then(serde_json::Value::as_object) else {
                 continue;
             };
-            let is_exposed = operation
+            let exposed = operation
                 .get(API_VISIBILITY_EXTENSION)
                 .and_then(serde_json::Value::as_str)
-                == Some(API_VISIBILITY_PUBLIC);
-            if !is_exposed {
+                == Some(API_VISIBILITY_EXPOSED);
+            if !exposed {
                 continue;
             }
             let method =
@@ -262,11 +262,11 @@ mod tests {
             "paths": {
                 "/calc/v1/items/{id}": {
                     "get": {
-                        "x-toolkit-visibility": "public",
+                        "x-toolkit-visibility": "exposed",
                         "security": [{ "bearerAuth": [] }],
                         "responses": {}
                     },
-                    "post": { "x-toolkit-visibility": "public", "responses": {} }
+                    "post": { "x-toolkit-visibility": "exposed", "responses": {} }
                 },
                 "/calc/v1/internal": {
                     "get": { "security": [{ "bearerAuth": [] }], "responses": {} }
@@ -311,14 +311,14 @@ mod tests {
             "security": [{ "bearerAuth": [] }],
             "paths": {
                 "/calc/v1/a": {
-                    "get": { "x-toolkit-visibility": "public", "responses": {} },
+                    "get": { "x-toolkit-visibility": "exposed", "responses": {} },
                     "post": {
-                        "x-toolkit-visibility": "public",
+                        "x-toolkit-visibility": "exposed",
                         "security": [],
                         "responses": {}
                     },
                     "delete": {
-                        "x-toolkit-visibility": "public",
+                        "x-toolkit-visibility": "exposed",
                         "security": [{ "bearerAuth": [] }],
                         "responses": {}
                     }

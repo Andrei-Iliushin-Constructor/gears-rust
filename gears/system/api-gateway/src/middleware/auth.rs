@@ -34,7 +34,7 @@ impl RouteMatcher {
 /// Route matcher for anonymous (unauthenticated) routes.
 ///
 /// "Anonymous" is the auth axis, distinct from external *visibility*: a route
-/// in here requires no bearer token. Do not conflate with `is_exposed`
+/// in here requires no bearer token. Do not conflate with `exposed`
 /// (visibility) elsewhere in the codebase.
 #[derive(Clone)]
 pub struct AnonymousRouteMatcher {

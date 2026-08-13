@@ -389,14 +389,14 @@ Active heartbeat-timeout reaping of unresponsive workers by the Platform Host is
 
 Gears MUST be able to mark API endpoints as public (registered in gateway for external access) or internal (available
 only for inter-gear communication via DirectoryService). The default MUST be internal. Visibility is an axis
-**orthogonal to authentication** and MUST be driven by the `OperationSpec.is_exposed` field, set via
+**orthogonal to authentication** and MUST be driven by the `OperationSpec.exposed` field, set via
 `OperationBuilder.exposed()`. It is independent of the auth axis (`OperationBuilder.authenticated()` /
 `OperationBuilder.anonymous()`, which set `OperationSpec.authenticated`): an exposed route MAY still require a JWT, and
 an internal route MAY be anonymous (e.g. probes). Auth-skip is carried on the auth axis (`!authenticated`, surfaced as
-the `AnonymousRoute` extension in the per-gear middleware), NOT by `is_exposed`.
+the `AnonymousRoute` extension in the per-gear middleware), NOT by `exposed`.
 
 - **Rationale**: Not all gear APIs should be exposed to external consumers. Separating public and internal APIs
-  reduces attack surface and keeps the gateway configuration clean. Keeping visibility (`is_exposed`) orthogonal to
+  reduces attack surface and keeps the gateway configuration clean. Keeping visibility (`exposed`) orthogonal to
   authentication (`authenticated`) lets gears expose authenticated public APIs and keep anonymous endpoints internal.
 - **Actors**: `cpt-cf-actor-gear-dev`, `cpt-cf-actor-platform-op`
 

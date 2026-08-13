@@ -168,7 +168,7 @@ mod tests {
             responses: vec![],
             handler_id: "test".to_owned(),
             authenticated: false,
-            is_exposed: false,
+            exposed: false,
             license_requirement: None,
             rate_limit: None,
             allowed_request_content_types: Some(vec!["multipart/form-data", "application/pdf"]),

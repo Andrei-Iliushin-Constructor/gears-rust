@@ -23,7 +23,7 @@
 //!
 //! Routes that carry no tenant JWT (probes, platform-plane-only handlers) are
 //! marked with the [`AnonymousRoute`] request extension by the gear/bootstrap
-//! layer; note this is distinct from `OperationSpec.is_exposed`, which controls
+//! layer; note this is distinct from `OperationSpec.exposed`, which controls
 //! gateway registration. The concrete authenticator adapters are injected via
 //! Axum state at the same layer.
 
@@ -64,7 +64,7 @@ const AUTH_INFRA_FAILURE_DETAIL: &str = "authentication infrastructure failure";
 /// a request without an `Authorization` header pass through instead of
 /// returning `401`.
 ///
-/// **Not the same as `OperationSpec.is_exposed`.** `is_exposed` controls whether
+/// **Not the same as `OperationSpec.exposed`.** `exposed` controls whether
 /// a route is registered in the gateway for external access; this marker
 /// controls whether [`security_context_middleware`] requires a JWT. The two are
 /// independent: most gateway-exposed routes DO carry a JWT and do NOT need this

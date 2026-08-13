@@ -347,7 +347,7 @@ async fn openapi_documents_query_params_including_arrays() {
 /// The visibility axis reaches the `OpenAPI` document.
 ///
 /// The gateway selects what to reverse-proxy by looking for
-/// `x-toolkit-visibility: public` and skipping everything else, with no
+/// `x-toolkit-visibility: exposed` and skipping everything else, with no
 /// fallback. Before this axis existed in the macro, a contract-declared route
 /// could never carry the extension, so no contract endpoint could serve
 /// external traffic in Profile 2/3 at all.
@@ -360,11 +360,11 @@ async fn exposed_operations_carry_the_visibility_extension() {
     // `#[exposed]` on an otherwise internal-by-default trait.
     assert_eq!(
         visibility("/api/pair/v1/probe"),
-        serde_json::json!("public")
+        serde_json::json!("exposed")
     );
 
     // Absent, not `"internal"` — the extension is omitted entirely for internal
-    // routes, which is what the gateway's `!= Some("public")` check relies on.
+    // routes, which is what the gateway's `!= Some("exposed")` check relies on.
     assert!(
         visibility("/api/pair/v1/search").is_null(),
         "an internal operation must not carry the extension at all"
@@ -381,7 +381,7 @@ async fn trait_level_visibility_default_applies_and_is_overridable() {
 
     assert_eq!(
         visibility("/api/edge/v1/public"),
-        serde_json::json!("public"),
+        serde_json::json!("exposed"),
         "method with no marker should inherit the trait default"
     );
     assert!(
