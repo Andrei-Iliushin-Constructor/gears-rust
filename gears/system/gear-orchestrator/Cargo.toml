@@ -33,6 +33,7 @@ toolkit-k8s-auth = { workspace = true, optional = true }
 secrecy = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true, features = ["transport"] }
+http = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

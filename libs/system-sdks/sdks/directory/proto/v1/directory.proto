@@ -64,6 +64,16 @@ message GetOpenApiSpecResponse {
 
 message ListInstancesRequest {
   string gear_name = 1;
+  map<string, string> match_labels = 2;
+}
+
+enum InstanceState {
+  INSTANCE_STATE_UNSPECIFIED = 0;
+  INSTANCE_STATE_REGISTERED = 1;
+  INSTANCE_STATE_READY = 2;
+  INSTANCE_STATE_HEALTHY = 3;
+  INSTANCE_STATE_QUARANTINED = 4;
+  INSTANCE_STATE_DRAINING = 5;
 }
 
 message InstanceInfo {
@@ -74,6 +84,8 @@ message InstanceInfo {
   optional string rest_endpoint_uri = 5;
   optional string openapi_spec = 6;
   optional string openapi_spec_hash = 7;
+  map<string, string> labels = 8;
+  InstanceState state = 9;
 }
 
 message ListInstancesResponse {
@@ -99,6 +111,7 @@ message RegisterInstanceRequest {
   string version = 4;
   optional string rest_endpoint_uri = 5;
   optional string openapi_spec = 6;
+  map<string, string> labels = 7;
 }
 
 message DeregisterInstanceRequest {

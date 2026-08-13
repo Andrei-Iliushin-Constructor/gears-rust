@@ -2320,6 +2320,7 @@ dependencies = [
  "cf-gears-toolkit-macros",
  "cf-gears-toolkit-security",
  "cf-gears-toolkit-transport-grpc",
+ "http",
  "inventory",
  "secrecy",
  "serde",
