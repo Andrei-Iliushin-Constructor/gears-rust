@@ -1,0 +1,780 @@
+# PRD — Graph Storage
+
+<!-- toc -->
+
+- [1. Overview](#1-overview)
+  - [1.1 Purpose](#11-purpose)
+  - [1.2 Background / Problem Statement](#12-background--problem-statement)
+  - [1.3 Goals (Business Outcomes)](#13-goals-business-outcomes)
+  - [1.4 Glossary](#14-glossary)
+- [2. Actors](#2-actors)
+  - [2.1 Human Actors](#21-human-actors)
+  - [2.2 System Actors](#22-system-actors)
+- [3. Operational Concept & Environment](#3-operational-concept--environment)
+  - [3.1 Gear-Specific Environment Constraints](#31-gear-specific-environment-constraints)
+- [4. Scope](#4-scope)
+  - [4.1 In Scope](#41-in-scope)
+  - [4.2 Out of Scope](#42-out-of-scope)
+- [5. Functional Requirements](#5-functional-requirements)
+  - [5.1 Graph Type Management](#51-graph-type-management)
+  - [5.2 Node and Edge Ingest](#52-node-and-edge-ingest)
+  - [5.3 Content Handling](#53-content-handling)
+  - [5.4 Vectorization](#54-vectorization)
+  - [5.5 Search](#55-search)
+  - [5.6 Graph Traversal and Projection](#56-graph-traversal-and-projection)
+  - [5.7 Graph Analytics](#57-graph-analytics)
+  - [5.8 Multi-Tenancy and Access Control](#58-multi-tenancy-and-access-control)
+  - [5.9 API Surfaces](#59-api-surfaces)
+  - [5.10 Observability and Readiness](#510-observability-and-readiness)
+- [6. Non-Functional Requirements](#6-non-functional-requirements)
+  - [6.1 Gear-Specific NFRs](#61-gear-specific-nfrs)
+  - [6.2 NFR Exclusions](#62-nfr-exclusions)
+- [7. Public Library Interfaces](#7-public-library-interfaces)
+  - [7.1 Public API Surface](#71-public-api-surface)
+  - [7.2 External Integration Contracts](#72-external-integration-contracts)
+- [8. Use Cases](#8-use-cases)
+- [9. Acceptance Criteria](#9-acceptance-criteria)
+- [10. Dependencies](#10-dependencies)
+- [11. Assumptions](#11-assumptions)
+- [12. Risks](#12-risks)
+- [13. Open Questions](#13-open-questions)
+- [14. Traceability](#14-traceability)
+
+<!-- /toc -->
+
+## 1. Overview
+
+### 1.1 Purpose
+
+**Graph Storage** is a platform gear that stores, indexes, and serves a typed, multi-tenant knowledge graph. Producer gears push typed nodes and edges into the graph; consumer gears and user interfaces query it through lexical search, vector similarity search, hybrid fusion, depth-limited graph traversal, tabular projections, and graph analytics. Every node, edge, and payload is typed and validated through GTS (Global Type System) contracts, so independently developed gears can share one graph without schema drift.
+
+The gear generalizes the `studio-graph-storage` prototype into a reusable platform component: it is not specific to Constructor Studio artifacts, code findings, or any single producer. Any domain that can express its entities as typed nodes and relationships — findings over a codebase, artifacts and their traceability, git objects such as commits, pull requests, and comments — is stored and queried the same way.
+
+### 1.2 Background / Problem Statement
+
+Several platform initiatives need to persist and query relationships between heterogeneous entities:
+
+1. **Analysis pipelines produce graph-shaped results.** Code-analysis flows create Finding records that reference commits, pull requests, files, and each other. Today each pipeline would have to invent its own relationship storage, its own search index, and its own traversal queries.
+
+2. **Entities live in different systems of record.** Some graph members are owned by the graph (a Finding created by an analysis run exists nowhere else), while others — commits, pull requests, review comments — are managed objects owned by other gears such as GitHub Mirror. A shared graph must represent both without duplicating the upstream stores.
+
+3. **One search mode is never enough.** Practical exploration scenarios established during prototyping require all three retrieval modes over the same data: full-text search, vector similarity over embeddings, and structural graph traversal — plus their combination (narrow candidates with hybrid search, then expand structurally).
+
+4. **The prototype is not multi-tenant and not a gear.** The `studio-graph-storage` prototype (Python, FastAPI, PostgreSQL with pgvector and Apache AGE, NetworkX) proved the data model, the GTS-typed ontology, hybrid retrieval, and depth-limited traversal, but has no tenancy, no access control, no pagination, unbatched writes, and Python-only dependencies. This PRD defines the productized Rust gear that replaces it.
+
+### 1.3 Goals (Business Outcomes)
+
+- Provide one reusable graph storage service for the platform so that new graph-shaped features (findings, traceability, dependency maps) do not each build bespoke relationship storage
+- Let independently developed producer gears share a single typed graph safely, with GTS contracts validating every node and edge payload at the storage boundary
+- Serve the retrieval scenarios validated in prototyping — hybrid text/vector narrowing, criteria-based tabular projection, bulk traversal with filtering, and bounded neighborhood exploration from a UI — from a single API
+- Keep the graph lean and fast by storing only searchable, indexable, and vectorizable metadata in the graph while heavy content lives in external blob storage referenced by identifier
+- Meet platform standards for multi-tenancy, access control, observability, and contract validation so the gear can be operated like any other CF/Gears component
+
+### 1.4 Glossary
+
+| Term | Definition |
+|------|------------|
+| Node | A typed graph vertex with a stable producer-supplied key, a GTS-validated JSON payload, optional searchable text, and optional embedding |
+| Edge | A typed, directed relationship between two nodes with a GTS-validated payload and a deterministic key |
+| Node Key | A producer-supplied stable identity string for a node (unique per tenant); repeated ingests of the same key update the same node |
+| Owned Node | A node whose content originates in the graph itself — the graph is its system of record (e.g., a Finding produced by an analysis run) |
+| Reference Node | A node that represents a managed object owned by another system of record (e.g., a commit or pull request mirrored by another gear); its payload carries the canonical identifier and a queryable projection, never the full upstream record |
+| Finding | An analysis result node type created by producer gears (e.g., a code-review conclusion); the canonical example of an owned node |
+| Managed Object | An entity whose lifecycle is owned by another gear or external system (commits, pull requests, comments); appears in the graph as a reference node |
+| Phantom Node | A placeholder node materialized when an ingested edge references a node key that no producer has defined yet |
+| Static Edge | An edge derived deterministically from source data; recomputed and replaced on re-ingest of its scope |
+| Analysis Edge | An edge produced by an analysis process, carrying provenance metadata; preserved across re-ingest of its scope |
+| Provenance | Metadata on analysis-originated content: origin, creating actor, method, model, and confidence |
+| Chunk | A deterministic fragment of long node content, individually indexed and embedded for retrieval |
+| Hybrid Search | Fusion of lexical and vector search results into a single ranked list |
+| RRF | Reciprocal Rank Fusion — a rank-based algorithm for merging result lists from multiple retrieval arms |
+| Projection | A bounded, filterable tabular or subgraph view over graph data |
+| Graph Revision | A monotonic counter bumped by every mutating ingest; used to invalidate analytics caches |
+| GTS | Global Type System — the platform's contract system of versioned, derivable JSON Schema types with `gts.` identifiers |
+| Ontology | The set of registered GTS node, edge, and attribute types that describe one domain's graph shape |
+| Heavy Content | Payload data too large or too opaque to index (article bodies, binaries, raw logs); stored in external blob storage and referenced from the graph by identifier |
+
+## 2. Actors
+
+> **Note**: Stakeholder needs are managed at project/task level by the steering committee. This section documents actors (users, systems) that interact with this gear.
+
+### 2.1 Human Actors
+
+#### Graph Explorer
+
+**ID**: `cpt-cf-graph-storage-actor-graph-explorer`
+
+- **Role**: A user who opens an entity in a UI and explores its relationships — "show me everything connected to this object within 3 hops".
+- **Needs**: Fast bounded neighborhood queries, human-readable node names and types, stable visual grouping, and truncation that keeps the structurally important nodes.
+
+#### Data Analyst
+
+**ID**: `cpt-cf-graph-storage-actor-data-analyst`
+
+- **Role**: A user who searches and slices the graph: finds candidates by text or semantic similarity, projects nodes matching criteria into tables, and reads graph metrics.
+- **Needs**: Hybrid search with relevance provenance (which arm matched, which fragment), criteria-based tabular projections with filtering and pagination, and precomputed graph metrics.
+
+#### Ontology Author
+
+**ID**: `cpt-cf-graph-storage-actor-ontology-author`
+
+- **Role**: A developer who designs a domain's graph ontology: node types, edge types, endpoint constraints, and which payload fields are indexed and vectorized.
+- **Needs**: A GTS type registration contract with clear validation errors, schema evolution through versioning, and declarative control over indexing and vectorization behavior.
+
+#### Platform Administrator
+
+**ID**: `cpt-cf-graph-storage-actor-platform-admin`
+
+- **Role**: An operator who runs the gear in a multi-tenant environment: monitors health and capacity, reviews registered ontologies, and manages tenant configuration.
+- **Needs**: Readiness and health reporting, observability of ingest and query behavior, and guardrails that keep single tenants from exhausting shared resources.
+
+### 2.2 System Actors
+
+#### Producer Gear
+
+**ID**: `cpt-cf-graph-storage-actor-producer-gear`
+
+- **Role**: Any gear that pushes nodes and edges into the graph: an analysis gear creating Finding nodes, an importer publishing artifact traceability, or a mirror gear projecting managed objects (commits, pull requests, comments) as reference nodes. Producers own their ingest scopes and re-sync them idempotently.
+
+#### Consumer Gear
+
+**ID**: `cpt-cf-graph-storage-actor-consumer-gear`
+
+- **Role**: Any gear that queries the graph through the SDK client or REST API: search, traversal, projections, and metrics. Consumers never write.
+
+#### PostgreSQL with pgvector
+
+**ID**: `cpt-cf-graph-storage-actor-postgres`
+
+- **Role**: The single storage backend: relational tables as the source of truth, full-text search indexes, JSONB attribute indexes, and vector indexes via the pgvector extension.
+
+#### File Storage Gear
+
+**ID**: `cpt-cf-graph-storage-actor-file-storage`
+
+- **Role**: The platform blob store holding heavy content (full documents, article bodies, large raw payloads) referenced from graph nodes by file identifier.
+
+#### Types Registry Gear
+
+**ID**: `cpt-cf-graph-storage-actor-types-registry`
+
+- **Role**: The platform GTS registry that validates and serves compile-time-known GTS schemas and instances; the graph ontology's base types are published through it.
+
+#### AuthZ Resolver Gear
+
+**ID**: `cpt-cf-graph-storage-actor-authz-resolver`
+
+- **Role**: The platform policy decision point consulted for every authenticated operation; supplies the access scope that confines queries to permitted tenants and resources.
+
+#### Embedding Provider
+
+**ID**: `cpt-cf-graph-storage-actor-embedding-provider`
+
+- **Role**: The pluggable component that turns text into fixed-dimension vectors during ingest and query embedding; either an in-process model runtime or a remote inference service, selected by deployment configuration.
+
+## 3. Operational Concept & Environment
+
+> **Note**: Runtime, OS, architecture, lifecycle policy, and gear integration patterns are defined in this repository's foundational documents — the [architecture manifest](../../../docs/ARCHITECTURE_MANIFEST.md) and [guidelines/](../../../guidelines/). This section captures only this gear's deviations.
+
+### 3.1 Gear-Specific Environment Constraints
+
+- Requires PostgreSQL 16 or later with the `pgvector` extension available and permission to create extensions in the gear's database; no other PostgreSQL extensions are required
+- Requires an embedding provider: either an in-process ONNX model runtime bundled with the gear or network access to a remote embedding inference endpoint, per deployment configuration
+- Graph analytics loads a bounded projection of the graph topology into memory; deployments must budget memory for the configured analytics node ceiling
+- Depends on the file-storage gear when heavy-content offloading is enabled; the graph gear itself never stores blobs
+
+## 4. Scope
+
+### 4.1 In Scope
+
+- Runtime registration of GTS graph ontologies: node types, edge types, and attribute types as draft-07 JSON Schemas with GTS identifiers, abstract types, and edge endpoint constraints
+- Typed node and edge storage with stable producer-supplied keys, idempotent bulk upsert, batch atomicity, and GTS payload validation across the full type derivation chain
+- A unified node model covering owned nodes (e.g., Finding) and reference nodes for managed objects (e.g., commits, pull requests, comments), distinguished by type metadata rather than separate storage
+- Phantom node materialization for edges that reference undefined node keys
+- Static versus analysis edge semantics: producer-scoped replacement re-sync that preserves analysis edges and their provenance
+- Deterministic chunking of long node content; per-chunk indexing and embedding
+- Heavy-content offloading to the file-storage gear with graph-side references
+- Embedding pipeline with pluggable provider, embedding dimension verification, and per-request opt-out
+- Lexical full-text search, vector similarity search, and hybrid search with reciprocal rank fusion; GTS type-family filtering on all search modes
+- Depth-limited graph traversal from seed nodes (explicit keys or search hits) with per-hop edge-type filtering
+- Bounded neighborhood projection for UI exploration with degree-ordered truncation
+- Tabular projection of nodes by criteria and identifier lists with OData-style filtering and pagination
+- Graph analytics: degree, PageRank, connected components (core); betweenness centrality and community detection (extended); revision-keyed caching
+- Multi-tenancy with tenant-scoped storage and queries, and platform access control on every operation
+- Versioned REST API and a typed Rust SDK client registered in ClientHub
+- Structured logging, metrics, and readiness reporting
+
+### 4.2 Out of Scope
+
+- Parsing source repositories or documents into nodes and edges — producers parse; the gear only stores what is pushed to it
+- Storing heavy content (article bodies, binaries, raw logs) inside the graph database
+- Serving as the system of record for managed objects owned by other gears; reference nodes carry projections and canonical identifiers only
+- Event-driven ingestion (subscribing to platform events to auto-sync managed objects) — ingest is push-only in v1; event-driven sync is a future consideration
+- Cross-tenant or cross-graph federation queries
+- A bundled visualization UI — consumers build UIs on the projection API
+- Bitemporal versioning, soft delete, and node-level history — the graph reflects the latest ingested state; history is a future consideration
+- Embedding model training or fine-tuning
+
+## 5. Functional Requirements
+
+> **Testing strategy**: All requirements verified via automated tests (unit, integration, e2e) targeting 90%+ code coverage unless otherwise specified. Document verification method only for non-test approaches.
+
+### 5.1 Graph Type Management
+
+#### Ontology Type Registration
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-type-registration`
+
+The system **MUST** accept runtime registration of GTS types with kind `node`, `edge`, or `attribute`, each carrying a GTS identifier and a draft-07 JSON Schema. Registration **MUST** be idempotent for byte-identical schemas, **MUST** reject re-registration of an existing identifier with a different schema (directing the caller to publish a new GTS version), and **MUST** apply each registration batch atomically. The system **MUST** derive and store the deterministic UUIDv5 for every registered GTS identifier using the platform GTS derivation so identifiers are interoperable with other gears.
+
+- **Rationale**: Producers evolve independently; the type registry is the contract boundary that keeps one shared graph consistent across them.
+- **Actors**: `cpt-cf-graph-storage-actor-ontology-author`, `cpt-cf-graph-storage-actor-producer-gear`
+
+#### Type Semantics and Endpoint Constraints
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-type-constraints`
+
+The system **MUST** support abstract types that cannot be instantiated directly, and edge types constrained to declared source and target node-type patterns (exact or GTS family patterns). Payload validation **MUST** walk the full GTS derivation chain: a payload is valid only if it satisfies the schema of every registered ancestor type plus the leaf type. Validation failures **MUST** report the offending type, JSON pointer path, and message for every error in the batch.
+
+- **Rationale**: Derivation-chain validation is what makes derived types substitutable, and endpoint constraints keep edges structurally meaningful.
+- **Actors**: `cpt-cf-graph-storage-actor-ontology-author`, `cpt-cf-graph-storage-actor-producer-gear`
+
+#### Type Catalog
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-type-catalog`
+
+The system **MUST** expose the registered ontology for inspection: list types filtered by kind and retrieve a single type with its schema, abstractness, endpoint constraints, and derived UUID.
+
+- **Rationale**: Ontology authors and operators need to see what is registered to evolve it safely.
+- **Actors**: `cpt-cf-graph-storage-actor-ontology-author`, `cpt-cf-graph-storage-actor-platform-admin`
+
+### 5.2 Node and Edge Ingest
+
+#### Bulk Idempotent Ingest
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-bulk-ingest`
+
+The system **MUST** accept batches of nodes and edges in one ingest request, validate every payload against its GTS type before writing, and apply the batch atomically — either all valid writes commit or the batch is rejected with per-item errors. Writes **MUST** use batched database statements. Repeating an identical ingest **MUST** be a no-op that converges to the same stored state. Every mutating ingest **MUST** increment the tenant's graph revision.
+
+- **Rationale**: Producers re-run pipelines; idempotent atomic batches make re-runs safe and cheap, and the prototype's row-at-a-time writes were a measured bottleneck.
+- **Actors**: `cpt-cf-graph-storage-actor-producer-gear`
+
+#### Stable Identity and Parallel Edges
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-stable-identity`
+
+Nodes **MUST** be identified by a producer-supplied stable node key, unique per tenant; ingesting an existing key updates that node. Edge identity **MUST** be derived deterministically from edge type, source key, target key, and an optional producer-supplied discriminator, so that parallel edges of the same type between the same nodes are representable and re-ingest updates rather than duplicates.
+
+- **Rationale**: Deterministic identity is the foundation of idempotent re-sync and of cross-producer references to the same entities.
+- **Actors**: `cpt-cf-graph-storage-actor-producer-gear`
+
+#### Unified Owned and Reference Nodes
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-reference-nodes`
+
+The system **MUST** store owned nodes (entities whose system of record is the graph, such as Finding nodes) and reference nodes (projections of managed objects owned elsewhere, such as commits, pull requests, and comments) in one unified node model: both are GTS-typed nodes distinguished by their type's metadata, not by separate storage or APIs. Reference node payloads **MUST** carry the canonical upstream identifier of the managed object. All query capabilities (search, traversal, projection, analytics) **MUST** treat both families uniformly.
+
+- **Rationale**: The platform value of the graph is connecting new analysis entities (Findings) to existing managed objects; a split model would fragment every query path.
+- **Actors**: `cpt-cf-graph-storage-actor-producer-gear`, `cpt-cf-graph-storage-actor-consumer-gear`
+
+#### Phantom Node Materialization
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-phantom-nodes`
+
+When an ingested edge references a node key that does not exist, the system **MUST** (by default, and controllable per request) materialize a phantom node of a dedicated phantom type recording the referencing edge type, so the dangling reference stays visible instead of the edge being dropped. A later ingest of the real node under the same key **MUST** replace the phantom in place, preserving all attached edges.
+
+- **Rationale**: Producers ingest incrementally and out of order; silently dropped edges are much harder to diagnose than visible phantoms.
+- **Actors**: `cpt-cf-graph-storage-actor-producer-gear`
+
+#### Edge Provenance and Analysis Preservation
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-edge-provenance`
+
+The system **MUST** distinguish static edges (derived deterministically from source data) from analysis edges (produced by an analysis process). Analysis edges and analysis-originated nodes **MUST** carry provenance metadata: origin, creating actor, method, and optionally model and confidence. Scope replacement (see `cpt-cf-graph-storage-fr-scope-replace`) **MUST NOT** delete analysis-originated content.
+
+- **Rationale**: Re-importing source data must not destroy conclusions computed on top of it; provenance is also required to audit machine-generated edges.
+- **Actors**: `cpt-cf-graph-storage-actor-producer-gear`, `cpt-cf-graph-storage-actor-data-analyst`
+
+#### Scope Replacement Re-Sync
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-scope-replace`
+
+The system **MUST** support declarative scope replacement on ingest: the producer names a scope (an indexed payload attribute and value, e.g., a source repository), and the system deletes previously ingested static nodes and edges of that scope that are absent from the new batch, in the same transaction as the upserts. Analysis-originated content in the scope **MUST** survive replacement.
+
+- **Rationale**: Producers re-sync whole sources; replacement semantics keep the graph consistent with upstream without full wipes or tombstone bookkeeping.
+- **Actors**: `cpt-cf-graph-storage-actor-producer-gear`
+
+#### Node Read with Adjacency
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-node-read`
+
+The system **MUST** return a single node by key with its type, payload, embedding presence, chunk inventory, and adjacent edges in both directions (with edge types and neighbor keys), bounded by request limits.
+
+- **Rationale**: The entity detail view is the entry point of the UI exploration scenario.
+- **Actors**: `cpt-cf-graph-storage-actor-graph-explorer`, `cpt-cf-graph-storage-actor-consumer-gear`
+
+### 5.3 Content Handling
+
+#### Deterministic Content Chunking
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-content-chunking`
+
+When a node is ingested with long-form text content, the system **MUST** split it into deterministic chunks with stable chunk identifiers encoding location (section and offsets, never content), preserve exact character offsets into the raw text, index each chunk for lexical search, and embed each chunk. Re-ingesting unchanged content **MUST** produce identical chunks.
+
+- **Rationale**: Retrieval quality over long documents requires passage-level granularity; deterministic chunking keeps re-ingest idempotent.
+- **Actors**: `cpt-cf-graph-storage-actor-producer-gear`, `cpt-cf-graph-storage-actor-data-analyst`
+
+#### Heavy Content Offloading
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-heavy-content-offload`
+
+The system **MUST** enforce a configurable payload size ceiling per node and reject payloads above it with an error directing producers to offload heavy content. Node payloads **MUST** be able to reference offloaded content held in the file-storage gear by file identifier, and node reads **MUST** return such references as-is without dereferencing them.
+
+- **Rationale**: The graph stays fast only if it stores searchable metadata; blobs belong in blob storage (per the platform's storage split), referenced by identifier.
+- **Actors**: `cpt-cf-graph-storage-actor-producer-gear`, `cpt-cf-graph-storage-actor-file-storage`
+
+### 5.4 Vectorization
+
+#### Embedding Pipeline
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-embedding-pipeline`
+
+During ingest the system **MUST** compose a searchable text per node (name plus string payload attributes designated as vectorizable plus a bounded content prefix), embed it and every content chunk through the configured embedding provider, and store the vectors for similarity search. Ingest requests **MUST** be able to skip embedding, and a non-embedding upsert **MUST NOT** erase existing vectors. Embedding **MUST** be batched across the ingest request.
+
+- **Rationale**: Vector search is a first-class retrieval arm; controlled skipping supports cheap metadata-only re-syncs.
+- **Actors**: `cpt-cf-graph-storage-actor-producer-gear`, `cpt-cf-graph-storage-actor-embedding-provider`
+
+#### Embedding Dimension Guard
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-embedding-dim-guard`
+
+The system **MUST** verify at readiness that the configured embedding dimension matches the database vector column definition, and **MUST** reject ingest batches whose produced vectors do not match the configured dimension. Readiness reporting **MUST** state the active provider and dimension.
+
+- **Rationale**: A silent dimension mismatch corrupts similarity ranking; the prototype documented this as a real failure mode.
+- **Actors**: `cpt-cf-graph-storage-actor-platform-admin`, `cpt-cf-graph-storage-actor-embedding-provider`
+
+### 5.5 Search
+
+#### Lexical Search
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-lexical-search`
+
+The system **MUST** provide full-text search over node search text and chunk content using web-style query syntax, ranked by lexical relevance, returning matched nodes with highlighted snippets. Chunk hits **MUST** fold up to their parent node, keeping the best-scoring chunk as match provenance.
+
+- **Rationale**: Exact-term retrieval is the baseline entry point into the graph and complements vector recall.
+- **Actors**: `cpt-cf-graph-storage-actor-data-analyst`, `cpt-cf-graph-storage-actor-consumer-gear`
+
+#### Vector Search
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-vector-search`
+
+The system **MUST** provide vector similarity search: the query text is embedded with the same provider used at ingest and matched against node and chunk vectors by cosine similarity using approximate nearest neighbor indexes, with chunk hits folded to parent nodes.
+
+- **Rationale**: Semantic similarity finds related entities that share no vocabulary with the query.
+- **Actors**: `cpt-cf-graph-storage-actor-data-analyst`, `cpt-cf-graph-storage-actor-consumer-gear`
+
+#### Hybrid Search
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-hybrid-search`
+
+The system **MUST** provide hybrid search that runs the lexical and vector arms independently and fuses their rankings with reciprocal rank fusion, reporting per-hit which arms matched and each arm's rank.
+
+- **Rationale**: The prototype demonstrated that neither arm alone is sufficient; rank-based fusion is robust without score calibration.
+- **Actors**: `cpt-cf-graph-storage-actor-data-analyst`, `cpt-cf-graph-storage-actor-consumer-gear`
+
+#### Type-Family Filtering
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-type-filtering`
+
+All search modes **MUST** support filtering results by node type, accepting exact GTS identifiers and GTS family patterns (a trailing wildcard matching all types derived from a base), with pattern matching that treats GTS identifier punctuation literally.
+
+- **Rationale**: Consumers usually search within a type family ("all findings", "all documents"), and GTS derivation makes family filters the natural unit.
+- **Actors**: `cpt-cf-graph-storage-actor-data-analyst`, `cpt-cf-graph-storage-actor-consumer-gear`
+
+### 5.6 Graph Traversal and Projection
+
+#### Depth-Limited Traversal
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-graph-traversal`
+
+The system **MUST** expand a subgraph from seed nodes — given as explicit node keys, as hybrid-search hits for a query, or both — by breadth-first traversal up to a requested depth bounded by a system maximum, treating edges as undirected for reachability, with optional per-hop edge-type restriction and node-type filtering of returned nodes. Responses **MUST** include the traversed nodes, edges, seeds, and truncation status; seeds always survive truncation.
+
+- **Rationale**: "Search then expand" and "traverse many nodes and filter" were the primary scenarios that motivated the gear.
+- **Actors**: `cpt-cf-graph-storage-actor-data-analyst`, `cpt-cf-graph-storage-actor-consumer-gear`
+
+#### Bounded Neighborhood Projection
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-neighborhood-projection`
+
+The system **MUST** serve a UI-oriented neighborhood projection: given one entity, return its connected subgraph up to a requested depth (the reference scenario is depth 3 or less) within a node budget, ordering retained nodes by degree so truncation keeps the structural core, with a toggle to exclude phantom nodes and optional per-node metric annotations.
+
+- **Rationale**: The "open an object, see its relationships" experience needs predictable latency and readable truncation on dense graphs.
+- **Actors**: `cpt-cf-graph-storage-actor-graph-explorer`
+
+#### Tabular Projection
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-tabular-projection`
+
+The system **MUST** project nodes matching criteria into tabular results: selection by explicit node-key or identifier lists, by type family, and by filters over indexed payload attributes using the platform's OData-style filter, ordering, and pagination conventions. Responses **MUST** return stable pages suitable for table rendering.
+
+- **Rationale**: "Show me all objects matching these criteria as a table" is a validated scenario and the standard list contract for platform UIs.
+- **Actors**: `cpt-cf-graph-storage-actor-data-analyst`, `cpt-cf-graph-storage-actor-consumer-gear`
+
+### 5.7 Graph Analytics
+
+#### Core Graph Metrics
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-graph-metrics`
+
+The system **MUST** compute per-node graph metrics on demand: degree (total, in, out), PageRank, and connected components, with an option to exclude named edge types from the computation. Metric results **MUST** be deterministic for a given graph state.
+
+- **Rationale**: Degree and centrality drive projection truncation and give analysts a structural ranking of entities; edge-type exclusion prevents hub types from dominating.
+- **Actors**: `cpt-cf-graph-storage-actor-data-analyst`
+
+#### Extended Graph Analytics
+
+- [ ] `p3` - **ID**: `cpt-cf-graph-storage-fr-graph-analytics-extended`
+
+The system **MUST** additionally provide betweenness centrality (exact below a node-count threshold, sampled above it) and community detection with stable community ordering across recomputation. Numeric parity with the Python prototype's NetworkX results is explicitly not required; algorithm and determinism guarantees are defined per algorithm.
+
+- **Rationale**: Communities and brokerage metrics support visual grouping and deeper structural analysis, but are not required for the primary scenarios.
+- **Actors**: `cpt-cf-graph-storage-actor-data-analyst`
+
+#### Revision-Keyed Metrics Cache
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-metrics-cache`
+
+The system **MUST** cache computed metrics keyed by graph revision and metric parameters, serve cached results while the revision is unchanged, and report per metric whether it was served from cache or computed.
+
+- **Rationale**: Whole-graph analytics is expensive; revision keying makes cache correctness trivial.
+- **Actors**: `cpt-cf-graph-storage-actor-data-analyst`, `cpt-cf-graph-storage-actor-platform-admin`
+
+### 5.8 Multi-Tenancy and Access Control
+
+#### Tenant Isolation
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-tenant-isolation`
+
+All graph data — types registered per tenant scope, nodes, edges, chunks, revisions, and metric caches — **MUST** be tenant-scoped, and every read and write path (including traversal recursion, search arms, and analytics graph loading) **MUST** apply tenant scoping at the database query layer through the platform's secure ORM. Node-key uniqueness is per tenant.
+
+- **Rationale**: The graph is a platform component; traversal and search are novel query shapes that must not become cross-tenant side channels.
+- **Actors**: `cpt-cf-graph-storage-actor-platform-admin`, `cpt-cf-graph-storage-actor-producer-gear`, `cpt-cf-graph-storage-actor-consumer-gear`
+
+#### Operation-Level Access Control
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-access-control`
+
+Every API operation **MUST** be authenticated and authorized through the platform policy decision point, with separate permissions for ontology administration, ingest, and query, declared as GTS permission instances.
+
+- **Rationale**: Producers, consumers, and administrators have different privileges; write access to a shared graph must be explicitly granted.
+- **Actors**: `cpt-cf-graph-storage-actor-authz-resolver`, `cpt-cf-graph-storage-actor-platform-admin`
+
+### 5.9 API Surfaces
+
+#### Versioned REST API
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-rest-api`
+
+The system **MUST** expose all capabilities over a versioned REST API following platform conventions: OpenAPI-documented operations, RFC-9457 problem responses, and platform authentication middleware. Request limits (batch sizes, result limits, depth bounds) **MUST** be validated and documented in the API schema.
+
+- **Rationale**: The REST surface is how UIs and non-Rust consumers integrate.
+- **Actors**: `cpt-cf-graph-storage-actor-consumer-gear`, `cpt-cf-graph-storage-actor-graph-explorer`, `cpt-cf-graph-storage-actor-data-analyst`
+
+#### Typed SDK Client
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-sdk-client`
+
+The system **MUST** ship a transport-agnostic SDK crate with a typed client trait covering type registration, ingest, search, traversal, projection, and metrics, registered in ClientHub for in-process consumption by other gears, with canonical platform error types.
+
+- **Rationale**: Producer and consumer gears integrate in-process; the SDK trait is the platform's inter-gear contract pattern.
+- **Actors**: `cpt-cf-graph-storage-actor-producer-gear`, `cpt-cf-graph-storage-actor-consumer-gear`
+
+### 5.10 Observability and Readiness
+
+#### Structured Observability
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-observability`
+
+The system **MUST** emit structured tracing for ingest, search, traversal, and analytics operations (batch sizes, arm timings, traversal depth and frontier sizes, cache hits) and expose operational metrics through the platform telemetry stack. Logs **MUST NOT** contain payload content.
+
+- **Rationale**: Query-shape problems (dense hubs, oversized batches) are diagnosable only with structural telemetry; payloads may hold sensitive content.
+- **Actors**: `cpt-cf-graph-storage-actor-platform-admin`
+
+#### Readiness Reporting
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-readiness`
+
+The system **MUST** report readiness covering database connectivity, required extension presence, migration state, embedding provider availability, and embedding dimension agreement, and **MUST** fail readiness with named problems when any check fails.
+
+- **Rationale**: The gear has two external dependencies that can silently drift (extension, embedding model); readiness is where drift is caught.
+- **Actors**: `cpt-cf-graph-storage-actor-platform-admin`
+
+## 6. Non-Functional Requirements
+
+> **Global baselines**: Project-wide NFRs are defined in the [architecture manifest](../../../docs/ARCHITECTURE_MANIFEST.md) and [guidelines/](../../../guidelines/). Only gear-specific NFRs are documented here.
+>
+> **Testing strategy**: NFRs verified via automated benchmarks, security scans, and monitoring unless otherwise specified.
+
+### 6.1 Gear-Specific NFRs
+
+#### Ingest Throughput
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-nfr-ingest-throughput`
+
+The system **MUST** ingest a batch of 10,000 nodes and 20,000 edges (validation and storage, embedding disabled) in 60 seconds or less on the reference deployment configuration.
+
+- **Threshold**: 10,000 nodes + 20,000 edges in <= 60 s, embedding excluded, single tenant, reference hardware profile defined in the benchmark suite
+- **Rationale**: Producers re-sync whole repositories; the prototype's row-at-a-time writes made large syncs impractical and batching is the required fix.
+- **Architecture Allocation**: See DESIGN.md § NFR Allocation
+
+#### Search Latency
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-nfr-search-latency`
+
+Hybrid search **MUST** answer within 500 ms at p95 (query embedding time excluded) on a tenant graph of 100,000 nodes and 500,000 edges with default limits.
+
+- **Threshold**: p95 <= 500 ms, 100k nodes / 500k edges / 300k chunks, arm limit 50, warm indexes
+- **Rationale**: Search is interactive; it fronts every exploration scenario.
+- **Architecture Allocation**: See DESIGN.md § NFR Allocation
+
+#### Traversal Latency
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-nfr-traversal-latency`
+
+Depth-3 neighborhood projection **MUST** answer within 1 second at p95 on a tenant graph of 100,000 nodes and 500,000 edges with a 1,000-node budget.
+
+- **Threshold**: p95 <= 1 s, depth 3, node budget 1,000, same reference graph as search latency
+- **Rationale**: The UI neighborhood scenario is interactive and hits dense regions of the graph.
+- **Architecture Allocation**: See DESIGN.md § NFR Allocation
+
+#### Analytics Memory Bound
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-nfr-analytics-memory`
+
+Whole-graph analytics **MUST** operate within a configurable node-count ceiling and refuse computation with a clear error beyond it, and **MUST** hold at most the graph topology (keys and edges, not payloads) in memory.
+
+- **Threshold**: Configurable ceiling, default 1,000,000 nodes; topology-only memory footprint verified by profiling tests
+- **Rationale**: In-memory analytics on unbounded tenant graphs is the main memory risk of the gear.
+- **Architecture Allocation**: See DESIGN.md § NFR Allocation
+
+#### Zero Cross-Tenant Leakage
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-nfr-tenant-zero-leak`
+
+No API operation, under any combination of filters, seeds, traversal depths, or pagination, **MUST** return or count data belonging to another tenant.
+
+- **Threshold**: Zero occurrences in adversarial integration tests seeding multiple tenants with colliding node keys and shared type identifiers
+- **Rationale**: Traversal recursion and rank fusion are custom query paths outside the CRUD patterns the platform's secure ORM is normally exercised on.
+- **Architecture Allocation**: See DESIGN.md § NFR Allocation
+
+#### Code Coverage
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-nfr-code-coverage`
+
+The gear **MUST** maintain at least 85% line coverage across its library crates.
+
+- **Threshold**: >= 85% line coverage, enforced in CI
+- **Rationale**: Validation, fusion, and traversal logic carry the correctness risk of the gear and must stay tested as they evolve.
+- **Architecture Allocation**: See DESIGN.md § NFR Allocation
+
+### 6.2 NFR Exclusions
+
+- High-availability clustering of the gear itself: the gear is stateless above PostgreSQL in v1; availability follows the platform's standard single-writer database posture, and gear-level clustering is deferred until platform guidance requires it.
+
+## 7. Public Library Interfaces
+
+### 7.1 Public API Surface
+
+#### Graph Storage REST API
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-interface-rest-api`
+
+- **Type**: REST API
+- **Stability**: unstable (v1 during incubation)
+- **Description**: Versioned HTTP surface covering type management, ingest, node reads, search (lexical, vector, hybrid), traversal, projections, metrics, and readiness.
+- **Breaking Change Policy**: Path-versioned; breaking changes require a new version prefix.
+
+#### Graph Storage SDK Client
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-interface-sdk-client`
+
+- **Type**: Rust trait (ClientHub client) in the SDK crate
+- **Stability**: unstable (v1 during incubation)
+- **Description**: Typed async client trait mirroring the REST capabilities for in-process gear-to-gear calls, with transport-agnostic models and canonical errors.
+- **Breaking Change Policy**: Versioned trait names (`...ClientV1`); breaking changes introduce a new trait version.
+
+### 7.2 External Integration Contracts
+
+#### Graph Ontology GTS Base Types
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-contract-gts-ontology`
+
+- **Direction**: provided by library
+- **Protocol/Format**: GTS type identifiers with draft-07 JSON Schemas
+- **Compatibility**: Base node, edge, and provenance types are versioned GTS types; producers derive domain types from them; new majors are additive, existing majors immutable.
+
+#### Embedding Provider Contract
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-contract-embedding-provider`
+
+- **Direction**: required from client (plugin implementations)
+- **Protocol/Format**: Rust plugin trait — batch text-to-vector with declared model name and dimension
+- **Compatibility**: Providers declare model identity and dimension; a deployment pins one provider configuration per vector column lifetime.
+
+## 8. Use Cases
+
+#### Narrow Candidates with Hybrid Search
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-usecase-hybrid-narrowing`
+
+**Actor**: `cpt-cf-graph-storage-actor-data-analyst`
+
+**Preconditions**:
+- Producers have ingested typed nodes with embedded search text
+
+**Main Flow**:
+1. The analyst submits a natural-language query with a node-type family filter
+2. The system runs lexical and vector arms, fuses them with RRF, and returns ranked nodes with matched-arm and snippet provenance
+3. The analyst selects promising hits as seeds for traversal or projection
+
+**Postconditions**:
+- A small, relevant candidate set exists for structural expansion
+
+**Alternative Flows**:
+- **No lexical matches**: vector arm results still surface semantically similar nodes; the response marks hits as vector-only
+
+#### Project Entities by Criteria into a Table
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-usecase-criteria-table`
+
+**Actor**: `cpt-cf-graph-storage-actor-data-analyst`
+
+**Preconditions**:
+- Nodes with indexed payload attributes exist
+
+**Main Flow**:
+1. The analyst requests all nodes of a type family matching attribute filters, or supplies an explicit identifier list
+2. The system returns a paginated tabular projection ordered by the requested attribute
+
+**Postconditions**:
+- The consumer renders a stable, pageable table of matching entities
+
+**Alternative Flows**:
+- **Filter on an unindexed attribute**: the system rejects the filter with an error naming the attribute and the indexed alternatives
+
+#### Traverse and Filter a Region of the Graph
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-usecase-traverse-filter`
+
+**Actor**: `cpt-cf-graph-storage-actor-consumer-gear`
+
+**Preconditions**:
+- Seed node keys are known (e.g., from a prior search)
+
+**Main Flow**:
+1. The consumer requests traversal from the seeds to a bounded depth restricted to named edge types
+2. The system expands breadth-first, applies node-type filters to the output, and returns nodes, edges, and truncation status
+3. The consumer post-processes the bounded subgraph
+
+**Postconditions**:
+- The consumer holds a bounded, typed subgraph for downstream logic
+
+**Alternative Flows**:
+- **Expansion exceeds the node budget**: the system truncates, keeps all seeds, and sets the truncation flag
+
+#### Explore an Entity's Neighborhood in the UI
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-usecase-ui-neighborhood`
+
+**Actor**: `cpt-cf-graph-storage-actor-graph-explorer`
+
+**Preconditions**:
+- The UI displays an entity backed by a graph node
+
+**Main Flow**:
+1. The user opens the entity's relationship view
+2. The UI requests the neighborhood projection at depth 3 or less with a node budget
+3. The system returns the degree-ordered neighborhood subgraph with metric annotations
+4. The UI renders the subgraph with important nodes retained under truncation
+
+**Postconditions**:
+- The user sees the entity's relationships up to the requested depth
+
+**Alternative Flows**:
+- **Dense hub entity**: truncation retains the highest-degree neighbors and marks the response truncated
+
+#### Ingest Findings Linked to Managed Objects
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-usecase-finding-ingest`
+
+**Actor**: `cpt-cf-graph-storage-actor-producer-gear`
+
+**Preconditions**:
+- The producer registered its Finding node type (derived from the owned-node base) and its edge types
+- Reference node types for commits, pull requests, and comments are registered
+
+**Main Flow**:
+1. An analysis run produces Findings referencing commits and pull requests
+2. The producer ingests Finding nodes (owned), reference nodes for the managed objects with canonical upstream identifiers, and analysis edges with provenance in one batch
+3. The system validates every payload against its GTS chain, upserts idempotently, and links Findings to the referenced objects
+
+**Postconditions**:
+- Findings are searchable and traversable alongside the managed objects they concern
+
+**Alternative Flows**:
+- **A referenced managed object was not ingested**: the edge materializes a phantom node that a later mirror sync replaces in place
+
+## 9. Acceptance Criteria
+
+- [ ] A producer can register an ontology, ingest a batch containing owned nodes, reference nodes, and both edge families, and re-run the identical ingest with a byte-identical resulting graph state
+- [ ] Scope replacement removes stale static content and demonstrably preserves analysis edges and their provenance
+- [ ] All four retrieval scenarios (hybrid narrowing, criteria table, bounded traversal with filtering, depth-3 UI neighborhood) succeed against a seeded reference graph within the latency thresholds of § 6.1
+- [ ] Payloads violating their GTS derivation chain, edges violating endpoint constraints, and vectors violating the configured dimension are rejected with structured, per-item errors
+- [ ] Adversarial multi-tenant tests observe zero cross-tenant data in every endpoint
+- [ ] `cfs validate` passes for this gear's documentation set, and the gear's CI meets the coverage threshold
+
+## 10. Dependencies
+
+| Dependency | Description | Criticality |
+|------------|-------------|-------------|
+| PostgreSQL 16+ with pgvector | Single storage backend: relational source of truth, full-text, JSONB, and vector indexes | p1 |
+| ToolKit framework | Gear lifecycle, REST OperationBuilder, SecureORM, ClientHub, canonical errors | p1 |
+| AuthZ Resolver gear | Policy decisions and access scopes for every operation | p1 |
+| Types Registry gear | Platform registration of the gear's GTS base types and permission instances | p1 |
+| Embedding provider | In-process ONNX runtime or remote inference endpoint producing fixed-dimension vectors | p1 |
+| File Storage gear | Blob storage for heavy content referenced from node payloads | p2 |
+
+## 11. Assumptions
+
+- Producers can express their entities as typed nodes and edges and are responsible for parsing source material; the gear never crawls upstream systems
+- Managed-object producers (e.g., a mirror gear) push reference-node projections; the graph does not subscribe to upstream change feeds in v1
+- One embedding provider configuration (model and dimension) is active per deployment at a time; changing it implies re-embedding
+- Tenant graphs fit the configured analytics ceiling; graphs beyond it forgo whole-graph analytics but keep all other capabilities
+- The platform provides tenant resolution and authentication in front of the gear's API
+
+## 12. Risks
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Dense hub nodes make traversal and projection slow or unreadable | Interactive scenarios miss latency targets | Node budgets, per-hop edge-type filters, degree-ordered truncation, edge-type exclusion in analytics |
+| JSONB attribute indexing degrades as payloads grow | Filter queries slow down; index bloat | Payload size ceiling, indexable-attribute discipline in ontology design, heavy-content offloading |
+| Embedding model change invalidates stored vectors | Vector search quality silently degrades | Provider identity and dimension pinned in configuration, readiness dimension guard, documented re-embedding procedure |
+| Community detection and sampled betweenness differ from prototype outputs | Consumers expecting NetworkX-identical numbers are surprised | PRD explicitly waives numeric parity; determinism and ordering guarantees are documented per algorithm |
+| A single tenant's ingest or analytics load starves others | Platform-wide latency degradation | Batch size limits, analytics ceiling and cache, operation-level permissions, observability of per-tenant load |
+| Shared ontologies evolve incompatibly across producers | Ingest failures or semantic drift between producers | Immutable schemas per GTS version, conflict-rejecting registration, family patterns that keep older derived types valid |
+
+## 13. Open Questions
+
+- Who decides which payload attributes are indexed and which are vectorized — the ontology author via schema annotations, the platform administrator via deployment configuration, or both with an approval step? The working assumption (see ADR-0003) is schema-declared annotations authored by the ontology author; the governance and review flow is unresolved.
+- Which embedding model does the platform standardize on, who owns model upgrades, and is re-embedding on model change automatic or operator-triggered?
+- Do managed-object reference nodes eventually sync through platform events (event-broker) instead of producer pushes, and if so, which component owns the subscription?
+- Are edge payload attributes worth indexing in v1, or do edge filters remain type-only until a concrete consumer needs attribute-level edge filtering?
+- What is the retention policy for phantom nodes that are never replaced by real nodes — permanent visibility, TTL-based cleanup, or producer-triggered pruning?
+- Does the gear expose a graph export format (such as the prototype's cfs-map document) in v1, and who are its consumers?
+
+## 14. Traceability
+
+Links to related specification artifacts.
+
+- **Design**: [DESIGN.md](./DESIGN.md)
+- **ADRs**: [ADR/](./ADR/)
