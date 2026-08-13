@@ -149,7 +149,7 @@ External Registry Sources cannot provide Aliases, and Externally Managed Entitie
 
 ### What the plugin is asked, and what it must not answer
 
-A plugin call carries the `SecurityContext` — the platform rule for every in-process call, and plugins are in-process in P1 — together with the tenant the question is about. That tenant is **optional**, because a platform-plane read has no tenant and therefore asks no tenant-specific question at all.
+A plugin call carries the plane-appropriate authenticated context through `SourceSecurityContext`: `Tenant(&SecurityContext)` on the tenant plane or `Platform(&PlatformSecurityContext)` on the platform plane. The wrapper preserves ToolKit's two authenticated context types across the in-process P1 plugin call. The call also carries the Context Tenant the question is about; it is **optional**, because a platform-plane read may ask no tenant-specific question at all.
 
 A plugin **MAY** apply its own checks on top of the platform's, and those checks **MAY only deny**. Narrowing is safe: the worst outcome is an entity the caller cannot see, which is indistinguishable from one that does not exist. Widening is not available to a plugin, because access is a platform decision and remains one; a source that could grant what Types Registry refused would place an authorization outcome in a component the platform does not operate. This is the same directional rule the ownership assertion above does *not* need — there a source speaks about its own content, here it would be speaking about a platform decision.
 

@@ -103,7 +103,7 @@ The canonical representation of registry contracts is based on [Global Type Syst
 | Externally Managed Entity | Registry entity whose definition and source-owned state are authoritative in an External Registry Source and obtained live through its Registry Source Plugin, while Types Registry governs platform visibility and usage semantics. |
 | Tenant Subtree | A tenant and all of its descendants in the platform tenant hierarchy. |
 | Lifecycle Status | Platform-level state of an admitted logical registry entity: in P1, `ACTIVE` or `DELETED` for every entity, managed or externally managed. `DEPRECATED` is deferred past P1 by ADR-0008. |
-| Tenant Enablement State | Tenant-level policy input for an entity: `NOT_INITIALIZED`, `ENABLED`, or `DISABLED`, the last with an optional reason and expiry. It is not the consumer-facing availability result. |
+| Tenant Enablement State | Tenant-level policy input for an entity: `NOT_INITIALIZED`, `ENABLED`, or `DISABLED`. The state carries no reason or expiry and is not the consumer-facing availability result. |
 | Tenant Availability State | Computed, consumer-facing state for a concrete entity and tenant, derived from lifecycle status, tenant enablement state, dependencies, and external-source state: `AVAILABLE` or `UNAVAILABLE` with a reason. |
 
 ## 2. Actors
@@ -554,7 +554,7 @@ When the External Registry Source cannot confirm state required for availability
 
 - [ ] `p2` - **ID**: `cpt-cf-types-registry-fr-tenant-enablement`
 
-The system **MUST**, after P1, support a stored Tenant Enablement State for an entity: `NOT_INITIALIZED`, `ENABLED`, or `DISABLED`, where `DISABLED` carries an optional reason and optional expiry. This state is a policy input to Tenant Availability State, not the consumer-facing result. Types Registry **MUST** allow authorized actors to manage this state for Managed Entities. For Externally Managed Entities, the External Registry Source remains authoritative for tenant enablement state.
+The system **MUST**, after P1, support a stored Tenant Enablement State for an entity: `NOT_INITIALIZED`, `ENABLED`, or `DISABLED`. The state carries no reason or expiry; any policy change is represented by a state transition. This state is a policy input to Tenant Availability State, not the consumer-facing result. Types Registry **MUST** allow authorized actors to manage this state for Managed Entities. For Externally Managed Entities, the External Registry Source remains authoritative for tenant enablement state.
 
 - **Rationale**: Tenant policy must be independently controllable without conflating it with platform lifecycle or computed availability.
 - **Actors**: `cpt-cf-types-registry-actor-platform-gear`, `cpt-cf-types-registry-actor-domain-gear`, `cpt-cf-types-registry-actor-tenant-admin`, `cpt-cf-types-registry-actor-registry-source-plugin`
