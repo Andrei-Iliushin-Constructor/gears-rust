@@ -7,6 +7,7 @@ authors.workspace = true
 repository.workspace = true
 description = "api-contracts example module — PaymentApi with local and HTTP transport"
 rust-version.workspace = true
+publish = false
 
 [features]
 default = []

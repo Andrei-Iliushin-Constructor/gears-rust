@@ -76,6 +76,9 @@ jobs:
               - 'Makefile'
               - 'rust-toolchain.toml'
               - '.cargo/**'
+              # Input to `make check-release-config` in the test job: a config-only
+              # edit must still get the release configuration validated.
+              - 'release-plz.toml'
             fips:
               - 'libs/toolkit/**'
               - 'libs/toolkit-http/**'
@@ -212,6 +215,9 @@ jobs:
 
       - name: Validate packaging metadata (readme/license-file paths)
         run: make check-packaging-metadata
+
+      - name: Validate release configuration (publish flags, release-plz.toml)
+        run: make check-release-config
 
       - name: Install Go (required for aws-lc-fips-sys FIPS build)
         uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
