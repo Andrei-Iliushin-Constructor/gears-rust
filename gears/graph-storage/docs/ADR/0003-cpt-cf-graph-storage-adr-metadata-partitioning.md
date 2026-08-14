@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-08-13
 decision-makers: Graph Storage design review
 ---
@@ -29,7 +29,7 @@ decision-makers: Graph Storage design review
 
 A shared graph accumulates payloads from many producers. If every attribute is indexed and embedded, indexes bloat and ingest slows; if none are, filters and vector search stop working; if payloads carry article bodies or raw logs, the graph becomes a slow blob store. The gear needs a defined partitioning of node metadata — what lives in dedicated columns, what is indexed inside JSONB, what feeds embeddings, and what must leave the graph entirely — and a defined authority for those choices per type.
 
-This ADR is deliberately `proposed`: the partitioning scheme is settled enough to design against, but the governance question — who approves indexing and vectorization declarations — is an open platform decision recorded here and in PRD § Open Questions.
+This ADR is `accepted` for the partitioning mechanism, which DESIGN builds on normatively (extension keywords, filter rejection for unannotated attributes, index provisioning, the payload ceiling) and which the prototype validates. The governance sub-question — who approves indexing and vectorization declarations — is deliberately **out of this ADR's scope**: it is an operational-policy decision, tracked in PRD § Open Questions with an owner (the platform steering committee), a binding interim policy (see Decision Outcome), and a blocking gate — it must be resolved before the v1 ontology-registration API freezes.
 
 ## Decision Drivers
 
@@ -55,7 +55,7 @@ Chosen option: "C. Schema-declared partitioning", because the ontology author kn
 3. **Vectorizable attributes**: string attributes annotated (e.g., `x-gts-vectorized`) join the node's composed search text for embedding and full-text indexing.
 4. **Heavy content**: payloads above the configured ceiling are rejected; long-form content goes to the file-storage gear, referenced from the payload by file identifier (and may still contribute a bounded excerpt to search text via the content field).
 
-The open governance question stays explicitly unresolved: the default proposal is that annotations are authored by the ontology author and reviewed like any GTS contract change, with a platform-administrator approval gate to be confirmed before v1 freeze.
+Until the steering committee resolves the governance question, the following **interim policy is binding**: annotations are authored by the ontology author and reviewed like any GTS contract change, and any type registration that provisions indexes or changes vectorization requires the ontology-administration permission (`cpt-cf-graph-storage-fr-access-control`), which keeps index-affecting registrations administratively gated. The steering-committee decision (owner of the open question; deadline: before the v1 ontology-registration API freeze) may replace this policy without reopening this ADR — the partitioning mechanism is unaffected by who approves declarations.
 
 ### Consequences
 
@@ -70,7 +70,7 @@ The open governance question stays explicitly unresolved: the default proposal i
 - Type-registration tests validate the extension keywords and reject malformed annotations.
 - Projection tests confirm annotated attributes filter correctly and unannotated attribute filters are rejected with the documented error.
 - Ingest benchmarks confirm the payload ceiling and annotation-bounded indexing hold `cpt-cf-graph-storage-nfr-ingest-throughput`.
-- The governance decision is confirmed (and this ADR moves to `accepted`) when the approval flow is ratified by the platform steering committee.
+- The governance decision is confirmed when the approval flow is ratified by the platform steering committee (owner; blocking for the v1 ontology-registration API freeze) and recorded against the PRD open question; the interim permission-gated policy applies until then and its enforcement is covered by access-control tests.
 
 ## Pros and Cons of the Options
 

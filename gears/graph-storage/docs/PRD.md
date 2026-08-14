@@ -484,7 +484,7 @@ The system **MUST** expose all capabilities over a versioned REST API following 
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-sdk-client`
 
-The system **MUST** ship a transport-agnostic SDK crate with a typed client trait covering type registration, ingest, search, traversal, projection, and metrics, registered in ClientHub for in-process consumption by other gears, with canonical platform error types.
+The system **MUST** ship a transport-agnostic SDK crate with a typed client trait covering type registration, ingest, search, traversal, projection, and metrics, registered in ClientHub for in-process consumption by other gears, with canonical platform error types. The in-process path **MUST** be subject to the same admission limits as the REST surface — resource bounds are enforced in the shared service layer, not at the HTTP edge only.
 
 - **Rationale**: Producer and consumer gears integrate in-process; the SDK trait is the platform's inter-gear contract pattern.
 - **Actors**: `cpt-cf-graph-storage-actor-producer-gear`, `cpt-cf-graph-storage-actor-consumer-gear`
@@ -495,7 +495,7 @@ The system **MUST** ship a transport-agnostic SDK crate with a typed client trai
 
 - [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-observability`
 
-The system **MUST** emit structured tracing for ingest, search, traversal, and analytics operations (batch sizes, arm timings, traversal depth and frontier sizes, cache hits) and expose operational metrics through the platform telemetry stack. Logs **MUST NOT** contain payload content.
+The system **MUST** emit structured tracing for ingest, search, traversal, and analytics operations (batch sizes, arm timings, traversal depth and frontier sizes, cache hits) and expose operational metrics through the platform telemetry stack, including saturation counters for every enforced admission limit. Logs **MUST NOT** contain payload content.
 
 - **Rationale**: Query-shape problems (dense hubs, oversized batches) are diagnosable only with structural telemetry; payloads may hold sensitive content.
 - **Actors**: `cpt-cf-graph-storage-actor-platform-admin`
@@ -551,9 +551,9 @@ Depth-3 neighborhood projection **MUST** answer within 1 second at p95 on a tena
 
 - [ ] `p2` - **ID**: `cpt-cf-graph-storage-nfr-analytics-memory`
 
-Whole-graph analytics **MUST** operate within a configurable node-count ceiling and refuse computation with a clear error beyond it, and **MUST** hold at most the graph topology (keys and edges, not payloads) in memory.
+Whole-graph analytics **MUST** operate within configurable node, edge, and memory-budget ceilings and refuse computation with a clear error beyond any of them (a node count alone does not bound memory on dense graphs), and **MUST** hold at most the graph topology (keys and edges, not payloads) in memory.
 
-- **Threshold**: Configurable ceiling, default 1,000,000 nodes; topology-only memory footprint verified by profiling tests
+- **Threshold**: Configurable ceilings, defaults 1,000,000 nodes / 10,000,000 edges / 2 GiB estimated topology budget; topology-only memory footprint verified by profiling tests
 - **Rationale**: In-memory analytics on unbounded tenant graphs is the main memory risk of the gear.
 - **Architecture Allocation**: See DESIGN.md § NFR Allocation
 
@@ -775,7 +775,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 
 ## 13. Open Questions
 
-- Who decides which payload attributes are indexed and which are vectorized — the ontology author via schema annotations, the platform administrator via deployment configuration, or both with an approval step? The working assumption (see ADR-0003) is schema-declared annotations authored by the ontology author; the governance and review flow is unresolved.
+- Who decides which payload attributes are indexed and which are vectorized — the ontology author via schema annotations, the platform administrator via deployment configuration, or both with an approval step? Owner: platform steering committee; deadline: before the v1 ontology-registration API freeze. Until resolved, the binding interim policy from ADR-0003 applies: annotations are declared by the ontology author, and index-affecting registrations require the ontology-administration permission.
 - Which embedding model does the platform standardize on, who owns model upgrades, and is re-embedding on model change automatic or operator-triggered?
 - Do managed-object reference nodes eventually sync through platform events (event-broker) instead of producer pushes, and if so, which component owns the subscription?
 - Are edge payload attributes worth indexing in v1, or do edge filters remain type-only until a concrete consumer needs attribute-level edge filtering?

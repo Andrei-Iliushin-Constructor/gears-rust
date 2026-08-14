@@ -21,6 +21,7 @@
   - [Prototype Lineage](#prototype-lineage)
   - [Phantom Materialization Contract](#phantom-materialization-contract)
   - [Traversal Backend Sketch](#traversal-backend-sketch)
+  - [Capacity and Admission Contract](#capacity-and-admission-contract)
   - [Base Ontology Publication](#base-ontology-publication)
 - [5. Traceability](#5-traceability)
 
@@ -70,7 +71,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-fr-access-control` | OperationBuilder-authenticated routes; PDP-checked permissions for ontology admin, ingest, and query declared as GTS instances |
 | `p1` | `cpt-cf-graph-storage-fr-rest-api` | Versioned REST under `/api/graph-storage/v1` with OpenAPI schemas, RFC-9457 problems, documented limits |
 | `p1` | `cpt-cf-graph-storage-fr-sdk-client` | SDK crate with `GraphStorageClientV1` trait registered in ClientHub; local client delegates to domain services |
-| `p2` | `cpt-cf-graph-storage-fr-observability` | Structural tracing spans (batch sizes, arm timings, frontier sizes, cache hits) and OTel metrics; payload content never logged |
+| `p2` | `cpt-cf-graph-storage-fr-observability` | Structural tracing spans (batch sizes, arm timings, frontier sizes, cache hits) and OTel metrics, including per-limit saturation counters from the Capacity and Admission Contract; payload content never logged |
 | `p1` | `cpt-cf-graph-storage-fr-readiness` | Readiness checks: DB, server major version (>= 19), pgvector presence, property-graph presence, migrations, embedding provider, dimension agreement — with named problems |
 
 #### NFR Allocation
@@ -80,7 +81,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-nfr-ingest-throughput` | 10k nodes + 20k edges <= 60 s | Ingest Pipeline, Storage Layer | Batched multi-row statements, single transaction, validation before writes, bounded per-batch memory | Ingest benchmark suite on reference profile |
 | `p1` | `cpt-cf-graph-storage-nfr-search-latency` | Hybrid p95 <= 500 ms at 100k nodes | Search Service, Storage Layer | Independent arm queries each using its index (GIN, HNSW), bounded arm limits, fusion in memory | Search benchmarks on seeded reference graph |
 | `p1` | `cpt-cf-graph-storage-nfr-traversal-latency` | Depth-3 p95 <= 1 s at 500k edges | Traversal Service, Storage Layer | Composite edge indexes (tenant, src), (tenant, dst); per-hop frontier bounding; node budgets | Traversal benchmarks on seeded reference graph |
-| `p2` | `cpt-cf-graph-storage-nfr-analytics-memory` | Topology-only, ceiling-enforced | Graph Analytics Service | Load node keys and typed edge pairs only; refuse graphs above configured ceiling | Memory profiling tests |
+| `p2` | `cpt-cf-graph-storage-nfr-analytics-memory` | Topology-only, ceiling-enforced | Graph Analytics Service | Load node keys and typed edge pairs only; refuse graphs above any configured ceiling (nodes, edges, or estimated bytes — a node count alone does not bound memory on dense graphs) | Memory profiling tests |
 | `p1` | `cpt-cf-graph-storage-nfr-tenant-zero-leak` | Zero cross-tenant results | Storage Layer, all query components | Tenant predicate injected by SecureORM scoping in every query including recursive CTEs; no raw unscoped SQL | Adversarial multi-tenant integration tests |
 | `p1` | `cpt-cf-graph-storage-nfr-code-coverage` | >= 85% line coverage | All crates | Trait-based ports enable mock-driven unit tests; integration tests against real PostgreSQL | `cargo llvm-cov` in CI |
 
@@ -184,7 +185,7 @@ Every table carries tenancy and every query path — including recursive travers
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-principle-bounded-queries`
 
-Every operation has explicit bounds validated at the API edge: batch sizes, result limits, traversal depth, node budgets, analytics ceilings. Unbounded work is rejected, never attempted.
+Every operation has explicit bounds — batch sizes, result limits, traversal depth, node/edge/byte budgets, deadlines, and per-tenant concurrency — defined by the [Capacity and Admission Contract](#capacity-and-admission-contract). Authoritative enforcement lives in the domain admission layer shared by REST and the ClientHub local client (API-edge validation is a fast-fail projection, never the only guard). Unbounded work is rejected with a canonical resource-exhausted error, never attempted.
 
 ### 2.2 Constraints
 
@@ -518,7 +519,7 @@ Implements `GraphStorageClientV1` from the SDK crate over the same domain servic
 
 ##### Responsibility boundaries
 
-No behavior differences from REST beyond transport; identical permission checks apply.
+No behavior differences from REST beyond transport; identical permission checks and identical admission limits apply — the Capacity and Admission Contract is enforced in the shared domain layer, so the in-process path can never bypass a bound that REST enforces.
 
 ##### Related components (by ID)
 
@@ -747,6 +748,40 @@ The `GraphQueryPort` is the graph-engine plugin surface (`cpt-cf-graph-storage-c
 The PG19 validation spike gating the traversal implementation freeze (ADR-0001 Confirmation) has run against PG19 beta2 + pgvector built from source — see [SPIKE-pg19-sqlpgq.md](./SPIKE-pg19-sqlpgq.md). Two binding implementation rules follow from it: the PGQ backend must emit direction-explicit patterns (the undirected shorthand plans as an all-vertex probe on the initial PG19 implementation), and neighborhood expansion must chain `GRAPH_TABLE` as a directed 1-hop primitive with per-hop dedup (multi-hop chain patterns enumerate paths and explode on hubs). Measured at reference shape (200k nodes / 660k edges, depth <= 3, random seeds): CTE p95 4.1 ms, PGQ hop-chain p95 8.8 ms — both far inside the NFR budget; single-statement KNN + graph + FTS composition confirmed at ~20-40 ms.
 
 The full graph-engine evaluation behind this strategy (12-engine scoreboard, FalkorDB/ArcadeDB smoke tests, AGE growth map, mirror-swap contingency triggers) is preserved in [graph-engine-alternatives.md](./graph-engine-alternatives.md).
+
+### Capacity and Admission Contract
+
+Every bound the gear enforces is a named configuration key with a safe default and a hard range (operators can tune within the range; values outside it are rejected at startup). Defaults are initial spec-level values — benchmarks may adjust them before v1 freeze, within the stated ranges.
+
+| Bound | Config key (`graph-storage.limits.`) | Default | Hard range | Enforced at |
+|---|---|---|---|---|
+| Ingest batch: nodes | `ingest_max_nodes` | 10,000 | 1 – 50,000 | Admission |
+| Ingest batch: edges | `ingest_max_edges` | 20,000 | 1 – 100,000 | Admission |
+| REST request body | `rest_max_body_bytes` | 32 MiB | 1 – 128 MiB | REST edge |
+| Node payload size | `payload_max_bytes` | 64 KiB | 1 KiB – 1 MiB | Admission (ADR-0003 ceiling) |
+| Node content size | `content_max_bytes` | 2 MiB | 64 KiB – 16 MiB | Admission |
+| Traversal depth | `traversal_max_depth` | 5 | 1 – 8 | Admission |
+| Traversal node budget | `traversal_max_nodes` | 1,000 per request, 10,000 hard | 1 – 10,000 | Admission + per hop |
+| Traversal frontier per hop | `traversal_max_frontier` | 10,000 | 100 – 100,000 | Engine, per hop |
+| Traversal edges scanned | `traversal_max_edges_scanned` | 100,000 | 1,000 – 1,000,000 | Engine, cumulative |
+| Search arm limit | `search_max_arm_limit` | 50 | 1 – 500 | Admission |
+| Projection page size | `projection_max_page` | 200 | 1 – 1,000 | Admission |
+| Analytics node ceiling | `analytics_max_nodes` | 1,000,000 | 1,000 – 10,000,000 | Job admission |
+| Analytics edge ceiling | `analytics_max_edges` | 10,000,000 | 10,000 – 100,000,000 | Job admission |
+| Analytics memory budget | `analytics_max_bytes` | 2 GiB | 128 MiB – 32 GiB | Job admission (estimate from node/edge counts and key sizes) + allocation tracking |
+| Interactive statement deadline | `deadline_interactive` | 10 s | 1 – 60 s | DB `statement_timeout` + cancellation token |
+| Analytics job deadline | `deadline_analytics` | 300 s | 10 s – 3,600 s | Cancellation token |
+| Per-tenant concurrent analytics jobs | `tenant_max_analytics_jobs` | 1 | 1 – 8 | Job admission |
+| Per-tenant concurrent ingest batches | `tenant_max_ingest` | 4 | 1 – 64 | Admission |
+| Per-tenant concurrent queries | `tenant_max_queries` | 32 | 1 – 1,024 | Admission |
+
+Enforcement is layered, and the authoritative layer is shared:
+
+1. **REST edge** — DTO validation and body-size caps as a fast-fail projection of the contract; never the only guard.
+2. **Domain admission layer** — the authoritative check, executed identically for REST handlers and the ClientHub local client; nothing reaches storage or an engine backend without passing it. Per-tenant concurrency gates live here.
+3. **Execution backstops** — database `statement_timeout`, cooperative cancellation tokens on long computations, and per-hop/cumulative budget checks inside the traversal engines.
+
+Every rejection maps to the canonical resource-exhausted problem type (RFC-9457) carrying the limit name, the configured bound, and the requested value — distinguishable from validation errors so clients can implement backoff rather than "fix the request". Every limit exposes a saturation counter (rejections) and a high-watermark gauge, so capacity pressure is visible in telemetry before it becomes an incident (`cpt-cf-graph-storage-fr-observability`).
 
 ### Base Ontology Publication
 
