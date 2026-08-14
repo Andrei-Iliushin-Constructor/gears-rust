@@ -14,6 +14,7 @@ use file_parser as _;
 #[cfg(feature = "file-storage")]
 use file_storage as _;
 use gear_orchestrator as _;
+use github_mirror as _;
 use grpc_hub as _;
 use nodes_registry as _;
 use resource_group as _;

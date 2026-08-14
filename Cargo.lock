@@ -2164,6 +2164,7 @@ dependencies = [
  "cf-gears-file-parser",
  "cf-gears-file-storage",
  "cf-gears-gear-orchestrator",
+ "cf-gears-github-mirror",
  "cf-gears-grpc-hub",
  "cf-gears-mini-chat",
  "cf-gears-nodes-registry",
@@ -2331,6 +2332,21 @@ dependencies = [
  "tracing",
  "utoipa",
  "uuid",
+]
+
+[[package]]
+name = "cf-gears-github-mirror"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-macros",
+ "inventory",
+ "serde",
+ "tracing",
+ "utoipa",
 ]
 
 [[package]]
