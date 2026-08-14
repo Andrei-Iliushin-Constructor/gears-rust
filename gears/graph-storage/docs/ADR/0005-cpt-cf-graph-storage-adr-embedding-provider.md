@@ -58,7 +58,8 @@ Providers declare a full **embedding-space identity**, not merely a dimension: t
 - Changing the active model is an operational event, not a request-level option: it requires re-embedding stored vectors, and the procedure (and its trigger — see PRD § 13 open question on model governance) must be documented before v1 freeze.
 - The in-process default keeps small deployments dependency-free (no inference service), at the cost of bundling ONNX runtime and model weights with the gear image.
 - Mixed-model graphs are structurally prevented: one provider configuration per deployment per vector column lifetime, and the recorded embedding-space identity turns any drift — same-dimension model swaps included — into a readiness failure with vector search blocked, instead of silent quality loss.
-- Embedding cost stays out of the ingest critical path decision: producers may skip embedding per request and rely on later re-embedding passes without losing vectors already stored.
+- Embedding cost stays out of the ingest critical path decision: producers may skip embedding per request and rely on later re-embedding passes; a preserved vector remains valid only while its recorded embedding-input hash is unchanged (stale vectors are excluded from similarity search until re-embedded).
+- Remote providers are governed data egress, not ordinary plugin calls: node search text, content chunks, and user query text leave the deployment. A default-deny per-tenant egress policy gates every remote embedding call — approved vendor/endpoint/model/region, permitted data classes and vectorized fields, separate rules for ingest text, chunks, and query text, byte/token limits with minimization, provider retention/deletion/no-training requirements, and metadata-only audit evidence. A denied tenant fails or explicitly skips per the API contract; the gear never silently switches models, which would break the single-vector-space invariant.
 
 ### Confirmation
 

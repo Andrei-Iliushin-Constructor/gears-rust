@@ -21,7 +21,11 @@
   - [Prototype Lineage](#prototype-lineage)
   - [Phantom Materialization Contract](#phantom-materialization-contract)
   - [Concurrent Ingest Protocol](#concurrent-ingest-protocol)
+  - [Authorization Model](#authorization-model)
+  - [Read Consistency Contract](#read-consistency-contract)
+  - [Telemetry and Audit Contract](#telemetry-and-audit-contract)
   - [Traversal Backend Sketch](#traversal-backend-sketch)
+  - [Plugin Selection and Lifecycle](#plugin-selection-and-lifecycle)
   - [Capacity and Admission Contract](#capacity-and-admission-contract)
   - [Base Ontology Publication](#base-ontology-publication)
 - [5. Traceability](#5-traceability)
@@ -62,6 +66,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-fr-vector-search` | Vector arm: provider-embedded query against HNSW cosine indexes over node and chunk vectors, folded to nodes |
 | `p1` | `cpt-cf-graph-storage-fr-hybrid-search` | Search Service runs both arms independently and fuses with RRF, reporting per-arm ranks |
 | `p1` | `cpt-cf-graph-storage-fr-type-filtering` | GTS family patterns compiled to safe SQL patterns with literal-punctuation escaping, applied in every search arm |
+| `p1` | `cpt-cf-graph-storage-fr-read-consistency` | Compound reads (hybrid search, traversal + hydration, projections) execute on one repeatable-read snapshot; responses report the observed graph revision; continuation tokens are revision-bound (Read Consistency Contract) |
 | `p1` | `cpt-cf-graph-storage-fr-graph-traversal` | Traversal Service expands breadth-first through the GraphQueryPort: SQL/PGQ `GRAPH_TABLE` hop patterns from v1 for fixed-depth shapes (direction-explicit, per-hop dedup), depth-bounded recursive SQL for variable depth until PG20-class quantifiers, per ADR-0001 |
 | `p1` | `cpt-cf-graph-storage-fr-neighborhood-projection` | Projection Service returns degree-ordered, budget-truncated neighborhoods with phantom toggle and metric annotations |
 | `p1` | `cpt-cf-graph-storage-fr-tabular-projection` | Projection Service serves OData-filtered, paginated node tables over annotated (indexed) payload attributes |
@@ -69,7 +74,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p3` | `cpt-cf-graph-storage-fr-graph-analytics-extended` | Seeded sampled Brandes betweenness and seeded Louvain-family communities with stable ordering; no NetworkX parity |
 | `p2` | `cpt-cf-graph-storage-fr-metrics-cache` | Metric results cached by (tenant, graph revision, metric, parameters); cache/computed provenance reported |
 | `p1` | `cpt-cf-graph-storage-fr-tenant-isolation` | Every entity is tenant-scoped through SecureORM; traversal recursion, search arms, and analytics loading carry the tenant predicate |
-| `p1` | `cpt-cf-graph-storage-fr-access-control` | OperationBuilder-authenticated routes; PDP-checked permissions for ontology admin, ingest, and query declared as GTS instances |
+| `p1` | `cpt-cf-graph-storage-fr-access-control` | Shared PolicyEnforcer-backed application service for REST and ClientHub; PDP-checked permissions (ontology admin, ingest, query, whole-tenant analytics) declared as GTS instances; resource-level enforcement per the Authorization Model (induced authorized subgraph, arm-level scoping, anti-enumeration) |
 | `p1` | `cpt-cf-graph-storage-fr-rest-api` | Versioned REST under `/api/graph-storage/v1` with OpenAPI schemas, RFC-9457 problems, documented limits |
 | `p1` | `cpt-cf-graph-storage-fr-sdk-client` | SDK crate with `GraphStorageClientV1` trait registered in ClientHub; local client delegates to domain services |
 | `p2` | `cpt-cf-graph-storage-fr-observability` | Structural tracing spans (batch sizes, arm timings, frontier sizes, cache hits) and OTel metrics, including per-limit saturation counters from the Capacity and Admission Contract; payload content never logged |
@@ -388,7 +393,7 @@ Hybrid retrieval quality depends on running arms independently and fusing by ran
 
 ##### Responsibility scope
 
-Lexical arm (web-style tsquery, rank, snippets over nodes and chunks); vector arm (cosine ANN over node and chunk vectors); chunk-to-node folding keeping best-chunk provenance; RRF fusion with per-arm rank reporting; GTS family-pattern filters with literal-punctuation escaping.
+Lexical arm (web-style tsquery, rank, snippets over nodes and chunks); vector arm (cosine ANN over node and chunk vectors, excluding vectors marked stale); chunk-to-node folding keeping best-chunk provenance; RRF fusion with per-arm rank reporting; GTS family-pattern filters with literal-punctuation escaping. The caller's resource scope is applied inside every arm before UNION, ranking, and LIMIT — chunks authorize through their parent node — and re-applied to folding, counts, snippets, fusion inputs, pagination, and hydration (Authorization Model); all arms of one request read the same snapshot (Read Consistency Contract).
 
 ##### Responsibility boundaries
 
@@ -410,7 +415,7 @@ Depth-limited expansion is the graph-native query shape; it needs dedicated, ben
 
 ##### Responsibility scope
 
-Owns the `GraphQueryPort` — the gear's graph-engine plugin surface (`cpt-cf-graph-storage-contract-graph-engine-plugin`). Engines behind the port declare capabilities (neighborhood, bounded traversal, shortest path, pattern queries, in-engine analytics) and answer undeclared operations with a typed not-implemented error. The default plugin is the built-in PostgreSQL engine with its two execution paths, both shipped in v1: SQL/PGQ (`CREATE PROPERTY GRAPH` over node/edge tables, direction-explicit `GRAPH_TABLE` hop patterns; serves fixed-depth shapes from the first release) and recursive CTE (depth-bounded iterative SQL over the indexed edge table; serves bounded variable-depth shapes until PG20-class quantifiers, and acts as the configuration-selected fallback). Seed resolution (explicit keys and/or hybrid hits); breadth-first expansion treating edges as undirected; per-hop edge-type restriction; output node-type filtering; node/edge budgets with seeds-survive-truncation semantics; hydrated subgraph responses with truncation status.
+Owns the `GraphQueryPort` — the gear's graph-engine plugin surface (`cpt-cf-graph-storage-contract-graph-engine-plugin`). Engines behind the port declare capabilities (neighborhood, bounded traversal, shortest path, pattern queries, in-engine analytics) and answer undeclared operations with a typed not-implemented error. The default plugin is the built-in PostgreSQL engine with its two execution paths, both shipped in v1: SQL/PGQ (`CREATE PROPERTY GRAPH` over node/edge tables, direction-explicit `GRAPH_TABLE` hop patterns; serves fixed-depth shapes from the first release) and recursive CTE (depth-bounded iterative SQL over the indexed edge table; serves bounded variable-depth shapes until PG20-class quantifiers, and acts as the configuration-selected fallback). Seed resolution (explicit keys and/or hybrid hits); breadth-first expansion treating edges as undirected; per-hop edge-type restriction; output node-type filtering; node/edge budgets with seeds-survive-truncation semantics; hydrated subgraph responses with truncation status. The port accepts the caller's compiled `AccessScope` as a mandatory input and expands only the caller-authorized induced subgraph — seeds authorized before expansion, unauthorized nodes never entering frontiers or visited sets, budgets and truncation computed on authorized rows, hydration under the same scope and snapshot (Authorization Model, Read Consistency Contract); unsupported scope properties fail closed rather than degrading to tenant-only filtering.
 
 ##### Responsibility boundaries
 
@@ -454,7 +459,7 @@ Whole-graph metrics need an in-memory topology and per-algorithm determinism con
 
 ##### Responsibility scope
 
-Topology-only projection loading (keys and typed edge pairs) under the configured node ceiling, canonicalized before any seeded algorithm runs (nodes by key, edges by type/source/target/discriminator, adjacency sorted, key-based tie-breaks — determinism comes from ordered inputs plus the seed, per ADR-0004); degree, components, PageRank; seeded sampled betweenness and seeded community detection with stable ordering; edge-type exclusion; revision-keyed cache reads/writes; cooperative cancellation.
+Topology-only projection loading (keys and typed edge pairs) under the configured node/edge/byte ceilings, canonicalized before any seeded algorithm runs (nodes by key, edges by type/source/target/discriminator, adjacency sorted, key-based tie-breaks — determinism comes from ordered inputs plus the seed, per ADR-0004); degree, components, PageRank; seeded sampled betweenness and seeded community detection with stable ordering; edge-type exclusion; revision-and-topology reads from one snapshot with conditional, single-flight cache publication (Read Consistency Contract); execution under the global analytics scheduler and memory pool with the asynchronous job contract (Capacity and Admission Contract); whole-tenant analytics permission enforced, constrained scopes rejected (Authorization Model); cooperative cancellation.
 
 ##### Responsibility boundaries
 
@@ -479,7 +484,7 @@ SeaORM entities with `Scopable` tenancy; repositories generic over `DBRunner`; b
 
 ##### Responsibility boundaries
 
-Contains no business rules; exposes typed ports consumed by domain services; raw SQL is confined here and covered by adversarial tenancy tests.
+Contains no business rules; exposes typed ports consumed by domain services. Hand-written traversal SQL executes exclusively through the `toolkit-db` scoped custom-query primitive (`query_scoped`: static templates, bound values, alias-to-scope mappings compiled by toolkit-db, fail closed on unrepresentable constraints) — the gear never holds a raw executor, and the platform's no-raw-SQL policy is preserved. Covered by adversarial tenancy and resource-scope tests.
 
 ##### Related components (by ID)
 
@@ -495,7 +500,7 @@ The HTTP boundary: DTOs, OpenAPI documentation, authentication, permission enfor
 
 ##### Responsibility scope
 
-OperationBuilder route registration under `/api/graph-storage/v1`; DTO validation of all bounds (batch sizes, limits, depths); permission declaration and checks per operation group (ontology admin, ingest, query); problem-details mapping from domain errors; readiness endpoint.
+OperationBuilder route registration under `/api/graph-storage/v1`; DTO validation of all bounds (batch sizes, limits, depths) as the fast-fail projection of the admission contract; permission declaration per operation group (ontology admin, ingest, query, whole-tenant analytics) with decisions delegated to the shared PolicyEnforcer-backed application service (Authorization Model); problem-details mapping from domain errors; the asynchronous analytics job surface (202 Accepted, status/result endpoints); readiness endpoint.
 
 ##### Responsibility boundaries
 
@@ -549,6 +554,7 @@ The public surfaces are defined in the PRD as `cpt-cf-graph-storage-interface-re
 ### 3.4 Internal Dependencies
 
 - `toolkit` (gear macro, lifecycle, OperationBuilder, ClientHub), `toolkit-db`/SecureORM (Scopable entities, DBRunner, SecureTx), `toolkit-gts` (identifier grammar, UUIDv5, schema/instance registration), `toolkit-odata` (tabular projection filtering), `toolkit-canonical-errors` (SDK error surface).
+- **Blocking platform prerequisite**: a scoped custom-query primitive in `toolkit-db` (working title `query_scoped`) that executes static CTE/`GRAPH_TABLE` templates with bound values and per-alias scope mappings under a compiled `AccessScope`, identically through pooled connections and `SecureTx`, failing closed on unrepresentable constraints — raised with the ToolKit owners; without it the traversal backends have no compliant execution path (see PRD Dependencies/Risks).
 - Platform gears: authz-resolver (PDP), types-registry (base ontology and permission instances), file-storage (heavy-content references only — the gear stores identifiers, consumers resolve them).
 
 ### 3.5 External Dependencies
@@ -570,7 +576,9 @@ The public surfaces are defined in the PRD as `cpt-cf-graph-storage-interface-re
 2. AuthN/AuthZ: ingest permission, tenant scope         [REST API / Local Client]
 3. Validate batch: GTS chains, endpoint constraints,    [Ingest Pipeline +
    payload ceiling, key derivation                       Ontology Registry]
-4. Chunk long content deterministically                 [Chunker]
+4. Chunk long content deterministically; the new set    [Chunker]
+   is exact — previous chunks absent from it are
+   deleted in the same transaction
 5. Compose search texts; batch-embed nodes + chunks     [Embedding Coordinator]
    (skipped when embed=false; existing vectors kept)
 6. One transaction:                                     [Storage Layer]
@@ -639,6 +647,8 @@ The public surfaces are defined in the PRD as `cpt-cf-graph-storage-interface-re
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-db-schema`
 
 Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by migration and verified at readiness. Index plan: composite edge indexes (tenant, src) / (tenant, dst) / (tenant, type); GIN over generated tsvectors; expression/GIN indexes over annotation-declared payload attributes; HNSW cosine indexes over embeddings.
+
+`tenant_id` is the designated partition key and participates in every primary, unique, and foreign-key contract from day one (e.g., nodes are unique on `(tenant_id, node_key)` and edges reference `(tenant_id, node_id)`), so adopting PostgreSQL partitioning at scale is a physical reorganization, not an identity migration (ADR-0001 § scale envelope). `metrics_cache` growth is bounded by the retention limits in the Capacity and Admission Contract (entry size, per-tenant entries, retained revisions, parameter variants), enforced by publication checks and a race-safe background cleanup that never removes an in-flight publication.
 
 #### Table: graph_type
 
@@ -741,6 +751,25 @@ Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by mi
 
 Replacement transactions lock this row exclusively; ordinary ingests into an owned scope lock it in shared mode (Concurrent Ingest Protocol).
 
+#### Table: ingest_audit
+
+**ID**: `cpt-cf-graph-storage-dbtable-ingest-audit`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| tenant_id | UUID | Tenant scope |
+| producer | TEXT | Producer identity |
+| operation | TEXT | Operation kind (ingest, replace, replay, ...) |
+| correlation | TEXT | Opaque request/trace correlation id |
+| idempotency_digest / request_hash | TEXT / TEXT | Digest of the idempotency key; canonical request hash |
+| scope_digest / generation | TEXT / BIGINT | Scope identity digest and source generation (when applicable) |
+| revision_before / revision_after | BIGINT / BIGINT | Graph revision around the mutation |
+| counts | JSONB | Per-entity-family inserted/updated/deleted/unchanged/materialized |
+| outcome | TEXT | commit / replay / conflict / stale / rollback / problem type |
+| created_at | TIMESTAMPTZ | Record time |
+
+Payload-free by construction (Telemetry and Audit Contract); written in the ingest transaction for committed mutations.
+
 #### Table: metrics_cache
 
 **ID**: `cpt-cf-graph-storage-dbtable-metrics-cache`
@@ -785,6 +814,45 @@ A single database transaction serializes rows, not intentions: batch-level valid
 
 Conflict and stale-generation rejections are canonical problem types distinct from validation errors and from resource exhaustion, so producers can implement the correct reaction (re-read and rebase, drop the stale run, or back off) mechanically.
 
+### Authorization Model
+
+Tenant scoping is the outer wall; the PDP-derived `AccessScope` is the inner, resource-level one, and it confines every path identically for REST and the in-process client.
+
+**Shared PEP.** Authorization decisions are made once, in a PolicyEnforcer-backed application service invoked by both adapters. REST handlers and the ClientHub local client both pass the caller's SecurityContext into that service; neither adapter owns permission checks. REST/ClientHub authorization-parity tests are part of the contract suite.
+
+**Authorization matrix.** Each operation group binds a ResourceType, an action, and the PDP properties it supports; composition rules define how a node-level constraint reaches dependent entities:
+
+| Operation group | ResourceType | Action | Composition |
+|---|---|---|---|
+| Types (admin) | graph ontology | administer | none (tenant-level) |
+| Ingest | graph node | write | edges authorize via both endpoints; chunks via parent node; scope replacement via owned scope |
+| Node read | graph node | read | chunks and adjacency via the node's scope; unauthorized key follows the anti-enumeration contract |
+| Search | graph node | read | resource predicate inside all four arms before UNION/ranking/LIMIT; chunk rows authorize through their parent node; folding, counts, snippets, fusion inputs, pagination, and hydration re-apply the same scope |
+| Traversal / projections | graph node (+ edge via endpoints) | read | the caller-authorized induced subgraph, below |
+| Metrics | graph analytics | execute (whole-tenant) | dedicated permission; constrained scopes rejected |
+
+A constraint that cannot be represented in SQL for the target entity fails closed — never degrades to tenant-only filtering. One entity type's compiled scope is never reused for another ResourceType.
+
+**Induced authorized subgraph.** For read paths the authorized graph is: nodes admitted by the caller's scope, and edges whose *both* endpoints are admitted. Traversal expands only within it — seeds (explicit or search-derived) are authorized before expansion, unauthorized nodes never enter frontiers or visited sets, degree ordering, budgets, and truncation are computed on authorized rows only, and hydration runs under the same scope and snapshot. Filtering only the returned nodes would be too late: a path through a hidden node already leaks connectivity.
+
+**Anti-enumeration.** A denied resource is indistinguishable from a nonexistent one: not present in results, counts, truncation flags, or budget consumption; an unauthorized seed behaves exactly like an unknown key.
+
+**Plugins.** The gear remains the PEP for every engine. The selected graph-engine plugin receives a non-forgeable normalized authorization envelope; capability negotiation declares which authorization predicates the engine can enforce. An engine that cannot enforce the complete scope, holds stale authorization state, or cannot prove the requested revision is failed closed or bypassed for the built-in backend — never widened to tenant scope. The same resource-scoped adversarial suite runs against every backend.
+
+**Analytics.** v1 ships whole-tenant analytics only, behind the dedicated analytics permission; callers with constrained resource scopes are rejected, not widened. Resource-scoped analytics over the induced subgraph (with a normalized scope fingerprint in the cache identity) is the documented evolution path.
+
+### Read Consistency Contract
+
+A compound read — hybrid search (arms + folding + hydration), traversal plus hydration, a projection page — executes every statement against one read-only repeatable-read snapshot. The observed graph revision is captured inside that snapshot and returned in the response; pagination continuation tokens embed it, and a continuation against a newer revision is answered with the recorded revision's data when still retained, or a typed stale-token error otherwise — never a silent mix of revisions.
+
+Metric computation follows the same rule (revision and topology read from one snapshot) and publishes conditionally: after computing, the writer re-checks that the tenant's current revision still equals the captured one and inserts under a single-flight uniqueness guard; on mismatch the result is discarded (or recomputed), so a cache entry never claims a revision whose topology it did not see.
+
+### Telemetry and Audit Contract
+
+Telemetry is deny-by-default for content. Prohibited in logs, spans, metrics, and error attributes — raw or truncated: search/query text, node and edge payloads, chunk and snippet text, composed embedding input, embedding vectors, schema instances, provider request/response bodies, credentials and authorization headers. Permitted: counts, byte sizes, durations, bounded backend/stage/outcome enums, graph revision, and opaque correlation identifiers. Tenant, node, type, scope, and idempotency identifiers never appear in metric labels; they may appear in access-controlled logs and traces only as digests.
+
+Every attempted logical mutation writes a payload-free audit record, linked durably to the ingest transaction for committed mutations (table `ingest_audit`): tenant and producer, operation kind, opaque request/trace correlation, idempotency-key digest and request hash, scope-identity digest and generation where applicable, revision before/after, per-entity-family counts (inserted/updated/deleted/unchanged/materialized), and the terminal outcome (commit, replay, conflict, stale, rollback, or problem type). Sampled traces cannot reconstruct a lost-response replay or a wrong scope replacement after the fact; the audit record can.
+
 ### Traversal Backend Sketch
 
 The `GraphQueryPort` is the graph-engine plugin surface (`cpt-cf-graph-storage-contract-graph-engine-plugin`): engines declare capabilities and answer undeclared operations with a typed not-implemented error. The built-in PostgreSQL engine is the default plugin; its two execution paths implement the same port contract (seeds, bounded expansion, per-hop filters, budgets, truncation semantics) and ship in v1.
@@ -796,6 +864,17 @@ The `GraphQueryPort` is the graph-engine plugin surface (`cpt-cf-graph-storage-c
 The PG19 validation spike gating the traversal implementation freeze (ADR-0001 Confirmation) has run against PG19 beta2 + pgvector built from source — see [SPIKE-pg19-sqlpgq.md](./SPIKE-pg19-sqlpgq.md). Two binding implementation rules follow from it: the PGQ backend must emit direction-explicit patterns (the undirected shorthand plans as an all-vertex probe on the initial PG19 implementation), and neighborhood expansion must chain `GRAPH_TABLE` as a directed 1-hop primitive with per-hop dedup (multi-hop chain patterns enumerate paths and explode on hubs). Measured at reference shape (200k nodes / 660k edges, depth <= 3, random seeds): CTE p95 4.1 ms, PGQ hop-chain p95 8.8 ms — both far inside the NFR budget; single-statement KNN + graph + FTS composition confirmed at ~20-40 ms.
 
 The full graph-engine evaluation behind this strategy (12-engine scoreboard, FalkorDB/ArcadeDB smoke tests, AGE growth map, mirror-swap contingency triggers) is preserved in [graph-engine-alternatives.md](./graph-engine-alternatives.md).
+
+### Plugin Selection and Lifecycle
+
+The platform baseline (PluginV1, types-registry registration, scoped ClientHub clients) supplies the mechanics; this section owns the Graph Storage-specific contracts, defined separately for embedding providers and graph engines:
+
+- **GTS plugin schemas**: `gts.cf.kg.plugin.embedding_provider.v1~` and `gts.cf.kg.plugin.graph_engine.v1~` (derived from the platform plugin base), with validated properties — provider/engine identity, declared capabilities and authorization predicates, embedding-space identity or projection characteristics, priority.
+- **Versioned SDK traits** (`EmbeddingProviderV1`, `GraphEngineV1`) with typed request/result/error models; the schema major maps one-to-one to the trait version, and a registered instance resolves to a scoped ClientHub client of the matching trait version — an incompatible version is a deterministic selection error, never a silent downgrade.
+- **Selection**: a configured selector picks among registered instances (built-in defaults when none is configured: in-process ONNX provider, built-in PostgreSQL engine); ties break deterministically on (priority, instance id); no-match falls back to the built-in where one exists and fails readiness where it does not.
+- **Readiness and churn**: a selected plugin participates in readiness; cached selections are invalidated on instance disappearance or re-registration, and re-selection follows the same deterministic rules.
+- **Source epoch fencing (graph engines)**: the gear owns a non-reusable source epoch (timeline identifier) paired with the graph revision; a point-in-time restore of PostgreSQL starts a new epoch. Every engine reports its applied (epoch, revision) cursor; on epoch mismatch, revision rewind, or an unprovable cursor the gear fails closed or routes to the built-in backend until the plugin acknowledges a rebuild from the current epoch. The plugin owns projection reset/rebuild mechanics; the gear owns the epoch, the rebuild handoff, the activation gate, and the routing decision.
+- **Conformance**: every implementation — real and fake — runs the same contract suite, including the resource-scoped adversarial authorization tests.
 
 ### Capacity and Admission Contract
 
@@ -823,6 +902,12 @@ Every bound the gear enforces is a named configuration key with a safe default a
 | Per-tenant concurrent ingest batches | `tenant_max_ingest` | 4 | 1 – 64 | Admission |
 | Per-tenant concurrent queries | `tenant_max_queries` | 32 | 1 – 1,024 | Admission |
 | Idempotency record retention | `idempotency_retention` | 7 days | 1 – 90 days | Background cleanup |
+| Global analytics memory pool | `analytics_global_max_bytes` | 4 GiB | 512 MiB – 128 GiB | Global job admission |
+| Analytics queue depth | `analytics_queue_depth` | 16 | 1 – 256 | Global job admission |
+| Metric cache entry size | `metrics_max_entry_bytes` | 4 MiB | 64 KiB – 64 MiB | Publication |
+| Metric cache entries per tenant | `metrics_max_entries_per_tenant` | 200 | 10 – 10,000 | Background cleanup |
+| Metric cache retained revisions | `metrics_retained_revisions` | 3 | 1 – 50 | Background cleanup |
+| Metric parameter variants per metric | `metrics_max_param_variants` | 20 | 1 – 200 | Publication |
 
 Enforcement is layered, and the authoritative layer is shared:
 
@@ -830,7 +915,9 @@ Enforcement is layered, and the authoritative layer is shared:
 2. **Domain admission layer** — the authoritative check, executed identically for REST handlers and the ClientHub local client; nothing reaches storage or an engine backend without passing it. Per-tenant concurrency gates live here.
 3. **Execution backstops** — database `statement_timeout`, cooperative cancellation tokens on long computations, and per-hop/cumulative budget checks inside the traversal engines.
 
-Every rejection maps to the canonical resource-exhausted problem type (RFC-9457) carrying the limit name, the configured bound, and the requested value — distinguishable from validation errors so clients can implement backoff rather than "fix the request". Every limit exposes a saturation counter (rejections) and a high-watermark gauge, so capacity pressure is visible in telemetry before it becomes an incident (`cpt-cf-graph-storage-fr-observability`).
+Analytics additionally runs under a **global scheduler**: per-tenant concurrency alone cannot bound the sum across tenants, so jobs pass through a bounded queue and a process-wide memory pool — each job's estimated peak (from node/edge counts and key sizes) is reserved at start and released on success, failure, or cancellation; per-tenant running/queued limits keep fairness. Jobs deduplicate on (tenant, graph revision, metric, parameters, authorization-scope identity); a job superseded by a newer revision is cancelled cooperatively. Because a job can outlive gateway timeouts, the REST surface answers long computations with `202 Accepted` plus a job identifier and status/result endpoints; the SDK path exposes the same job contract.
+
+Every rejection maps to the canonical resource-exhausted problem type (RFC-9457) carrying the limit name, the configured bound, and the requested value — distinguishable from validation errors so clients can implement backoff rather than "fix the request". Every limit exposes a saturation counter (rejections) and a high-watermark gauge, so capacity pressure is visible in telemetry before it becomes an incident (`cpt-cf-graph-storage-fr-observability`), including metric-cache retained-bytes and cleanup-lag gauges.
 
 ### Base Ontology Publication
 

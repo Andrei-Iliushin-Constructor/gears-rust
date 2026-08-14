@@ -75,6 +75,7 @@ Concretely:
 - Until PG20-class SQL/PGQ, variable-depth expansion stays on the CTE backend even on PG19 — the port hides which backend serves which request shape.
 - Consumer-facing declarative graph queries (a bounded pattern DSL over the port) become a possible later API addition; whether and when to expose one is tracked as a PRD open question.
 - The edge table's index design (tenant, source, target, type) remains the performance backbone for both backends and must be treated as such in DESIGN and benchmarks.
+- The 1M–500M aggregate range is supported through admitted scale profiles, not a single benchmark point: `tenant_id` is the partition key and participates in every primary, unique, and foreign-key contract from day one, so partitioning at scale is a physical reorganization rather than an identity migration. Scale profiles (10M / 100M / 500M nodes with proportional edge and chunk cardinality) each carry benchmark gates covering heap and index amplification (every node and chunk row feeds GIN, tsvector, and HNSW indexes), write and backup amplification, and explicit partition triggers; profiles beyond the benchmarked one are admitted only when their gates pass. Deployment documentation selects hardware within this envelope.
 - Operationally the platform keeps exactly one database technology; PostgreSQL major upgrades are not coupled to any graph-extension release cadence.
 
 ### Confirmation

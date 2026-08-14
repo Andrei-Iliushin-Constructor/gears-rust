@@ -327,7 +327,7 @@ The system **MUST** return a single node by key with its type, payload, embeddin
 
 - [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-content-chunking`
 
-When a node is ingested with long-form text content, the system **MUST** split it into deterministic chunks with stable chunk identifiers encoding location (section and offsets, never content), preserve exact character offsets into the raw text, index each chunk for lexical search, and embed each chunk. Re-ingesting unchanged content **MUST** produce identical chunks.
+When a node is ingested with long-form text content, the system **MUST** split it into deterministic chunks with stable chunk identifiers encoding location (section and offsets, never content), preserve exact character offsets into the raw text, index each chunk for lexical search, and embed each chunk. Re-ingesting unchanged content **MUST** produce identical chunks. Supplied content is an exact replacement set: in the same transaction the system **MUST** delete previous chunks absent from the newly computed set, so removed content can never remain searchable.
 
 - **Rationale**: Retrieval quality over long documents requires passage-level granularity; deterministic chunking keeps re-ingest idempotent.
 - **Actors**: `cpt-cf-graph-storage-actor-producer-gear`, `cpt-cf-graph-storage-actor-data-analyst`
@@ -347,7 +347,7 @@ The system **MUST** enforce a configurable payload size ceiling per node and rej
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-embedding-pipeline`
 
-During ingest the system **MUST** compose a searchable text per node (name plus string payload attributes designated as vectorizable plus a bounded content prefix), embed it and every content chunk through the configured embedding provider, and store the vectors for similarity search. Ingest requests **MUST** be able to skip embedding, and a non-embedding upsert **MUST NOT** erase existing vectors. Embedding **MUST** be batched across the ingest request.
+During ingest the system **MUST** compose a searchable text per node (name plus string payload attributes designated as vectorizable plus a bounded content prefix), embed it and every content chunk through the configured embedding provider, and store the vectors for similarity search. The system **MUST** persist a canonical hash of each embedding input: on a skip-embedding upsert an existing vector is preserved only while its input hash is unchanged; if the vectorizable text changed, the vector **MUST** be marked stale and excluded from similarity search until re-embedding completes — a stored vector never ranks content that is no longer stored. Embedding **MUST** be batched across the ingest request.
 
 - **Rationale**: Vector search is a first-class retrieval arm; controlled skipping supports cheap metadata-only re-syncs.
 - **Actors**: `cpt-cf-graph-storage-actor-producer-gear`, `cpt-cf-graph-storage-actor-embedding-provider`
@@ -396,6 +396,15 @@ The system **MUST** provide hybrid search that runs the lexical and vector arms 
 
 All search modes **MUST** support filtering results by node type, accepting exact GTS identifiers and GTS family patterns (a trailing wildcard matching all types derived from a base), with pattern matching that treats GTS identifier punctuation literally.
 
+#### Consistent Compound Reads
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-read-consistency`
+
+Every compound read — hybrid search (multiple arms plus hydration), traversal with hydration, and projections — **MUST** observe one consistent graph state: all statements of one request execute against a single repeatable-read snapshot (or an equivalent revision-pinned protocol). Responses **MUST** report the observed graph revision, and pagination continuation tokens **MUST** be bound to it, so a continued read never silently mixes revisions.
+
+- **Rationale**: Individually atomic statements can still compose a response describing a graph state that never existed when a concurrent ingest commits mid-request.
+- **Actors**: `cpt-cf-graph-storage-actor-data-analyst`, `cpt-cf-graph-storage-actor-consumer-gear`
+
 - **Rationale**: Consumers usually search within a type family ("all findings", "all documents"), and GTS derivation makes family filters the natural unit.
 - **Actors**: `cpt-cf-graph-storage-actor-data-analyst`, `cpt-cf-graph-storage-actor-consumer-gear`
 
@@ -434,7 +443,7 @@ The system **MUST** project nodes matching criteria into tabular results: select
 
 - [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-graph-metrics`
 
-The system **MUST** compute per-node graph metrics on demand: degree (total, in, out), PageRank, and connected components, with an option to exclude named edge types from the computation. Metric results **MUST** be deterministic for a given graph state.
+The system **MUST** compute per-node graph metrics on demand: degree (total, in, out), PageRank, and connected components, with an option to exclude named edge types from the computation. Metric results **MUST** be deterministic for a given graph state. Whole-graph analytics executes under the dedicated whole-tenant analytics permission: callers with a constrained resource scope **MUST** be rejected rather than served tenant-wide results (resource-scoped analytics is a documented future evolution). Computations that exceed interactive deadlines run as asynchronous jobs with a status/result contract.
 
 - **Rationale**: Degree and centrality drive projection truncation and give analysts a structural ranking of entities; edge-type exclusion prevents hub types from dominating.
 - **Actors**: `cpt-cf-graph-storage-actor-data-analyst`
@@ -472,7 +481,7 @@ All graph data — types registered per tenant scope, nodes, edges, chunks, revi
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-access-control`
 
-Every API operation **MUST** be authenticated and authorized through the platform policy decision point, with separate permissions for ontology administration, ingest, and query, declared as GTS permission instances.
+Every API operation **MUST** be authenticated and authorized through the platform policy decision point, with separate permissions for ontology administration, ingest, query, and whole-tenant analytics, declared as GTS permission instances. Authorization is resource-level, not tenant-level only: the PDP-derived access scope **MUST** confine every read path — search arms before ranking, traversal expansion (the caller-authorized induced subgraph), projections, and hydration — per the authorization matrix in DESIGN, with identical enforcement for the REST and in-process paths through a shared policy-enforcement layer. Denied resources **MUST** be indistinguishable from nonexistent ones in results, counts, truncation flags, and budget consumption.
 
 - **Rationale**: Producers, consumers, and administrators have different privileges; write access to a shared graph must be explicitly granted.
 - **Actors**: `cpt-cf-graph-storage-actor-authz-resolver`, `cpt-cf-graph-storage-actor-platform-admin`
@@ -503,7 +512,7 @@ The system **MUST** ship a transport-agnostic SDK crate with a typed client trai
 
 - [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-observability`
 
-The system **MUST** emit structured tracing for ingest, search, traversal, and analytics operations (batch sizes, arm timings, traversal depth and frontier sizes, cache hits) and expose operational metrics through the platform telemetry stack, including saturation counters for every enforced admission limit. Logs **MUST NOT** contain payload content.
+The system **MUST** emit structured tracing for ingest, search, traversal, and analytics operations (batch sizes, arm timings, traversal depth and frontier sizes, cache hits) and expose operational metrics through the platform telemetry stack, including saturation counters for every enforced admission limit. Telemetry is deny-by-default for content: raw or truncated query text, payloads, chunk or snippet text, composed embedding input, vectors, schema instances, and provider request/response bodies **MUST NOT** appear in logs, spans, metrics, or error attributes — only structural fields from the explicit allowlist (counts, sizes, durations, bounded enums, graph revision, opaque correlation identifiers) are permitted (see DESIGN § Telemetry and Audit Contract).
 
 - **Rationale**: Query-shape problems (dense hubs, oversized batches) are diagnosable only with structural telemetry; payloads may hold sensitive content.
 - **Actors**: `cpt-cf-graph-storage-actor-platform-admin`
@@ -634,8 +643,8 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 - [ ] `p3` - **ID**: `cpt-cf-graph-storage-contract-graph-engine-plugin`
 
 - **Direction**: required from client (plugin implementations)
-- **Protocol/Format**: Rust plugin trait behind the traversal port — graph-query execution with declared capabilities (neighborhood expansion, bounded traversal, shortest path, pattern queries, in-engine analytics); operations outside a plugin's declared capabilities are answered with a typed not-implemented error, never approximated
-- **Compatibility**: The built-in PostgreSQL engine (SQL/PGQ plus recursive CTE) is the default plugin and defines the baseline capability set. External-engine plugins are additive: they serve capabilities the baseline lacks over a rebuildable projection of the relational source of truth, must uphold the gear's tenant-isolation obligations, and must declare their projection's consistency lag. Relational storage, ingest, and search are not pluggable.
+- **Protocol/Format**: Rust plugin trait behind the traversal port — graph-query execution with declared capabilities (neighborhood expansion, bounded traversal, shortest path, pattern queries, in-engine analytics), including which authorization predicates the plugin can enforce; operations outside a plugin's declared capabilities are answered with a typed not-implemented error, never approximated
+- **Compatibility**: The built-in PostgreSQL engine (SQL/PGQ plus recursive CTE) is the default plugin and defines the baseline capability set. External-engine plugins are additive: they serve capabilities the baseline lacks over a rebuildable projection of the relational source of truth, must uphold the gear's tenant-isolation obligations and authorization equivalence (the gear remains the policy-enforcement point and passes a non-forgeable authorization envelope; a plugin that cannot enforce the full scope fails closed or is bypassed for the built-in engine), and must report their applied (source epoch, graph revision) cursor — the epoch is a non-reusable timeline identifier so a projection surviving a point-in-time restore of the source database is detected and rebuilt rather than served. Relational storage, ingest, and search are not pluggable.
 
 ## 8. Use Cases
 
@@ -759,6 +768,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 | Types Registry gear | Platform registration of the gear's GTS base types and permission instances | p1 |
 | Embedding provider | In-process ONNX runtime or remote inference endpoint producing fixed-dimension vectors | p1 |
 | File Storage gear | Blob storage for heavy content referenced from node payloads | p2 |
+| ToolKit `toolkit-db` scoped custom-query API | Secure execution path for the hand-written traversal SQL (recursive CTE, `GRAPH_TABLE`) under a compiled access scope — the platform data layer otherwise forbids raw SQL outside migrations; a blocking platform prerequisite tracked with the ToolKit owners | p1 |
 
 ## 11. Assumptions
 
@@ -780,6 +790,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 | Shared ontologies evolve incompatibly across producers | Ingest failures or semantic drift between producers | Immutable schemas per GTS version, conflict-rejecting registration, family patterns that keep older derived types valid |
 | PostgreSQL 19 GA slips, or a PG19 beta regression hits the pinned stack | The gear ships on a beta database longer than planned | The stack is pinned (beta image + pgvector revision) and validated by the PG19 spike and the prototype's full test suite; the recursive-CTE backend can serve the whole fixed-depth API if a PGQ-specific regression appears; re-pin to stock at GA |
 | SQL/PGQ variable-length paths arrive later than PG20 | The CTE backend carries variable-depth expansion longer | The traversal port isolates the split; consumers see no API difference; a dedicated traversal mirror remains the measured-bottleneck contingency (ADR-0001) |
+| The `toolkit-db` scoped custom-query primitive is not delivered in time | Traversal SQL has no compliant secure execution path; implementation blocks | Requirement raised with ToolKit owners early (narrow `query_scoped` primitive with alias-to-scope bindings, fail-closed compilation); conformance tests agreed as part of the contract; the raw executor and any lint exception stay inside toolkit-db |
 
 ## 13. Open Questions
 
