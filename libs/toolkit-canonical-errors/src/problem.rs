@@ -613,18 +613,38 @@ impl TryFrom<Problem> for CanonicalError {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "axum")]
+fn service_unavailable_retry_after_seconds(problem: &Problem) -> Option<u64> {
+    if category_from_problem_type(&problem.problem_type) != Some("service_unavailable") {
+        return None;
+    }
+
+    ServiceUnavailable::deserialize(&problem.context)
+        .ok()?
+        .retry_after_seconds
+}
+
+#[cfg(feature = "axum")]
 impl axum::response::IntoResponse for Problem {
     fn into_response(self) -> axum::response::Response {
         match serde_json::to_vec(&self) {
             Ok(body) => {
                 let status = http::StatusCode::from_u16(self.status)
                     .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
-                (
+                let retry_after_seconds = service_unavailable_retry_after_seconds(&self);
+                let mut response = (
                     status,
                     [(http::header::CONTENT_TYPE, APPLICATION_PROBLEM_JSON)],
                     body,
                 )
-                    .into_response()
+                    .into_response();
+
+                if let Some(seconds) = retry_after_seconds {
+                    response
+                        .headers_mut()
+                        .insert(http::header::RETRY_AFTER, http::HeaderValue::from(seconds));
+                }
+
+                response
             }
             Err(e) => {
                 tracing::error!(
