@@ -51,8 +51,10 @@ Chosen option: "C. In-process Rust analytics with explicit determinism contracts
 - **Degree** (total/in/out): computed from the edge topology (or SQL aggregation when cheaper).
 - **Connected components**: union-find over the undirected topology.
 - **PageRank**: power iteration over the directed topology with fixed damping, tolerance, and iteration cap — deterministic.
-- **Betweenness centrality**: Brandes exact below a node threshold; above it, sampled Brandes with a seeded, documented sampling scheme — deterministic for a fixed graph and configuration, not comparable to NetworkX's sampling.
-- **Community detection**: Louvain-family algorithm with seeded initialization; results stabilized by the prototype's ordering convention (communities sorted by size, then smallest member key) — stable across recomputation of the same graph, not identical to NetworkX partitions.
+- **Betweenness centrality**: Brandes exact below a node threshold; above it, sampled Brandes over the canonicalized topology with a seeded, documented sampling scheme — deterministic for a fixed graph and configuration, not comparable to NetworkX's sampling.
+- **Community detection**: Louvain-family algorithm with seeded initialization over the canonicalized topology; results stabilized by the prototype's ordering convention (communities sorted by size, then smallest member key) — stable across recomputation of the same graph, not identical to NetworkX partitions.
+
+**Canonical input ordering** underpins every seeded guarantee: a seed alone does not make an algorithm repeatable when database row order, hash-map iteration, or adjacency layout varies between runs. The topology projection is therefore canonicalized before any seeded algorithm executes — nodes ordered by node key; edges by (type, source key, target key, discriminator); adjacency lists sorted by neighbor key; and every algorithmic tie-break defined on node keys. Determinism comes from ordered inputs plus the seed, never from incidental iteration order.
 
 All metrics support edge-type exclusion, load only node keys and typed edges (never payloads), and are cached by graph revision and parameters.
 
@@ -66,7 +68,7 @@ All metrics support edge-type exclusion, load only node keys and typed edges (ne
 
 ### Confirmation
 
-- Golden tests on fixed small graphs assert exact values for degree, components, and PageRank (within tolerance) and assert stability (same output across repeated runs) for betweenness and communities.
+- Golden tests on fixed small graphs assert exact values for degree, components, and PageRank (within tolerance) and assert stability for betweenness and communities — including runs with deliberately shuffled input row order, which must produce identical outputs (canonical ordering, not luck, carries the determinism).
 - Profiling tests verify the topology-only memory footprint and ceiling enforcement (`cpt-cf-graph-storage-nfr-analytics-memory`).
 - API documentation review confirms each metric's determinism contract is stated.
 

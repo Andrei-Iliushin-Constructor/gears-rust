@@ -48,20 +48,22 @@ The prototype embedded node search text and content chunks with `sentence-transf
 
 ## Decision Outcome
 
-Chosen option: "D. Pluggable embedding provider", because it ports the prototype's proven encoder-protocol design onto the platform's plugin pattern: one `EmbeddingProvider` contract (batch texts to vectors; declared model identity and dimension), selected per deployment. The default plugin runs an ONNX MiniLM-class sentence-embedding model in-process (matching the prototype's 384-dimension, normalized-vector behavior); a second plugin calls a remote inference endpoint; a deterministic hash-based fake serves CI. The active provider's model identity and dimension are pinned in deployment configuration and checked by the readiness dimension guard. Query-time embedding always uses the same active provider as ingest.
+Chosen option: "D. Pluggable embedding provider", because it ports the prototype's proven encoder-protocol design onto the platform's plugin pattern: one `EmbeddingProvider` contract (batch texts to vectors; declared embedding-space identity and dimension), selected per deployment. The default plugin runs an ONNX MiniLM-class sentence-embedding model in-process (matching the prototype's 384-dimension, normalized-vector behavior); a second plugin calls a remote inference endpoint; a deterministic hash-based fake serves CI.
+
+Providers declare a full **embedding-space identity**, not merely a dimension: the exact model artifact (name plus version or content hash), the tokenizer artifact, and the preprocessing, pooling, and normalization configuration. Dimension alone is not a sufficient guard — a different tokenizer, pooling rule, or weight set can still emit 384-dimensional normalized vectors that are mutually incomparable. The identity under which stored vectors were produced is recorded durably alongside them; readiness compares the active provider's identity (and dimension) against that record, and on mismatch fails readiness and blocks vector search until re-embedding completes. Query-time embedding always uses the same active provider as ingest.
 
 ### Consequences
 
 - The gear defines and publishes the provider plugin contract (`cpt-cf-graph-storage-contract-embedding-provider`) with model identity, dimension, and batch semantics; plugins register as GTS plugin instances.
 - Changing the active model is an operational event, not a request-level option: it requires re-embedding stored vectors, and the procedure (and its trigger — see PRD § 13 open question on model governance) must be documented before v1 freeze.
 - The in-process default keeps small deployments dependency-free (no inference service), at the cost of bundling ONNX runtime and model weights with the gear image.
-- Mixed-model graphs are structurally prevented: one provider configuration per deployment per vector column lifetime; the dimension guard turns drift into a readiness failure instead of silent quality loss.
+- Mixed-model graphs are structurally prevented: one provider configuration per deployment per vector column lifetime, and the recorded embedding-space identity turns any drift — same-dimension model swaps included — into a readiness failure with vector search blocked, instead of silent quality loss.
 - Embedding cost stays out of the ingest critical path decision: producers may skip embedding per request and rely on later re-embedding passes without losing vectors already stored.
 
 ### Confirmation
 
 - Contract tests run all three plugins (ONNX, remote via mock server, fake) against the provider contract, including batch behavior and dimension declaration.
-- Readiness tests cover dimension mismatch (provider vs. schema) and provider unavailability.
+- Readiness tests cover dimension mismatch (provider vs. schema), embedding-space identity mismatch at identical dimension (a different model producing 384-dim vectors must fail readiness and block vector search), and provider unavailability.
 - An end-to-end test verifies query-time and ingest-time embeddings agree (a document ingested and then queried with its own text ranks first in the vector arm).
 
 ## Pros and Cons of the Options

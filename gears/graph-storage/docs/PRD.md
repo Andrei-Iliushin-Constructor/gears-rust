@@ -272,7 +272,7 @@ Nodes **MUST** be identified by a producer-supplied stable node key, unique per 
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-reference-nodes`
 
-The system **MUST** store owned nodes (entities whose system of record is the graph, such as Finding nodes) and reference nodes (projections of managed objects owned elsewhere, such as commits, pull requests, and comments) in one unified node model: both are GTS-typed nodes distinguished by their type's metadata, not by separate storage or APIs. Reference node payloads **MUST** carry the canonical upstream identifier of the managed object. All query capabilities (search, traversal, projection, analytics) **MUST** treat both families uniformly.
+The system **MUST** store owned nodes (entities whose system of record is the graph, such as Finding nodes) and reference nodes (projections of managed objects owned elsewhere, such as commits, pull requests, and comments) in one unified node model: both are GTS-typed nodes distinguished by their type's metadata, not by separate storage or APIs. Reference node payloads **MUST** carry a source-qualified canonical identity — the owning source (gear or external system), the object kind, and the native identifier — so that identical native identifiers from different sources remain distinct within a tenant, and reference-node keys **MUST** derive from that full identity. All query capabilities (search, traversal, projection, analytics) **MUST** treat both families uniformly.
 
 - **Rationale**: The platform value of the graph is connecting new analysis entities (Findings) to existing managed objects; a split model would fragment every query path.
 - **Actors**: `cpt-cf-graph-storage-actor-producer-gear`, `cpt-cf-graph-storage-actor-consumer-gear`
@@ -344,13 +344,13 @@ During ingest the system **MUST** compose a searchable text per node (name plus 
 - **Rationale**: Vector search is a first-class retrieval arm; controlled skipping supports cheap metadata-only re-syncs.
 - **Actors**: `cpt-cf-graph-storage-actor-producer-gear`, `cpt-cf-graph-storage-actor-embedding-provider`
 
-#### Embedding Dimension Guard
+#### Embedding Identity and Dimension Guard
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-embedding-dim-guard`
 
-The system **MUST** verify at readiness that the configured embedding dimension matches the database vector column definition, and **MUST** reject ingest batches whose produced vectors do not match the configured dimension. Readiness reporting **MUST** state the active provider and dimension.
+The system **MUST** verify at readiness that the configured embedding dimension matches the database vector column definition, and **MUST** reject ingest batches whose produced vectors do not match the configured dimension. The system **MUST** also record the embedding-space identity (model artifact, tokenizer, preprocessing and pooling configuration) under which stored vectors were produced, verify the active provider against that record at readiness, and on mismatch **MUST** fail readiness and block vector search until re-embedding completes. Readiness reporting **MUST** state the active provider identity and dimension.
 
-- **Rationale**: A silent dimension mismatch corrupts similarity ranking; the prototype documented this as a real failure mode.
+- **Rationale**: A silent dimension mismatch corrupts similarity ranking, and a same-dimension model swap corrupts it invisibly; the prototype documented the dimension case as a real failure mode, and identity verification closes the remaining gap.
 - **Actors**: `cpt-cf-graph-storage-actor-platform-admin`, `cpt-cf-graph-storage-actor-embedding-provider`
 
 ### 5.5 Search
@@ -618,8 +618,8 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 - [ ] `p2` - **ID**: `cpt-cf-graph-storage-contract-embedding-provider`
 
 - **Direction**: required from client (plugin implementations)
-- **Protocol/Format**: Rust plugin trait — batch text-to-vector with declared model name and dimension
-- **Compatibility**: Providers declare model identity and dimension; a deployment pins one provider configuration per vector column lifetime.
+- **Protocol/Format**: Rust plugin trait — batch text-to-vector with a declared embedding-space identity (model artifact name plus version or hash, tokenizer artifact, preprocessing and pooling configuration) and dimension
+- **Compatibility**: Providers declare the full embedding-space identity, not only a dimension; a deployment pins one provider configuration per vector column lifetime, and changing it requires re-embedding.
 
 #### Graph Engine Plugin Contract
 

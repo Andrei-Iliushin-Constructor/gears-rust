@@ -55,7 +55,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p2` | `cpt-cf-graph-storage-fr-content-chunking` | Chunker produces deterministic, offset-preserving chunks with location-encoded identifiers; chunks indexed and embedded individually |
 | `p2` | `cpt-cf-graph-storage-fr-heavy-content-offload` | Payload size ceiling enforced at ingest; payloads reference file-storage identifiers that the gear never dereferences |
 | `p1` | `cpt-cf-graph-storage-fr-embedding-pipeline` | Embedding Coordinator composes search text from vectorized attributes, batches provider calls, preserves vectors on non-embedding upserts |
-| `p1` | `cpt-cf-graph-storage-fr-embedding-dim-guard` | Readiness compares provider-declared dimension with the vector column; ingest rejects mismatched vector widths |
+| `p1` | `cpt-cf-graph-storage-fr-embedding-dim-guard` | Readiness compares the provider-declared embedding-space identity (model, tokenizer, preprocessing/pooling) and dimension against the identity recorded for stored vectors; mismatch fails readiness and blocks vector search; ingest rejects mismatched vector widths |
 | `p1` | `cpt-cf-graph-storage-fr-lexical-search` | Lexical arm: web-style tsquery over node and chunk tsvectors with ranked results, snippets, and chunk-to-node folding |
 | `p1` | `cpt-cf-graph-storage-fr-vector-search` | Vector arm: provider-embedded query against HNSW cosine indexes over node and chunk vectors, folded to nodes |
 | `p1` | `cpt-cf-graph-storage-fr-hybrid-search` | Search Service runs both arms independently and fuses with RRF, reporting per-arm ranks |
@@ -210,7 +210,7 @@ The gear integrates with the CF/Gears runtime: ToolKit gear lifecycle, Operation
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-constraint-single-embedding-space`
 
-Exactly one embedding provider configuration (model identity and dimension) is active per deployment at a time; the vector column dimension is fixed at migration time and verified at readiness. Changing the model requires re-embedding. ADR: [`cpt-cf-graph-storage-adr-embedding-provider`](./ADR/0005-cpt-cf-graph-storage-adr-embedding-provider.md).
+Exactly one embedding provider configuration is active per deployment at a time, identified by its full embedding-space identity (model artifact, tokenizer, preprocessing and pooling configuration) — not only its dimension. The identity under which stored vectors were produced is recorded durably; readiness verifies the active provider against it and blocks vector search on mismatch. The vector column dimension is fixed at migration time. Changing the model requires re-embedding. ADR: [`cpt-cf-graph-storage-adr-embedding-provider`](./ADR/0005-cpt-cf-graph-storage-adr-embedding-provider.md).
 
 #### Payload Size Ceiling
 
@@ -365,7 +365,7 @@ One component owns the embedding lifecycle so model identity, batching, and dime
 
 ##### Responsibility scope
 
-Search-text composition from name, vectorized attributes, and bounded content prefix; batched provider calls for node texts and chunks; per-request skip semantics with vector preservation; query-text embedding for the vector arm; provider identity and dimension exposure for readiness.
+Search-text composition from name, vectorized attributes, and bounded content prefix; batched provider calls for node texts and chunks; per-request skip semantics with vector preservation; query-text embedding for the vector arm; exposure of the provider's embedding-space identity and dimension for readiness, and durable recording of the identity under which stored vectors were produced.
 
 ##### Responsibility boundaries
 
@@ -452,7 +452,7 @@ Whole-graph metrics need an in-memory topology and per-algorithm determinism con
 
 ##### Responsibility scope
 
-Topology-only projection loading (keys and typed edge pairs) under the configured node ceiling; degree, components, PageRank; seeded sampled betweenness and seeded community detection with stable ordering; edge-type exclusion; revision-keyed cache reads/writes; cooperative cancellation.
+Topology-only projection loading (keys and typed edge pairs) under the configured node ceiling, canonicalized before any seeded algorithm runs (nodes by key, edges by type/source/target/discriminator, adjacency sorted, key-based tie-breaks — determinism comes from ordered inputs plus the seed, per ADR-0004); degree, components, PageRank; seeded sampled betweenness and seeded community detection with stable ordering; edge-type exclusion; revision-keyed cache reads/writes; cooperative cancellation.
 
 ##### Responsibility boundaries
 

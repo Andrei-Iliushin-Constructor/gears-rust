@@ -46,7 +46,7 @@ The graph must hold two families of members. Owned entities — such as Finding 
 
 ## Decision Outcome
 
-Chosen option: "C. Single typed node table with GTS-expressed family semantics", because it keeps one uniform storage and query model while the type system — not the storage engine — carries the semantic distinction. The gear publishes GTS base types: an owned-node base, a reference-node base (whose schema requires a canonical upstream identifier field), a phantom type, and a provenance attribute type for analysis-originated content. Producers derive their domain types (Finding from the owned base; commit, pull request, and comment from the reference base). Reference payloads hold only what queries need: the canonical identifier and a small projection of searchable and filterable attributes.
+Chosen option: "C. Single typed node table with GTS-expressed family semantics", because it keeps one uniform storage and query model while the type system — not the storage engine — carries the semantic distinction. The gear publishes GTS base types: an owned-node base, a reference-node base, a phantom type, and a provenance attribute type for analysis-originated content. Producers derive their domain types (Finding from the owned base; commit, pull request, and comment from the reference base). The reference-node base schema requires a **source-qualified canonical identity** — the owning source (gear or external system identifier), the object kind, and the native identifier — because a native identifier alone is not collision-safe: two upstream systems can expose the same native ID within one tenant. Reference payloads hold only what queries need: that identity triple and a small projection of searchable and filterable attributes.
 
 ### Consequences
 
@@ -55,7 +55,7 @@ Chosen option: "C. Single typed node table with GTS-expressed family semantics",
 - Consumers resolving a reference node's full record must call the owning gear using the canonical identifier; the graph API never proxies upstream reads.
 - Edge semantics split along the same seam: static edges are recomputed on scope replacement, analysis edges carry provenance and survive it — so re-mirroring a repository never erases Finding conclusions.
 - Phantom nodes make cross-producer ordering a non-problem: a Finding batch may reference a commit before the mirror producer has pushed it; the phantom is replaced in place later. That replacement is governed by an explicit atomic transition contract (DESIGN § Phantom Materialization Contract): identity and edges preserved, incident edges revalidated against the concrete type's endpoint constraints, batch-level rejection on violation, deterministic resolution under concurrent ingests.
-- Uniqueness of node keys per tenant makes the node-key scheme a shared producer convention that DESIGN must specify (deterministic keys per family, e.g., derived from canonical upstream identifiers for reference nodes).
+- Uniqueness of node keys per tenant makes the node-key scheme a shared producer convention that DESIGN must specify. For reference nodes the key is derived deterministically from the full identity triple (source, object kind, native identifier), never from the native identifier alone. Collision behavior is therefore defined by construction: the same triple ingested by any producer converges onto the same node (idempotent upsert), while identical native identifiers from different sources remain distinct nodes.
 
 ### Confirmation
 
