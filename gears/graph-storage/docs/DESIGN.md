@@ -19,6 +19,7 @@
   - [3.7 Database schemas & tables](#37-database-schemas--tables)
 - [4. Additional context](#4-additional-context)
   - [Prototype Lineage](#prototype-lineage)
+  - [Phantom Materialization Contract](#phantom-materialization-contract)
   - [Traversal Backend Sketch](#traversal-backend-sketch)
   - [Base Ontology Publication](#base-ontology-publication)
 - [5. Traceability](#5-traceability)
@@ -33,7 +34,7 @@ Graph Storage is a stateless-above-PostgreSQL platform gear that stores one type
 
 The design generalizes the `studio-graph-storage` prototype: its data model (typed nodes and edges with GTS contracts, deterministic keys, phantom nodes, static/analysis edge split), its retrieval stack (tsvector + pgvector + RRF fusion, chunk folding), and its analytics surface are carried forward; its Python-only dependencies (Apache AGE, NetworkX, sentence-transformers) are replaced by decisions recorded in ADR-0001, ADR-0004, and ADR-0005; and platform obligations the prototype deliberately skipped — tenancy, access control, pagination, batched writes, observability — are designed in from the start.
 
-The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a typed client trait and transport-agnostic models, an implementation crate with API/domain/infra layers, and plugin crates for embedding providers.
+The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a typed client trait and transport-agnostic models, an implementation crate with API/domain/infra layers, and two plugin surfaces — embedding providers (ADR-0005) and graph engines behind the `GraphQueryPort` (ADR-0001), with the built-in PostgreSQL engine as the default graph-engine plugin.
 
 ### 1.2 Architecture Drivers
 
@@ -62,7 +63,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-fr-graph-traversal` | Traversal Service expands breadth-first through the GraphQueryPort: SQL/PGQ `GRAPH_TABLE` hop patterns from v1 for fixed-depth shapes (direction-explicit, per-hop dedup), depth-bounded recursive SQL for variable depth until PG20-class quantifiers, per ADR-0001 |
 | `p1` | `cpt-cf-graph-storage-fr-neighborhood-projection` | Projection Service returns degree-ordered, budget-truncated neighborhoods with phantom toggle and metric annotations |
 | `p1` | `cpt-cf-graph-storage-fr-tabular-projection` | Projection Service serves OData-filtered, paginated node tables over annotated (indexed) payload attributes |
-| `p2` | `cpt-cf-graph-storage-fr-graph-metrics` | Analytics Service computes degree, PageRank, components over a topology-only projection per ADR-0004 |
+| `p2` | `cpt-cf-graph-storage-fr-graph-metrics` | Graph Analytics Service computes degree, PageRank, components over a topology-only projection per ADR-0004 |
 | `p3` | `cpt-cf-graph-storage-fr-graph-analytics-extended` | Seeded sampled Brandes betweenness and seeded Louvain-family communities with stable ordering; no NetworkX parity |
 | `p2` | `cpt-cf-graph-storage-fr-metrics-cache` | Metric results cached by (tenant, graph revision, metric, parameters); cache/computed provenance reported |
 | `p1` | `cpt-cf-graph-storage-fr-tenant-isolation` | Every entity is tenant-scoped through SecureORM; traversal recursion, search arms, and analytics loading carry the tenant predicate |
@@ -79,7 +80,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-nfr-ingest-throughput` | 10k nodes + 20k edges <= 60 s | Ingest Pipeline, Storage Layer | Batched multi-row statements, single transaction, validation before writes, bounded per-batch memory | Ingest benchmark suite on reference profile |
 | `p1` | `cpt-cf-graph-storage-nfr-search-latency` | Hybrid p95 <= 500 ms at 100k nodes | Search Service, Storage Layer | Independent arm queries each using its index (GIN, HNSW), bounded arm limits, fusion in memory | Search benchmarks on seeded reference graph |
 | `p1` | `cpt-cf-graph-storage-nfr-traversal-latency` | Depth-3 p95 <= 1 s at 500k edges | Traversal Service, Storage Layer | Composite edge indexes (tenant, src), (tenant, dst); per-hop frontier bounding; node budgets | Traversal benchmarks on seeded reference graph |
-| `p2` | `cpt-cf-graph-storage-nfr-analytics-memory` | Topology-only, ceiling-enforced | Analytics Service | Load node keys and typed edge pairs only; refuse graphs above configured ceiling | Memory profiling tests |
+| `p2` | `cpt-cf-graph-storage-nfr-analytics-memory` | Topology-only, ceiling-enforced | Graph Analytics Service | Load node keys and typed edge pairs only; refuse graphs above configured ceiling | Memory profiling tests |
 | `p1` | `cpt-cf-graph-storage-nfr-tenant-zero-leak` | Zero cross-tenant results | Storage Layer, all query components | Tenant predicate injected by SecureORM scoping in every query including recursive CTEs; no raw unscoped SQL | Adversarial multi-tenant integration tests |
 | `p1` | `cpt-cf-graph-storage-nfr-code-coverage` | >= 85% line coverage | All crates | Trait-based ports enable mock-driven unit tests; integration tests against real PostgreSQL | `cargo llvm-cov` in CI |
 
@@ -90,7 +91,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | [`cpt-cf-graph-storage-adr-single-postgres-store`](./ADR/0001-cpt-cf-graph-storage-adr-single-postgres-store.md) | Single PostgreSQL 19+ store (pgvector only); graph queries behind the GraphQueryPort with SQL/PGQ active from v1 (fixed-depth shapes) and recursive CTE for variable depth; pinned beta image until PG19 GA; Apache AGE not carried into the gear; dedicated traversal mirror as a measured-bottleneck contingency | `cpt-cf-graph-storage-principle-single-source-of-truth`, `cpt-cf-graph-storage-component-traversal-service`, `cpt-cf-graph-storage-component-storage-layer` |
 | [`cpt-cf-graph-storage-adr-unified-node-model`](./ADR/0002-cpt-cf-graph-storage-adr-unified-node-model.md) | One typed node model; owned vs. reference semantics via GTS base types; provenance-gated scope replacement | `cpt-cf-graph-storage-principle-reference-not-replica`, `cpt-cf-graph-storage-principle-provenance-survives-resync`, `cpt-cf-graph-storage-component-ontology-registry`, `cpt-cf-graph-storage-component-ingest-pipeline` |
 | [`cpt-cf-graph-storage-adr-metadata-partitioning`](./ADR/0003-cpt-cf-graph-storage-adr-metadata-partitioning.md) | Common columns + schema-declared indexed/vectorized attributes + payload ceiling with file-storage offload | `cpt-cf-graph-storage-principle-metadata-only-graph`, `cpt-cf-graph-storage-component-ontology-registry`, `cpt-cf-graph-storage-component-projection-service` |
-| [`cpt-cf-graph-storage-adr-analytics-in-rust`](./ADR/0004-cpt-cf-graph-storage-adr-analytics-in-rust.md) | In-process Rust analytics with per-metric determinism contracts; NetworkX parity waived | `cpt-cf-graph-storage-component-analytics-service` |
+| [`cpt-cf-graph-storage-adr-analytics-in-rust`](./ADR/0004-cpt-cf-graph-storage-adr-analytics-in-rust.md) | In-process Rust analytics with per-metric determinism contracts; NetworkX parity waived | `cpt-cf-graph-storage-component-graph-analytics-service` |
 | [`cpt-cf-graph-storage-adr-embedding-provider`](./ADR/0005-cpt-cf-graph-storage-adr-embedding-provider.md) | Pluggable embedding provider; in-process ONNX default, remote plugin, deterministic fake for CI | `cpt-cf-graph-storage-component-embedding-coordinator`, `cpt-cf-graph-storage-constraint-single-embedding-space` |
 
 ### 1.3 Architecture Layers
@@ -112,7 +113,7 @@ flowchart TD
             SRCH["Search Service"]
             TRAV["Traversal Service"]
             PROJ["Projection Service"]
-            ANA["Analytics Service"]
+            ANA["Graph Analytics Service"]
             EMB["Embedding Coordinator"]
         end
         subgraph INFRA["infra"]
@@ -321,7 +322,7 @@ All writes go through one validated, transactional, idempotent path; ingest corr
 
 ##### Responsibility scope
 
-Batch validation (payloads against GTS chains, endpoint constraints, payload ceiling, vector dimensions); deterministic edge-key derivation; phantom materialization and in-place replacement; scope replacement with the analysis-provenance exclusion predicate; batched multi-row writes in one transaction; graph-revision bump; per-item structured errors.
+Batch validation (payloads against GTS chains, endpoint constraints, payload ceiling, vector dimensions); deterministic edge-key derivation; phantom materialization under the [Phantom Materialization Contract](#phantom-materialization-contract); scope replacement with the analysis-provenance exclusion predicate; batched multi-row writes in one transaction; graph-revision bump; per-item structured errors.
 
 ##### Responsibility boundaries
 
@@ -407,11 +408,11 @@ Depth-limited expansion is the graph-native query shape; it needs dedicated, ben
 
 ##### Responsibility scope
 
-Owns the `GraphQueryPort` and its engine-native backends, both shipped in v1: the SQL/PGQ backend (`CREATE PROPERTY GRAPH` over node/edge tables, direction-explicit `GRAPH_TABLE` hop patterns; serves fixed-depth shapes from the first release) and the recursive-CTE backend (depth-bounded iterative SQL over the indexed edge table; serves bounded variable-depth shapes until PG20-class quantifiers, and acts as the configuration-selected fallback). Seed resolution (explicit keys and/or hybrid hits); breadth-first expansion treating edges as undirected; per-hop edge-type restriction; output node-type filtering; node/edge budgets with seeds-survive-truncation semantics; hydrated subgraph responses with truncation status.
+Owns the `GraphQueryPort` — the gear's graph-engine plugin surface (`cpt-cf-graph-storage-contract-graph-engine-plugin`). Engines behind the port declare capabilities (neighborhood, bounded traversal, shortest path, pattern queries, in-engine analytics) and answer undeclared operations with a typed not-implemented error. The default plugin is the built-in PostgreSQL engine with its two execution paths, both shipped in v1: SQL/PGQ (`CREATE PROPERTY GRAPH` over node/edge tables, direction-explicit `GRAPH_TABLE` hop patterns; serves fixed-depth shapes from the first release) and recursive CTE (depth-bounded iterative SQL over the indexed edge table; serves bounded variable-depth shapes until PG20-class quantifiers, and acts as the configuration-selected fallback). Seed resolution (explicit keys and/or hybrid hits); breadth-first expansion treating edges as undirected; per-hop edge-type restriction; output node-type filtering; node/edge budgets with seeds-survive-truncation semantics; hydrated subgraph responses with truncation status.
 
 ##### Responsibility boundaries
 
-Does not rank results (search does), does not order by degree for UI budgets (projection does), never exceeds the system depth maximum. Backend selection is invisible to callers of the port; a future dedicated traversal mirror (ADR-0001 contingency) would implement the same port.
+Does not rank results (search does), does not order by degree for UI budgets (projection does), never exceeds the system depth maximum. Backend selection is invisible to callers of the port. An external graph engine (ADR-0001 contingency; ArcadeDB is the candidate PoC) joins as another plugin implementing the same contract: it maintains a rebuildable projection of the edge table (PostgreSQL stays the system of record), serves capabilities the built-in engine lacks, and carries explicit tenant-isolation and consistency-lag obligations.
 
 ##### Related components (by ID)
 
@@ -433,17 +434,17 @@ Neighborhood projection (depth-bounded expansion, degree-ordered retention withi
 
 ##### Responsibility boundaries
 
-Does not define which attributes are indexed (schema annotations do), does not compute metrics (annotates from the Analytics Service cache).
+Does not define which attributes are indexed (schema annotations do), does not compute metrics (annotates from the Graph Analytics Service cache).
 
 ##### Related components (by ID)
 
 - `cpt-cf-graph-storage-component-traversal-service` — expansion primitive
-- `cpt-cf-graph-storage-component-analytics-service` — metric annotations
+- `cpt-cf-graph-storage-component-graph-analytics-service` — metric annotations
 - `cpt-cf-graph-storage-component-ontology-registry` — filter admissibility
 
-#### Analytics Service
+#### Graph Analytics Service
 
-- [ ] `p2` - **ID**: `cpt-cf-graph-storage-component-analytics-service`
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-component-graph-analytics-service`
 
 ##### Why this component exists
 
@@ -480,7 +481,7 @@ Contains no business rules; exposes typed ports consumed by domain services; raw
 
 ##### Related components (by ID)
 
-- `cpt-cf-graph-storage-component-ingest-pipeline`, `cpt-cf-graph-storage-component-search-service`, `cpt-cf-graph-storage-component-traversal-service`, `cpt-cf-graph-storage-component-projection-service`, `cpt-cf-graph-storage-component-analytics-service` — all data access
+- `cpt-cf-graph-storage-component-ingest-pipeline`, `cpt-cf-graph-storage-component-search-service`, `cpt-cf-graph-storage-component-traversal-service`, `cpt-cf-graph-storage-component-projection-service`, `cpt-cf-graph-storage-component-graph-analytics-service` — all data access
 
 #### REST API
 
@@ -525,7 +526,7 @@ No behavior differences from REST beyond transport; identical permission checks 
 
 ### 3.3 API Contracts
 
-The public surfaces are defined in the PRD as `cpt-cf-graph-storage-interface-rest-api` and `cpt-cf-graph-storage-interface-sdk-client`, with external contracts `cpt-cf-graph-storage-contract-gts-ontology` and `cpt-cf-graph-storage-contract-embedding-provider`.
+The public surfaces are defined in the PRD as `cpt-cf-graph-storage-interface-rest-api` and `cpt-cf-graph-storage-interface-sdk-client`, with external contracts `cpt-cf-graph-storage-contract-gts-ontology`, `cpt-cf-graph-storage-contract-embedding-provider`, and `cpt-cf-graph-storage-contract-graph-engine-plugin` (the two plugin contracts follow the platform pattern: plugin trait + GTS-registered plugin instances discovered via types-registry and resolved through ClientHub scoped clients).
 
 **REST surface** (`/api/graph-storage/v1`, all operations authenticated and permission-checked):
 
@@ -607,7 +608,7 @@ The public surfaces are defined in the PRD as `cpt-cf-graph-storage-interface-re
    (recursive SQL, tenant predicate, edge-type filters)
 3. Degree-ordered retention within node budget;         [Projection Service]
    phantoms excluded if requested; seeds always kept
-4. Optional metric annotations from cache               [Analytics Service]
+4. Optional metric annotations from cache               [Graph Analytics Service]
 5. Subgraph + truncation status returned for rendering
 ```
 
@@ -619,7 +620,7 @@ The public surfaces are defined in the PRD as `cpt-cf-graph-storage-interface-re
 
 ```
 1. Metrics requested (selection, edge-type exclusions)
-2. Cache lookup by (tenant, revision, metric, params)   [Analytics Service]
+2. Cache lookup by (tenant, revision, metric, params)   [Graph Analytics Service]
 3. On miss: load topology projection under ceiling
    (keys + typed edges only, tenant-scoped)
 4. Compute per determinism contracts (ADR-0004)
@@ -723,9 +724,21 @@ Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by mi
 
 The `studio-graph-storage` prototype validates this design's data model and retrieval stack. Deliberate departures: Apache AGE removed (ADR-0001), NetworkX replaced (ADR-0004), sentence-transformers replaced by the provider contract (ADR-0005), whole-payload GIN indexing replaced by annotation-declared indexes (ADR-0003), and row-at-a-time writes replaced by batched statements (`cpt-cf-graph-storage-nfr-ingest-throughput`). Tenancy, access control, and pagination are new platform obligations the prototype did not carry.
 
+### Phantom Materialization Contract
+
+The transition `phantom -> concrete` (a real ingest arriving under a node key currently held by a phantom, `cpt-cf-graph-storage-fr-phantom-nodes`, ADR-0002) is governed by an atomic transition contract:
+
+1. **Identity is preserved.** The phantom and the materialized node are the same row: same node key, same internal identifier. Incident edges are never rewritten, re-keyed, or re-created by the transition.
+2. **Eligibility.** A phantom may materialize into any registered, non-abstract node type — the phantom is a typeless placeholder, and materialization is type assignment. The reverse transition (concrete to phantom) never happens; a later ingest that would only create a phantom for an existing concrete key is a no-op against that node.
+3. **Incident-edge revalidation.** In the same transaction, every edge incident to the node is revalidated against the concrete type's endpoint constraints (edges attached while the node was a phantom could not be endpoint-checked). Any violation rejects the entire ingest batch with per-item errors naming the offending edges; nothing is mutated. Producers resolve the conflict by fixing the ontology or the batch, never by partial application.
+4. **Atomicity.** Type assignment, payload validation, edge revalidation, and the write commit or roll back as one transaction. No intermediate state (typed node with unrevalidated edges, half-assigned payload) is ever observable by concurrent readers.
+5. **Concurrency and idempotency.** Materialization serializes on the node row via the per-tenant node-key uniqueness constraint: concurrent phantom creation and materialization (or two concurrent materializations) resolve deterministically — one transaction wins, the other observes the winner's committed state and proceeds as an upsert (or retries on serialization failure). Re-ingesting the same concrete node is a converging no-op.
+
+Consequences for shapes outside the happy path: a second edge referencing the same missing key reuses the existing phantom (no duplicate placeholders); scope replacement treats phantoms as static content (a phantom whose last referencing edge is deleted is subject to the retention policy tracked in PRD § Open Questions).
+
 ### Traversal Backend Sketch
 
-Both backends implement the same `GraphQueryPort` contract (seeds, bounded expansion, per-hop filters, budgets, truncation semantics) and ship in v1.
+The `GraphQueryPort` is the graph-engine plugin surface (`cpt-cf-graph-storage-contract-graph-engine-plugin`): engines declare capabilities and answer undeclared operations with a typed not-implemented error. The built-in PostgreSQL engine is the default plugin; its two execution paths implement the same port contract (seeds, bounded expansion, per-hop filters, budgets, truncation semantics) and ship in v1.
 
 **SQL/PGQ backend** (active from v1 for fixed-depth shapes): a `CREATE PROPERTY GRAPH` definition over the node and edge tables (vertex label from `graph_type`, edge label with source/destination keys); fixed-depth neighborhood queries compile to `GRAPH_TABLE` pattern matches that join freely with pgvector KNN and tsvector predicates in the same statement and inherit indexes, `EXPLAIN`, RLS, and secure-ORM scoping.
 

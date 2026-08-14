@@ -281,7 +281,7 @@ The system **MUST** store owned nodes (entities whose system of record is the gr
 
 - [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-phantom-nodes`
 
-When an ingested edge references a node key that does not exist, the system **MUST** (by default, and controllable per request) materialize a phantom node of a dedicated phantom type recording the referencing edge type, so the dangling reference stays visible instead of the edge being dropped. A later ingest of the real node under the same key **MUST** replace the phantom in place, preserving all attached edges.
+When an ingested edge references a node key that does not exist, the system **MUST** (by default, and controllable per request) materialize a phantom node of a dedicated phantom type recording the referencing edge type, so the dangling reference stays visible instead of the edge being dropped. A later ingest of the real node under the same key **MUST** replace the phantom in place as one atomic transition: node identity and attached edges are preserved, the concrete payload is validated, every incident edge is revalidated against the concrete type's endpoint constraints, and a violation **MUST** reject the batch without mutation. Concurrent phantom creation and materialization **MUST** resolve deterministically (see DESIGN § Phantom Materialization Contract).
 
 - **Rationale**: Producers ingest incrementally and out of order; silently dropped edges are much harder to diagnose than visible phantoms.
 - **Actors**: `cpt-cf-graph-storage-actor-producer-gear`
@@ -621,6 +621,14 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 - **Protocol/Format**: Rust plugin trait — batch text-to-vector with declared model name and dimension
 - **Compatibility**: Providers declare model identity and dimension; a deployment pins one provider configuration per vector column lifetime.
 
+#### Graph Engine Plugin Contract
+
+- [ ] `p3` - **ID**: `cpt-cf-graph-storage-contract-graph-engine-plugin`
+
+- **Direction**: required from client (plugin implementations)
+- **Protocol/Format**: Rust plugin trait behind the traversal port — graph-query execution with declared capabilities (neighborhood expansion, bounded traversal, shortest path, pattern queries, in-engine analytics); operations outside a plugin's declared capabilities are answered with a typed not-implemented error, never approximated
+- **Compatibility**: The built-in PostgreSQL engine (SQL/PGQ plus recursive CTE) is the default plugin and defines the baseline capability set. External-engine plugins are additive: they serve capabilities the baseline lacks over a rebuildable projection of the relational source of truth, must uphold the gear's tenant-isolation obligations, and must declare their projection's consistency lag. Relational storage, ingest, and search are not pluggable.
+
 ## 8. Use Cases
 
 #### Narrow Candidates with Hybrid Search
@@ -771,9 +779,10 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 - Which embedding model does the platform standardize on, who owns model upgrades, and is re-embedding on model change automatic or operator-triggered?
 - Do managed-object reference nodes eventually sync through platform events (event-broker) instead of producer pushes, and if so, which component owns the subscription?
 - Are edge payload attributes worth indexing in v1, or do edge filters remain type-only until a concrete consumer needs attribute-level edge filtering?
-- What is the retention policy for phantom nodes that are never replaced by real nodes — permanent visibility, TTL-based cleanup, or producer-triggered pruning?
+- What is the retention policy for phantom nodes that are never replaced by real nodes, or whose last referencing edge is removed by scope replacement — permanent visibility, TTL-based cleanup, or producer-triggered pruning? (See DESIGN § Phantom Materialization Contract for the transition rules that stop at this question.)
 - Does the gear expose a graph export format (such as the prototype's cfs-map document) in v1, and who are its consumers?
 - Does the gear expose a consumer-facing bounded graph-pattern query endpoint (a declarative graph-query DSL, e.g., derived from SQL/PGQ patterns) in a later version? Raw query languages cannot be exposed in a multi-tenant platform, so the shape and bounds of such a DSL — and which consumers need it — remain to be defined.
+- Should an external graph engine be validated as the first third-party graph-engine plugin? The candidate experiment is an ArcadeDB plugin serving shortest-path queries over a rebuildable projection of the edge table (PG stays the system of record) — it would exercise the plugin contract end to end and feed the engine re-evaluation scheduled for Q1 2027 (ADR-0001) with first-hand data.
 
 ## 14. Traceability
 

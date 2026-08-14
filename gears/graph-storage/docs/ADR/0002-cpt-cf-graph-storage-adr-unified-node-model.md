@@ -54,7 +54,7 @@ Chosen option: "C. Single typed node table with GTS-expressed family semantics",
 - Reference-node projections duplicate a bounded slice of upstream data by design; staleness is accepted and bounded by producer re-sync cadence — the graph answers "what is connected", the upstream gear answers "what is the current full state".
 - Consumers resolving a reference node's full record must call the owning gear using the canonical identifier; the graph API never proxies upstream reads.
 - Edge semantics split along the same seam: static edges are recomputed on scope replacement, analysis edges carry provenance and survive it — so re-mirroring a repository never erases Finding conclusions.
-- Phantom nodes make cross-producer ordering a non-problem: a Finding batch may reference a commit before the mirror producer has pushed it; the phantom is replaced in place later.
+- Phantom nodes make cross-producer ordering a non-problem: a Finding batch may reference a commit before the mirror producer has pushed it; the phantom is replaced in place later. That replacement is governed by an explicit atomic transition contract (DESIGN § Phantom Materialization Contract): identity and edges preserved, incident edges revalidated against the concrete type's endpoint constraints, batch-level rejection on violation, deterministic resolution under concurrent ingests.
 - Uniqueness of node keys per tenant makes the node-key scheme a shared producer convention that DESIGN must specify (deterministic keys per family, e.g., derived from canonical upstream identifiers for reference nodes).
 
 ### Confirmation
