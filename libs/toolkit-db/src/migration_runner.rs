@@ -20,8 +20,8 @@
 //! them using its privileged connection. Gears never receive raw database access.
 
 use sea_orm::{
-    ConnectionTrait, DatabaseBackend, DbErr, ExecResult, FromQueryResult, Statement,
-    TransactionTrait,
+    ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, ExecResult, FromQueryResult,
+    Statement, TransactionTrait,
 };
 use sea_orm_migration::MigrationTrait;
 use std::collections::HashSet;
@@ -59,6 +59,19 @@ pub enum MigrationError {
     /// Duplicate migration name found in provided migrations list.
     #[error("duplicate migration name '{name}' for gear '{gear}'")]
     DuplicateMigrationName { gear: String, name: String },
+
+    /// The connection reports a database backend this runner has no SQL for.
+    ///
+    /// `sea_orm::DatabaseBackend` is `#[non_exhaustive]` as of `SeaORM` 2.0, so
+    /// this is reachable only if `SeaORM` adds a backend we haven't taught the
+    /// history-table DDL about. Failing loudly is the safe option: the
+    /// alternative is guessing at a dialect and writing the migration history
+    /// with SQL meant for a different engine.
+    #[error("unsupported database backend {backend:?} for gear '{gear}' migrations")]
+    UnsupportedBackend {
+        gear: String,
+        backend: DatabaseBackend,
+    },
 }
 
 /// Result of a migration run.
@@ -158,9 +171,15 @@ async fn ensure_migration_table(
             )
             "#
         ),
+        _ => {
+            return Err(MigrationError::UnsupportedBackend {
+                gear: gear_name.to_owned(),
+                backend,
+            });
+        }
     };
 
-    conn.execute(Statement::from_string(backend, sql))
+    conn.execute_raw(Statement::from_string(backend, sql))
         .await
         .map_err(|e| MigrationError::CreateTable {
             gear: gear_name.to_owned(),
@@ -183,6 +202,12 @@ async fn get_applied_migrations(
             format!(r#"SELECT version FROM "{table_name}""#)
         }
         DatabaseBackend::MySql => format!(r"SELECT version FROM `{table_name}`"),
+        _ => {
+            return Err(MigrationError::UnsupportedBackend {
+                gear: gear_name.to_owned(),
+                backend,
+            });
+        }
     };
 
     let records: Vec<MigrationRecord> =
@@ -211,9 +236,15 @@ async fn record_migration(
             format!(r#"INSERT INTO "{table_name}" (version) VALUES ($1)"#)
         }
         DatabaseBackend::MySql => format!(r"INSERT INTO `{table_name}` (version) VALUES (?)"),
+        _ => {
+            return Err(MigrationError::UnsupportedBackend {
+                gear: gear_name.to_owned(),
+                backend,
+            });
+        }
     };
 
-    conn.execute(Statement::from_sql_and_values(
+    conn.execute_raw(Statement::from_sql_and_values(
         backend,
         &sql,
         [migration_name.into()],
@@ -283,14 +314,11 @@ pub async fn run_migrations_for_gear(
 ///
 /// Returns `Ok(MigrationResult)` with statistics about the migration run,
 /// or an error if any migration fails.
-async fn run_gear_migrations<C>(
-    conn: &C,
+async fn run_gear_migrations(
+    conn: &DatabaseConnection,
     gear_name: &str,
     migrations: Vec<Box<dyn MigrationTrait>>,
-) -> Result<MigrationResult, MigrationError>
-where
-    C: ConnectionTrait + TransactionTrait,
-{
+) -> Result<MigrationResult, MigrationError> {
     if migrations.is_empty() {
         debug!(gear = gear_name, "No migrations to run");
         return Ok(MigrationResult {
@@ -500,7 +528,7 @@ async fn get_pending_migrations_internal(
                 "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = '{table_name}')"
             );
             let row = conn
-                .query_one(Statement::from_string(backend, sql))
+                .query_one_raw(Statement::from_string(backend, sql))
                 .await
                 .map_err(|e| MigrationError::QueryHistory {
                     gear: gear_name.to_owned(),
@@ -514,7 +542,7 @@ async fn get_pending_migrations_internal(
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{table_name}'"
             );
             let row = conn
-                .query_one(Statement::from_string(backend, sql))
+                .query_one_raw(Statement::from_string(backend, sql))
                 .await
                 .map_err(|e| MigrationError::QueryHistory {
                     gear: gear_name.to_owned(),
@@ -528,7 +556,7 @@ async fn get_pending_migrations_internal(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table_name}'"
             );
             let row = conn
-                .query_one(Statement::from_string(backend, sql))
+                .query_one_raw(Statement::from_string(backend, sql))
                 .await
                 .map_err(|e| MigrationError::QueryHistory {
                     gear: gear_name.to_owned(),
@@ -536,6 +564,12 @@ async fn get_pending_migrations_internal(
                 })?;
             row.and_then(|r| r.try_get_by_index::<i32>(0).ok())
                 .is_some_and(|c| c > 0)
+        }
+        _ => {
+            return Err(MigrationError::UnsupportedBackend {
+                gear: gear_name.to_owned(),
+                backend,
+            });
         }
     };
 
@@ -612,11 +646,16 @@ mod tests {
                 DatabaseBackend::MySql => format!(
                     "CREATE TABLE IF NOT EXISTS `{table_name}` (id INT AUTO_INCREMENT PRIMARY KEY)"
                 ),
+                other => {
+                    return Err(DbErr::Custom(format!(
+                        "test migration has no DDL for backend {other:?}"
+                    )));
+                }
             };
 
             manager
                 .get_connection()
-                .execute(Statement::from_string(backend, sql))
+                .execute_raw(Statement::from_string(backend, sql))
                 .await?;
             Ok(())
         }
@@ -758,7 +797,7 @@ mod tests {
             let conn = db.sea_internal();
             let backend = conn.get_database_backend();
             let check_a = conn
-                .query_one(Statement::from_string(
+                .query_one_raw(Statement::from_string(
                     backend,
                     format!(
                         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table_a}'"
@@ -772,7 +811,7 @@ mod tests {
             assert_eq!(count_a, 1);
 
             let check_b = conn
-                .query_one(Statement::from_string(
+                .query_one_raw(Statement::from_string(
                     backend,
                     format!(
                         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table_b}'"

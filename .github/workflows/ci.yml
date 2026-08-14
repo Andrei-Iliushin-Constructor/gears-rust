@@ -466,7 +466,7 @@ jobs:
     uses: ./.github/workflows/cfs.yml
 
   security:
-    name: Security (cargo-deny & cargo-audit on Ubuntu)
+    name: Security (cargo-deny on Ubuntu)
     needs: changes
     if: >-
       !cancelled()
@@ -490,7 +490,7 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
 
-      # Run deny checks but do not fail CI (as requested).
+      # Blocking gate: advisories, licenses, bans and sources.
       - name: cargo deny check
         run: make deny
 

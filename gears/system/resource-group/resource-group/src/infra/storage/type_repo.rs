@@ -8,6 +8,7 @@
 use async_trait::async_trait;
 use resource_group_sdk::ResourceGroupType;
 use resource_group_sdk::odata::TypeFilterField;
+use sea_orm::ExprTrait;
 use sea_orm::sea_query::Expr;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 use toolkit_db::odata::{LimitCfg, paginate_odata};

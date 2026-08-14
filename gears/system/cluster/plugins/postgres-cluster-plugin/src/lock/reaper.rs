@@ -111,6 +111,7 @@ use cluster_sdk::{ClusterError, ClusterMetrics};
 use dashmap::DashMap;
 use opentelemetry::metrics::{Gauge, Histogram, Meter};
 use opentelemetry::{InstrumentationScope, KeyValue, global};
+use sqlx::AssertSqlSafe;
 use sqlx::PgPool;
 use sqlx::types::chrono::{DateTime, Utc};
 use tokio::sync::Notify;
@@ -297,12 +298,12 @@ fn wake_floor(interval: Duration) -> Duration {
 /// statement's own row lock and then finds the row gone, reporting `LockExpired`
 /// — the same reaper-wins outcome the unbounded single-statement delete had.)
 async fn sweep_batch(pool: &PgPool, table: &str) -> Result<Vec<(String, Uuid)>, ClusterError> {
-    sqlx::query_as(&format!(
+    sqlx::query_as(AssertSqlSafe(format!(
         "DELETE FROM {table} WHERE name IN (\
              SELECT name FROM {table} WHERE expires_at <= now() \
              ORDER BY expires_at LIMIT {SWEEP_BATCH} FOR UPDATE SKIP LOCKED\
          ) RETURNING name, holder_id"
-    ))
+    )))
     .fetch_all(pool)
     .await
     .map_err(map_sqlx_error)
@@ -416,14 +417,14 @@ pub(super) async fn sweep_orphans(
         .map(|entry| *entry.value())
         .collect();
 
-    let orphans: Vec<String> = sqlx::query_scalar(&format!(
+    let orphans: Vec<String> = sqlx::query_scalar(AssertSqlSafe(format!(
         "DELETE FROM {table} \
          WHERE holder_beacon_hi = $1 AND holder_beacon_lo = $2 \
            AND holder_id <> ALL($3::uuid[]) \
            AND acquired_at < $4 \
          RETURNING name",
         table = ctx.table,
-    ))
+    )))
     .bind(key.hi)
     .bind(key.lo)
     .bind(&live)
@@ -625,8 +626,8 @@ pub(super) async fn probe_schedule(
     pool: &PgPool,
     table: &str,
 ) -> Result<SchedulingProbe, ClusterError> {
-    let (seconds_until_expiry, now): (Option<f64>, DateTime<Utc>) = sqlx::query_as(&format!(
-        "SELECT extract(epoch FROM (min(expires_at) - now()))::float8, now() FROM {table}"
+    let (seconds_until_expiry, now): (Option<f64>, DateTime<Utc>) = sqlx::query_as(AssertSqlSafe(
+        format!("SELECT extract(epoch FROM (min(expires_at) - now()))::float8, now() FROM {table}"),
     ))
     .fetch_one(pool)
     .await
@@ -666,7 +667,7 @@ fn next_delay(
 /// `local_holders.len()`, which is only this instance's slice of the fleet's
 /// locks.
 async fn active_name_count(pool: &PgPool, table: &str) -> Result<i64, ClusterError> {
-    sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+    sqlx::query_scalar(AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
         .fetch_one(pool)
         .await
         .map_err(map_sqlx_error)

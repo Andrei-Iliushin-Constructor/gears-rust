@@ -83,6 +83,7 @@ use std::time::Duration;
 use cluster_sdk::observability::{self, ResourceId};
 use cluster_sdk::{ClusterError, ClusterMetrics, ProviderErrorKind};
 use dashmap::DashMap;
+use sqlx::AssertSqlSafe;
 use sqlx::{Connection, PgConnection, PgPool};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -682,17 +683,18 @@ impl BeaconTask {
     /// a NOTIFY instead of making waiters discover them by retry. Best-effort
     /// accordingly — a failure costs promptness, never correctness.
     async fn hand_over(&self, lost: BeaconKey) {
-        let handed_over: Result<Vec<String>, ClusterError> = sqlx::query_scalar(&format!(
-            "DELETE FROM {table} \
+        let handed_over: Result<Vec<String>, ClusterError> =
+            sqlx::query_scalar(AssertSqlSafe(format!(
+                "DELETE FROM {table} \
              WHERE holder_beacon_hi = $1 AND holder_beacon_lo = $2 \
              RETURNING name",
-            table = self.config.table,
-        ))
-        .bind(lost.hi)
-        .bind(lost.lo)
-        .fetch_all(&self.config.pool)
-        .await
-        .map_err(map_sqlx_error);
+                table = self.config.table,
+            )))
+            .bind(lost.hi)
+            .bind(lost.lo)
+            .fetch_all(&self.config.pool)
+            .await
+            .map_err(map_sqlx_error);
 
         let names = match handed_over {
             Ok(names) => names,

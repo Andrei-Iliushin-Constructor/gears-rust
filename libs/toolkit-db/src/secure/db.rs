@@ -202,7 +202,6 @@ impl Db {
     /// retryable-error detection to the correct engine.
     #[must_use]
     pub fn backend(&self) -> sea_orm::DbBackend {
-        use sea_orm::ConnectionTrait;
         self.handle.sea_internal_ref().get_database_backend()
     }
 
@@ -704,12 +703,13 @@ impl Db {
     /// Return database engine identifier for logging/tracing.
     #[must_use]
     pub fn db_engine(&self) -> &'static str {
-        use sea_orm::{ConnectionTrait, DbBackend};
+        use sea_orm::DbBackend;
 
         match self.handle.sea_internal_ref().get_database_backend() {
             DbBackend::Postgres => "postgres",
             DbBackend::MySql => "mysql",
             DbBackend::Sqlite => "sqlite",
+            _ => "unknown",
         }
     }
 }

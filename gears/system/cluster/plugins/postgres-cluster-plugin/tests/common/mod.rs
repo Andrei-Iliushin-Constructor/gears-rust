@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use postgres_cluster_plugin::{PostgresClusterConfig, PostgresLockConfig};
 use serde_json::json;
+use sqlx::AssertSqlSafe;
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::str::FromStr;
@@ -190,10 +191,12 @@ pub async fn isolated_schema_connection_string(
     schema: &str,
 ) -> String {
     let pool = raw_pool(base_connection_string).await;
-    sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
-        .execute(&pool)
-        .await
-        .expect("create schema succeeds");
+    sqlx::query(AssertSqlSafe(format!(
+        "CREATE SCHEMA IF NOT EXISTS {schema}"
+    )))
+    .execute(&pool)
+    .await
+    .expect("create schema succeeds");
     pool.close().await;
     format!("{base_connection_string}?options[search_path]={schema}")
 }

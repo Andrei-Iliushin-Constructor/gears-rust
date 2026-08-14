@@ -162,7 +162,7 @@ async fn has_outstanding_balance_reflects_the_ar_grain() {
 
     // Seed a non-zero AR grain for the payer.
     let acct = Uuid::now_v7();
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_ar_payer_balance \
          (tenant_id, payer_tenant_id, account_id, currency, balance_minor, version) \
          VALUES ('{tenant}','{payer}','{acct}','USD',500,0)"

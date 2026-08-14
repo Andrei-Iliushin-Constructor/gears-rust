@@ -678,7 +678,7 @@ impl GroupRepositoryTrait for GroupRepository {
         let scope = system_scope();
 
         let parent_val: sea_orm::Value = match parent_id {
-            Some(pid) => sea_orm::Value::Uuid(Some(Box::new(pid))),
+            Some(pid) => sea_orm::Value::Uuid(Some(pid)),
             None => sea_orm::Value::Uuid(None),
         };
 

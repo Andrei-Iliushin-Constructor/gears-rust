@@ -26,6 +26,28 @@ pub enum SeaOrmRunner<'a> {
     Tx(&'a sea_orm::DatabaseTransaction),
 }
 
+// Only the outbox module needs `executor()` today; the whole impl block is
+// gated to match so it isn't flagged as dead code (and the block itself
+// doesn't trip an elidable-lifetime warning once empty) when `preview-outbox`
+// is off.
+#[cfg(feature = "preview-outbox")]
+impl<'a> SeaOrmRunner<'a> {
+    /// Erase the connection/transaction distinction into `SeaORM`'s own executor enum.
+    ///
+    /// `ConnectionTrait` gained generic methods in `SeaORM` 2.0 and is therefore no
+    /// longer dyn-compatible, so `&dyn ConnectionTrait` is not an option for code
+    /// that has to accept "either a pool or a transaction". `DatabaseExecutor` is
+    /// `SeaORM`'s replacement for exactly that: it implements `ConnectionTrait` (and
+    /// `TransactionTrait`), so callers keep using `.all(exec)` / `.exec(exec)` as
+    /// before, without this crate going generic over the executor.
+    pub(crate) fn executor(&self) -> sea_orm::DatabaseExecutor<'a> {
+        match *self {
+            Self::Conn(c) => sea_orm::DatabaseExecutor::Connection(c),
+            Self::Tx(t) => sea_orm::DatabaseExecutor::Transaction(t),
+        }
+    }
+}
+
 /// Internal-only bridge to `SeaORM`'s executor types.
 pub trait DBRunnerInternal: sealed::Sealed + Send + Sync {
     fn as_seaorm(&self) -> SeaOrmRunner<'_>;

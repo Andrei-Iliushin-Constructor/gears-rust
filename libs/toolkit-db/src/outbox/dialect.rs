@@ -24,11 +24,24 @@ pub enum Dialect {
 }
 
 impl From<DbBackend> for Dialect {
+    /// # Panics
+    ///
+    /// Panics if `backend` is not one of `Postgres`, `SQLite`, or `MySQL`.
+    /// `DbBackend` is `#[non_exhaustive]` as of `SeaORM` 2.0, so this arm exists
+    /// for forward compatibility only — it is unreachable with the variants
+    /// `SeaORM` defines today. This is the single point where a backend is
+    /// narrowed to a dialect, so every SQL builder downstream can match
+    /// `Dialect` exhaustively instead of guessing at an unknown backend and
+    /// emitting SQL that silently targets the wrong engine.
     fn from(backend: DbBackend) -> Self {
         match backend {
             DbBackend::Postgres => Self::Postgres,
             DbBackend::Sqlite => Self::Sqlite,
             DbBackend::MySql => Self::MySql,
+            other => panic!(
+                "toolkit-db outbox supports Postgres, SQLite and MySQL only; \
+                 got unsupported database backend {other:?}"
+            ),
         }
     }
 }

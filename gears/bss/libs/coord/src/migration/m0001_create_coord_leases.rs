@@ -111,7 +111,7 @@ impl MigrationTrait for Migration {
                     attempts INTEGER NOT NULL DEFAULT 0 \
                 );"
             .to_owned(),
-            sea_orm::DatabaseBackend::MySql => {
+            _ => {
                 return Err(DbErr::Custom(MYSQL_NOT_SUPPORTED.to_owned()));
             }
         };
@@ -125,7 +125,7 @@ impl MigrationTrait for Migration {
         let table = match backend {
             sea_orm::DatabaseBackend::Postgres => self.pg_table(),
             sea_orm::DatabaseBackend::Sqlite => "coord_leases".to_owned(),
-            sea_orm::DatabaseBackend::MySql => {
+            _ => {
                 return Err(DbErr::Custom(MYSQL_NOT_SUPPORTED.to_owned()));
             }
         };

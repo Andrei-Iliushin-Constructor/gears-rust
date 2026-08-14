@@ -7,7 +7,7 @@ use bigdecimal::{BigDecimal, ToPrimitive};
 use chrono::{NaiveDate, NaiveTime, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{
-    ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+    ColumnTrait, Condition, EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect,
     sea_query::{Expr, Order},
 };
 use thiserror::Error;
@@ -132,7 +132,7 @@ fn bigdecimal_to_decimal(bd: &BigDecimal) -> ODataBuildResult<Decimal> {
 fn coerce(kind: FieldKind, v: &core::Value) -> ODataBuildResult<sea_orm::Value> {
     use core::Value as V;
     Ok(match (kind, v) {
-        (FieldKind::String, V::String(s)) => sea_orm::Value::String(Some(Box::new(s.clone()))),
+        (FieldKind::String, V::String(s)) => sea_orm::Value::String(Some(s.clone())),
 
         (FieldKind::I64, V::Number(n)) => {
             let i = n.to_i64().ok_or(ODataBuildError::TypeMismatch {
@@ -150,22 +150,17 @@ fn coerce(kind: FieldKind, v: &core::Value) -> ODataBuildResult<sea_orm::Value> 
             sea_orm::Value::Double(Some(f))
         }
 
-        // Box the Decimal
         (FieldKind::Decimal, V::Number(n)) => {
-            sea_orm::Value::Decimal(Some(Box::new(bigdecimal_to_decimal(n)?)))
+            sea_orm::Value::Decimal(Some(bigdecimal_to_decimal(n)?))
         }
 
         (FieldKind::Bool, V::Bool(b)) => sea_orm::Value::Bool(Some(*b)),
 
-        // Box the Uuid
-        (FieldKind::Uuid, V::Uuid(u)) => sea_orm::Value::Uuid(Some(Box::new(*u))),
+        (FieldKind::Uuid, V::Uuid(u)) => sea_orm::Value::Uuid(Some(*u)),
 
-        // Box chrono types
-        (FieldKind::DateTimeUtc, V::DateTime(dt)) => {
-            sea_orm::Value::ChronoDateTimeUtc(Some(Box::new(*dt)))
-        }
-        (FieldKind::Date, V::Date(d)) => sea_orm::Value::ChronoDate(Some(Box::new(*d))),
-        (FieldKind::Time, V::Time(t)) => sea_orm::Value::ChronoTime(Some(Box::new(*t))),
+        (FieldKind::DateTimeUtc, V::DateTime(dt)) => sea_orm::Value::ChronoDateTimeUtc(Some(*dt)),
+        (FieldKind::Date, V::Date(d)) => sea_orm::Value::ChronoDate(Some(*d)),
+        (FieldKind::Time, V::Time(t)) => sea_orm::Value::ChronoTime(Some(*t)),
 
         (expected, V::Null) => {
             return Err(ODataBuildError::TypeMismatch {
@@ -273,7 +268,7 @@ pub fn parse_cursor_value(kind: FieldKind, s: &str) -> ODataBuildResult<sea_orm:
     use sea_orm::Value as V;
 
     let result = match kind {
-        FieldKind::String => V::String(Some(Box::new(s.to_owned()))),
+        FieldKind::String => V::String(Some(s.to_owned())),
         FieldKind::I64 => {
             let i = s
                 .parse::<i64>()
@@ -296,31 +291,31 @@ pub fn parse_cursor_value(kind: FieldKind, s: &str) -> ODataBuildResult<sea_orm:
             let u = s
                 .parse::<uuid::Uuid>()
                 .map_err(|_| ODataBuildError::Other("invalid uuid in cursor"))?;
-            V::Uuid(Some(Box::new(u)))
+            V::Uuid(Some(u))
         }
         FieldKind::DateTimeUtc => {
             let dt = chrono::DateTime::parse_from_rfc3339(s)
                 .map_err(|_| ODataBuildError::Other("invalid datetime in cursor"))?
                 .with_timezone(&Utc);
-            V::ChronoDateTimeUtc(Some(Box::new(dt)))
+            V::ChronoDateTimeUtc(Some(dt))
         }
         FieldKind::Date => {
             let d = s
                 .parse::<NaiveDate>()
                 .map_err(|_| ODataBuildError::Other("invalid date in cursor"))?;
-            V::ChronoDate(Some(Box::new(d)))
+            V::ChronoDate(Some(d))
         }
         FieldKind::Time => {
             let t = s
                 .parse::<NaiveTime>()
                 .map_err(|_| ODataBuildError::Other("invalid time in cursor"))?;
-            V::ChronoTime(Some(Box::new(t)))
+            V::ChronoTime(Some(t))
         }
         FieldKind::Decimal => {
             let d = s
                 .parse::<Decimal>()
                 .map_err(|_| ODataBuildError::Other("invalid decimal in cursor"))?;
-            V::Decimal(Some(Box::new(d)))
+            V::Decimal(Some(d))
         }
     };
 

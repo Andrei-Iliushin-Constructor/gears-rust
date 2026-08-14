@@ -121,7 +121,7 @@ async fn setup_seller(raw: &sea_orm::DatabaseConnection, provider: &DBProvider<D
         })
         .await
         .unwrap();
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_fiscal_period (tenant_id, legal_entity_id, period_id, fiscal_tz, status)
          VALUES ('{}','{}','{}','UTC','OPEN')",
         s.tenant, s.tenant, s.period_id
@@ -156,7 +156,7 @@ async fn account_balance(
     s: &Seller,
     account: Uuid,
 ) -> Option<i64> {
-    raw.query_one(pg(format!(
+    raw.query_one_raw(pg(format!(
         "SELECT balance_minor FROM bss.ledger_account_balance \
          WHERE tenant_id='{}' AND account_id='{}' AND currency='USD'",
         s.tenant, account

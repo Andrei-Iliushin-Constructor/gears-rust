@@ -65,6 +65,7 @@ use cluster_sdk::{
     ProviderErrorKind,
 };
 use dashmap::DashMap;
+use sqlx::AssertSqlSafe;
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -430,17 +431,18 @@ impl PostgresLock {
         };
         let mut conn = conn.detach();
 
-        let drained: Result<Vec<String>, ClusterError> = sqlx::query_scalar(&format!(
-            "DELETE FROM {table} \
+        let drained: Result<Vec<String>, ClusterError> =
+            sqlx::query_scalar(AssertSqlSafe(format!(
+                "DELETE FROM {table} \
              WHERE holder_beacon_hi = $1 AND holder_beacon_lo = $2 \
              RETURNING name",
-            table = self.table,
-        ))
-        .bind(key.hi)
-        .bind(key.lo)
-        .fetch_all(&mut conn)
-        .await
-        .map_err(map_sqlx_error);
+                table = self.table,
+            )))
+            .bind(key.hi)
+            .bind(key.lo)
+            .fetch_all(&mut conn)
+            .await
+            .map_err(map_sqlx_error);
 
         match drained {
             Ok(names) => {
@@ -607,13 +609,13 @@ impl PostgresLock {
             .key()
             .ok_or_else(|| beacon_unavailable("no live beacon to orphan a row under"))?;
         let age_ms = ttl_to_millis(age)?;
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO {table} \
              (name, holder_id, acquired_at, expires_at, holder_beacon_hi, holder_beacon_lo) \
              VALUES ($1, $2, now() - ($3::bigint * interval '1 millisecond'), \
                      now() + interval '10 minutes', $4, $5)",
             table = self.table,
-        ))
+        )))
         .bind(name)
         .bind(Uuid::new_v4())
         .bind(age_ms)
@@ -645,10 +647,10 @@ impl PostgresLock {
             .beacon
             .key()
             .ok_or_else(|| beacon_unavailable("no live beacon to plan an acquire with"))?;
-        let plan: Vec<String> = sqlx::query_scalar(&format!(
+        let plan: Vec<String> = sqlx::query_scalar(AssertSqlSafe(format!(
             "EXPLAIN (ANALYZE, VERBOSE) {acquire}",
             acquire = acquire_sql(&self.table)
-        ))
+        )))
         .bind(name)
         .bind(Uuid::new_v4())
         .bind(ttl_to_millis(ttl)?)
@@ -814,9 +816,9 @@ fn is_transient_session_loss(err: &ClusterError) -> bool {
 /// Best-effort: the caller is already returning an error, and a row left behind
 /// is reclaimed by the TTL sweep.
 async fn discard_row(table: &str, name: &str, holder_id: Uuid, pool: &PgPool) {
-    let _deleted = sqlx::query(&format!(
+    let _deleted = sqlx::query(AssertSqlSafe(format!(
         "DELETE FROM {table} WHERE name = $1 AND holder_id = $2"
-    ))
+    )))
     .bind(name)
     .bind(holder_id)
     .execute(pool)
@@ -913,7 +915,7 @@ async fn try_acquire(
     // then re-evaluates the predicate against the winner's *committed* state,
     // which is why there is no third case — and why `READ COMMITTED` is asserted
     // at startup (`pg_setup::assert_read_committed`).
-    let acquired: Option<i32> = sqlx::query_scalar(&acquire_sql(table))
+    let acquired: Option<i32> = sqlx::query_scalar(AssertSqlSafe(acquire_sql(table)))
         .bind(name)
         .bind(holder_id)
         .bind(ttl_ms)
@@ -1108,13 +1110,13 @@ async fn renew(
     };
 
     let ttl_ms = ttl_to_millis(new_ttl)?;
-    let updated: Option<i32> = sqlx::query_scalar(&format!(
+    let updated: Option<i32> = sqlx::query_scalar(AssertSqlSafe(format!(
         "UPDATE {table} SET acquired_at = now(), expires_at = {expires_at} \
          WHERE name = $2 AND holder_id = $3 AND expires_at > now() \
            AND holder_beacon_hi = $4 AND holder_beacon_lo = $5 \
          RETURNING 1",
         expires_at = expires_at_sql(1),
-    ))
+    )))
     .bind(ttl_ms)
     .bind(name)
     .bind(holder_id)
@@ -1194,10 +1196,10 @@ async fn release(
     // announcing a release that did not happen — the channel is shared, so every
     // blocked `lock()` waiter on it wakes and retries for nothing, and §11 names
     // aggregate NOTIFY rate as the primary scaling risk.
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "WITH released AS (DELETE FROM {table} WHERE name = $1 AND holder_id = $2 RETURNING 1) \
          SELECT pg_notify($3, $1) FROM released"
-    ))
+    )))
     .bind(name)
     .bind(holder_id)
     .bind(notify::RELEASE_CHANNEL)
