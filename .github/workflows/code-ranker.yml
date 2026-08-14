@@ -9,9 +9,6 @@ on:
       - '.cargo/**'
       - '!**/tests/**'
       - '!testing/**'
-      - '!**/*.md'
-      - '!docs/**'
-      - '!guidelines/**'
   push:
     paths:
       - '**/*.rs'
@@ -21,9 +18,6 @@ on:
       - '.cargo/**'
       - '!**/tests/**'
       - '!testing/**'
-      - '!**/*.md'
-      - '!docs/**'
-      - '!guidelines/**'
 jobs:
   code-ranker:
     uses: code-ranker-com/actions/.github/workflows/report.yml@v1
