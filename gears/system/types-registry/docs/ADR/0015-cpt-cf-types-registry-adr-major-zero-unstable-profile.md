@@ -157,9 +157,9 @@ Admission therefore adds one comparison to the managed Instance identity profile
 
 ADR-0004 refuses minors on Instance identifiers for the same reason while admitting them on Type Schema identifiers under every prefix.
 
-**A registered Instance MUST NOT conform to a v0 Type Schema.** ADR-0006 otherwise blocks a schema revision that makes an affected Instance invalid. Applying that rule to v0 would restore the evolution block this ADR removes. Waiving it would leave invalid Instances while `instance.validated_type_schema_revision_no` falsely records successful revalidation.
+**A registered Instance MUST NOT conform to a v0 Type Schema.** ADR-0006 otherwise blocks a schema revision that makes an affected Instance invalid. Applying that rule to v0 would restore the evolution block this ADR removes. Waiving it would leave invalid Instances behind the platform-wide invariant that a current Instance value is valid against its schema's current revision — the invariant that lets Types Registry store no revalidation record at all.
 
-Refusing the combination keeps both records truthful. The accepted cost is that a control-plane type and its Instances cannot be co-developed under v0; such a type starts at v1.
+Refusing the combination keeps that invariant true. The accepted cost is that a control-plane type and its Instances cannot be co-developed under v0; such a type starts at v1.
 
 ### Nothing is stored
 

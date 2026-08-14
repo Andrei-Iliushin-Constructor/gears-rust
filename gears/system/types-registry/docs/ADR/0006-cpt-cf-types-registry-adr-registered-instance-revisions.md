@@ -176,7 +176,9 @@ Neither the Instance revision number nor its conforming Type Schema revision app
 
 The conforming revision is actively misleading. A caller seeing validation against schema revision 4 beside a later current revision could conclude that the value is outdated. That is false: this ADR and ADR-0005 prevent a schema revision from becoming current if an affected registered Instance would become invalid. The current Instance value is therefore valid against the current schema.
 
-The stored schema revision records when revalidation was last established. It is internal work provenance, not the value's current standing.
+The stored schema revision is the one that admitted the value, and it lives on the immutable Instance revision. It is internal admission provenance, not the value's current standing.
+
+That same argument is why no revision records the revalidation itself. The current standing is the invariant above, so a "last revalidated by" column on current state would restate what activation already guarantees, and it could not serve as retry bookkeeping either: a rolled-back attempt commits nothing, so nothing survives to shorten the retry. A conforming Instance is reached during revalidation the way every other dependent is, through the reverse dependency traversal. Indexing the conforming schema on current state would not merely duplicate that reach, it would compete with it: the commit rechecks the membership of the reverse-impact set under the target's lock, and two mechanisms producing one set must then be reconciled there, on the path whose duration is already the hazard. Should the activation protocol commit progress in stages, that progress belongs to the operation rather than to entity state.
 
 The conforming Type Schema identifier is also absent, for a plainer reason: GTS §11.1 makes it the Instance identifier's chain up to and including the last `~`, so the caller already holds it and the SDK derives it with a method call rather than string parsing.
 

@@ -565,8 +565,8 @@ CREATE TABLE types_registry__instance_revision (
     CONSTRAINT ck_tr_instance_revision_no CHECK (revision_no >= 1)
 );
 
--- No content-hash index (same rationale as Type Schema revisions) and no validating
--- revision index; revalidation scans current Instances via idx_tr_instance_schema.
+-- No content-hash index, same rationale as Type Schema revisions, and no conforming-
+-- schema index: revalidation arrives through the reverse dependency traversal.
 
 
 -- Current Type Schema state. Authored content, hash, and checker versions remain in
@@ -608,19 +608,21 @@ CREATE TABLE types_registry__type_schema (
 );
 
 
--- Current registered Instance state. Authored value, hash, original validating
--- schema revision, and checker versions remain in instance_revision.
+-- Current registered Instance state: the current-revision pointer and nothing else.
+-- Authored value, hash, admitting schema revision, and checker versions stay in
+-- instance_revision; unlike type_schema there is no resolved artifact to hold.
 --
--- validated_type_schema_revision_no advances when a newer schema revalidates the
--- unchanged value. Instances have no derived artifact to fingerprint; resource
--- version plus tenant ancestor-chain version fully validates reads.
+-- No conforming-schema columns: that schema is the identifier prefix through the last
+-- `~` (GTS spec 11.1), the immutable pair on instance_revision, and a kind 4
+-- dependency edge, which is how revalidation reaches the Instance. No last-revalidated
+-- revision either — activation keeps a current value valid against its schema's
+-- current revision, and a rolled-back attempt commits nothing, so it could neither
+-- inform nor shorten a retry (ADR-0006).
 CREATE TABLE types_registry__instance (
-    entity_id                         bigint      NOT NULL,
-    revision_no                       integer     NOT NULL,
-    type_schema_entity_id             bigint      NOT NULL,
-    validated_type_schema_revision_no integer     NOT NULL,
-    created_at                        timestamptz NOT NULL,
-    updated_at                        timestamptz NOT NULL,
+    entity_id   bigint      NOT NULL,
+    revision_no integer     NOT NULL,
+    created_at  timestamptz NOT NULL,
+    updated_at  timestamptz NOT NULL,
 
     CONSTRAINT pk_tr_instance PRIMARY KEY (entity_id),
     CONSTRAINT fk_tr_instance_revision_ptr
@@ -629,24 +631,8 @@ CREATE TABLE types_registry__instance (
             entity_id,
             revision_no
         )
-        ON DELETE CASCADE,
-    CONSTRAINT fk_tr_instance_validated_schema
-        FOREIGN KEY (
-            type_schema_entity_id,
-            validated_type_schema_revision_no
-        )
-        REFERENCES types_registry__type_schema_revision (
-            entity_id,
-            revision_no
-        )
-        ON DELETE RESTRICT
+        ON DELETE CASCADE
 );
-
-CREATE INDEX idx_tr_instance_schema
-    ON types_registry__instance (
-        type_schema_entity_id,
-        validated_type_schema_revision_no
-    );
 
 
 -- Direct dependency relation: from_entity_id depends on to_entity_id. Nothing
