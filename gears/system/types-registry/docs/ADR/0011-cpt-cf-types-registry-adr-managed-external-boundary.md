@@ -178,7 +178,7 @@ What it examines is exactly what Types Registry owns and can enumerate: types de
 
 An optional diagnostic also has no consumer. Types Registry exposes no dependent-enumeration operation on either plane; callers instead ask *would this mutation be refused, and why?* through that mutation's Dry Run.
 
-A reverse-impact report would therefore have a producer and router but no caller. ADR-0007 excludes it rather than making it optional. The capability profile consequently has no advisory tier, and `cpt-cf-types-registry-principle-fail-closed` needs no exception for a warning-only plugin output.
+A reverse-impact report would therefore have a producer and router but no caller. ADR-0007 keeps it out of the contract rather than making it optional. The contract consequently has no advisory tier, and `cpt-cf-types-registry-principle-fail-closed` needs no exception for a warning-only plugin output.
 
 Adding both a diagnostic and a surface that renders it later remains additive.
 
@@ -235,7 +235,7 @@ The composition story therefore sits on the managed side of the boundary rather 
 ### Consequences
 
 * ADR-0002's enumeration of prohibited persistence holds with no exception, so the persistence rule and the enumeration state the same thing.
-* The P1 capability profile of ADR-0007 contains neither dependency registration nor reverse dependency-impact lookup: the boundary leaves nothing to register, and nothing to report that any operation would consume. Everything left in the profile is mandatory, so the profile has no optional or advisory tier and plugin conformance tests need only one shape.
+* The P1 federation contract of ADR-0007 contains neither dependency registration nor reverse dependency-impact lookup: the boundary leaves nothing to register, and nothing to report that any operation would consume. Everything left in the contract is mandatory, so it has no optional or advisory tier, nothing about it is declared per plugin, and plugin conformance tests need only one shape.
 * **Registry Source Plugins have no write path to Types Registry.** The relationship is read-only, so the authentication, per-claim authorization, idempotency, and withdrawal semantics such a path would need do not arise.
 * Every availability-blocking relationship in ADR-0010's table holds between two Managed Entities, and none crosses the boundary.
 * Managed deletion, resolution, and availability involve no plugin and no plugin-supplied data. The managed lookup NFR is achievable without plugin-latency budgeting, and no degraded vendor integration can block or corrupt a managed decision.
@@ -263,7 +263,7 @@ This decision is confirmed when:
 * registering a Managed Entity whose identifier matches a retired Source Claim is rejected, and deleting a plugin Instance retires its claims into exactly that state while an unreachable plugin retains its own;
 * activating a new plugin's claim over a retired claim is rejected with no exception, and no request field, declared intent, or continuity assertion makes it succeed;
 * the retargeting migration is documented as carrying the hazard it cannot dispel rather than as a safe path: the persistence rule leaves the platform holding no identifier, revision, or content hash of what the predecessor served, so nothing verifies that the named successor serves the same logical entities, and a successor that serves different content under a reserved identifier silently rebinds every domain row holding its Registry Reference. What stands behind continuity there is the review of that migration, never a registry check;
-* no plugin operation asks a source about dependents, and no plugin output is permitted to degrade with a warning in place of failing closed — the capability profile has no optional or advisory tier to test.
+* no plugin operation asks a source about dependents, and no plugin output is permitted to degrade with a warning in place of failing closed — the contract has no optional or advisory tier to test.
 
 ## Pros and Cons of the Options
 

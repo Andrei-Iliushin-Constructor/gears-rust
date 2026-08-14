@@ -63,7 +63,7 @@ Registration and deletion use one asynchronous read/reconcile/conditional-write 
 | `cpt-cf-types-registry-fr-tenant-availability` | Registry-computed verdict from entity state and the Context Tenant's ancestor chain; P1 requires no dependency-closure traversal. See *Availability Evaluator* in §3.2. |
 | `cpt-cf-types-registry-fr-lifecycle` | Managed `ACTIVE`/`DELETED` lifecycle, exact family enumeration, and deletion blocked by registered dependents. See *Dependency Graph & Deletion Safety* in §3.2. |
 | `cpt-cf-types-registry-fr-externally-managed-entities` | Live, non-persisted source results validated at the managed–external boundary; typed origin data exposes no external write precondition. See *Federation Router* in §3.2 and *Registry Source Plugin contract* in §3.3. |
-| `cpt-cf-types-registry-fr-registry-federation`, `cpt-cf-types-registry-fr-registry-source-routing` | Managed-first resolution followed by deterministic, non-overlapping Source Claims; plugins are capability-checked and read-only. See *Federation Router* and *Registry Source Plugin registration* in §3.2. |
+| `cpt-cf-types-registry-fr-registry-federation`, `cpt-cf-types-registry-fr-registry-source-routing` | Managed-first resolution followed by deterministic, non-overlapping Source Claims; plugins are read-only and bound to the total federation contract. See *Federation Router* and *Registry Source Plugin registration* in §3.2. |
 | `cpt-cf-types-registry-fr-cache-freshness-metadata` | Per-request opaque validators scoped to origin, Context Tenant, and normalized projection for exact reads, never discovery pages. See *What a validator is made of* in §3.3. |
 | `cpt-cf-types-registry-fr-client-cache` | Bounded per-client representation cache with batched conditional revalidation and fail-closed expiry handling. See *The client-side cache* in §3.3. |
 | `cpt-cf-types-registry-fr-two-phase-init` | Caller-side inventory reconciliation, dependency-aware batches, and per-registrant readiness without a global startup barrier. See *Inventory and startup reconciliation* in §3.3. |
@@ -533,7 +533,7 @@ The three guards cover distinct races:
 - The reverse-impact set and revision vector detect both movement of a known dependency/dependant and a phantom dependant created after the initial scan; the worker reloads and revalidates within a bounded retry policy.
 - Canonically ordered `version_family` locks serialize first registration under competing owners, predecessor removal by purge, and multi-family units. Locking dependency entity rows serializes a new edge against target deletion. When routing state also participates, every path takes family locks, then entity/current rows, then the singleton routing lock.
 
-Deletion has its own short commit protocol. It requires a positive `expected_resource_version`, locks the target family and entity row, rechecks the target is `ACTIVE` at that version and has no direct registered dependants, then changes lifecycle to `DELETED`, increments `resource_version`, and records the outcome atomically. Because admission locks every dependency target entity before writing its edges, a new dependent cannot appear between the deletion check and lifecycle transition. Deleting a Registry Source Plugin additionally locks `routing_config` after the family and entity locks, retires its active claims, and increments the routing generation in the same transaction; source unreachability never triggers this path.
+Deletion has its own short commit protocol. It requires a positive `expected_resource_version`, locks the target family and entity row, rechecks the target is `ACTIVE` at that version and has no direct registered dependants, then changes lifecycle to `DELETED`, increments `resource_version`, and records the outcome atomically. Because admission locks every dependency target entity before writing its edges, a new dependent cannot appear between the deletion check and lifecycle transition. Deleting a Registry Source Plugin additionally locks `routing_config` after the family and entity locks, stamps `retired_at` on its active claims — the only column deletion touches, so each reservation keeps the projection recording which plugin revision issued it — and increments the routing generation in the same transaction; source unreachability never triggers this path.
 
 The unique family row is the ownership authority. Creation uses backend-specific insert-if-absent followed by a locked read; admission requires the requested owner to equal the stored one. The entity's owner is only a SecureORM projection and changes while this lock is held.
 
@@ -742,7 +742,7 @@ No transitive relation is materialized. Derivation and conformance are stored as
 
 ##### Responsibility scope
 
-Matches a canonical identifier against active Source Claims by its first **GTS chain segment** — the whole substring before the first `~`, not one dot-delimited field; for `A~B~`, routing is decided from `A` — orders plugins deterministically, selects at most one source for an exact identifier and every intersecting source for a pattern, fans out batch resolution so each plugin is called at most once, validates every response against the platform boundary — identifier integrity, derived reference equality, claim conformance, entity kind, revision and hash consistency — mints and validates federation cursors bound to the plugin configuration revision, and maps source outcomes onto the platform failure vocabulary without ever converting unavailability into absence.
+Matches a canonical identifier against active Source Claims by its first **GTS chain segment** — the whole substring before the first `~`, not one dot-delimited field; for `A~B~`, routing is decided from `A` — orders plugins deterministically, selects at most one source for an exact identifier and every intersecting source for a pattern, fans out batch resolution so each plugin is called at most once, validates every response against the platform boundary — identifier integrity, derived reference equality, claim conformance, agreement between the reported kind and the trailing `~` of the returned identifier, revision and hash consistency — mints and validates federation cursors bound to the plugin configuration revision, and maps source outcomes onto the platform failure vocabulary without ever converting unavailability into absence.
 
 ##### Responsibility boundaries
 
@@ -777,7 +777,7 @@ It returns concrete references, never a normalized predicate or an executable pl
 
 ##### Responsibility scope
 
-A closed, in-process validator set for platform-defined control-plane types. It enforces Source Claim invariants and required capabilities by entity kind, rejects tenant-scoped control-plane types and instances, and rejects claims overlapping retired reservations because ADR-0011 provides no runtime transfer.
+A closed, in-process validator set for platform-defined control-plane types. It enforces Source Claim invariants — pattern grammar and non-overlap — rejects tenant-scoped control-plane types and instances, and rejects claims overlapping retired reservations because ADR-0011 provides no runtime transfer.
 
 ##### Responsibility boundaries
 
@@ -794,9 +794,9 @@ It is not the P2 Validation Hook mechanism. Validators are compiled in and keyed
 
 A Registry Source Plugin registers as a well-known GTS Instance of a Types Registry-owned schema derived from `gts.cf.toolkit.plugins.plugin.v1~`; it is declared with `toolkit-gts` and startup-reconciled through ordinary admission (§3.3), never inserted specially or configured in a separate file.
 
-The base schema provides the plugin `id`, `vendor`, lower-wins `priority`, and generic `properties`. The derived schema adds Source Claims, served entity kinds, and the capabilities ADR-0007 requires for activation. `source_claim.priority` and `source_claim.plugin_entity_gts_id` project the base `priority` and `id`.
+The base schema provides the plugin `id`, `vendor`, lower-wins `priority`, and generic `properties`. The derived schema adds one thing: a set of Source Claims, each a GTS Identifier pattern. Nothing else is declared — the federation contract is total, so implementing the trait is the whole obligation and there is no profile to state or check, and entity kind is not declared either because the trailing `~` of each identifier already carries it (ADR-0007). `source_claim.priority` and `source_claim.plugin_entity_gts_id` project the base `priority` and `id`.
 
-Registration is ordinary platform-plane Instance admission under ADR-0012, including operation, idempotency, and audit; there is no separate plugin API. Outside the transaction, the Control-Plane Validator rejects claims overlapping an active claim, retired reservation, or managed identifier range (checked by prefix range over `entity.gts_id`) and verifies the capability profile for each entity kind.
+Registration is ordinary platform-plane Instance admission under ADR-0012, including operation, idempotency, and audit; there is no separate plugin API. Outside the transaction, the Control-Plane Validator rejects claims overlapping an active claim, retired reservation, or managed identifier range (checked by prefix range over `entity.gts_id`) and rejects a malformed pattern.
 
 The commit transaction atomically:
 
@@ -826,7 +826,7 @@ These policy-free adapters and maintenance job are defined together to avoid emp
 | Operation Store | `cpt-cf-types-registry-component-operation-store` | Public async operations with scoped key/fingerprint, per-ID preconditions, state, results, and diagnostics; atomically enqueues operation UUIDs through dedicated `toolkit-db` outbox tables. Times out stalled operations and sweeps retained, unpinned terminal ones | The operation is the request receipt. Outbox tables own leases, attempts, retries, and dead letters; registry tables own client-visible state. Payloads contain no candidate content. Sweeping touches neither admitted content nor identity and is not ADR-0013 purge |
 | Tenant Hierarchy Client | `cpt-cf-types-registry-component-tenant-hierarchy-client` | Ancestor chain of a tenant from `tenant-resolver` with barrier traversal disabled, cached with a version participating in the resolution validator | Does not interpret tenancy semantics; supplies the chain only |
 | Plugin Client Adapter | `cpt-cf-types-registry-component-plugin-client-adapter` | Scoped ClientHub access to Registry Source Plugins, timeouts, concurrency limits, and per-source failure classification | Applies no platform policy to responses; conformance validation belongs to the federation router |
-| Purge Job | `cpt-cf-types-registry-component-purge-job` | Synchronous operator purge/dry run by GTS pattern on the platform plane. Expands the pattern; locks all affected `version_family` rows in canonical order through commit; removes Instances before Type Schemas, their revisions, entity rows, and empty families. When purging a Registry Source Plugin, it then locks `routing_config`, removes that plugin's retired claims, and increments the routing generation in the same transaction. It leaves operation history to ordinary retention and returns a per-ID report | Never scheduled; disabled by default. Rechecks deletion preconditions and refuses to release a minor below another admitted minor (ADR-0013). The family-then-routing lock order matches admission. Creates no operation, candidate, or request-identity row: the sole mutation outside ADR-0012's async path |
+| Purge Job | `cpt-cf-types-registry-component-purge-job` | Synchronous operator purge/dry run by GTS pattern on the platform plane. Expands the pattern; locks all affected `version_family` rows in canonical order through commit; when purging a Registry Source Plugin, locks `routing_config` next and removes that plugin's claims first, so the rows go before the revisions they reference; then removes Instances before Type Schemas, their revisions, entity rows, and empty families, and increments the routing generation in the same transaction. It leaves operation history to ordinary retention and returns a per-ID report | Never scheduled; disabled by default. Rechecks deletion preconditions and refuses to release a minor below another admitted minor (ADR-0013). The family-then-routing lock order matches admission. Creates no operation, candidate, or request-identity row: the sole mutation outside ADR-0012's async path |
 
 ### 3.3 API Contracts
 
@@ -1478,7 +1478,7 @@ Although P1 plugins are in-process, this contract is remote-ready: batched calls
 
 ##### The trait
 
-Both operations are mandatory for every claimed entity kind; missing capability blocks Source Claim activation. Tenant enablement travels with the entity result rather than through a race-prone second call.
+The contract is total: both operations are mandatory across the whole claimed identifier space, nothing in it is optional, and implementing this trait is therefore the whole obligation — there is nothing to declare at registration. Kind-dependent requirements, such as the effective artifacts a Type Schema result must carry, follow from each identifier's trailing `~` and are enforced on every response as `INVALID_SOURCE_RESPONSE`; behavioral ones are covered by conformance tests. A source holding no entity of one kind in its space answers `NotFound` for it, exactly as for any other absent identifier. Tenant enablement travels with the entity result rather than through a race-prone second call.
 
 `TenantEnablement` is a state-only input and carries no source reason or expiry. The Availability Evaluator maps `NotInitialized` and `Disabled` to platform-owned reasons; a source with time-based policy returns the state effective at call time, and any state change changes its token for that `(entity, tenant)`.
 
@@ -1554,6 +1554,8 @@ pub enum SourceLookup {
 /// Metadata through content_hash is mandatory for filtering and validation.
 pub struct SourceEntity {
     pub gts_id: GtsId,
+    /// Must agree with the trailing `~` of `gts_id`; disagreement is
+    /// INVALID_SOURCE_RESPONSE. No claim declares which kinds a source serves.
     pub kind: EntityKind,
     /// Registry applies authoritative descendant visibility. Unknown or absent
     /// ownership is INVALID_SOURCE_RESPONSE.
@@ -1615,7 +1617,7 @@ pub enum SourceError {
 
 Only document groups are projected; all metadata is required for registry filtering and validation. `list_entities` returns a candidate feed: over-returning is expected, and the registry wraps opaque `SourceCursor` state in its routing-generation-bound cursor.
 
-`SourceQuery` omits platform-owned predicates: availability, descendant scope, origin, and derivation depth are applied by the registry. Capabilities come from the registration Instance and are checked at claim activation, not probed per call. `INVALID_SOURCE_RESPONSE` is a registry verdict and therefore is not a `SourceError`.
+`SourceQuery` omits platform-owned predicates: availability, descendant scope, origin, and derivation depth are applied by the registry. Nothing about the contract is negotiated per call or declared at registration: its version is the version of the SDK crate the plugin compiles against. `INVALID_SOURCE_RESPONSE` is a registry verdict and therefore is not a `SourceError`.
 
 ##### What the plugin does not decide
 
@@ -1704,9 +1706,9 @@ sequenceDiagram
     C->>A: Batch-get exact GTS IDs
     A->>D: Read identity + current projections
     A-->>C: Current authored content + resource_version
-    C->>C: Drop equal entities; attach per-item preconditions
+    C->>C: Drop equal entities, attach per-item preconditions
     opt nothing differs
-        C->>C: Report UpToDate; send no request
+        C->>C: Report UpToDate, send no request
     end
     C->>A: Register remaining batch + idempotency key
     A->>G: Canonicalize authored content
@@ -1744,9 +1746,9 @@ sequenceDiagram
     participant P as Registry Source Plugin
 
     C->>A: batch_get_entities(keys, $select, per-key validators)
-    A->>G: Canonicalize; derive gts_uuid for every GTS Identifier key
+    A->>G: Canonicalize, derive gts_uuid for every GTS Identifier key
     alt tenant plane
-        A->>T: Subject ancestor chain; authorize named Context Tenant
+        A->>T: Subject ancestor chain, authorize named Context Tenant
         opt Context Tenant differs and availability is selected
             A->>T: Context Tenant ancestor chain (cached separately)
         end
@@ -1754,7 +1756,7 @@ sequenceDiagram
         A->>T: Named Context Tenant ancestor chain
     end
     A->>D: One keyed read per entity, no history scan
-    Note over A,D: Visibility uses the subject chain; availability uses the<br/>Context Tenant chain; platform visibility is unrestricted
+    Note over A,D: Visibility uses the subject chain, availability uses the<br/>Context Tenant chain — platform visibility is unrestricted
     opt keys not held locally
         A->>R: Unresolved keys
         alt key is a GTS Identifier
@@ -1767,7 +1769,7 @@ sequenceDiagram
         R->>P: One batch call per plugin, never one per key
         P-->>R: Authored + effective content, ownership scope,<br/>lifecycle, tenant enablement, external_revision, content hash
         R->>G: Derive gts_uuid from the returned identifier
-        R->>R: Validate reference equality, claim conformance, entity kind,<br/>ownership scope, revision/hash consistency
+        R->>R: Validate reference equality, claim conformance, kind against<br/>trailing `~`, ownership scope, revision/hash consistency
         alt SOURCE_UNAVAILABLE or INVALID_SOURCE_RESPONSE
             R-->>A: Failure bound to that key alone
             Note over R,A: Never converted into not_found
@@ -1802,7 +1804,7 @@ sequenceDiagram
     loop until the traversal ends or the registry refuses
         S->>A: GET /entities, $select=gts_uuid, availability=available, cursor
         A->>G: Compile the pattern to explicit identifier bounds
-        A->>D: Index range scan; visibility and availability in one predicate
+        A->>D: Index range scan, visibility and availability in one predicate
         A->>G: Confirm each candidate with the GTS matcher
         Note over A,G: The range is a pre-filter — matching is segment-wise,<br/>so the matcher decides
         opt managed rows exhausted and a claim intersects the pattern

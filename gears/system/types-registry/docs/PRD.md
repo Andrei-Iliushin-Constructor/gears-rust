@@ -344,7 +344,7 @@ That last qualification is normative, because GTS 0.13 §9.6 gives `x-gts-ref` t
 
 The system **MUST NOT** treat the open set of entities a pattern matches as a dependency, so admitting a new entity under an existing pattern **MUST NOT** require any edge to be re-expanded.
 
-Under ADR-0011 every tracked dependency has a Managed Entity at both ends, so the tracked set is authoritative for deletion safety and that decision is reached from local state without plugin availability, plugin cooperation, or plugin-supplied data. No plugin capability contributes to that set, and none is asked to.
+Under ADR-0011 every tracked dependency has a Managed Entity at both ends, so the tracked set is authoritative for deletion safety and that decision is reached from local state without plugin availability, plugin cooperation, or plugin-supplied data. No plugin operation contributes to that set, and none is asked to.
 
 Types Registry **MUST NOT** expose a client-facing operation for enumerating dependents. What a caller needs — whether a deletion or a revision would be refused, and by what — is answered by the Dry Run of that same mutation.
 
@@ -357,7 +357,7 @@ Any visible and tenant-available entity **MUST** remain a valid target for both 
 
 - [ ] `p1` - **ID**: `cpt-cf-types-registry-fr-registry-federation`
 
-The system **MUST** support multiple Registry Sources, including Types Registry's own managed storage and External Registry Sources integrated through governed Registry Source Plugins. Types Registry **MUST NOT** persist external entity definitions, identifiers, revisions, content hashes, lifecycle state, Registry Reference mappings, query indexes, caches, or tombstones, and the owning plugin **MUST** provide those capabilities live through the Types Registry federation contract. Under ADR-0011 this prohibition has no exception, and Registry Source Plugins **MUST NOT** have any write path into Types Registry state.
+The system **MUST** support multiple Registry Sources, including Types Registry's own managed storage and External Registry Sources integrated through governed Registry Source Plugins. Types Registry **MUST NOT** persist external entity definitions, identifiers, revisions, content hashes, lifecycle state, Registry Reference mappings, query indexes, caches, or tombstones, and the owning plugin **MUST** serve that state live through the Types Registry federation contract. Under ADR-0011 this prohibition has no exception, and Registry Source Plugins **MUST NOT** have any write path into Types Registry state.
 
 - **Rationale**: Vendor products may already have authoritative type registries, but platform gears still need one Types Registry contract for resolving, discovery, and platform governance.
 - **Actors**: `cpt-cf-types-registry-actor-xaas-vendor-architect`, `cpt-cf-types-registry-actor-gears-developer`, `cpt-cf-types-registry-actor-registry-source-plugin`
@@ -366,9 +366,9 @@ The system **MUST** support multiple Registry Sources, including Types Registry'
 
 - [ ] `p1` - **ID**: `cpt-cf-types-registry-fr-registry-source-routing`
 
-Each Registry Source Plugin instance **MUST** declare validated Source Claims, served entity kinds, and deterministic priority. A claim **MUST** be one rooted GTS segment with a wildcard at a token boundary, from `gts.<vendor>.*` through `gts.<vendor>.<package>.<namespace>.<type>.*`; activation **MUST** reject multi-segment patterns. The matching rooted claim prefix therefore selects the source and keeps the identifier's whole derivation chain within it.
+Each Registry Source Plugin **MUST** declare one or more validated Source Claims and a deterministic priority. A Source Claim is a GTS Identifier pattern and nothing more: the trailing `~` of an identifier already determines its kind and overlap is checked over the identifier space regardless of kind, so a claim declaring an entity-kind restriction **MUST** be rejected rather than narrowed to the kinds it names. A claim **MUST** be one rooted GTS segment with a wildcard at a token boundary, from `gts.<vendor>.*` through `gts.<vendor>.<package>.<namespace>.<type>.*`; activation **MUST** reject multi-segment patterns. The matching rooted claim prefix therefore selects the source and keeps the identifier's whole derivation chain within it.
 
-For every claimed kind, an active P1 plugin **MUST** provide:
+The Types Registry federation contract is total: across its whole claimed identifier space an active P1 plugin **MUST** implement all of it, with no optional or advisory part and nothing separately declared or negotiated. The contract requires:
 
 - batch forward and reverse resolution, with reverse resolution retained after deletion;
 - complete bounded candidate queries with opaque pagination;
@@ -376,11 +376,11 @@ For every claimed kind, an active P1 plugin **MUST** provide:
 - revision/hash and conditional-read semantics; and
 - structured source failures.
 
-For Type Schemas it **MUST** also return resolved effective schema and trait artifacts. These capabilities are mandatory and authoritative; dependency registration and reverse-impact lookup are excluded by the closed boundary.
+For a Type Schema result — an identifier with a trailing `~` — it **MUST** also return resolved effective schema and trait artifacts. A claim covers both entity kinds in its space, so a source holding none of one kind **MUST** report that kind's identifiers absent exactly as it reports any other absent identifier, with no separate outcome for an unheld kind. These obligations are mandatory and authoritative; dependency registration and reverse-impact lookup are absent from the contract under the closed boundary.
 
-Candidate queries **MUST NOT** have false negatives; Types Registry **MUST** accept a broader candidate set and apply normalized platform filtering. A claim/kind configuration **MUST NOT** activate without every applicable capability, and incomplete runtime results **MUST** fail closed.
+Candidate queries **MUST NOT** have false negatives; Types Registry **MUST** accept a broader candidate set and apply normalized platform filtering. A source response that is non-conforming or incomplete for the identifier it returns **MUST** be rejected rather than interpreted, and the affected request **MUST** fail closed; conformance is therefore established on every response and by plugin conformance tests, never by an activation-time check against a plugin's own declaration.
 
-P1 Source Claims **MUST NOT** overlap one another or managed identifier space, including by nesting a Managed Entity beneath a claim. Deleting a plugin retires its claims: they no longer route but **MUST** remain reservations until ADR-0013 purge, so overlapping managed registration or claim activation remains forbidden. Managed storage **MUST** be consulted first, then plugins in deterministic priority order. An exact or batch source failure **MUST** remain distinct from absence; a batch **MUST** report it per affected key while returning unaffected keys. List and search operations **MUST** fail closed on any selected source failure or invalid/incomplete response and **MUST NOT** return partial pages or reinterpret failure as exhaustion or absence.
+P1 Source Claims **MUST NOT** overlap one another or managed identifier space, including by nesting a Managed Entity beneath a claim. Source Claims are declared by ordinary platform-plane admission of an Instance of the Registry Source Plugin type, never through the plugin contract itself, which keeps no write path; that Instance is a Managed Entity of the platform's own plugin region and so lies outside every vendor claim. A claim's lifecycle is therefore that Instance's: it routes while the Instance is `ACTIVE`, deleting the Instance retires its claims — they no longer route but **MUST** remain reservations, so overlapping managed registration or claim activation remains forbidden — and only ADR-0013 purge of that Instance releases the reserved space. Managed storage **MUST** be consulted first, then plugins in deterministic priority order. Because no source declares which kinds it serves, a kind filter **MUST NOT** narrow the set of sources consulted: a kind-filtered query goes to every source whose claim intersects the queried identifier space. Absence **MUST** be authoritative — Types Registry **MUST NOT** report an identifier absent until every source required to establish that has answered authoritatively. An exact or batch source failure **MUST** remain distinct from absence; a batch **MUST** report it per affected key while returning unaffected keys. List and search operations **MUST** fail closed on any selected source failure or invalid/incomplete response and **MUST NOT** return partial pages or reinterpret failure as exhaustion or absence.
 
 - **Rationale**: Live federation requires deterministic ownership and routing without a per-external-entity index or identifier shadowing.
 - **Actors**: `cpt-cf-types-registry-actor-platform-gear`, `cpt-cf-types-registry-actor-registry-source-plugin`
@@ -395,7 +395,7 @@ Their identifier spaces **MUST** be disjoint, with no reference or derivation ac
 
 Types Registry **MUST NOT** parse external content to detect a source-authored `$ref` or `x-gts-ref` to a Managed Entity. Such a reference receives no platform guarantee: no managed-target deletion safety, availability propagation, dependent revalidation, lifecycle notification, or protection from purge and identifier rebinding. This limitation does not weaken the managed target's own compatibility guarantee.
 
-The External Registry Source **MUST** remain sole authority for source-owned entity validity; Types Registry **MUST NOT** require, interpret, or reproduce its validation results. Before exposure, Types Registry validates only platform-owned response invariants: identifier and Registry Reference integrity, Source Claim, entity kind, authorization, visibility, lifecycle mapping, availability, and freshness. Every result **MUST** carry External Revision and canonical content hash, neither persisted by Types Registry.
+The External Registry Source **MUST** remain sole authority for source-owned entity validity; Types Registry **MUST NOT** require, interpret, or reproduce its validation results. Before exposure, Types Registry validates only platform-owned response invariants: identifier and Registry Reference integrity, Source Claim, entity kind as determined by the identifier's trailing `~`, authorization, visibility, lifecycle mapping, availability, and freshness. Every result **MUST** carry External Revision and canonical content hash, neither persisted by Types Registry.
 
 - **Rationale**: External source ownership must not bypass platform contract governance, while source-owned entity validation policies and results remain outside the Types Registry responsibility boundary.
 - **Actors**: `cpt-cf-types-registry-actor-platform-gear`, `cpt-cf-types-registry-actor-domain-gear`, `cpt-cf-types-registry-actor-registry-source-plugin`
@@ -590,7 +590,7 @@ Every exact resolution, by either key or as a batch member, **MUST** return meta
 
 The validator **MUST** cover the complete projected result, including tenant availability, rather than only entity `resource_version`. It **MUST** be scoped to the entity, Context Tenant, visibility context, and field projection for which it was issued; a validator from another scope or projection **MUST** yield the full result, never a false unchanged response.
 
-For an Externally Managed Entity, the validator **MUST** derive from the source's opaque revision and content hash, remain unpersisted by Types Registry, and change whenever the platform-visible result for that entity and tenant changes, including source-owned tenant enablement. Validation **MUST** delegate to the owning source's conditional-read capability.
+For an Externally Managed Entity, the validator **MUST** derive from the source's opaque revision and content hash, remain unpersisted by Types Registry, and change whenever the platform-visible result for that entity and tenant changes, including source-owned tenant enablement. Validation **MUST** delegate to the owning source's conditional-read semantics under the federation contract.
 
 Single and batch reads **MUST** accept caller-supplied validators and return an unchanged outcome instead of the full result when current; batch evaluation is per item. Types Registry **MUST NOT** report unchanged unless currentness is established (`cpt-cf-types-registry-principle-fail-closed`). Callers may use this contract directly or through the P1 SDK cache of `cpt-cf-types-registry-fr-client-cache`.
 
@@ -656,7 +656,7 @@ Authorization **MUST** precede identifier availability, and Dry Run **MUST NOT**
 
 - [ ] `p1` - **ID**: `cpt-cf-types-registry-nfr-lookup-latency`
 
-The system **MUST** resolve an exact Managed Entity Registry Reference or GTS Identifier lookup within 10 ms at p95 under the supported production benchmark profile defined in DESIGN. For an Externally Managed Entity, the same threshold applies only to Types Registry federation and policy-processing overhead; Registry Source Plugin and External Registry Source execution time are governed by the source capability contract.
+The system **MUST** resolve an exact Managed Entity Registry Reference or GTS Identifier lookup within 10 ms at p95 under the supported production benchmark profile defined in DESIGN. For an Externally Managed Entity, the same threshold applies only to Types Registry federation and policy-processing overhead; Registry Source Plugin and External Registry Source execution time are governed by the federation contract.
 
 - **Threshold**: p95 < 10 ms for a managed exact lookup and p95 < 10 ms for Types Registry external-resolution overhead.
 - **Rationale**: Registry resolving is used by gear startup and runtime paths.
@@ -666,7 +666,7 @@ The system **MUST** resolve an exact Managed Entity Registry Reference or GTS Id
 
 - [ ] `p2` - **ID**: `cpt-cf-types-registry-nfr-query-latency`
 
-The system **MUST** return bounded Managed Entity searches within 100 ms at p95 under the supported production benchmark profile defined in DESIGN. For federated searches, the same threshold applies only to Types Registry processing overhead; participating source execution time is governed by the source capability contracts.
+The system **MUST** return bounded Managed Entity searches within 100 ms at p95 under the supported production benchmark profile defined in DESIGN. For federated searches, the same threshold applies only to Types Registry processing overhead; participating source execution time is governed by the federation contract.
 
 - **Threshold**: p95 < 100 ms for a bounded managed search and p95 < 100 ms for Types Registry federated-search overhead.
 - **Rationale**: Discovery and management views must remain responsive.
@@ -676,7 +676,7 @@ The system **MUST** return bounded Managed Entity searches within 100 ms at p95 
 
 - [ ] `p1` - **ID**: `cpt-cf-types-registry-nfr-multi-pod-correctness`
 
-The system **MUST** make every committed Managed Entity or Registry Source Plugin configuration mutation visible to every Types Registry pod after transaction commit. External entity consistency across plugin instances, pods, and data centers is governed by the Registry Source Plugin capability contract.
+The system **MUST** make every committed Managed Entity or Registry Source Plugin configuration mutation visible to every Types Registry pod after transaction commit. External entity consistency across plugin instances, pods, and data centers is governed by the federation contract.
 
 - **Threshold**: 100% of committed mutations are visible on every pod's first post-commit read.
 - **Rationale**: Production deployments are horizontally scaled.
@@ -723,7 +723,7 @@ The system **MUST** prevent SDK clients from treating invalidated registry looku
 
 - **Type**: Rust plugin trait and models, resolved through the ToolKit scoped ClientHub.
 - **Stability**: unstable until first platform-stable release.
-- **Description**: The contract Types Registry defines and a Registry Source Plugin implements: batch forward and reverse resolution, bounded candidate queries, tenant state, freshness and conditional reads, ownership assertions, and the effective artifacts of a claimed Type Schema kind. It is shaped for a remote counterparty although P1 plugins are in-process.
+- **Description**: The contract Types Registry defines and a Registry Source Plugin implements: batch forward and reverse resolution, bounded candidate queries, tenant state, freshness and conditional reads, ownership assertions, and the effective artifacts of a Type Schema result. It is shaped for a remote counterparty although P1 plugins are in-process.
 - **Breaking Change Policy**: Breaking changes allowed before first stable release; afterwards require a versioned contract, because a plugin is built and shipped separately from the registry.
 
 ### 7.2 External Integration Contracts
@@ -750,7 +750,7 @@ The system **MUST** prevent SDK clients from treating invalidated registry looku
 
 - **Direction**: required by Types Registry for external registry source integration.
 - **Protocol/Format**: ToolKit plugin and scoped ClientHub contracts.
-- **Compatibility**: External Registry Sources must be integrated behind Types Registry rather than consumed directly by regular gears. For each claimed entity kind, Registry Source Plugins must satisfy the mandatory P1 capability and completeness profile defined by Registry Source Routing; concrete plugin traits and transport models are versioned SDK design.
+- **Compatibility**: External Registry Sources must be integrated behind Types Registry rather than consumed directly by regular gears. Across its claimed identifier space, a Registry Source Plugin must implement the whole mandatory P1 federation and completeness contract defined by Registry Source Routing; concrete plugin traits and transport models are versioned SDK design.
 
 ## 8. Use Cases
 
@@ -846,7 +846,7 @@ Acceptance of this PRD requires automated evidence for the cross-cutting outcome
 - [ ] **Derivation and dependency safety** — derived schemas remain substitutable for their complete base chain; every entity-naming dependency is tracked, revalidated when affected, and blocks deletion while live, while valid non-entity `x-gts-ref` forms create no edge. (`cpt-cf-types-registry-fr-validate-type-derivation`, `cpt-cf-types-registry-fr-ref-tracking`)
 - [ ] **Lifecycle and identity** — admitted entities expose only `ACTIVE` or terminal `DELETED` in P1; content revisions and lifecycle transitions remain distinct; deletion retains identity and reverse resolution, and only explicitly enabled operator purge releases them. (`cpt-cf-types-registry-fr-lifecycle`)
 - [ ] **Federation ownership boundary** — Externally Managed Entity state is obtained live and never projected into registry storage; plugins have no registry write path, and no managed dependency guarantee crosses the managed–external boundary. (`cpt-cf-types-registry-fr-registry-federation`, `cpt-cf-types-registry-fr-externally-managed-entities`)
-- [ ] **Source routing and completeness** — valid non-overlapping Source Claims select complete mandatory plugin capabilities; managed storage is consulted first; exact source failures remain distinct from absence; discovery fails rather than returning a partial page. (`cpt-cf-types-registry-fr-registry-source-routing`)
+- [ ] **Source routing and completeness** — valid non-overlapping Source Claims route to conforming sources; managed storage is consulted first; a non-conforming or incomplete source response is rejected; exact source failures remain distinct from absence; discovery fails rather than returning a partial page. (`cpt-cf-types-registry-fr-registry-source-routing`)
 - [ ] **Reference resolution** — exact GTS Identifier and Registry Reference resolution is literal and bidirectional for both origins, preserves deleted identities, validates plugin-returned mappings, and fails on an observed identity collision rather than selecting a winner. (`cpt-cf-types-registry-fr-id-resolution`)
 - [ ] **Query assistance** — supported user-facing filters produce a traversal-complete, deduplicated, tenant-visible and tenant-available Concrete Reference Set; traversal is bounded, never silently truncated, and never returns an unfinished prefix as complete. (`cpt-cf-types-registry-fr-type-query-assistance`)
 - [ ] **Ownership and disclosure** — one owner scope governs every Version Family; global entries are visible platform-wide; tenant-owned entries are visible only in their owning Tenant Subtree; reads disclose ownership only as the Context Tenant boolean `owned_by_context_tenant`, while platform reads cross subtrees without disclosing owner identity. (`cpt-cf-types-registry-fr-tenant-ownership`)

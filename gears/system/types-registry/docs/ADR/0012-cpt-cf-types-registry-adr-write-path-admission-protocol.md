@@ -304,7 +304,7 @@ The SDK provides this workflow as a convenience helper while retaining lower-lev
 
 Registry Source Plugin configuration and, in P2, Validation Hook declarations are global Managed registered Instances of platform-defined GTS Types. They pass through the same revisions, concurrency, operation, and audit protocol.
 
-Types Registry provides a closed in-process validator for these platform-defined control-plane types. It is not registered or extensible and is distinct from P2 semantic hooks. It enforces Source Claim non-overlap, retired-claim reservations, capability requirements, and the prohibition on tenant-scoped control-plane instances. Their base schemas are trusted platform seeds and do not depend on user definitions.
+Types Registry provides a closed in-process validator for these platform-defined control-plane types. It is not registered or extensible and is distinct from P2 semantic hooks. It enforces Source Claim non-overlap, claim pattern grammar, retired-claim reservations, and the prohibition on tenant-scoped control-plane instances. Their base schemas are trusted platform seeds and do not depend on user definitions.
 
 ### Consequences
 

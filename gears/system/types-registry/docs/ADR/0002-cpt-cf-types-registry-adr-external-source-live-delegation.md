@@ -97,7 +97,7 @@ The owning Registry Source Plugin is responsible for all of that state. Managed 
 
 Registry Source Plugin registration and routing configuration are Managed registered Instances of platform-defined control-plane types, validated by a built-in validator inside Types Registry rather than by a P2 Validation Hook (ADR-0012). They are not external entity projections and not platform configuration files: Source Claim invariants are statements about registry state and can only be checked against it at write time.
 
-An active Source Claim must satisfy ADR-0007's P1 minimum capability and completeness profile for every claimed entity kind. Types Registry rejects plugin configuration activation when an applicable mandatory capability is missing.
+An active Source Claim must be backed by a plugin implementing ADR-0007's P1 federation and completeness contract in full across the claimed identifier space. That contract is total, so nothing about it is declared at registration; a response failing to satisfy it is rejected and the affected request fails closed.
 
 ### Live external response contract
 
@@ -113,7 +113,7 @@ Every live external entity result must include at least:
 
 ### The plugin resolves its own type chains
 
-Producing the resolved effective schema and the effective trait artifacts is a **mandatory** capability, not an optional one, and the decision turns on what the alternative leaves a consumer holding.
+Producing the resolved effective schema and the effective trait artifacts is a **mandatory** part of the contract, not an optional one, and the decision turns on what the alternative leaves a consumer holding.
 
 If a plugin omits the artifacts, a consumer must fetch every base and resolve the chain locally. That means several round trips and a GTS resolution implementation in every consumer — precisely the duplication Types Registry removes.
 
@@ -217,7 +217,7 @@ All P1 Types Registry operations that require the source fail closed. In particu
 This decision is confirmed when:
 
 * Types Registry storage contains no external definition, identifier, revision, content-hash, dependency, lifecycle, tenant-state, or UUID-mapping value in any column;
-* plugin configuration activation rejects a Source Claim/entity-kind pair that does not satisfy ADR-0007's applicable mandatory capability profile;
+* a source result that does not satisfy ADR-0007's contract as applicable to the returned identifier is rejected as an invalid source response rather than interpreted, and the affected request fails closed;
 * managed entities continue to resolve entirely from Types Registry storage in P1, and Managed Aliases do so when Alias support is introduced in P2;
 * external single and batch forward/reverse resolution are delegated through the normal Types Registry API;
 * every external response carries revision and hash metadata, returned content hashes are verifiable, and conditional requests reject inconsistent revision/hash pairs;
@@ -227,7 +227,7 @@ This decision is confirmed when:
 * plugin-owned tombstones preserve external reverse resolution after logical deletion;
 * plugins reject rebinding a deleted external GTS Identifier or Registry Reference to a different logical entity;
 * a source assertion of deprecation is accepted, the entity is exposed as `ACTIVE`, and no result of any origin carries a `DEPRECATED` status in P1;
-* a plugin that does not return the resolved effective schema and trait artifacts for a claimed Type Schema kind fails Source Claim activation, and conformance tests exercise `$ref` inlining, `allOf` chain composition, RFC 7396 trait merge, and default materialization rather than only the stability of the returned bytes;
+* a plugin that does not return the resolved effective schema and trait artifacts for a Type Schema result has that response rejected as invalid, and conformance tests exercise `$ref` inlining, `allOf` chain composition, RFC 7396 trait merge, and default materialization rather than only the stability of the returned bytes;
 * tenant-aware operations obtain authoritative source state and fail closed when it cannot be confirmed;
 * a response omitting the ownership scope, or naming a tenant the platform does not know, is rejected as an invalid source response rather than exposed;
 * a plugin-side check can make an entity invisible to a caller and cannot make one visible that platform policy refused;
@@ -292,7 +292,7 @@ ADR-0012 decided that Registry Source Plugin configuration is a Managed register
 
 ### What would reopen this decision
 
-Live delegation is chosen against projection on the grounds that a second serving copy of externally authoritative state introduces synchronization, invalidation, and stale-read policy as correctness concerns. Two observations would reopen it: measurement showing that plugin latency puts federated resolution outside the NFR budget in a realistic deployment, or a source capability contract that made change notification reliable enough for a projection to be invalidated rather than polled. Neither is available today, and note that reopening it does not reopen ADR-0011 — a projection of external content would still not permit a reference across the boundary.
+Live delegation is chosen against projection on the grounds that a second serving copy of externally authoritative state introduces synchronization, invalidation, and stale-read policy as correctness concerns. Two observations would reopen it: measurement showing that plugin latency puts federated resolution outside the NFR budget in a realistic deployment, or a source contract that made change notification reliable enough for a projection to be invalidated rather than polled. Neither is available today, and note that reopening it does not reopen ADR-0011 — a projection of external content would still not permit a reference across the boundary.
 
 ## Traceability
 
