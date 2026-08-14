@@ -290,10 +290,10 @@ impl TypeRepositoryTrait for TypeRepository {
         self.load_full_type(db, &type_model).await.map(Some)
     }
 
-    /// Same lookup as `find_by_code`, but also returns the surrogate
-    /// SMALLINT id, for callers that need both (e.g. a group's
-    /// `gts_type_id` FK) from a single query instead of two (RG-11).
-    async fn find_by_code_with_id<C: DBRunner>(
+    /// Same lookup as `find_by_code`, but also returns the `gts_type` row
+    /// itself alongside the assembled `ResourceGroupType`, from a single
+    /// query instead of two (RG-11).
+    async fn find_by_code_with_model<C: DBRunner>(
         &self,
         db: &C,
         code: &str,
@@ -585,14 +585,18 @@ impl TypeRepositoryTrait for TypeRepository {
         // must fix has to receive one row per group it must fix.
         //
         // A join projecting the parent's type would answer in one statement
-        // instead of two, but `SecureSelect` exposes `all`/`one`/`count` over
-        // `E::Model` only, so that projection would have to leave the secure
-        // layer -- and `resource_group` declares scope columns. The subquery
-        // below is hand-built and inherits no scope predicate of its own; it
-        // is safe because this method runs under the system scope it
-        // constructs itself above, where `build_scope_condition` is empty.
+        // instead of two -- and `SecureSelect` could still express it:
+        // `project_all` projects arbitrary shapes, and `into_inner` hands
+        // back the underlying `sea_orm::Select` for a manual join. The
+        // subquery below is hand-built and unscoped for a different reason:
+        // this is an integrity sweep, and under a constrained scope it would
+        // "see no violations" while `update_type` went ahead and dropped
+        // `parent_codes` that real groups still depend on. This method runs
+        // under the system scope it constructs itself above -- that is the
+        // contract, not an accident of what `SecureSelect` happens to expose.
         // Give this method a caller-supplied scope and the subquery has to be
-        // scoped with it.
+        // scoped with it, or the sweep has to be rethought under a partial
+        // view.
         let budget = toolkit_db::secure::max_bind_params_for(db);
         let mut violating: Vec<rg_entity::Model> = Vec::new();
         for type_chunk in parent_type_ids.chunks(budget.saturating_sub(1).max(1)) {

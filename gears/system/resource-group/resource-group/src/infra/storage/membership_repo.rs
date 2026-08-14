@@ -203,9 +203,22 @@ impl MembershipRepositoryTrait for MembershipRepository {
         // one parameter per membership of the resource -- unbounded, and
         // unchunked.
         //
-        // `resource_group_membership` declares no scope columns, so this
-        // hand-built subquery skips no scope predicate: for that entity
-        // `build_scope_condition` is `Condition::all()` under any scope.
+        // The inner subquery over `resource_group_membership` is
+        // deliberately hand-built and unscoped, not an oversight: this is an
+        // integrity read (cross-tenant compatibility) and must see every
+        // membership row regardless of scope. `resource_group_membership`
+        // declares no scope columns, so a constrained `AccessScope` run
+        // through `build_scope_condition` against it does not degrade to
+        // "no filter" -- every constraint fails to resolve a column and the
+        // whole condition compiles to `WHERE false` (`cond.rs`,
+        // `build_constraint_condition`'s early return through
+        // `resolve_property`). Scoping this subquery under a constrained
+        // scope would make it silently see zero memberships and report the
+        // resource tenant-compatible with everything. This method builds
+        // `system_scope()` itself, precisely so no constrained scope can
+        // reach here; if it ever takes a caller-supplied scope instead,
+        // do not scope this subquery -- rethink what "existing membership
+        // tenants" is even supposed to mean under a partial view first.
         let member_group_ids = Query::select()
             .column(membership_entity::Column::GroupId)
             .from(MembershipEntity)

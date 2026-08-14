@@ -221,6 +221,23 @@ where
 /// **A split batch is not atomic on its own** -- wrap the call in a
 /// transaction if a partial commit across split statements is unacceptable.
 ///
+/// # Divergences from `secure_insert`, checked against sea-orm 1.1.20
+///
+/// Both are consequences of going through `Insert::add_many` rather than one
+/// `ActiveModelTrait::insert` per model, and neither is a reason to forbid
+/// heterogeneous batches -- a legitimate scenario -- only to know about
+/// before mixing `Set`/`NotSet` shapes in one call:
+///
+/// - A column that is `NotSet` on one model but `Set` on another in the same
+///   batch is not left to the database's `DEFAULT`: `add_many` binds a
+///   typed `NULL` for every row where it's `NotSet`, once any row in the
+///   batch sets it (`Insert::add_many` in `sea_orm::query::insert`). A
+///   column-default that isn't `NULL` is silently discarded for those rows.
+/// - `ActiveModelBehavior::before_save` never runs. It lives on
+///   `ActiveModelTrait::insert`, which this helper does not call --
+///   `Insert::exec` has no hook for it. Any invariant a model normally
+///   enforces in `before_save` is the caller's job for a batched insert.
+///
 /// # Errors
 ///
 /// - `ScopeError::Invalid` if a tenant-scoped model is missing `tenant_id`.
@@ -315,12 +332,20 @@ where
 /// [`secure_insert`] and [`secure_insert_many`] validate every row against
 /// the caller's scope before any of it reaches the database. Rows produced by
 /// a `SELECT` inside the database are never visible here, so that check
-/// cannot be run -- and this helper does not pretend otherwise. It is
-/// restricted to entities that declare no scope columns at all
-/// (`#[secure(no_tenant, no_resource, no_owner, no_type)]`), where per-row
-/// validation has nothing to examine and skipping it forfeits nothing. Any
-/// other entity is refused before the statement is built, so the restriction
-/// cannot be waived by a caller that would rather not honour it.
+/// cannot be run against them. What this helper checks instead is `scope`
+/// itself: it must be unconstrained. That is **stricter** than the per-row
+/// path, which also lets through an empty constraint list (an `AccessScope`
+/// can be built with zero constraints without being the unconstrained
+/// sentinel) -- and deliberately so. An entity with no scope columns has
+/// nothing a non-empty constraint could match against, so there is no
+/// per-row check to run in the first place; but telling an empty constraint
+/// apart from an unconstrained scope here would add a distinction this
+/// helper has no way to act on. Refusing both alike is the honest contract:
+/// a caller passing any scope narrower than "everything" gets an error, not
+/// a silent no-op-per-row insert. The entity-side restriction from before is
+/// unchanged and independent: `E` must still declare no scope columns at
+/// all, checked before the statement is built so it cannot be waived by a
+/// caller that would rather not honour it.
 ///
 /// The target table is `E`'s, and only `E`'s. The caller supplies the target
 /// columns and the source `SELECT`; the `INSERT` around them is built here.
@@ -352,18 +377,25 @@ where
 ///
 /// # Errors
 ///
+/// - `ScopeError::Denied` if `scope` is not unconstrained.
 /// - `ScopeError::Invalid` if `E` declares any scope column, or if the target
 ///   column count does not match the source `SELECT`.
 /// - `ScopeError::Db` if the statement fails.
 pub async fn secure_insert_from_select<E, C>(
     columns: C,
     source: sea_orm::sea_query::SelectStatement,
+    scope: &AccessScope,
     runner: &impl DBRunner,
 ) -> Result<u64, ScopeError>
 where
     E: ScopableEntity + EntityTrait,
     C: IntoIterator<Item = E::Column>,
 {
+    if !scope.is_unconstrained() {
+        return Err(ScopeError::Denied(
+            "insert-from-select requires an unconstrained scope",
+        ));
+    }
     insert_from_select_allowed::<E>()?;
 
     let mut insert = sea_orm::sea_query::Query::insert();

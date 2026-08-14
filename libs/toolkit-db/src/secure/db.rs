@@ -1106,24 +1106,31 @@ mod tests {
 
     #[test]
     fn delay_grows_with_attempt_number() {
-        // Structural growth check on the *ceiling* (deterministic), not on
-        // any individual jittered sample -- two samples from a later
-        // attempt aren't guaranteed to exceed an earlier one (jitter can
-        // draw close to zero), but the achievable ceiling must strictly
-        // grow attempt-over-attempt up to the cap.
-        let ceilings: Vec<Duration> = (2..=5).map(pre_jitter_ceiling).collect();
-        for pair in ceilings.windows(2) {
-            assert!(
-                pair[1] >= pair[0],
-                "backoff ceiling must not shrink as attempts increase: {ceilings:?}"
-            );
-        }
-        // And it must actually increase somewhere in this range (not
-        // flat-lined at the cap immediately) -- otherwise "growing per
-        // attempt" would be vacuously true.
+        // Exercises `retry_backoff_delay` itself, not `pre_jitter_ceiling` --
+        // that helper is deterministic by construction and would just prove
+        // this crate can multiply and cap, telling us nothing about the
+        // production function. A single sample from each attempt isn't
+        // enough either: full jitter draws uniformly from `[0, ceiling]`, so
+        // one attempt-5 sample can easily land below one attempt-2 sample.
+        // The max of many samples converges to the ceiling instead, so
+        // comparing maxima is a randomized stand-in for comparing ceilings.
+        // Attempt 2's pre-jitter ceiling is 10ms, attempt 5's is 80ms (see
+        // `pre_jitter_ceiling`); with 200 samples each, the chance that
+        // max(attempt 5) fails to exceed max(attempt 2) is bounded by
+        // `(10/80)^200`, indistinguishable from zero.
+        const SAMPLES: usize = 200;
+        let max_2 = (0..SAMPLES)
+            .map(|_| retry_backoff_delay(2))
+            .max()
+            .expect("SAMPLES > 0");
+        let max_5 = (0..SAMPLES)
+            .map(|_| retry_backoff_delay(5))
+            .max()
+            .expect("SAMPLES > 0");
         assert!(
-            ceilings.iter().collect::<HashSet<_>>().len() > 1,
-            "expected the ceiling to vary across attempts 2..=5, got {ceilings:?}"
+            max_5 > max_2,
+            "expected attempt 5's backoff to exceed attempt 2's over {SAMPLES} samples: \
+             max_2={max_2:?}, max_5={max_5:?}"
         );
     }
 

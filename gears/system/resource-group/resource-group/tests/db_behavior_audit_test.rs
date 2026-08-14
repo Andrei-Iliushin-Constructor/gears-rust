@@ -236,16 +236,16 @@ async fn trace_create_root_group() {
          got {rg_selects} resource_group SELECTs:\n{}",
         rec.dump()
     );
-    // Exactly 1 gts_type SELECT: `find_by_code_with_id`'s combined id+type
-    // lookup (RG-11). The second one belonged to the response read-back,
-    // which resolved the very code this request supplied -- it went with the
-    // read-back itself (RG-08).
+    // Exactly 1 gts_type SELECT: `find_by_code_with_model`'s combined
+    // model+type lookup (RG-11). The second one belonged to the response
+    // read-back, which resolved the very code this request supplied -- it
+    // went with the read-back itself (RG-08).
     let type_selects = count_in(&rec.stats(), QueryKind::Select, "gts_type");
     assert_eq!(
         type_selects,
         1,
         "RG-11 regression: expected exactly 1 gts_type SELECT (the combined \
-         find_by_code_with_id lookup), got {type_selects}:\n{}",
+         find_by_code_with_model lookup), got {type_selects}:\n{}",
         rec.dump()
     );
 }
@@ -439,7 +439,7 @@ async fn trace_update_type() {
          that transaction is still SERIALIZABLE without retry (RG-03):\n{}",
         rec.dump()
     );
-    // Exactly 1 gts_type SELECT: find_by_code_with_id's combined lookup.
+    // Exactly 1 gts_type SELECT: find_by_code_with_model's combined lookup.
     // `SecureUpdateMany` reports only rows-affected, but the row it wrote is
     // fully determined by that lookup plus the values the update set, so the
     // service assembles the answer instead of reading it back (RG-08).
@@ -448,7 +448,7 @@ async fn trace_update_type() {
         type_selects,
         1,
         "RG-08/RG-11 regression: expected exactly 1 gts_type SELECT (the \
-         combined find_by_code_with_id lookup, with no post-update re-read), \
+         combined find_by_code_with_model lookup, with no post-update re-read), \
          got {type_selects}:\n{}",
         rec.dump()
     );
@@ -631,7 +631,16 @@ async fn trace_seeding() {
 async fn scale_create_child_closure_inserts_do_not_grow_with_ancestor_depth() {
     // insert_ancestor_closure_rows computes the whole ancestor set inside the
     // database with one INSERT ... SELECT (RG-06).
-    async fn closure_inserts_for_new_child_at_depth(depth: usize) -> usize {
+    //
+    // Statement count alone can't tell an `INSERT ... SELECT` apart from the
+    // same row set materialized in Rust and sent as one multi-row `INSERT`:
+    // both are "1 INSERT". `normalize_sql` collapses value-group counts on
+    // purpose (batch size shouldn't change a statement's normalized shape),
+    // so it can't distinguish them either -- but a multi-row `INSERT` binds
+    // one parameter per column per row while `INSERT ... SELECT` binds none
+    // of the row data, so total bind-parameter count does, and is asserted
+    // alongside the statement count.
+    async fn closure_inserts_for_new_child_at_depth(depth: usize) -> (usize, usize) {
         let (db, rec) = common::test_db_with_recorder().await;
         let type_svc = common::make_type_service(db.clone());
         let group_svc = make_group_service_with_profile(
@@ -648,19 +657,29 @@ async fn scale_create_child_closure_inserts_do_not_grow_with_ancestor_depth() {
 
         rec.clear();
         common::create_child_group(&group_svc, &ctx, &t.code, last, "extra", tenant_id).await;
-        count_in(&rec.stats(), QueryKind::Insert, "resource_group_closure")
+        (
+            count_in(&rec.stats(), QueryKind::Insert, "resource_group_closure"),
+            rec.total_params(),
+        )
     }
 
-    let small = closure_inserts_for_new_child_at_depth(3).await;
-    let large = closure_inserts_for_new_child_at_depth(15).await;
+    let (small, small_params) = closure_inserts_for_new_child_at_depth(3).await;
+    let (large, large_params) = closure_inserts_for_new_child_at_depth(15).await;
     assert_eq!(
         small, large,
         "closure INSERT count must not scale with ancestor depth \
          (small={small} at depth 3, large={large} at depth 15)"
     );
+    assert_eq!(
+        small_params, large_params,
+        "total bind-parameter count must not scale with ancestor depth \
+         (small={small_params} at depth 3, large={large_params} at depth 15) -- \
+         a materialized multi-row INSERT would grow here even with a flat \
+         statement count"
+    );
 }
 
-async fn move_stats_for_subtree_size(n: usize) -> BTreeMap<(QueryKind, String), usize> {
+async fn move_stats_for_subtree_size(n: usize) -> (BTreeMap<(QueryKind, String), usize>, usize) {
     let (db, rec) = common::test_db_with_recorder().await;
     let type_svc = common::make_type_service(db.clone());
     let group_svc = common::make_group_service(db.clone());
@@ -679,7 +698,7 @@ async fn move_stats_for_subtree_size(n: usize) -> BTreeMap<(QueryKind, String), 
         .move_group(moved, Some(target_parent.id))
         .await
         .expect("move_group should succeed");
-    rec.stats()
+    (rec.stats(), rec.total_params())
 }
 
 #[tokio::test]
@@ -687,20 +706,29 @@ async fn scale_move_closure_inserts_do_not_grow_with_subtree_size() {
     // rebuild_subtree_closure forms the whole A x N cross product inside the
     // database with one INSERT ... SELECT; the pairs never become Rust
     // values (RG-04).
-    let small = count_in(
-        &move_stats_for_subtree_size(3).await,
-        QueryKind::Insert,
-        "resource_group_closure",
-    );
-    let large = count_in(
-        &move_stats_for_subtree_size(15).await,
-        QueryKind::Insert,
-        "resource_group_closure",
-    );
+    //
+    // Statement count alone can't tell that cross-product INSERT ... SELECT
+    // apart from the same pairs materialized in Rust and sent as one
+    // multi-row INSERT -- normalize_sql collapses value-group counts on
+    // purpose, so both look like "1 INSERT". Total bind-parameter count does
+    // distinguish them (one param per column per row for a materialized
+    // insert, none for a SELECT-sourced one), so it's asserted alongside the
+    // statement count.
+    let (small_stats, small_params) = move_stats_for_subtree_size(3).await;
+    let (large_stats, large_params) = move_stats_for_subtree_size(15).await;
+    let small = count_in(&small_stats, QueryKind::Insert, "resource_group_closure");
+    let large = count_in(&large_stats, QueryKind::Insert, "resource_group_closure");
     assert_eq!(
         small, large,
         "closure INSERT count during move must not scale with subtree size \
          (small={small} at N=3, large={large} at N=15)"
+    );
+    assert_eq!(
+        small_params, large_params,
+        "total bind-parameter count during move must not scale with subtree \
+         size (small={small_params} at N=3, large={large_params} at N=15) -- \
+         a materialized multi-row INSERT would grow here even with a flat \
+         statement count"
     );
 }
 
@@ -709,12 +737,12 @@ async fn scale_move_descendant_depth_selects_do_not_grow_with_subtree_size() {
     // Move's depth validation calls get_descendant_ids_with_depth once and
     // takes the max in memory (RG-05).
     let small = count_in(
-        &move_stats_for_subtree_size(3).await,
+        &move_stats_for_subtree_size(3).await.0,
         QueryKind::Select,
         "resource_group_closure",
     );
     let large = count_in(
-        &move_stats_for_subtree_size(15).await,
+        &move_stats_for_subtree_size(15).await.0,
         QueryKind::Select,
         "resource_group_closure",
     );
@@ -1287,10 +1315,17 @@ fn static_rule_passes_group_service_uses_retry() {
         "negative control violated: group_service.rs should not bypass \
          transaction_with_retry for its SERIALIZABLE writes"
     );
-    assert!(
-        retried >= 3,
-        "expected create/update/move/delete_group to all use \
-         transaction_with_retry, found {retried}"
+    // Exact count, not a floor: the five call sites are create_group,
+    // update_group, move_group, delete_group, and create_group_unscoped. A
+    // floor of >= 3 would pass just as well if a refactor quietly dropped the
+    // retry wrapper from one of these (as long as 3 remained) or if a sixth
+    // SERIALIZABLE transaction were added without it -- either regression
+    // should fail this test, and only exact equality catches both.
+    assert_eq!(
+        retried, 5,
+        "expected exactly 5 transaction_with_retry(TxConfig::serializable(...)) call \
+         sites in group_service.rs -- create_group, update_group, move_group, \
+         delete_group, create_group_unscoped -- found {retried}"
     );
 }
 

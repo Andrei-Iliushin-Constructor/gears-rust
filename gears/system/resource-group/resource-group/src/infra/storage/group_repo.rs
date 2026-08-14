@@ -327,12 +327,21 @@ impl GroupRepository {
         paths.dedup();
 
         // These paths come straight out of the client's `$filter`, so their
-        // number is the caller's choice. `ODataLimits::max_filter_length`
-        // would bound it, but `validate_filter` is not called anywhere in the
-        // workspace, so today the only ceiling is the transport's URI limit.
-        // Chunked against the bind ceiling like every other client-fed list
-        // here -- `type_repo`'s `resolve_ids` and the removed-parent sweep
-        // already are, and this was the one that was not.
+        // number is the caller's choice, but it is not unbounded: the HTTP
+        // extractor rejects the request before it gets here if the raw
+        // filter exceeds `MAX_FILTER_LEN` (8 KiB) or parses to more than
+        // `MAX_NODES` (2000) nodes (`libs/toolkit/src/api/odata.rs`).
+        // `toolkit_odata::ODataLimits::validate_filter` is a parallel
+        // mechanism that would enforce its own bound -- it is simply dead
+        // code, never called anywhere in this workspace, not a second layer
+        // actually protecting this path. The chunking below is
+        // defense-in-depth against the extractor's ceiling, not the only
+        // barrier standing between a client and an oversized `IN (...)`, but
+        // it's still needed: 2000 distinct paths is comfortably past most
+        // backends' per-statement bind limit. Chunked against the bind
+        // ceiling like every other client-fed list here -- `type_repo`'s
+        // `resolve_ids` and the removed-parent sweep already are, and this
+        // was the one that was not.
         let scope = system_scope();
         let mut ids: std::collections::HashMap<String, i16> = std::collections::HashMap::new();
         for chunk in paths.chunks(toolkit_db::secure::max_bind_params_for(db)) {
@@ -732,13 +741,13 @@ impl GroupRepositoryTrait for GroupRepository {
 
     /// Update a resource group entity.
     ///
-    /// A missing row is silently a no-op, not an error: this is an
-    /// `UPDATE ... WHERE id = ?` and `rows_affected` is not inspected. The
-    /// previous shape loaded an `ActiveModel` first and so answered
-    /// `RecordNotFound` -- at the cost of the very read this method exists to
-    /// avoid. Both callers already read the row inside the same `SERIALIZABLE`
-    /// transaction, so absence is answered there; a future caller that does
-    /// not must check for itself.
+    /// Returns `rows_affected` from the `UPDATE ... WHERE id = ?` rather than
+    /// answering `RecordNotFound` itself: the previous shape loaded an
+    /// `ActiveModel` first to know that -- at the cost of the very read this
+    /// method exists to avoid. Both current callers already read the row
+    /// inside the same `SERIALIZABLE` transaction, so a `0` here is
+    /// unreachable for them in practice, but the signature no longer asks
+    /// them to take that on faith.
     async fn update<C: DBRunner>(
         &self,
         db: &C,
@@ -747,7 +756,7 @@ impl GroupRepositoryTrait for GroupRepository {
         gts_type_id: i16,
         name: &str,
         metadata: Option<&serde_json::Value>,
-    ) -> Result<(), DomainError> {
+    ) -> Result<u64, DomainError> {
         let scope = system_scope();
 
         let parent_val: sea_orm::Value = match parent_id {
@@ -760,7 +769,7 @@ impl GroupRepositoryTrait for GroupRepository {
             None => sea_orm::Value::Json(None),
         };
 
-        ResourceGroupEntity::update_many()
+        let res = ResourceGroupEntity::update_many()
             .filter(rg_entity::Column::Id.eq(id))
             .secure()
             .col_expr(rg_entity::Column::ParentId, Expr::value(parent_val))
@@ -776,7 +785,7 @@ impl GroupRepositoryTrait for GroupRepository {
             .await
             .map_err(|e| DomainError::database(e.to_string()))?;
 
-        Ok(())
+        Ok(res.rows_affected)
     }
 
     /// Delete a resource group entity by ID.
@@ -820,6 +829,7 @@ impl GroupRepositoryTrait for GroupRepository {
         child_id: Uuid,
         parent_id: Uuid,
     ) -> Result<(), DomainError> {
+        let scope = system_scope();
         // One statement for the whole ancestor chain: every row the parent
         // has as a descendant becomes a row for the child, one deeper. The
         // ancestors are neither fetched nor rebuilt here -- a create used to
@@ -840,10 +850,17 @@ impl GroupRepositoryTrait for GroupRepository {
                 closure_entity::Column::Depth,
             ],
             source,
+            &scope,
             db,
         )
         .await
-        .map_err(|e| DomainError::database(e.to_string()))?;
+        .map_err(|e| match e {
+            toolkit_db::secure::ScopeError::Db(db) => DomainError::Database(db),
+            // stringify would wrap this in `DbErr::Custom`, which
+            // `is_retryable_contention` does not recognize -- a 40001 from
+            // this set-based statement would stop being retried.
+            other => DomainError::database(other.to_string()),
+        })?;
 
         Ok(())
     }
@@ -1213,10 +1230,17 @@ impl GroupRepositoryTrait for GroupRepository {
                     closure_entity::Column::Depth,
                 ],
                 source,
+                &scope,
                 db,
             )
             .await
-            .map_err(|e| DomainError::database(e.to_string()))?;
+            .map_err(|e| match e {
+                toolkit_db::secure::ScopeError::Db(db) => DomainError::Database(db),
+                // stringify would wrap this in `DbErr::Custom`, which
+                // `is_retryable_contention` does not recognize -- a 40001 from
+                // this set-based statement would stop being retried.
+                other => DomainError::database(other.to_string()),
+            })?;
             // @cpt-end:cpt-cf-resource-group-algo-entity-hier-closure-rebuild:p1:inst-closure-rebuild-4
         }
 

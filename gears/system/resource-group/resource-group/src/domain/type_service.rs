@@ -252,7 +252,7 @@ impl<TR: TypeRepositoryTrait> TypeService<TR> {
                 // update path needs each, and resolving the code twice cost
                 // a second `gts_type` SELECT per update (RG-11).
                 let (type_model, existing) = type_repo
-                    .find_by_code_with_id(tx, &code)
+                    .find_by_code_with_model(tx, &code)
                     .await?
                     .ok_or_else(|| DomainError::type_not_found(&code))?;
                 let type_id = type_model.id;
@@ -453,18 +453,26 @@ impl<TR: TypeRepositoryTrait> TypeService<TR> {
             // @cpt-end:cpt-cf-resource-group-algo-type-mgmt-check-hierarchy-safety:p1:inst-hier-check-2a
 
             // @cpt-begin:cpt-cf-resource-group-algo-type-mgmt-check-hierarchy-safety:p1:inst-hier-check-2b
-            // Report the first removed parent, in request order, that has a
-            // violation -- the same answer the per-parent loop gave, since
-            // it iterated in that order and returned on its first hit.
-            if let Some(removed_parent) = removed_parents
+            // Group violations by parent code in one pass instead of
+            // rescanning `violations` once per removed parent
+            // (`removed_parents.iter().find(|p| violations.iter().any(...))`
+            // was O(removed_parents * violations)). `entry(...).or_default()`
+            // preserves each code's names in `violations`' original order, so
+            // the lookup below reports the same first-hit-in-request-order
+            // parent and the same name list the quadratic scan did.
+            let mut names_by_parent: std::collections::HashMap<&str, Vec<&str>> =
+                std::collections::HashMap::new();
+            for (code, _, name) in &violations {
+                names_by_parent
+                    .entry(code.as_str())
+                    .or_default()
+                    .push(name.as_str());
+            }
+
+            if let Some((removed_parent, names)) = removed_parents
                 .iter()
-                .find(|p| violations.iter().any(|(code, _, _)| code == *p))
+                .find_map(|p| names_by_parent.get(p.as_str()).map(|names| (p, names)))
             {
-                let names: Vec<String> = violations
-                    .iter()
-                    .filter(|(code, _, _)| code == removed_parent)
-                    .map(|(_, _, name)| name.clone())
-                    .collect();
                 return Err(DomainError::allowed_parent_types_violation(format!(
                     "Cannot remove allowed parent '{removed_parent}': groups using this parent relationship: {}",
                     names.join(", ")

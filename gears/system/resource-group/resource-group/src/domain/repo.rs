@@ -81,13 +81,17 @@ pub trait GroupRepositoryTrait: Send + Sync + 'static {
         tenant_id: Uuid,
     ) -> Result<rg_entity::Model, DomainError>;
 
-    /// Apply the update and return nothing.
+    /// Apply the update and return the number of rows it touched.
     ///
     /// Deliberately not the updated row: `update_many` reports a row count,
     /// so returning the model meant reading it straight back, and both
     /// callers threw that model away and read again for themselves. Every
     /// value the row now holds was supplied by the caller, so a caller that
     /// wants the updated entity can assemble it without asking (RG-08).
+    ///
+    /// `rows_affected` is `0` when `id` doesn't match any row; what to do
+    /// about that is the caller's call, not this method's -- both current
+    /// callers turn it into not-found.
     async fn update<C: DBRunner>(
         &self,
         db: &C,
@@ -96,7 +100,7 @@ pub trait GroupRepositoryTrait: Send + Sync + 'static {
         gts_type_id: i16,
         name: &str,
         metadata: Option<&serde_json::Value>,
-    ) -> Result<(), DomainError>;
+    ) -> Result<u64, DomainError>;
 
     async fn delete_by_id<C: DBRunner>(&self, db: &C, id: Uuid) -> Result<(), DomainError>;
 
@@ -203,15 +207,14 @@ pub trait TypeRepositoryTrait: Send + Sync + 'static {
         code: &str,
     ) -> Result<Option<ResourceGroupType>, DomainError>;
 
-    /// Same lookup as `find_by_code`, but also returns the surrogate
-    /// SMALLINT id, letting a caller that needs both avoid a separate
-    /// `resolve_id` call for the same code (RG-11).
-    /// The row and the type built from it, in one query.
+    /// Same lookup as `find_by_code`, but also returns the `gts_type` row
+    /// itself alongside the assembled `ResourceGroupType`, in one query
+    /// (RG-11).
     ///
-    /// Returns the `gts_type` row itself, not just its surrogate id: the
-    /// update path needs `created_at` to assemble its answer without reading
-    /// the row back after the write, and this query already held it.
-    async fn find_by_code_with_id<C: DBRunner>(
+    /// The row, not just its surrogate id: the update path needs
+    /// `created_at` off it to assemble its answer without reading the row
+    /// back a second time after the write, and this query already held it.
+    async fn find_by_code_with_model<C: DBRunner>(
         &self,
         db: &C,
         code: &str,

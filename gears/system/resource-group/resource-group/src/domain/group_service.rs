@@ -548,7 +548,7 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
         // for them separately cost two `gts_type` SELECTs per create for the
         // same row (RG-11).
         let (type_model, rg_type) = type_repo
-            .find_by_code_with_id(tx, &req.code)
+            .find_by_code_with_model(tx, &req.code)
             .await?
             .ok_or_else(|| DomainError::type_not_found(&req.code))?;
         let type_id = type_model.id;
@@ -890,7 +890,7 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
         // @cpt-begin:cpt-cf-resource-group-flow-entity-hier-update-group:p1:inst-update-group-5
         // Persist name/parent/metadata. `gts_type_id` is reused from the
         // existing row — type is immutable on update.
-        group_repo
+        let rows = group_repo
             .update(
                 tx,
                 group_id,
@@ -900,6 +900,13 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
                 req.metadata.as_ref(),
             )
             .await?;
+        // The pre-read above happened in this same transaction, so `id`
+        // vanishing between it and this UPDATE should be impossible -- but
+        // `update` returning `rows_affected` instead of `()` means this is no
+        // longer just an assumption to trust.
+        if rows == 0 {
+            return Err(DomainError::group_not_found(group_id));
+        }
         // @cpt-end:cpt-cf-resource-group-flow-entity-hier-update-group:p1:inst-update-group-5
 
         // @cpt-begin:cpt-cf-resource-group-flow-entity-hier-update-group:p1:inst-update-group-6
@@ -987,7 +994,7 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
         // @cpt-begin:cpt-cf-resource-group-flow-entity-hier-move-group:p1:inst-move-group-10
         // Update parent_id on the group. Type and tenant_id are immutable —
         // both reuse the existing row's values.
-        group_repo
+        let rows = group_repo
             .update(
                 tx,
                 group_id,
@@ -997,6 +1004,13 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
                 existing.metadata.as_ref(),
             )
             .await?;
+        // The pre-read above happened in this same transaction, so `id`
+        // vanishing between it and this UPDATE should be impossible -- but
+        // `update` returning `rows_affected` instead of `()` means this is no
+        // longer just an assumption to trust.
+        if rows == 0 {
+            return Err(DomainError::group_not_found(group_id));
+        }
         // @cpt-end:cpt-cf-resource-group-flow-entity-hier-move-group:p1:inst-move-group-10
 
         // Assembled rather than read back, as in `update_group_inner`: a move
