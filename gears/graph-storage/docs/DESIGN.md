@@ -20,6 +20,7 @@
 - [4. Additional context](#4-additional-context)
   - [Prototype Lineage](#prototype-lineage)
   - [Phantom Materialization Contract](#phantom-materialization-contract)
+  - [Concurrent Ingest Protocol](#concurrent-ingest-protocol)
   - [Traversal Backend Sketch](#traversal-backend-sketch)
   - [Capacity and Admission Contract](#capacity-and-admission-contract)
   - [Base Ontology Publication](#base-ontology-publication)
@@ -46,12 +47,12 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-fr-type-registration` | Ontology Registry component validates draft-07 schemas, derives UUIDv5 identifiers via platform GTS, applies batches atomically, rejects conflicting re-registration |
 | `p1` | `cpt-cf-graph-storage-fr-type-constraints` | Registry enforces abstractness and edge endpoint patterns; Ingest Pipeline validates payloads across the full GTS derivation chain with JSON-pointer error reporting |
 | `p2` | `cpt-cf-graph-storage-fr-type-catalog` | Registry read endpoints list and fetch registered types with schemas, constraints, and derived UUIDs |
-| `p1` | `cpt-cf-graph-storage-fr-bulk-ingest` | Ingest Pipeline validates whole batches, writes nodes/edges/chunks with batched statements in one transaction, bumps the tenant graph revision |
-| `p1` | `cpt-cf-graph-storage-fr-stable-identity` | Producer-supplied node keys unique per tenant; edge keys derived as a hash of type, endpoints, and discriminator |
+| `p1` | `cpt-cf-graph-storage-fr-bulk-ingest` | Ingest Pipeline validates whole batches, writes nodes/edges/chunks with batched statements in one transaction, bumps the tenant graph revision; durable idempotency keys with recorded outcomes make retries after unknown commit results safe (Concurrent Ingest Protocol) |
+| `p1` | `cpt-cf-graph-storage-fr-stable-identity` | Producer-supplied node keys unique per tenant; edge keys derived as a hash of type, endpoints, and discriminator; concrete node types immutable under upsert with optional expected-version CAS, endpoint validation under row locks (Concurrent Ingest Protocol) |
 | `p1` | `cpt-cf-graph-storage-fr-reference-nodes` | Unified node table; owned/reference semantics carried by GTS base types per ADR-0002; all query components type-agnostic |
 | `p2` | `cpt-cf-graph-storage-fr-phantom-nodes` | Ingest Pipeline materializes phantom-typed nodes for dangling edge endpoints; real ingest replaces phantoms in place |
 | `p1` | `cpt-cf-graph-storage-fr-edge-provenance` | Provenance attribute type in the base ontology; scope replacement predicate excludes analysis-originated rows |
-| `p1` | `cpt-cf-graph-storage-fr-scope-replace` | Declarative replace-scope executed in the ingest transaction: delete static rows of the scope absent from the batch |
+| `p1` | `cpt-cf-graph-storage-fr-scope-replace` | Declarative replace-scope executed in the ingest transaction: delete static rows of the scope absent from the batch; replacements serialize on the canonical scope identity and carry monotonic source generations (Concurrent Ingest Protocol) |
 | `p1` | `cpt-cf-graph-storage-fr-node-read` | Node read path joins node, chunk inventory, and adjacent edges with limits |
 | `p2` | `cpt-cf-graph-storage-fr-content-chunking` | Chunker produces deterministic, offset-preserving chunks with location-encoded identifiers; chunks indexed and embedded individually |
 | `p2` | `cpt-cf-graph-storage-fr-heavy-content-offload` | Payload size ceiling enforced at ingest; payloads reference file-storage identifiers that the gear never dereferences |
@@ -573,10 +574,14 @@ The public surfaces are defined in the PRD as `cpt-cf-graph-storage-interface-re
 5. Compose search texts; batch-embed nodes + chunks     [Embedding Coordinator]
    (skipped when embed=false; existing vectors kept)
 6. One transaction:                                     [Storage Layer]
-   batched upserts (nodes, edges, chunks)
+   idempotency-key check (replay recorded outcome if hit)
+   + scope lock and generation compare-and-update
+   + batched upserts (nodes, edges, chunks; endpoint
+     locks per Concurrent Ingest Protocol)
    + phantom materialization
    + scope replacement (static rows only)
    + graph revision bump
+   + idempotency record write
 7. Return per-item results, phantom list, revision
 ```
 
@@ -707,6 +712,35 @@ Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by mi
 | key | TEXT | Meta key (e.g., graph_revision) |
 | value | JSONB | Meta value |
 
+#### Table: ingest_idempotency
+
+**ID**: `cpt-cf-graph-storage-dbtable-ingest-idempotency`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| tenant_id | UUID | Tenant scope |
+| producer | TEXT | Producer identity (from the security context) |
+| idempotency_key | TEXT | Producer-chosen key; unique per (tenant, producer) |
+| request_hash | TEXT | Canonical hash of the ingest request |
+| graph_revision | BIGINT | Revision committed by the original request |
+| response | JSONB | Recorded outcome returned to identical retries |
+| created_at | TIMESTAMPTZ | Retention window anchor |
+
+#### Table: scope_registry
+
+**ID**: `cpt-cf-graph-storage-dbtable-scope-registry`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| tenant_id | UUID | Tenant scope |
+| scope_attribute / scope_value | TEXT / TEXT | Canonical scope identity |
+| owner_producer | TEXT | Producer owning this scope |
+| generation | BIGINT | Highest accepted source generation (fencing) |
+| request_hash | TEXT | Hash of the last accepted replacement snapshot |
+| updated_at | TIMESTAMPTZ | Last accepted replacement |
+
+Replacement transactions lock this row exclusively; ordinary ingests into an owned scope lock it in shared mode (Concurrent Ingest Protocol).
+
 #### Table: metrics_cache
 
 **ID**: `cpt-cf-graph-storage-dbtable-metrics-cache`
@@ -736,6 +770,20 @@ The transition `phantom -> concrete` (a real ingest arriving under a node key cu
 5. **Concurrency and idempotency.** Materialization serializes on the node row via the per-tenant node-key uniqueness constraint: concurrent phantom creation and materialization (or two concurrent materializations) resolve deterministically — one transaction wins, the other observes the winner's committed state and proceeds as an upsert (or retries on serialization failure). Re-ingesting the same concrete node is a converging no-op.
 
 Consequences for shapes outside the happy path: a second edge referencing the same missing key reuses the existing phantom (no duplicate placeholders); scope replacement treats phantoms as static content (a phantom whose last referencing edge is deleted is subject to the retention policy tracked in PRD § Open Questions).
+
+### Concurrent Ingest Protocol
+
+A single database transaction serializes rows, not intentions: batch-level validation runs against a snapshot, commit outcomes can be lost on the network, and lock acquisition order says nothing about source freshness. The protocol below is what makes the PRD's convergence promises (`cpt-cf-graph-storage-fr-bulk-ingest`, `cpt-cf-graph-storage-fr-stable-identity`, `cpt-cf-graph-storage-fr-scope-replace`) hold under concurrent producers.
+
+**1. Node type conflicts (validate-then-write).** Two concurrently validated batches can declare the same new node key under different concrete types; each validates its own edges against its own assumed type, the node-row upserts serialize, one type wins — and the loser's edges would remain, violating endpoint constraints despite both batches having "passed validation". Therefore: a concrete node's type is immutable under ordinary upsert — a same-key ingest with a different type is a conflict error; the only type transition is phantom materialization under the [Phantom Materialization Contract](#phantom-materialization-contract) (exclusive node lock, atomic incident-edge revalidation). Producers may pass an expected version for compare-and-set updates; endpoint-constraint validation executes inside the ingest transaction holding shared locks on the referenced endpoint nodes, so an endpoint's type cannot change between validation and commit.
+
+**2. Durable idempotency (unknown commit outcomes).** A producer whose connection drops after commit cannot distinguish "failed before commit" from "committed, response lost"; a blind retry can overwrite newer state written in between, and stable keys alone cannot tell a retry of a completed logical request from a new request. Therefore: every ingest carries a tenant- and producer-scoped idempotency key; the gear persists `(key, canonical request hash, committed revision, response)` in the same transaction as the batch. A retry with the same key and hash returns the recorded response without touching graph state; the same key with a different hash is a conflict. Idempotency records are retained for a configurable window (`limits.idempotency_retention`, default 7 days).
+
+**3. Scope replacement serialization (write skew on sets).** Two concurrent replacements of one scope each read the same snapshot, each deletes rows absent from its own batch, and both commit — producing a union state neither producer submitted. Therefore: a scope has a canonical identity `(tenant, owning producer, scope attribute, scope value)` registered in the scope registry; every replacement takes an exclusive transaction-scoped lock on that identity (locked registry row) held through commit, and ordinary ingests writing static content into an owned scope take the same lock in shared mode.
+
+**4. Source ordering (fencing).** Lock order is arrival order, not source order: a stalled generation 10 can acquire the lock after generation 11 committed and overwrite fresh state with stale state, legally. Therefore: every replacement snapshot carries a monotonic source generation; the scope registry stores the highest accepted generation, compared-and-updated atomically under the scope lock. Older generations are rejected with a stale-generation error; an equal generation with an identical request hash replays the recorded outcome; an equal generation with different content is a conflict.
+
+Conflict and stale-generation rejections are canonical problem types distinct from validation errors and from resource exhaustion, so producers can implement the correct reaction (re-read and rebase, drop the stale run, or back off) mechanically.
 
 ### Traversal Backend Sketch
 
@@ -774,6 +822,7 @@ Every bound the gear enforces is a named configuration key with a safe default a
 | Per-tenant concurrent analytics jobs | `tenant_max_analytics_jobs` | 1 | 1 – 8 | Job admission |
 | Per-tenant concurrent ingest batches | `tenant_max_ingest` | 4 | 1 – 64 | Admission |
 | Per-tenant concurrent queries | `tenant_max_queries` | 32 | 1 – 1,024 | Admission |
+| Idempotency record retention | `idempotency_retention` | 7 days | 1 – 90 days | Background cleanup |
 
 Enforcement is layered, and the authoritative layer is shared:
 

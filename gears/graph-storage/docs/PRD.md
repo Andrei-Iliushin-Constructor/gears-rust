@@ -90,6 +90,8 @@ Several platform initiatives need to persist and query relationships between het
 | RRF | Reciprocal Rank Fusion — a rank-based algorithm for merging result lists from multiple retrieval arms |
 | Projection | A bounded, filterable tabular or subgraph view over graph data |
 | Graph Revision | A monotonic counter bumped by every mutating ingest; used to invalidate analytics caches |
+| Idempotency Key | A tenant- and producer-scoped identifier of one logical ingest request; its recorded outcome makes retries after lost responses safe |
+| Scope Generation | A monotonic source revision carried by every scope-replacement snapshot; stale generations are rejected (fencing) |
 | GTS | Global Type System — the platform's contract system of versioned, derivable JSON Schema types with `gts.` identifiers |
 | Ontology | The set of registered GTS node, edge, and attribute types that describe one domain's graph shape |
 | Heavy Content | Payload data too large or too opaque to index (article bodies, binaries, raw logs); stored in external blob storage and referenced from the graph by identifier |
@@ -256,6 +258,8 @@ The system **MUST** expose the registered ontology for inspection: list types fi
 
 The system **MUST** accept batches of nodes and edges in one ingest request, validate every payload against its GTS type before writing, and apply the batch atomically — either all valid writes commit or the batch is rejected with per-item errors. Writes **MUST** use batched database statements. Repeating an identical ingest **MUST** be a no-op that converges to the same stored state. Every mutating ingest **MUST** increment the tenant's graph revision.
 
+Convergence **MUST** hold under retries with unknown commit outcomes: every ingest request carries a tenant- and producer-scoped idempotency key, and the system persists that key with a canonical request hash, the committed graph revision, and the response atomically with the batch. An identical retry **MUST** return the recorded outcome without touching graph state; reuse of a key with a different request **MUST** be rejected as a conflict (see DESIGN § Concurrent Ingest Protocol).
+
 - **Rationale**: Producers re-run pipelines; idempotent atomic batches make re-runs safe and cheap, and the prototype's row-at-a-time writes were a measured bottleneck.
 - **Actors**: `cpt-cf-graph-storage-actor-producer-gear`
 
@@ -264,6 +268,8 @@ The system **MUST** accept batches of nodes and edges in one ingest request, val
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-stable-identity`
 
 Nodes **MUST** be identified by a producer-supplied stable node key, unique per tenant; ingesting an existing key updates that node. Edge identity **MUST** be derived deterministically from edge type, source key, target key, and an optional producer-supplied discriminator, so that parallel edges of the same type between the same nodes are representable and re-ingest updates rather than duplicates.
+
+A concrete node's GTS type is immutable under ordinary upsert: a same-key ingest declaring a different type **MUST** be rejected as a conflict — the only permitted type transition is phantom materialization, which locks the node and revalidates incident edges atomically. Producers **MAY** pass an expected version with an update (compare-and-set); a mismatch **MUST** reject the batch. Endpoint-constraint validation **MUST** execute inside the ingest transaction under locks on the referenced endpoint nodes, so concurrently validated batches cannot commit edges against node types they never observed (see DESIGN § Concurrent Ingest Protocol).
 
 - **Rationale**: Deterministic identity is the foundation of idempotent re-sync and of cross-producer references to the same entities.
 - **Actors**: `cpt-cf-graph-storage-actor-producer-gear`
@@ -300,6 +306,8 @@ The system **MUST** distinguish static edges (derived deterministically from sou
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-scope-replace`
 
 The system **MUST** support declarative scope replacement on ingest: the producer names a scope (an indexed payload attribute and value, e.g., a source repository), and the system deletes previously ingested static nodes and edges of that scope that are absent from the new batch, in the same transaction as the upserts. Analysis-originated content in the scope **MUST** survive replacement.
+
+A scope **MUST** have a canonical identity (tenant, owning producer, scope attribute and value). Replacements of one scope **MUST** serialize on that identity through a lock held to commit, and ordinary ingests writing static content into an owned scope **MUST** participate in the same locking protocol. Every replacement snapshot **MUST** carry a monotonic source generation: the system persists the highest accepted generation per scope and compares-and-updates it atomically under the scope lock; an older generation **MUST** be rejected as stale, an equal-generation identical retry **MUST** return the recorded outcome, and an equal-generation different-content snapshot **MUST** be rejected as a conflict (see DESIGN § Concurrent Ingest Protocol).
 
 - **Rationale**: Producers re-sync whole sources; replacement semantics keep the graph consistent with upstream without full wipes or tombstone bookkeeping.
 - **Actors**: `cpt-cf-graph-storage-actor-producer-gear`
