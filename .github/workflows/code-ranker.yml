@@ -3,21 +3,11 @@ on:
   pull_request:
     paths:
       - '**/*.rs'
-      - '**/Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - '.cargo/**'
-      - '!**/tests/**'
-      - '!testing/**'
+      - '**/*.md'
   push:
     paths:
       - '**/*.rs'
-      - '**/Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - '.cargo/**'
-      - '!**/tests/**'
-      - '!testing/**'
+      - '**/*.md'
 jobs:
   code-ranker:
     uses: code-ranker-com/actions/.github/workflows/report.yml@v1
