@@ -72,9 +72,9 @@ impl From<ChatDetail> for ChatDetailDto {
 
 /// Response DTO for a message in the list endpoint.
 ///
-/// Aliased to `MiniChatMessageDto` in the OpenAPI schema: `chat-engine` also
+/// Aliased to `MiniChatMessageDto` in the `OpenAPI`` schema: `chat-engine` also
 /// exposes a `MessageDto`, and both gears register into the same api-gateway
-/// OpenAPI registry, so the bare ident would collide in `components.schemas`.
+/// `OpenAPI`` registry, so the bare ident would collide in `components.schemas`.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
 #[schema(as = MiniChatMessageDto)]
