@@ -507,7 +507,7 @@ openapi: .example-server-build py-env
 	echo "Fetching OpenAPI spec..." && \
 	curl -fsS "$(OPENAPI_URL)" -o "$(if $(GEAR),$(GEAR_OPENAPI_TMP),$(OPENAPI_OUT))" && \
 	if [ -n "$(GEAR)" ]; then \
-		echo "Merging gear OpenAPI into $(OPENAPI_OUT)..." && \
+		echo "Merging $(GEAR) OpenAPI into $(OPENAPI_OUT)..." && \
 		$(PYTHON) tools/scripts/merge_openapi_json.py "$(OPENAPI_OUT)" "$(GEAR_OPENAPI_TMP)"; \
 	fi && \
 	echo "Sorting OpenAPI JSON for deterministic ordering..." && \
@@ -586,7 +586,20 @@ GEAR_SDK_FLAG := $(if $(wildcard gears/$(GEAR)/$(GEAR)-sdk),-p $(GEAR_SDK_PKG))
 GEAR_PKGS := -p $(GEAR_PKG) $(GEAR_SDK_FLAG)
 GEAR_CARGO_SCOPE := $(if $(GEAR),$(GEAR_PKGS),--workspace)
 GEAR_SERVER_FEATURE_ARGS := $(if $(GEAR),--no-default-features --features $(GEAR_SERVER_FEATURES),$(EXAMPLE_SERVER_FEATURE_ARGS))
-OPENAPI_BUILD_FEATURE_ARGS := $(if $(GEAR),$(GEAR_SERVER_FEATURE_ARGS),$(OPENAPI_SERVER_FEATURE_ARGS))
+# GTS envelope providers that config/e2e-local.yaml's seeds depend on at LINK
+# time: account-management registers the `gts.cf.core.am.tenant_type.v1~` base
+# schema via inventory::submit!, while that config seeds its derived tenant
+# types. A focused `GEAR=` build must link these providers or the server won't
+# boot against the shared config (types-registry ready-commit fails chain
+# validation on the seeded derived tenant types).
+OPENAPI_ENVELOPE_FEATURES ?= account-management,static-idp
+GEAR_OPENAPI_FEATURE_ARGS := --no-default-features --features $(GEAR_SERVER_FEATURES),$(OPENAPI_ENVELOPE_FEATURES)
+# `make openapi` (no GEAR): build the FULL curated server (every gear in
+# config/e2e-features.txt) so docs/api/api.json is the complete all-gears spec.
+# `make openapi GEAR=xxx`: build a focused server for that gear (plus the
+# envelope providers above) and MERGE its /openapi.json into docs/api/api.json,
+# patching just that gear's paths without a full rebuild.
+OPENAPI_BUILD_FEATURE_ARGS := $(if $(GEAR),$(GEAR_OPENAPI_FEATURE_ARGS),$(OPENAPI_SERVER_FEATURE_ARGS))
 GEAR_E2E_SCOPE := $(if $(GEAR),$(GEAR_E2E_TARGET) $(E2E_TARGET),$(E2E_TARGET))
 GEAR_COVERAGE_ARGS := $(if $(GEAR),--package $(GEAR_PKG) --e2e-target $(GEAR_E2E_TARGET),)
 GEAR_CLIPPY_ARGS ?= --all-targets --all-features -- -D warnings
