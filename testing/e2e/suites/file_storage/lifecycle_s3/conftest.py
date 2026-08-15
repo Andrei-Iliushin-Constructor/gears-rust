@@ -99,7 +99,7 @@ import pytest
 # process wrapper from the local-fs lifecycle conftest — no S3-specific change
 # is needed in any of that machinery, only in config/env wiring, so importing
 # rather than forking avoids duplicating a second copy to keep in sync.
-from gears.file_storage.lifecycle.conftest import (
+from ..lifecycle.conftest import (
     FileStorageSidecar,
     _SIGNING_KEY_SEED_B64,
     _assert_port_available,
