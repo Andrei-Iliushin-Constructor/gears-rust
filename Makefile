@@ -228,7 +228,7 @@ ensure-submodules:
 # Check code formatting
 fmt:
 	$(call check_rustup_component,rustfmt)
-	cargo fmt --all --check
+	$(if $(GEAR),cargo fmt -p $(GEAR_PKG) --check,cargo fmt --all --check)
 
 CFS ?= cfs
 CFS_PIPX_SPEC ?= git+https://github.com/constructorfabric/studio.git
@@ -257,9 +257,13 @@ CLIPPY_HACK_EXCLUDE := --exclude-features _any-backend
 
 clippy:
 	$(call check_rustup_component,clippy)
+ifeq ($(GEAR),)
 	$(call check_tool,cargo-hack)
 	cargo clippy --workspace --all-targets --all-features $(CLIPPY_FLAGS)
 	cargo hack clippy $(CLIPPY_HACK_CRATES) --all-targets --each-feature $(CLIPPY_HACK_EXCLUDE) $(CLIPPY_FLAGS)
+else
+	cargo clippy -p $(GEAR_PKG) $(GEAR_CLIPPY_ARGS)
+endif
 
 ## Full feature-matrix clippy: one pass per (crate × feature).
 ## ~182 runs — intended for nightly CI and pre-release validation, not PRs.
@@ -295,7 +299,7 @@ geiger:
 
 ## Check there are no compile time warnings
 lint:
-	RUSTFLAGS="-D warnings" cargo check --workspace --all-targets --all-features
+	RUSTFLAGS="-D warnings" cargo check $(GEAR_CARGO_SCOPE) --all-targets --all-features
 
 ## Validate GTS identifiers in .md and .json files (DE0903)
 # Uses gts-validator binary (install via: cargo install gts-validator)
@@ -420,12 +424,16 @@ cfs-validate-kit-local: cfs-repair
 # Generate OpenAPI spec from running cf-gears-example-server
 openapi:
 	@command -v curl >/dev/null || (echo "curl is required to generate OpenAPI spec" && exit 1)
-	@cargo build --bin cf-gears-example-server $(E2E_ARGS)
+	@cargo build --bin cf-gears-example-server $(GEAR_SERVER_FEATURE_ARGS)
 	@echo "Starting cf-gears-example-server to generate OpenAPI spec..."
-	@$(call start_server_and_wait,target/debug/cf-gears-example-server --config config/quickstart.yaml,$(OPENAPI_URL),300) && \
+	@mkdir -p $$(dirname "$(if $(GEAR),$(GEAR_OPENAPI_TMP),$(OPENAPI_OUT))") && \
+	$(call start_server_and_wait,target/debug/cf-gears-example-server --config config/quickstart.yaml,$(OPENAPI_URL),300) && \
 	echo "Fetching OpenAPI spec..." && \
-	mkdir -p $$(dirname "$(OPENAPI_OUT)") && \
-	curl -fsS "$(OPENAPI_URL)" -o "$(OPENAPI_OUT)" && \
+	curl -fsS "$(OPENAPI_URL)" -o "$(if $(GEAR),$(GEAR_OPENAPI_TMP),$(OPENAPI_OUT))" && \
+	if [ -n "$(GEAR)" ]; then \
+		echo "Merging gear OpenAPI into $(OPENAPI_OUT)..." && \
+		$(PYTHON) tools/scripts/merge_openapi_json.py "$(OPENAPI_OUT)" "$(GEAR_OPENAPI_TMP)"; \
+	fi && \
 	echo "Sorting OpenAPI JSON for deterministic ordering..." && \
 	$(PYTHON) tools/scripts/sort_openapi_json.py "$(OPENAPI_OUT)" && \
 	echo "OpenAPI spec saved to $(OPENAPI_OUT)"
@@ -463,13 +471,47 @@ dev-clippy:
 # Auto-fix formatting and clippy warnings
 dev: dev-fmt dev-clippy dev-test
 
+# -------- Optional GEAR= scope for top-level targets --------
+# Examples:
+#   make test GEAR=file-parser
+#     -> cargo nextest run -p cf-gears-file-parser -p cf-gears-file-parser-sdk
+#   make run GEAR=file-parser
+#     -> cargo run --bin cf-gears-example-server --no-default-features \
+#        --features file-parser,static-tenants,static-authn,static-authz
+#   make build GEAR=bss-ledger GEAR_PKG=bss-ledger GEAR_SDK_PKG=bss-ledger-sdk
+#     -> cargo build --release -p bss-ledger -p bss-ledger-sdk
+#   make test GEAR=file-parser GEAR_FEATURES=integration
+#     -> cargo nextest run -p cf-gears-file-parser -p cf-gears-file-parser-sdk --features integration
+
+GEAR ?=
+GEAR_BUILD_ARGS ?=
+GEAR_TEST_ARGS ?=
+GEAR_RUN_ARGS ?=
+GEAR_FEATURES ?=
+
+GEAR_FEATURE_ARGS := $(if $(GEAR_FEATURES),--features $(GEAR_FEATURES),)
+GEAR_SERVER_BASE_FEATURES ?= static-tenants,static-authn,static-authz
+GEAR_SERVER_FEATURES ?= $(GEAR),$(GEAR_SERVER_BASE_FEATURES)
+GEAR_OPENAPI_TMP ?= target/openapi/$(GEAR).json
+GEAR_E2E_TARGET ?= testing/e2e/gears/$(subst -,_,$(GEAR))
+GEAR_PKG ?= cf-gears-$(GEAR)
+GEAR_SDK_PKG ?= $(GEAR_PKG)-sdk
+GEAR_SDK_FLAG := $(if $(wildcard gears/$(GEAR)/$(GEAR)-sdk),-p $(GEAR_SDK_PKG))
+GEAR_PKGS := -p $(GEAR_PKG) $(GEAR_SDK_FLAG)
+GEAR_CARGO_SCOPE := $(if $(GEAR),$(GEAR_PKGS),--workspace)
+GEAR_SERVER_FEATURE_ARGS := $(if $(GEAR),--no-default-features --features $(GEAR_SERVER_FEATURES),$(E2E_ARGS))
+GEAR_E2E_SCOPE := $(if $(GEAR),$(GEAR_E2E_TARGET) $(E2E_TARGET),$(E2E_TARGET))
+GEAR_COVERAGE_ARGS := $(if $(GEAR),--package $(GEAR_PKG) --e2e-target $(GEAR_E2E_TARGET),)
+GEAR_CLIPPY_ARGS ?= --all-targets --all-features -- -D warnings
+
+
 # -------- Tests --------
 
 .PHONY: test test-no-macros test-macros test-sqlite test-pg test-mysql test-db test-users-info-pg test-usage-collector-pg test-cluster-pg test-fips
 
-# Run all tests
+# Run all tests, or a single gear when GEAR=<gear> is set
 test: install-tools
-	cargo nextest run --workspace
+	cargo nextest run $(GEAR_CARGO_SCOPE) $(GEAR_FEATURE_ARGS) $(GEAR_TEST_ARGS)
 
 test-no-macros: install-tools
 	cargo nextest run --workspace --exclude cf-gears-toolkit-macros-tests --exclude cf-gears-toolkit-db-macros
@@ -622,9 +664,9 @@ e2e-docker:
 e2e-docker-smoke:
 	$(PYTHON) tools/scripts/ci.py e2e-docker -- -m smoke $(E2E_TARGET)
 
-# Run E2E tests locally, use `make e2e-local E2E_TARGET=testing/e2e/gears/` to specify target
+# Run E2E tests locally, use GEAR=<gear> to scope to testing/e2e/gears/<gear>
 e2e-local:
-	$(PYTHON) tools/scripts/ci.py e2e-local -- $(E2E_TARGET)
+	$(PYTHON) tools/scripts/ci.py e2e-local -- $(GEAR_E2E_SCOPE)
 
 ## Run RG + AuthZ barrier E2E tests with tr-authz-plugin going through TR -> RG
 e2e-tr-authz:
@@ -663,12 +705,12 @@ e2e-usage-collector:
 # Generate code coverage report (unit + e2e-local tests)
 coverage:
 	$(call check_tool,cargo-llvm-cov)
-	$(PYTHON) tools/scripts/coverage.py combined
+	$(PYTHON) tools/scripts/coverage.py combined $(GEAR_COVERAGE_ARGS)
 
 # Generate code coverage report (unit tests only)
 coverage-unit:
 	$(call check_tool,cargo-llvm-cov)
-	$(PYTHON) tools/scripts/coverage.py unit
+	$(PYTHON) tools/scripts/coverage.py unit $(if $(GEAR),--package $(GEAR_PKG),)
 
 ## Ensure needed packages and programs installed for local e2e testing
 check-prereq-e2e-local:
@@ -677,7 +719,7 @@ check-prereq-e2e-local:
 # Generate code coverage report (e2e-local tests only)
 coverage-e2e-local: check-prereq-e2e-local
 	$(call check_tool,cargo-llvm-cov)
-	$(PYTHON) tools/scripts/coverage.py e2e-local
+	$(PYTHON) tools/scripts/coverage.py e2e-local $(if $(GEAR),--e2e-target $(GEAR_E2E_TARGET),)
 
 # -------- Fuzzing --------
 
@@ -867,6 +909,10 @@ quickstart:
 example:
 	cargo run --bin cf-gears-example-server $(E2E_ARGS) -- --config config/quickstart.yaml run
 
+# Run the default server, or the example server with only one gear feature when GEAR=<gear> is set
+run:
+	cargo run --bin cf-gears-example-server $(GEAR_SERVER_FEATURE_ARGS) -- --config config/quickstart.yaml run $(GEAR_RUN_ARGS)
+
 ## Run server with fips gear
 fips:
 	cargo run --bin cf-gears-example-server --features fips,static-authn,static-authz,single-tenant,static-credstore,otel -- --config config/quickstart.yaml run
@@ -877,7 +923,7 @@ oop-example:
 	cargo run --bin cf-gears-example-server --features oop-example,users-info-example,static-authn,static-authz,static-tenants,static-credstore -- --config config/quickstart.yaml run
 
 # Run all quality checks
-check: .setup-stamp fmt cfs-validate clippy lychee security dylint gts-docs test
+check: fmt cfs-validate clippy lychee security dylint gts-docs test
 
 ci_test: fmt clippy
 
@@ -886,9 +932,9 @@ ci_docs: lychee gts-docs
 # Run CI pipeline locally, requires docker
 ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-usage-collector-pg lychee gts-docs dylint
 
-## Build the cf-gears-example-server release binary using a toolchain from the rust-toolchain.toml
+## Build the cf-gears-example-server release binary, or a single gear when GEAR=<gear> is set
 .cargo-build:
-	cargo build --release --bin cf-gears-example-server $(E2E_ARGS)
+	$(if $(GEAR),cargo build --release $(GEAR_PKGS) $(GEAR_FEATURE_ARGS) $(GEAR_BUILD_ARGS),cargo build --release --bin cf-gears-example-server $(E2E_ARGS))
 
 ## Split debug symbols into separate artifact(s) and strip the binary.
 ## Requires platform tools: objcopy (Linux), dsymutil+strip (macOS).
@@ -896,10 +942,10 @@ ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-u
 .split-debug:
 	cargo xtask split-debug cf-gears-example-server
 
-# Build the release binary, then split debug symbols.
-# Use 'make cargo-build' if you don't need stripped artifacts or lack
-# platform debug-splitting tools (objcopy, dsymutil).
-build: .cargo-build .split-debug
+# Build the release binary, or a single gear when GEAR=<gear> is set.
+build:
+	$(MAKE) .cargo-build GEAR=$(GEAR) GEAR_PKG=$(GEAR_PKG) GEAR_SDK_PKG=$(GEAR_SDK_PKG) GEAR_FEATURES=$(GEAR_FEATURES) GEAR_BUILD_ARGS=$(GEAR_BUILD_ARGS)
+	@if [ -z "$(GEAR)" ]; then $(MAKE) .split-debug; fi
 
 # Run all necessary quality checks and tests and then build the release binary
 all: build check test-sqlite e2e-local openapi

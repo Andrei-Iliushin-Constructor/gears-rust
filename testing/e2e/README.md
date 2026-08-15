@@ -40,7 +40,7 @@ This approach runs tests against a locally running cf-gears-server.
 ```bash
 # Run local E2E (builds release artifacts and starts server automatically)
 make e2e-local  # all tests
-make e2e-local E2E_TARGET=testing/e2e/gears/file_parser/  # targeted scope
+make e2e-local GEAR=file-parser  # targeted scope
 make e2e-local-smoke  # smoke only tests (annotated with @pytest.mark.smoke)
 
 # Or directly
@@ -125,7 +125,7 @@ async def test_my_endpoint(base_url, auth_headers):
 | `make e2e-docker`                    | Docker | Run tests in Docker environment          |
 | `make e2e-docker-smoke`              | Docker | Run only smoke tests in Docker            |
 | `make e2e-local`                     | Local  | Run tests against auto-started local server |
-| `make e2e-local E2E_TARGET=testing/e2e/gears/file_parser/` | Local | Run a targeted local E2E subset |
+| `make e2e-local GEAR=file-parser/`.  | Local | Run a targeted local E2E subset |
 | `make e2e-local-smoke`               | Local  | Run only smoke tests locally              |
 | `make e2e-usage-collector`           | Local  | Usage-collector suite: dedicated binary + TimescaleDB container (**requires Docker**) |
 | `python3 scripts/ci.py e2e-local`    | Local  | Direct script execution (local)          |

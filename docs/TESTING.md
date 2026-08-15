@@ -31,6 +31,8 @@ make check                  # full quality gate (fmt + clippy + test + security)
 ### Quick-reference commands
 
 ```bash
+make build                 # whole-project example server release binary
+make run                   # default example server
 make test                  # unit tests (workspace, all OS)
 make test-sqlite           # integration — SQLite
 make test-pg               # integration — PostgreSQL
@@ -47,6 +49,12 @@ make e2e-usage-collector   # E2E — usage-collector lane (dedicated binary; nee
 make fuzz                  # fuzz — 30 s smoke per target
 make check                 # full quality gate (fmt + clippy + test + security)
 make all                   # full pipeline (build + check + test-sqlite + e2e-local)
+
+make build GEAR=file-parser      # one gear package plus SDK package
+make test GEAR=file-parser       # one gear package plus SDK package
+make run GEAR=file-parser        # server with only this gear feature set
+make e2e-local GEAR=file-parser  # gear E2E path plus default E2E target
+make coverage GEAR=file-parser   # unit + E2E coverage for one gear scope
 ```
 
 ---
@@ -104,10 +112,15 @@ Local coverage commands produce four report formats under `coverage/<mode>/`:
 ### 3.2 Running
 
 ```bash
-cargo test --workspace          # all unit tests
-cargo test -p cf-gears-oagw           # single package
+make test                              # workspace unit tests via nextest
+make test GEAR=file-parser             # one gear plus SDK package scope
+make test GEAR=file-parser GEAR_FEATURES=integration
+cargo test --workspace                 # all unit tests
+cargo test -p cf-gears-oagw            # single package
 cargo test -p cf-gears-toolkit-db -- cursor  # filtered by name
 ```
+
+`GEAR=<name>` defaults to packages `cf-gears-<name>` and `cf-gears-<name>-sdk`. Override `GEAR_PKG`, `GEAR_SDK_PKG`, `GEAR_FEATURES`, or `GEAR_TEST_ARGS` when a gear has non-standard package names or needs extra Cargo flags.
 
 ---
 
@@ -159,6 +172,7 @@ httpx).
 | Mode | Backend | Use case |
 |------|---------|----------|
 | **Local** (`make e2e-local`) | Builds a release binary, starts it locally | Development, CI |
+| **Single-gear local** (`make e2e-local GEAR=file-parser`) | Builds local server and runs `testing/e2e/gears/file_parser` plus the default E2E target | Focused gear iteration |
 | **Docker** (`make e2e-docker`) | Builds a Docker image, runs in container | Isolation, reproducibility |
 
 ### 5.3 CI
@@ -290,6 +304,8 @@ The `Makefile` wraps the same operations for convenience:
 ```bash
 make all        # build + check + test-sqlite + e2e-local
 make check      # fmt + clippy + test + security
+make build      # whole-project example server release binary
+make run        # default example server
 make fmt        # formatting check (cargo fmt --all -- --check)
 make dev-fmt    # auto-format (cargo fmt --all)
 make clippy     # linting (clippy --workspace --all-targets --all-features)
@@ -299,6 +315,10 @@ make deny       # cargo deny check
 make kani       # Kani formal verification (optional)
 make safety     # clippy + kani + lint + gears-lint
 ```
+
+Common targets accept `GEAR=<name>` for focused local iteration. `make build GEAR=<name>` and `make test GEAR=<name>` select the gear crate plus its SDK crate. `make run GEAR=<name>` composes `cf-gears-example-server` with the gear feature and the static local development system gears. `make e2e-local GEAR=<name>` maps kebab-case gear names to `testing/e2e/gears/<name_with_underscores>`.
+
+Gear runtime settings are YAML-driven under `gears:<gear_name>:` with a `config` section and optional gear-owned `database` section. Build-time Cargo features decide which gear code is present in the server binary; runtime YAML decides how those gears are configured.
 
 ## 7.3 CI Pipeline Summary
 
