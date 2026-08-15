@@ -1571,4 +1571,306 @@ mod tests {
             "Unknown property must cause constraint to fail (fail-closed)"
         );
     }
+
+    /// Test entity whose scope-resolvable column is a type
+    /// `sea_value_to_scope_value` does not support, used to prove the
+    /// unsupported-type path fails closed rather than allowing the insert.
+    mod unsupported_value_entity {
+        use super::*;
+        use toolkit_security::pep_properties;
+
+        #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+        #[sea_orm(table_name = "unsupported_value_table")]
+        pub struct Model {
+            #[sea_orm(primary_key)]
+            pub id: Uuid,
+            pub tenant_id: Uuid,
+            /// `f64` becomes `Value::Double`, which the scope-value converter
+            /// has no `ScopeValue` mapping for.
+            pub score: f64,
+        }
+
+        #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+        pub enum Relation {}
+
+        impl ActiveModelBehavior for ActiveModel {}
+
+        impl ScopableEntity for Entity {
+            fn tenant_col() -> Option<Column> {
+                Some(Column::TenantId)
+            }
+            fn resource_col() -> Option<Column> {
+                Some(Column::Id)
+            }
+            fn owner_col() -> Option<Column> {
+                None
+            }
+            fn type_col() -> Option<Column> {
+                None
+            }
+            fn resolve_property(property: &str) -> Option<Column> {
+                match property {
+                    pep_properties::OWNER_TENANT_ID => Self::tenant_col(),
+                    "score" => Some(Column::Score),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // sea_value_to_scope_value
+    //
+    // This is the bridge between a column's stored `sea_orm::Value` and the
+    // `ScopeValue` an access-scope filter compares against. A variant it fails
+    // to recognise makes `validate_insert_scope` fail closed, so the arm list
+    // is security-relevant, not cosmetic.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sea_value_to_scope_value_maps_uuid() {
+        let id = Uuid::from_u128(0x91);
+        assert_eq!(
+            sea_value_to_scope_value(&sea_orm::Value::Uuid(Some(id))),
+            Some(toolkit_security::ScopeValue::Uuid(id))
+        );
+    }
+
+    /// A UUID stored in a text column must still compare as a `Uuid`, so a
+    /// scope filter written with UUIDs matches a `VARCHAR` tenant column too.
+    #[test]
+    fn sea_value_to_scope_value_parses_uuid_shaped_strings_as_uuid() {
+        let id = Uuid::from_u128(0x92);
+        assert_eq!(
+            sea_value_to_scope_value(&sea_orm::Value::String(Some(id.to_string()))),
+            Some(toolkit_security::ScopeValue::Uuid(id))
+        );
+    }
+
+    #[test]
+    fn sea_value_to_scope_value_keeps_non_uuid_strings_as_strings() {
+        assert_eq!(
+            sea_value_to_scope_value(&sea_orm::Value::String(Some("draft".to_owned()))),
+            Some(toolkit_security::ScopeValue::String("draft".to_owned()))
+        );
+    }
+
+    /// Every integer width widens to `ScopeValue::Int(i64)`, so a scope filter
+    /// need not know the column's storage width.
+    #[test]
+    fn sea_value_to_scope_value_widens_every_integer_width_to_i64() {
+        let cases = [
+            sea_orm::Value::BigInt(Some(7i64)),
+            sea_orm::Value::Int(Some(7i32)),
+            sea_orm::Value::SmallInt(Some(7i16)),
+            sea_orm::Value::TinyInt(Some(7i8)),
+        ];
+        for v in cases {
+            assert_eq!(
+                sea_value_to_scope_value(&v),
+                Some(toolkit_security::ScopeValue::Int(7)),
+                "unexpected mapping for {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sea_value_to_scope_value_maps_bool() {
+        assert_eq!(
+            sea_value_to_scope_value(&sea_orm::Value::Bool(Some(true))),
+            Some(toolkit_security::ScopeValue::Bool(true))
+        );
+    }
+
+    /// Unsupported variants and SQL NULLs must return `None` so the caller fails
+    /// closed instead of treating an unknown value as a match.
+    #[test]
+    fn sea_value_to_scope_value_returns_none_for_unsupported_and_null_values() {
+        let unsupported = [
+            sea_orm::Value::Double(Some(1.5)),
+            sea_orm::Value::Float(Some(1.5)),
+            sea_orm::Value::Uuid(None),
+            sea_orm::Value::String(None),
+            sea_orm::Value::BigInt(None),
+            sea_orm::Value::Bool(None),
+        ];
+        for v in unsupported {
+            assert_eq!(
+                sea_value_to_scope_value(&v),
+                None,
+                "{v:?} must not map to a ScopeValue"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_insert_scope — the two branches the existing suite misses
+    // -----------------------------------------------------------------------
+
+    /// A filter on a column the insert does not set (auto-generated, defaulted)
+    /// must be *skipped*, not treated as a mismatch — otherwise every insert
+    /// that omits an optional scoped column would be denied.
+    #[test]
+    fn validate_insert_scope_skips_filters_on_not_set_columns() {
+        use owner_entity::ActiveModel;
+        use sea_orm::{NotSet, Set};
+        use toolkit_security::access_scope::{ScopeConstraint, ScopeFilter};
+        use toolkit_security::pep_properties;
+
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        let scope = AccessScope::from_constraints(vec![ScopeConstraint::new(vec![
+            ScopeFilter::in_uuids(pep_properties::OWNER_TENANT_ID, vec![tenant_id]),
+            ScopeFilter::eq(pep_properties::OWNER_ID, user_id),
+            // Resolvable, but the ActiveModel leaves it NotSet below.
+            ScopeFilter::eq("city_id", Uuid::new_v4()),
+        ])]);
+
+        let am = ActiveModel {
+            id: Set(Uuid::new_v4()),
+            tenant_id: Set(tenant_id),
+            user_id: Set(user_id),
+            city_id: NotSet,
+        };
+
+        assert!(
+            validate_insert_scope(&am, &scope).is_ok(),
+            "a filter on a NotSet column must be skipped, not denied"
+        );
+    }
+
+    /// If a resolvable column's value has a type the scope-value converter does
+    /// not understand, the constraint must fail closed — comparing an unknown
+    /// value optimistically would let an out-of-scope row through.
+    #[test]
+    fn validate_insert_scope_denies_when_column_type_is_unsupported() {
+        use sea_orm::Set;
+        use toolkit_security::access_scope::{ScopeConstraint, ScopeFilter};
+        use toolkit_security::pep_properties;
+        use unsupported_value_entity::ActiveModel;
+
+        let tenant_id = Uuid::new_v4();
+
+        let scope = AccessScope::from_constraints(vec![ScopeConstraint::new(vec![
+            ScopeFilter::in_uuids(pep_properties::OWNER_TENANT_ID, vec![tenant_id]),
+            // `score` resolves to an f64 column -> Value::Double -> no ScopeValue.
+            ScopeFilter::eq("score", Uuid::new_v4()),
+        ])]);
+
+        let am = ActiveModel {
+            id: Set(Uuid::new_v4()),
+            tenant_id: Set(tenant_id),
+            score: Set(0.5),
+        };
+
+        assert!(
+            matches!(
+                validate_insert_scope(&am, &scope),
+                Err(ScopeError::Denied(_))
+            ),
+            "an unsupported column type must fail closed"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // SecureInsertMany — the multi-row wrapper added for SeaORM 2.0's split of
+    // insert_many out of Insert<A>. These exercise the builder/type-state half,
+    // which needs no database; the exec paths are covered by the sqlite suite.
+    // -----------------------------------------------------------------------
+
+    /// The type-state gate: a deny-all scope must be rejected at
+    /// `scope_unchecked`, before any statement can be executed.
+    #[test]
+    fn secure_insert_many_rejects_deny_all_scope() {
+        use sea_orm::Set;
+        use test_entity::{ActiveModel, Entity};
+
+        let am = ActiveModel {
+            id: Set(Uuid::new_v4()),
+            tenant_id: Set(Uuid::new_v4()),
+            name: Set("row".to_owned()),
+            value: Set(1),
+        };
+
+        let result = Entity::insert_many([am])
+            .secure()
+            .scope_unchecked(&AccessScope::default());
+
+        assert!(
+            matches!(result, Err(ScopeError::Denied(_))),
+            "a deny-all scope must not reach the Scoped state"
+        );
+    }
+
+    #[test]
+    fn secure_insert_many_accepts_a_scope_with_constraints() {
+        use sea_orm::Set;
+        use test_entity::{ActiveModel, Entity};
+
+        let tenant_id = Uuid::new_v4();
+        let am = ActiveModel {
+            id: Set(Uuid::new_v4()),
+            tenant_id: Set(tenant_id),
+            name: Set("row".to_owned()),
+            value: Set(1),
+        };
+
+        assert!(
+            Entity::insert_many([am])
+                .secure()
+                .scope_unchecked(&AccessScope::for_tenants(vec![tenant_id]))
+                .is_ok()
+        );
+    }
+
+    /// `into_inner` is the documented escape hatch; the built statement must
+    /// still carry the ON CONFLICT clause set through the secure wrapper,
+    /// otherwise an upsert would silently degrade to a plain insert.
+    #[test]
+    fn secure_insert_many_on_conflict_raw_survives_into_inner() {
+        use sea_orm::{QueryTrait, Set};
+        use test_entity::{ActiveModel, Column, Entity};
+
+        let tenant_id = Uuid::new_v4();
+        let am = ActiveModel {
+            id: Set(Uuid::new_v4()),
+            tenant_id: Set(tenant_id),
+            name: Set("row".to_owned()),
+            value: Set(1),
+        };
+
+        let mut on_conflict = OnConflict::column(Column::Id);
+        on_conflict.do_nothing();
+
+        let insert = Entity::insert_many([am])
+            .secure()
+            .scope_unchecked(&AccessScope::for_tenants(vec![tenant_id]))
+            .expect("scope with constraints is accepted")
+            .on_conflict_raw(on_conflict)
+            .into_inner();
+
+        let sql = insert.build(sea_orm::DatabaseBackend::Postgres).to_string();
+        assert!(
+            sql.contains("ON CONFLICT"),
+            "ON CONFLICT must survive the secure wrapper; got: {sql}"
+        );
+        assert!(
+            sql.contains("DO NOTHING"),
+            "the DO NOTHING action must be preserved; got: {sql}"
+        );
+    }
+
+    /// The secure `on_conflict` path still enforces tenant immutability, so a
+    /// caller cannot use an upsert to move a row between tenants.
+    #[test]
+    fn secure_insert_many_secure_on_conflict_rejects_tenant_column_update() {
+        let result = SecureOnConflict::<test_entity::Entity>::columns([test_entity::Column::Id])
+            .update_columns([test_entity::Column::TenantId]);
+
+        assert!(
+            matches!(result, Err(ScopeError::Denied(_))),
+            "tenant_id must stay immutable through an upsert"
+        );
+    }
 }
