@@ -170,7 +170,7 @@ httpx).
 
 ### 5.2 Modes
 
-A **suite** is one E2E scenario under `testing/e2e/gears/` (usually a gear).
+A **suite** is one E2E scenario under `testing/e2e/suites/` (usually a gear).
 A **shared-server suite** (marked `launcher: e2e-launcher` in its `e2e.yaml`) can
 run against one common server; a **self-managed suite** (`launcher: pytest`)
 starts its own server and must be run on its own.
@@ -183,7 +183,7 @@ and `GEAR=` are mutually exclusive.
 | Mode | What it does | Use case |
 |------|---------|----------|
 | **Local, many suites** (`make e2e-local`) | Builds one server and runs **every shared-server suite** against it. Self-managed suites are skipped — run those with their own target (see 5.3). | Development, CI |
-| **Local, one suite** (`make e2e-local SUITE=file-parser`) | Builds a server for just that suite and runs only its tests (`testing/e2e/gears/file_parser`). Works for shared-server and self-managed suites. | Focused suite iteration |
+| **Local, one suite** (`make e2e-local SUITE=file-parser`) | Builds a server for just that suite and runs only its tests (`testing/e2e/suites/file_parser`). Works for shared-server and self-managed suites. | Focused suite iteration |
 | **Local, one gear** (`make e2e-local GEAR=credstore`) | Discovers every shared-server suite whose `e2e.yaml` features include the gear (e.g. `credstore` → the `credstore` and `oagw` suites) and runs each as its own focused build+run. Self-managed suites are skipped. | Gear-scoped iteration |
 | **Docker** (`make e2e-docker`) | Builds a Docker image and runs the tests in a container | Isolation, reproducibility |
 
@@ -197,7 +197,7 @@ The `e2e.yml` workflow runs:
   RG + AuthZ end-to-end chain tests, and the usage-collector suite.
 
 The `tr-authz` lane is ordinary local mode with a full-config profile
-(`testing/e2e/gears/resource_group/e2e.yaml`, profile `tr-authz`, applied over
+(`testing/e2e/suites/resource_group/e2e.yaml`, profile `tr-authz`, applied over
 `config/e2e-local.yaml`) and a `-k resource_group` selection. The `mini-chat` and
 `usage-collector` lanes each build their own `cf-gears-example-server` with a feature
 set the default local-mode binary does not carry, so they cannot share the common
@@ -229,7 +229,7 @@ workflow:
 The detailed E2E guide is [`testing/e2e/README.md`](../testing/e2e/README.md). Use it as
 the source of truth for:
 
-- **Adding a new suite** — naming conventions, `testing/e2e/gears/<suite>/` layout,
+- **Adding a new suite** — naming conventions, `testing/e2e/suites/<suite>/` layout,
   `e2e.yaml` fields, focused builds, config pruning, overlays, and profiles.
 - **Choosing who starts the server (`launcher`)** — use `launcher: e2e-launcher`
   when tests are only HTTP clients and can run against the standard shared E2E
@@ -346,7 +346,7 @@ make kani       # Kani formal verification (optional)
 make safety     # clippy + kani + lint + gears-lint
 ```
 
-Common gear-scoped targets accept `GEAR=<name>` for focused local iteration. `make build GEAR=<name>` and `make test GEAR=<name>` select the gear crate plus its SDK crate. `make run GEAR=<name>` composes `cf-gears-example-server` with the gear feature and the static local development system gears. E2E instead uses `SUITE=<name>`: `make e2e-local SUITE=<name>` maps kebab-case suite names to `testing/e2e/gears/<name_with_underscores>` (a suite is often, but not always, a gear).
+Common gear-scoped targets accept `GEAR=<name>` for focused local iteration. `make build GEAR=<name>` and `make test GEAR=<name>` select the gear crate plus its SDK crate. `make run GEAR=<name>` composes `cf-gears-example-server` with the gear feature and the static local development system gears. E2E instead uses `SUITE=<name>`: `make e2e-local SUITE=<name>` maps kebab-case suite names to `testing/e2e/suites/<name_with_underscores>` (a suite is often, but not always, a gear).
 
 Gear runtime settings are YAML-driven under `gears:<gear_name>:` with a `config` section and optional gear-owned `database` section. Build-time Cargo features decide which gear code is present in the server binary; runtime YAML decides how those gears are configured.
 

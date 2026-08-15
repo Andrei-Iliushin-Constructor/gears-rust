@@ -257,7 +257,7 @@ On **Windows** (no `make`), use the cross-platform Python scripts directly
 ```bash
 python tools/scripts/ci.py check          # full CI suite
 python tools/scripts/ci.py e2e-local      # end-to-end tests
-python tools/scripts/ci.py e2e-local -- testing/e2e/gears/file_parser/  # targeted end-to-end scope
+python tools/scripts/ci.py e2e-local -- testing/e2e/suites/file_parser/  # targeted end-to-end scope
 python tools/scripts/ci.py fuzz --seconds 60  # fuzz smoke run
 
 python tools/scripts/coverage.py unit      # unit-test code coverage

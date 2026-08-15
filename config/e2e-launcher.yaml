@@ -1,6 +1,6 @@
 # Global defaults for the local E2E launcher (tools/scripts/run_e2e.py).
 #
-# Per-suite manifests live at testing/e2e/gears/<suite>/e2e.yaml.
+# Per-suite manifests live at testing/e2e/suites/<suite>/e2e.yaml.
 base_config: config/e2e-local.yaml
 base_features:
   - static-tenants

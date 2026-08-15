@@ -7,7 +7,7 @@ Single entry point behind `make e2e-local [SUITE=<suite>] [GEAR=<gear>]`. A
 discovers and runs every e2e-launcher suite whose resolved Cargo features
 (`features` + `features_file` + `extra_features`) include that gear. The runner
 resolves *what* to build and run from config (global
-`config/e2e-launcher.yaml` + per-suite `testing/e2e/gears/<suite>/e2e.yaml`),
+`config/e2e-launcher.yaml` + per-suite `testing/e2e/suites/<suite>/e2e.yaml`),
 builds the server with the right Cargo features (plus any sidecars), then
 dispatches by the suite's `launcher`:
 
@@ -132,7 +132,7 @@ def merged_suite(
         if manifest_path is not None:
             suite["test_path"] = str(manifest_path.parent.relative_to(ROOT))
         else:
-            suite["test_path"] = f"testing/e2e/gears/{suite_key(suite_name)}"
+            suite["test_path"] = f"testing/e2e/suites/{suite_key(suite_name)}"
     return suite
 
 

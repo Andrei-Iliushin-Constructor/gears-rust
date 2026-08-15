@@ -579,7 +579,7 @@ GEAR_SERVER_OPTIONAL_FEATURES := $(filter-out $(GEAR_SERVER_ALWAYS_LINKED),$(GEA
 GEAR_SERVER_FEATURES ?= $(GEAR_SERVER_OPTIONAL_FEATURES)$(if $(GEAR_SERVER_OPTIONAL_FEATURES),$(COMMA),)$(GEAR_SERVER_BASE_FEATURES)
 GEAR_E2E_KEY := $(subst -,_,$(GEAR))
 GEAR_OPENAPI_TMP ?= target/openapi/$(GEAR).json
-GEAR_E2E_TARGET ?= testing/e2e/gears/$(GEAR_E2E_KEY)
+GEAR_E2E_TARGET ?= testing/e2e/suites/$(GEAR_E2E_KEY)
 GEAR_PKG ?= cf-gears-$(GEAR)
 GEAR_SDK_PKG ?= $(GEAR_PKG)-sdk
 GEAR_SDK_FLAG := $(if $(wildcard gears/$(GEAR)/$(GEAR)-sdk),-p $(GEAR_SDK_PKG))
@@ -762,7 +762,7 @@ bench-db-longhaul: bench-pg-longhaul bench-mysql-longhaul bench-mariadb-longhaul
 
 E2E_TARGET ?=
 # E2E selectors for `make e2e-local`:
-#   SUITE=<suite>  run ONE named scenario under testing/e2e/gears/ (often, but
+#   SUITE=<suite>  run ONE named scenario under testing/e2e/suites/ (often, but
 #                  not always, a gear crate) — e.g. SUITE=file-parser,
 #                  SUITE=scope-enforcement.
 #   GEAR=<gear>    run EVERY e2e-launcher suite whose e2e.yaml features (incl.
@@ -805,7 +805,7 @@ e2e-docker-smoke: py-env
 # tr-authz profile lane start their own server, so plain `make e2e-local` and
 # GEAR= runs skip them; run them via their own targets (e2e-mini-chat,
 # e2e-usage-collector, e2e-tr-authz). All feature/config/sidecar/gear knowledge
-# lives in config/e2e-launcher.yaml and testing/e2e/gears/<suite>/e2e.yaml, so
+# lives in config/e2e-launcher.yaml and testing/e2e/suites/<suite>/e2e.yaml, so
 # this recipe stays suite-agnostic.
 e2e-local: py-env
 	$(call print_target_banner)

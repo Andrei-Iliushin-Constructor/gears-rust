@@ -21,7 +21,7 @@ A few words show up everywhere below. Here is what each one means, in plain
 language:
 
 - **Suite** — one E2E scenario, living in its own folder under
-  `testing/e2e/gears/`. A suite is usually named after a gear (for example
+  `testing/e2e/suites/`. A suite is usually named after a gear (for example
   `file-parser`), but not always (for example `scope-enforcement`).
 - **`SUITE=<name>`** — the `make` variable that picks **one** suite to run, e.g.
   `make e2e-local SUITE=file-parser`. Leave it off (`make e2e-local`) to run the
@@ -166,12 +166,12 @@ make e2e-local SUITE=file-parser
 make e2e-local SUITE=credstore
 ```
 
-Every suite has its own test configuration, see `testing/e2e/gears/{SUITE}/e2e.yaml`.
+Every suite has its own test configuration, see `testing/e2e/suites/{SUITE}/e2e.yaml`.
 
 ### Running every suite for a gear (`make e2e-local GEAR=<name>`)
 
 When you run `make e2e-local GEAR=<name>`, the runner scans every
-`testing/e2e/gears/<suite>/e2e.yaml`, keeps the *shared-server* suites
+`testing/e2e/suites/<suite>/e2e.yaml`, keeps the *shared-server* suites
 (`launcher: e2e-launcher`) whose resolved Cargo features include `<name>`, and
 executes each one as its own focused build+run (same as `SUITE=<suite>`, one
 after another). It reports a non-zero exit if any suite fails.
@@ -211,10 +211,10 @@ in the most efficient way:
    `config/e2e-local.yaml`).
 3. It then runs the tests of **every shared-server suite** against that one
    server. ("Shared-server suite" = `launcher: e2e-launcher`; the list is found
-   automatically by scanning each `testing/e2e/gears/<suite>/e2e.yaml`.)
+   automatically by scanning each `testing/e2e/suites/<suite>/e2e.yaml`.)
 
 **Self-managed suites are skipped by `make e2e-local`.** Suites that have
-`launcher: pytest` in `testing/e2e/gears/<suite>/e2e.yaml` (`mini-chat` and
+`launcher: pytest` in `testing/e2e/suites/<suite>/e2e.yaml` (`mini-chat` and
 `usage-collector`) need their own server — and `usage-collector` also needs a
 TimescaleDB container — so they can't use the shared server. Run each of them on
 its own instead:
@@ -226,7 +226,7 @@ make e2e-usage-collector              # or: make e2e-local SUITE=usage-collector
 
 ### `launcher: e2e-launcher` vs `launcher: pytest`
 
-The `launcher` field in the test suite config `testing/e2e/gears/{SUITE}/e2e.yaml` says **who owns the server lifecycle**. Two categories:
+The `launcher` field in the test suite config `testing/e2e/suites/{SUITE}/e2e.yaml` says **who owns the server lifecycle**. Two categories:
 
 - **`e2e-launcher` (default, preferred).** The suite fits the shared server
   model: it can run inside one `cf-gears-example-server` process configured by
@@ -285,7 +285,7 @@ sidecars:                           # named build+env, referenced by name
     env: { FS_SIDECAR_BINARY: target/debug/sidecar }
 ```
 
-**Per-suite manifest — `testing/e2e/gears/<suite>/e2e.yaml`:**
+**Per-suite manifest — `testing/e2e/suites/<suite>/e2e.yaml`:**
 
 ```yaml
 suite: file-parser                   # suite id (canonical, with dashes); often a gear name
@@ -299,7 +299,7 @@ launcher: e2e-launcher               # e2e-launcher | pytest  (default: e2e-laun
 config_gears:                        # (e2e-launcher) gears (crates) whose config blocks to keep
   - file-parser
 # binary: cf-gears-example-server    # optional: server bin to build (this is the default)
-# test_path: testing/e2e/gears/file_parser  # optional: defaults to this manifest's own dir
+# test_path: testing/e2e/suites/file_parser  # optional: defaults to this manifest's own dir
 # sidecars: [file-storage]           # optional: named sidecars to build
 # env: { FOO: bar }                  # optional: extra env ({binary}/{suite} expand). E2E_BINARY
 #                                    #   is auto-set for launcher: pytest — no need to declare it.
@@ -316,22 +316,22 @@ config_gears:                        # (e2e-launcher) gears (crates) whose confi
 `profiles:` in the *same* `e2e.yaml`, deep-merged over the base manifest and
 selected with `--profile <name>`. Live examples:
 
-- `testing/e2e/gears/resource_group/e2e.yaml` → profile `tr-authz` — the RG +
+- `testing/e2e/suites/resource_group/e2e.yaml` → profile `tr-authz` — the RG +
   AuthZ chain: `config_gears: ['*']`, `extra_features: [tr-authz,
   tenant-resolver-rg]`, and a `config_overrides` that flips two plugin
   priorities. Run: `make e2e-tr-authz` (i.e. `run_e2e.py --suite resource-group
   --profile tr-authz`).
-- `testing/e2e/gears/scope_enforcement/e2e.yaml` — route-policy enforcement:
+- `testing/e2e/suites/scope_enforcement/e2e.yaml` — route-policy enforcement:
   `config_overrides` adds `route_policies` + scoped tokens and `env` sets
   `E2E_SCOPE_ENFORCEMENT=1`. Run: `make e2e-local SUITE=scope-enforcement`.
 
 Suites that own a fully different runtime (different binary, ports, sidecars)
 keep a dedicated config next to the suite, e.g.
-`testing/e2e/gears/usage_collector/config.yaml`, loaded by that suite's
+`testing/e2e/suites/usage_collector/config.yaml`, loaded by that suite's
 `conftest.py` (a `launcher: pytest` suite).
 
 Manifest resolution: `run_e2e.py` looks for
-`testing/e2e/gears/<suite_with_underscores>/e2e.yaml` first, then falls back to
+`testing/e2e/suites/<suite_with_underscores>/e2e.yaml` first, then falls back to
 scanning `**/e2e.yaml` for a matching `suite:` value (so nested paths like
 `bss/ledger` are found). If no manifest exists, a sensible default is derived
 (`suite` name as feature + `base_features`, `launcher: e2e-launcher`).
@@ -366,7 +366,7 @@ manual check against a single compatible test:
 make run GEAR=file-parser   # minimal server on :8087 with the quickstart config
 
 # Terminal 2 — run one compatible test against that already-running quickstart server:
-E2E_BASE_URL=http://localhost:8087/cf python3 -m pytest testing/e2e/gears/file_parser/test_file_parser_info.py
+E2E_BASE_URL=http://localhost:8087/cf python3 -m pytest testing/e2e/suites/file_parser/test_file_parser_info.py
 ```
 
 To run the full file-parser E2E suite, let the E2E runner own the server:
@@ -400,7 +400,7 @@ Tests are written using pytest and httpx. See `gears/file_parser/test_file_parse
 
 ### Add a new E2E suite
 
-1. **Choose the suite name.** Use a dash-separated `suite:` value, for example `todo-manager`. The directory normally uses underscores: `testing/e2e/gears/todo_manager/`.
+1. **Choose the suite name.** Use a dash-separated `suite:` value, for example `todo-manager`. The directory normally uses underscores: `testing/e2e/suites/todo_manager/`.
 2. **Create the suite directory.** Add `__init__.py`, one or more `test_*.py` files, and usually an `e2e.yaml` manifest.
 3. **Prefer `launcher: e2e-launcher`.** Use the default shared-server model unless the suite must own a custom server lifecycle, unique ports, a different runtime config, or external infrastructure.
 4. **Declare the focused build.** In `e2e.yaml`, set `features` to the Cargo features needed by the server and `config_gears` to the gear config blocks that must remain in the generated focused config. `make e2e-local GEAR=<gear>` discovers the suite automatically from these `features`.

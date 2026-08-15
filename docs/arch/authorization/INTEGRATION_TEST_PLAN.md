@@ -28,7 +28,7 @@ For background on how AuthZ uses RG data, see [RESOURCE_GROUP_MODEL.md](./RESOUR
 ## Planned File Layout
 
 ```
-testing/e2e/gears/resource_group/        ← E2E tests (pytest, HTTP against running server)
+testing/e2e/suites/resource_group/         ← E2E tests (pytest, HTTP against running server)
   conftest.py                              ← Fixtures: base_url, auth headers, type/group factories
   test_authz_tenant_scoping.py             ← Phase 1: CRUD + tenant isolation + hierarchy + membership
 
@@ -38,7 +38,7 @@ gears/system/resource-group/
     tenant_scoping_test.rs                 ← AccessScope scoping: 10 tests
 ```
 
-Follows existing project conventions: `testing/e2e/gears/{gear}/` for HTTP-level tests (see `oagw/`, `mini_chat/`, `types_registry/`), `gears/.../tests/` for Rust in-process tests.
+Follows existing project conventions: `testing/e2e/suites/{gear}/` for HTTP-level tests (see `oagw/`, `mini_chat/`, `types_registry/`), `gears/.../tests/` for Rust in-process tests.
 
 ---
 
@@ -92,7 +92,7 @@ cargo run --bin cf-gears-server \
 cargo test -p cf-gears-resource-group --test authz_integration_test --test tenant_scoping_test
 
 # E2E tests (requires running server + PostgreSQL)
-E2E_BASE_URL=http://localhost:8087 pytest testing/e2e/gears/resource_group/ -v
+E2E_BASE_URL=http://localhost:8087 pytest testing/e2e/suites/resource_group/ -v
 ```
 
 ---
@@ -305,7 +305,7 @@ curl -H "Authorization: Bearer test" \
 
 ## E2E Test Hierarchy Fixture (AuthZ plugins)
 
-E2E tests using AuthZ plugins (profile `tr-authz` in `testing/e2e/gears/resource_group/e2e.yaml`, applied over `config/e2e-local.yaml`) require a pre-seeded tenant hierarchy. A session-scoped pytest fixture creates the hierarchy via REST API before any tests run, then all tests reuse it.
+E2E tests using AuthZ plugins (profile `tr-authz` in `testing/e2e/suites/resource_group/e2e.yaml`, applied over `config/e2e-local.yaml`) require a pre-seeded tenant hierarchy. A session-scoped pytest fixture creates the hierarchy via REST API before any tests run, then all tests reuse it.
 
 **Available AuthZ plugins:**
 - `tr-authz-plugin` (priority 50) — resolves tenants via `TenantResolverClient` (recommended, no direct RG dependency)

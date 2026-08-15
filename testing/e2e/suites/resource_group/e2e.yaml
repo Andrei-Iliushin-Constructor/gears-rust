@@ -1,0 +1,36 @@
+suite: resource-group
+features:
+  - resource-group
+  - static-tenants
+  - static-authn
+  - static-authz
+launcher: e2e-launcher
+config_gears:
+  - resource-group
+
+profiles:
+  # AuthZ -> TenantResolver -> ResourceGroup chain. A full-config profile: keep
+  # every base gear block, build the shared feature set plus the two chain
+  # features, and override only the two plugin priorities that activate the
+  # chain. Run via: make e2e-tr-authz
+  tr-authz:
+    features_file: config/e2e-features.txt
+    extra_features:
+      - tr-authz
+      - tenant-resolver-rg
+    default_features: true
+    config_gears: ["*"]
+    test_path: testing/e2e
+    pytest_args:
+      - -k
+      - resource_group
+    config_overrides:
+      gears:
+        tr-authz-plugin:
+          config:
+            vendor: constructorfabric
+            priority: 90
+        rg-tr-plugin:
+          config:
+            vendor: constructorfabric
+            priority: 10
