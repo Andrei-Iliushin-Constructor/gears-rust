@@ -5,8 +5,10 @@ at the gateway level, rejecting requests early with 403 Forbidden when scopes ar
 insufficient.
 
 Prerequisites:
-- Start the server with: cargo run -- --config config/e2e-scope-enforcement.yaml
-- The config defines tokens with specific scopes for testing
+- Run via: make e2e-local SUITE=scope-enforcement
+  (applies testing/e2e/gears/scope_enforcement/e2e.yaml over config/e2e-local.yaml
+  and sets E2E_SCOPE_ENFORCEMENT=1)
+- The overlay defines tokens with specific scopes for testing
 
 Test scenarios:
 1. First-party apps (token_scopes: ["*"]) always pass
@@ -87,8 +89,8 @@ class TestScopeEnforcementDenied:
             assert resp.status_code == 403
             body = resp.json()
             assert body["status"] == 403
-            assert body["title"] == "Forbidden"
-            assert "scope" in body["detail"].lower()
+            assert body["title"] == "Permission Denied"
+            assert body["context"]["reason"] == "INSUFFICIENT_SCOPES"
 
     @pytest.mark.asyncio
     async def test_unrelated_scope_returns_403(
@@ -105,8 +107,8 @@ class TestScopeEnforcementDenied:
             assert resp.status_code == 403
             body = resp.json()
             assert body["status"] == 403
-            assert body["title"] == "Forbidden"
-            assert "scope" in body["detail"].lower()
+            assert body["title"] == "Permission Denied"
+            assert body["context"]["reason"] == "INSUFFICIENT_SCOPES"
 
 
 class TestScopeEnforcementGlobPatterns:
@@ -117,7 +119,7 @@ class TestScopeEnforcementGlobPatterns:
         self, base_url, tenant_id, token_users_read
     ):
         """Single * pattern should match single path segment.
-        
+
         Route config: /users-info/v1/users/* requires users:read or users:admin
         """
         headers = make_headers(tenant_id, token_users_read)
@@ -146,15 +148,15 @@ class TestScopeEnforcementGlobPatterns:
             assert resp.status_code == 403
             body = resp.json()
             assert body["status"] == 403
-            assert body["title"] == "Forbidden"
-            assert "scope" in body["detail"].lower()
+            assert body["title"] == "Permission Denied"
+            assert body["context"]["reason"] == "INSUFFICIENT_SCOPES"
 
     @pytest.mark.asyncio
     async def test_cities_exact_path_with_correct_scope(
         self, base_url, tenant_id, token_cities_admin
     ):
         """Exact path match should pass with correct scope.
-        
+
         Route config: /users-info/v1/cities requires cities:admin
         """
         headers = make_headers(tenant_id, token_cities_admin)
@@ -182,8 +184,8 @@ class TestScopeEnforcementGlobPatterns:
             assert resp.status_code == 403
             body = resp.json()
             assert body["status"] == 403
-            assert body["title"] == "Forbidden"
-            assert "scope" in body["detail"].lower()
+            assert body["title"] == "Permission Denied"
+            assert body["context"]["reason"] == "INSUFFICIENT_SCOPES"
 
 
 class TestScopeEnforcementEdgeCases:
@@ -220,7 +222,7 @@ class TestScopeEnforcementEdgeCases:
         self, base_url, tenant_id, token_no_scopes
     ):
         """Routes not configured in gateway_scope_checks should pass scope enforcement.
-        
+
         The /docs endpoint is not configured, so any authenticated request should pass.
         """
         headers = make_headers(tenant_id, token_no_scopes)
