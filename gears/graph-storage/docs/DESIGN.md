@@ -23,6 +23,9 @@
   - [Concurrent Ingest Protocol](#concurrent-ingest-protocol)
   - [Authorization Model](#authorization-model)
   - [Read Consistency Contract](#read-consistency-contract)
+  - [Error Model](#error-model)
+  - [Deadlines and Cancellation](#deadlines-and-cancellation)
+  - [Readiness Matrix](#readiness-matrix)
   - [Telemetry and Audit Contract](#telemetry-and-audit-contract)
   - [Traversal Backend Sketch](#traversal-backend-sketch)
   - [Plugin Selection and Lifecycle](#plugin-selection-and-lifecycle)
@@ -78,7 +81,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-fr-rest-api` | Versioned REST under `/api/graph-storage/v1` with OpenAPI schemas, RFC-9457 problems, documented limits |
 | `p1` | `cpt-cf-graph-storage-fr-sdk-client` | SDK crate with `GraphStorageClientV1` trait registered in ClientHub; local client delegates to domain services |
 | `p2` | `cpt-cf-graph-storage-fr-observability` | Structural tracing spans (batch sizes, arm timings, frontier sizes, cache hits) and OTel metrics, including per-limit saturation counters from the Capacity and Admission Contract; payload content never logged |
-| `p1` | `cpt-cf-graph-storage-fr-readiness` | Readiness checks: DB, server major version (>= 19), pgvector presence, property-graph presence, migrations, embedding provider, dimension agreement — with named problems |
+| `p1` | `cpt-cf-graph-storage-fr-readiness` | Per-capability readiness (DB and migrations, server major version, pgvector, property graph, registries, embedding provider and identity, engine plugins, dynamic indexes, analytics workers) reported as healthy/degraded/unhealthy with named problems; degraded capabilities reject only their own operations (Readiness Matrix) |
 
 #### NFR Allocation
 
@@ -770,6 +773,25 @@ Replacement transactions lock this row exclusively; ordinary ingests into an own
 
 Payload-free by construction (Telemetry and Audit Contract); written in the ingest transaction for committed mutations.
 
+#### Table: analytics_job
+
+**ID**: `cpt-cf-graph-storage-dbtable-analytics-job`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| tenant_id | UUID | Tenant scope; part of every key |
+| job_id | UUID | Opaque identifier; **PK (tenant_id, job_id)** |
+| principal | TEXT | Submitting principal (ownership tuple with tenant) |
+| dedup_key | TEXT | (revision, metric, params, scope identity, contract version); **UNIQUE (tenant_id, dedup_key)** while non-terminal |
+| state | TEXT | queued / running / succeeded / failed / cancelled / expired / superseded |
+| lease_owner / lease_epoch / lease_expires_at | TEXT / BIGINT / TIMESTAMPTZ | Worker lease with fencing epoch and heartbeat expiry |
+| graph_revision | BIGINT | Revision the job was admitted at |
+| error_category / error_reason / trace_id | TEXT / TEXT / TEXT | Persisted terminal error (payload-free) |
+| result_ref | TEXT | Reference to the published metric cache entry |
+| deadline_at / created_at / terminal_at | TIMESTAMPTZ | Job deadline and lifecycle timestamps |
+
+The state machine is durable: an accepted job identifier survives process restart, expired running leases are reclaimed (and their late attempts fenced by `lease_epoch`) before analytics workers report ready, and terminal transitions — including the cancellation-versus-publication race — are single atomic updates. Status, result, and cancel requests re-authorize the caller against the ownership tuple; unknown and unauthorized identifiers are indistinguishable.
+
 #### Table: metrics_cache
 
 **ID**: `cpt-cf-graph-storage-dbtable-metrics-cache`
@@ -778,7 +800,8 @@ Payload-free by construction (Telemetry and Audit Contract); written in the inge
 |--------|------|-------------|
 | tenant_id | UUID | Tenant scope; part of every key |
 | graph_revision | BIGINT | Revision the result was computed at |
-| metric | TEXT | Metric name + canonicalized parameters; **PK (tenant_id, graph_revision, metric)** |
+| metric | TEXT | Metric name + canonicalized parameters |
+| contract_version | INTEGER | Immutable algorithm contract version; **PK (tenant_id, graph_revision, metric, contract_version)** |
 | payload | JSONB | Per-node metric values |
 | computed_at | TIMESTAMPTZ | Computation time |
 
@@ -830,6 +853,7 @@ Tenant scoping is the outer wall; the PDP-derived `AccessScope` is the inner, re
 | Search | graph node | read | resource predicate inside all four arms before UNION/ranking/LIMIT; chunk rows authorize through their parent node; folding, counts, snippets, fusion inputs, pagination, and hydration re-apply the same scope |
 | Traversal / projections | graph node (+ edge via endpoints) | read | the caller-authorized induced subgraph, below |
 | Metrics | graph analytics | execute (whole-tenant) | dedicated permission; constrained scopes rejected |
+| Analytics jobs | analytics job | submit / read / cancel | ownership tuple (tenant, principal); every status, result, and cancel request re-authorizes; unknown and unauthorized identifiers are indistinguishable |
 
 A constraint that cannot be represented in SQL for the target entity fails closed — never degrades to tenant-only filtering. One entity type's compiled scope is never reused for another ResourceType.
 
@@ -845,7 +869,71 @@ A constraint that cannot be represented in SQL for the target entity fails close
 
 A compound read — hybrid search (arms + folding + hydration), traversal plus hydration, a projection page — executes every statement against one read-only repeatable-read snapshot. The observed graph revision is captured inside that snapshot and returned in the response; pagination continuation tokens embed it, and a continuation against a newer revision is answered with the recorded revision's data when still retained, or a typed stale-token error otherwise — never a silent mix of revisions.
 
-Metric computation follows the same rule (revision and topology read from one snapshot) and publishes conditionally: after computing, the writer re-checks that the tenant's current revision still equals the captured one and inserts under a single-flight uniqueness guard; on mismatch the result is discarded (or recomputed), so a cache entry never claims a revision whose topology it did not see.
+Metric computation follows the same rule (revision and topology read from one snapshot) and publishes conditionally: after computing, the writer re-checks that the tenant's current revision still equals the captured one and inserts under a single-flight uniqueness guard; on mismatch the result is discarded (or recomputed), so a cache entry never claims a revision whose topology it did not see. The cache identity additionally carries the immutable `algorithm_contract_version` (ADR-0004), so a deployment that changes output-affecting semantics can never serve an old result under new semantics.
+
+### Error Model
+
+One authoritative chain classifies every failure: `DomainError -> CanonicalError -> REST Problem` and the same `CanonicalError` on the SDK path. REST and ClientHub never classify the same failure differently; the mapping lives in the domain layer, and adapters only render it.
+
+| Failure | Canonical category | Stable reason | Client disposition |
+|---|---|---|---|
+| Malformed payload, schema violation, inconsistent limits | `invalid_argument` | `SCHEMA_VIOLATION`, `LIMIT_COMBINATION` | Fix the request |
+| Value outside a documented hard range (depth, batch size, seed count) | `out_of_range` | `LIMIT_EXCEEDED` | Reduce the value; never retry unchanged |
+| Same-key different-type ingest, expected-version mismatch | `aborted` | `CAS_CONFLICT` | Re-read and retry |
+| Serialization failure under concurrent ingest | `aborted` | `SERIALIZATION` | Retry unchanged |
+| Older source generation for a scope | `failed_precondition` | `STALE_GENERATION` | Drop the stale run; never retry |
+| Idempotency key reused with a different request | `aborted` | `IDEMPOTENCY_MISMATCH` | New logical request |
+| Idempotency receipt expired for an uncertain key | `failed_precondition` | `IDEMPOTENCY_KEY_EXPIRED` | Reconcile, then issue a new logical request |
+| Transient quota, concurrency, queue, or memory pressure | `resource_exhausted` | `QUEUE_FULL`, `MEMORY_POOL_BUSY`, `TENANT_CONCURRENCY` | Wait for the retry-after hint, then retry |
+| Operation exceeded its absolute deadline | `deadline_exceeded` | `DEADLINE` | Retry with a smaller request or later |
+| Caller or shutdown cancellation | `cancelled` | `CANCELLED` | Resubmit if still needed |
+| Capability not supported by the selected engine | `unimplemented` | `CAPABILITY_UNSUPPORTED` | Do not retry; use another capability |
+| Dependency unavailable (PDP, types-registry, provider, engine) | `unavailable` | `DEPENDENCY_UNAVAILABLE` | Wait and retry |
+| Vector search blocked by embedding-identity mismatch | `failed_precondition` | `EMBEDDING_SPACE_MISMATCH` | Operator action; other operations unaffected |
+| Unauthorized or unknown resource | `not_found` | `NOT_FOUND` | Indistinguishable by contract (anti-enumeration) |
+| Durable corruption detected | `data_loss` | `PROJECTION_CORRUPT`, `STORE_CORRUPT` | Operator action; never retry |
+| Unexpected internal failure | `internal` | `INTERNAL` | Retry once, then escalate |
+
+Reasons are a stable, published vocabulary; clients never parse human-readable `detail` strings. Transient categories carry a retry-after hint; non-retryable ones explicitly carry none.
+
+**Atomic batches.** A failed batch always has exactly one outer `CanonicalError`: `invalid_argument` when item validation failed (per-item violations attached), `aborted` for CAS or serialization conflicts, `unavailable` for a dependency outage, `deadline_exceeded`, or `internal`. Any non-success batch outcome means zero newly committed items and carries neither success counts nor a new graph revision — the sole exception is an idempotency replay, which returns the previously committed outcome.
+
+**Plugins.** Provider and engine failures are normalized by the gear before crossing the public boundary: unsupported capability → `unimplemented`; incompatible version or configuration → `failed_precondition`; timeout → `deadline_exceeded`; cancellation → `cancelled`; throttling or temporary outage → `unavailable` (with retry-after); stale or rebuilding projection → `failed_precondition` (`PROJECTION_STALE`); malformed plugin response or detected projection corruption → `internal` / `data_loss`. Vendor messages, URLs, status codes, and response bodies are protected diagnostics kept in access-controlled logs with a trace identifier; public `detail`, reason, and context use only Graph Storage vocabulary.
+
+**Asynchronous analytics jobs** have three error surfaces: (1) submission errors before `202` — validation, authorization, admission, dependency — returned immediately as a Problem, no job created; (2) execution errors after `202` — the terminal category, stable reason, safe structured context, and trace identifier are persisted with the job and replayed by the result endpoint, while status returns a failed-job envelope; (3) job-request errors — unknown or unauthorized job (`not_found`, indistinguishable), result requested before completion (`failed_precondition`, `JOB_NOT_COMPLETE`), invalid cancellation (`failed_precondition`), expired result (`not_found`, `JOB_RESULT_EXPIRED`). The SDK exposes the same terminal category and context.
+
+**Route registration.** Each route registers every Problem status its runtime can produce through OperationBuilder — `standard_errors` plus explicit additional responses for the canonical outcomes it can reach (for example `499` cancelled, `501` unsupported capability, `503` dependency unavailable, `504` deadline exceeded). Synchronous routes and the analytics submit/status/result/cancel routes are registered separately, so OpenAPI describes every failure a generated client or gateway can observe.
+
+### Deadlines and Cancellation
+
+**One absolute deadline per logical operation.** A deadline is created at admission (from the request or the applicable configured default) and the *remaining* budget is passed to every subsequent step: queue residence, provider and plugin calls, transaction attempts, backoff waits, and publication. A retry never starts when the remaining budget cannot accommodate it, and each per-attempt timeout is bounded by the remaining total. Local backstops (`statement_timeout`, cancellation tokens) remain, but they are floors under the absolute budget, not independent allowances. An accepted `202` analytics job gets its own job deadline, distinct from the submit request's deadline; whether queue residence consumes it is stated in the job contract (it does), and the completed HTTP deadline is never reused or extended.
+
+**Cancellation is resolved per phase**, so a cancellation never hides durable work:
+
+- before the transaction begins — cancel and roll back; the client sees `cancelled`;
+- once `COMMIT` has been issued and its outcome is unknown — the operation is resolved through the idempotency receipt, and a definite cancellation is never reported while the outcome is unknown;
+- after a durable commit or a published job result — success wins even if response delivery was cancelled; the recorded outcome remains retrievable by idempotency key or job identifier;
+- for `202` jobs — cancellation and result publication compete through a single persisted terminal-state transition, so exactly one of them wins.
+
+The same rules apply during shutdown.
+
+**Expired idempotency receipts.** Retention deletes the recorded response, not the guarantee: a compact tombstone (tenant, producer, key, request hash, committed revision) outlives the full record. A retry whose key matches only a tombstone is answered with `IDEMPOTENCY_KEY_EXPIRED` (`failed_precondition`) — the caller must reconcile and issue a new logical request. Absence of a full response record never by itself grants permission to re-execute an uncertain key.
+
+### Readiness Matrix
+
+Readiness is per capability, not one global boolean: a component is `Healthy`, `Degraded`, or `Unhealthy`, and only some states take the whole gear out of service.
+
+| Component | Degraded | Unhealthy | Aggregate effect |
+|---|---|---|---|
+| Database, migrations | — | Unreachable, migrations unapplied | Gear not ready |
+| Property graph (`kb_pgq`) | — | Missing on PostgreSQL 19+ | SQL/PGQ backend unavailable; CTE backend serves; gear ready-degraded |
+| AuthZ resolver / types-registry | Cached decisions in use | Unreachable with no cache | Unhealthy: gear not ready (fail closed) |
+| Embedding provider | Unavailable (ingest may skip embedding) | Embedding-space identity mismatch | Vector and hybrid search rejected with `EMBEDDING_SPACE_MISMATCH`; lexical search, ingest, traversal, projections unaffected |
+| Graph-engine plugin | Stale projection or unprovable cursor | Incompatible version | Route to the built-in PostgreSQL engine; capabilities unique to the plugin rejected with `CAPABILITY_UNSUPPORTED` |
+| Dynamic indexes | Building or backfilling | Build failed | Filters on affected attributes rejected; everything else unaffected |
+| Analytics workers | Lease recovery in progress | Scheduler unavailable | Analytics submissions rejected with `unavailable`; recovery of expired running leases completes before workers report ready |
+
+The readiness endpoint reports per-component state with named problems; the aggregate is ready only when no component is `Unhealthy`. Degraded components never silently widen behavior — the affected operations are rejected canonically instead.
 
 ### Telemetry and Audit Contract
 
@@ -874,6 +962,7 @@ The platform baseline (PluginV1, types-registry registration, scoped ClientHub c
 - **Selection**: a configured selector picks among registered instances (built-in defaults when none is configured: in-process ONNX provider, built-in PostgreSQL engine); ties break deterministically on (priority, instance id); no-match falls back to the built-in where one exists and fails readiness where it does not.
 - **Readiness and churn**: a selected plugin participates in readiness; cached selections are invalidated on instance disappearance or re-registration, and re-selection follows the same deterministic rules.
 - **Source epoch fencing (graph engines)**: the gear owns a non-reusable source epoch (timeline identifier) paired with the graph revision; a point-in-time restore of PostgreSQL starts a new epoch. Every engine reports its applied (epoch, revision) cursor; on epoch mismatch, revision rewind, or an unprovable cursor the gear fails closed or routes to the built-in backend until the plugin acknowledges a rebuild from the current epoch. The plugin owns projection reset/rebuild mechanics; the gear owns the epoch, the rebuild handoff, the activation gate, and the routing decision.
+- **Built-in PostgreSQL engine routing**: the Traversal Service always calls `GraphEngineV1` through the port — never a backend directly — and the gear registers its own PostgreSQL adapter as the built-in `GraphEngineV1` implementation with a GTS instance and a scoped ClientHub client, exactly like an external plugin. The adapter itself stays in `graph-storage/src/infra` (no separate crate); what the plugin path adds is uniform registration, selection, capability negotiation, and fallback routing.
 - **Conformance**: every implementation — real and fake — runs the same contract suite, including the resource-scoped adversarial authorization tests.
 
 ### Capacity and Admission Contract
@@ -915,9 +1004,13 @@ Enforcement is layered, and the authoritative layer is shared:
 2. **Domain admission layer** — the authoritative check, executed identically for REST handlers and the ClientHub local client; nothing reaches storage or an engine backend without passing it. Per-tenant concurrency gates live here.
 3. **Execution backstops** — database `statement_timeout`, cooperative cancellation tokens on long computations, and per-hop/cumulative budget checks inside the traversal engines.
 
+Rejections are classified by cause, not by the fact that a limit was involved: a value outside a documented hard range is `out_of_range` (backoff can never make it valid), a malformed or internally inconsistent combination of limits is `invalid_argument`, and only transient quota, concurrency, queue, or memory pressure is `resource_exhausted` (retryable, with a retry-after hint); termination by time or cancellation is `deadline_exceeded` or `cancelled`. The Error Model section defines the client disposition for each class.
+
 Analytics additionally runs under a **global scheduler**: per-tenant concurrency alone cannot bound the sum across tenants, so jobs pass through a bounded queue and a process-wide memory pool — each job's estimated peak (from node/edge counts and key sizes) is reserved at start and released on success, failure, or cancellation; per-tenant running/queued limits keep fairness. Jobs deduplicate on (tenant, graph revision, metric, parameters, authorization-scope identity); a job superseded by a newer revision is cancelled cooperatively. Because a job can outlive gateway timeouts, the REST surface answers long computations with `202 Accepted` plus a job identifier and status/result endpoints; the SDK path exposes the same job contract.
 
-Every rejection maps to the canonical resource-exhausted problem type (RFC-9457) carrying the limit name, the configured bound, and the requested value — distinguishable from validation errors so clients can implement backoff rather than "fix the request". Every limit exposes a saturation counter (rejections) and a high-watermark gauge, so capacity pressure is visible in telemetry before it becomes an incident (`cpt-cf-graph-storage-fr-observability`), including metric-cache retained-bytes and cleanup-lag gauges.
+Every rejection carries the limit name, the configured bound, and the requested value in structured context. Every limit exposes a saturation counter (rejections) and a high-watermark gauge, so capacity pressure is visible in telemetry before it becomes an incident (`cpt-cf-graph-storage-fr-observability`), including metric-cache retained-bytes and cleanup-lag gauges.
+
+**Seed admission.** Because every seed survives truncation, the seed set is bounded before expansion begins: after authorization and deduplication, a request whose distinct authorized seeds exceed the effective node budget is rejected with `out_of_range` (naming the seed count and the budget) rather than silently exceeding the budget. Seeds are ordered deterministically by node key, and the response reports the admitted seed count alongside truncation metadata.
 
 ### Base Ontology Publication
 

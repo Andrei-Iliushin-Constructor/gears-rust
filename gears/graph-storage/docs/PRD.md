@@ -327,7 +327,7 @@ The system **MUST** return a single node by key with its type, payload, embeddin
 
 - [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-content-chunking`
 
-When a node is ingested with long-form text content, the system **MUST** split it into deterministic chunks with stable chunk identifiers encoding location (section and offsets, never content), preserve exact character offsets into the raw text, index each chunk for lexical search, and embed each chunk. Re-ingesting unchanged content **MUST** produce identical chunks. Supplied content is an exact replacement set: in the same transaction the system **MUST** delete previous chunks absent from the newly computed set, so removed content can never remain searchable.
+When a node is ingested with long-form text content, the system **MUST** split it into deterministic chunks with stable chunk identifiers encoding location (section and offsets, never content), preserve exact character offsets into the raw text, index each chunk for lexical search, and embed each chunk when embedding is requested (see the embedding pipeline for the per-branch vector state). Re-ingesting unchanged content **MUST** produce identical chunks. Supplied content is an exact replacement set: in the same transaction the system **MUST** delete previous chunks absent from the newly computed set, so removed content can never remain searchable.
 
 - **Rationale**: Retrieval quality over long documents requires passage-level granularity; deterministic chunking keeps re-ingest idempotent.
 - **Actors**: `cpt-cf-graph-storage-actor-producer-gear`, `cpt-cf-graph-storage-actor-data-analyst`
@@ -347,7 +347,9 @@ The system **MUST** enforce a configurable payload size ceiling per node and rej
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-embedding-pipeline`
 
-During ingest the system **MUST** compose a searchable text per node (name plus string payload attributes designated as vectorizable plus a bounded content prefix), embed it and every content chunk through the configured embedding provider, and store the vectors for similarity search. The system **MUST** persist a canonical hash of each embedding input: on a skip-embedding upsert an existing vector is preserved only while its input hash is unchanged; if the vectorizable text changed, the vector **MUST** be marked stale and excluded from similarity search until re-embedding completes — a stored vector never ranks content that is no longer stored. Embedding **MUST** be batched across the ingest request.
+When embedding is requested, the system **MUST** compose a searchable text per node (name plus string payload attributes designated as vectorizable plus a bounded content prefix), embed it and every content chunk through the configured embedding provider, store the vectors for similarity search, and batch the provider calls across the ingest request. Requests **MAY** opt out of embedding; the mandatory-embedding rule applies only to requests that ask for it.
+
+The system **MUST** persist a canonical hash of each embedding input, and the vector state after an upsert **MUST** be one of: embedded and current (embedding requested); absent (new node or chunk with embedding skipped); preserved (embedding skipped and the input hash unchanged); stale (embedding skipped and the input hash changed); or removed together with its row (chunk deleted by exact-set reconciliation). Similarity search **MUST** consider only current vectors — never absent or stale ones — so a stored vector can never rank content that is no longer stored.
 
 - **Rationale**: Vector search is a first-class retrieval arm; controlled skipping supports cheap metadata-only re-syncs.
 - **Actors**: `cpt-cf-graph-storage-actor-producer-gear`, `cpt-cf-graph-storage-actor-embedding-provider`
@@ -414,7 +416,7 @@ Every compound read — hybrid search (multiple arms plus hydration), traversal 
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-graph-traversal`
 
-The system **MUST** expand a subgraph from seed nodes — given as explicit node keys, as hybrid-search hits for a query, or both — by breadth-first traversal up to a requested depth bounded by a system maximum, treating edges as undirected for reachability, with optional per-hop edge-type restriction and node-type filtering of returned nodes. Responses **MUST** include the traversed nodes, edges, seeds, and truncation status; seeds always survive truncation.
+The system **MUST** expand a subgraph from seed nodes — given as explicit node keys, as hybrid-search hits for a query, or both — by breadth-first traversal up to a requested depth bounded by a system maximum, treating edges as undirected for reachability, with optional per-hop edge-type restriction and node-type filtering of returned nodes. Responses **MUST** include the traversed nodes, edges, seeds, and truncation status; seeds always survive truncation. Because seeds are exempt from truncation, the seed set **MUST** be bounded before expansion: after authorization and deduplication, a request whose distinct authorized seeds exceed the effective node budget **MUST** be rejected rather than served beyond the budget, and seed ordering and admitted-seed metadata **MUST** be deterministic.
 
 - **Rationale**: "Search then expand" and "traverse many nodes and filter" were the primary scenarios that motivated the gear.
 - **Actors**: `cpt-cf-graph-storage-actor-data-analyst`, `cpt-cf-graph-storage-actor-consumer-gear`
@@ -521,9 +523,9 @@ The system **MUST** emit structured tracing for ingest, search, traversal, and a
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-readiness`
 
-The system **MUST** report readiness covering database connectivity, required extension presence, migration state, embedding provider availability, and embedding dimension agreement, and **MUST** fail readiness with named problems when any check fails.
+The system **MUST** report readiness per capability — database and migrations, policy and type registries, embedding provider and embedding-space identity, property graph and graph-engine plugins, dynamic indexes, and analytics workers — each as healthy, degraded, or unhealthy with named problems. Aggregate readiness **MUST** fail only when a component is unhealthy; a degraded capability **MUST** reject exactly the affected operations with canonical errors (or fall back where a fallback exists) while unrelated operations continue, and **MUST NOT** silently widen behavior. The readiness matrix in DESIGN is normative.
 
-- **Rationale**: The gear has two external dependencies that can silently drift (extension, embedding model); readiness is where drift is caught.
+- **Rationale**: A single global boolean either takes healthy lexical and ingest paths offline for an unrelated fault, or keeps admitting a capability already known to be unsafe.
 - **Actors**: `cpt-cf-graph-storage-actor-platform-admin`
 
 ## 6. Non-Functional Requirements
@@ -784,7 +786,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 |------|--------|------------|
 | Dense hub nodes make traversal and projection slow or unreadable | Interactive scenarios miss latency targets | Node budgets, per-hop edge-type filters, degree-ordered truncation, edge-type exclusion in analytics |
 | JSONB attribute indexing degrades as payloads grow | Filter queries slow down; index bloat | Payload size ceiling, indexable-attribute discipline in ontology design, heavy-content offloading |
-| Embedding model change invalidates stored vectors | Vector search quality silently degrades | Provider identity and dimension pinned in configuration, readiness dimension guard, documented re-embedding procedure |
+| Embedding model change invalidates stored vectors | Vector search quality silently degrades | Provider identity and dimension pinned in configuration; readiness identity guard blocks vector search on mismatch; operator-triggered resumable re-embedding lifecycle with checkpoints and atomic identity cutover (ADR-0005) |
 | Community detection and sampled betweenness differ from prototype outputs | Consumers expecting NetworkX-identical numbers are surprised | PRD explicitly waives numeric parity; determinism and ordering guarantees are documented per algorithm |
 | A single tenant's ingest or analytics load starves others | Platform-wide latency degradation | Batch size limits, analytics ceiling and cache, operation-level permissions, observability of per-tenant load |
 | Shared ontologies evolve incompatibly across producers | Ingest failures or semantic drift between producers | Immutable schemas per GTS version, conflict-rejecting registration, family patterns that keep older derived types valid |

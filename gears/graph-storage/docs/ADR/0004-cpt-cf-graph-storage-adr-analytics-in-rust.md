@@ -56,7 +56,9 @@ Chosen option: "C. In-process Rust analytics with explicit determinism contracts
 
 **Canonical input ordering** underpins every seeded guarantee: a seed alone does not make an algorithm repeatable when database row order, hash-map iteration, or adjacency layout varies between runs. The topology projection is therefore canonicalized before any seeded algorithm executes — nodes ordered by node key; edges by (type, source key, target key, discriminator); adjacency lists sorted by neighbor key; and every algorithmic tie-break defined on node keys. Determinism comes from ordered inputs plus the seed, never from incidental iteration order.
 
-All metrics support edge-type exclusion, load only node keys and typed edges (never payloads), and are cached by graph revision and parameters.
+Each metric carries a **normative contract** covering the semantics that change outputs: edge multiplicity and self-loop treatment, direction handling, PageRank damping, dangling-node redistribution, convergence tolerance and iteration cap, Brandes normalization and endpoint inclusion, sampling rule above the exact threshold, and Louvain graph construction, weighting, and resolution. That contract carries an immutable `algorithm_contract_version`, which is part of the cache identity — lookup, single-flight coordination, publication, persisted rows, result provenance, and metric annotations all include it. The version is bumped whenever an output-affecting semantic, default, sampling rule, or implementation contract changes, and every version is covered by golden fixtures; an old cached result can therefore never be served under new semantics.
+
+All metrics support edge-type exclusion, load only node keys and typed edges (never payloads), and are cached by graph revision, parameters, and contract version.
 
 ### Consequences
 
