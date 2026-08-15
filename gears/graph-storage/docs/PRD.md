@@ -219,7 +219,7 @@ Several platform initiatives need to persist and query relationships between het
 
 ## 5. Functional Requirements
 
-> **Testing strategy**: All requirements verified via automated tests (unit, integration, e2e) targeting 90%+ code coverage unless otherwise specified. Document verification method only for non-test approaches.
+> **Testing strategy**: All requirements verified via automated tests (unit, integration, e2e). Coverage has one normative threshold — the enforced floor of `cpt-cf-graph-storage-nfr-code-coverage` (>= 85% line coverage, gated in CI). Document verification method only for non-test approaches.
 
 ### 5.1 Graph Type Management
 
@@ -256,7 +256,7 @@ The system **MUST** expose the registered ontology for inspection: list types fi
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-bulk-ingest`
 
-The system **MUST** accept batches of nodes and edges in one ingest request, validate every payload against its GTS type before writing, and apply the batch atomically — either all valid writes commit or the batch is rejected with per-item errors. Writes **MUST** use batched database statements. Repeating an identical ingest **MUST** be a no-op that converges to the same stored state. Every mutating ingest **MUST** increment the tenant's graph revision.
+The system **MUST** accept batches of nodes and edges in one ingest request, validate every payload against its GTS type before writing, and apply the batch atomically — either all valid writes commit or the batch is rejected with per-item errors. Writes **MUST** use batched database statements. Repeating an identical ingest **MUST** be a no-op that converges to the same stored state. The tenant's graph revision **MUST** be incremented in the same transaction if and only if stored state actually changed — a converging replay leaves the revision untouched, so retries do not invalidate metric caches.
 
 Convergence **MUST** hold under retries with unknown commit outcomes: every ingest request carries a tenant- and producer-scoped idempotency key, and the system persists that key with a canonical request hash, the committed graph revision, and the response atomically with the batch. An identical retry **MUST** return the recorded outcome without touching graph state; reuse of a key with a different request **MUST** be rejected as a conflict (see DESIGN § Concurrent Ingest Protocol).
 

@@ -590,8 +590,13 @@ The public surfaces are defined in the PRD as `cpt-cf-graph-storage-interface-re
    + batched upserts (nodes, edges, chunks; endpoint
      locks per Concurrent Ingest Protocol)
    + phantom materialization
-   + scope replacement (static rows only)
-   + graph revision bump
+   + scope replacement (static rows only; explicit
+     ordered deletes - edges first, then nodes with
+     no remaining analysis-originated edge - never
+     relying on cascade)
+   + graph revision bump only when stored state
+     actually changed (a converging no-op replay
+     leaves the revision, and metric caches, intact)
    + idempotency record write
 7. Return per-item results, phantom list, revision
 ```
@@ -682,6 +687,7 @@ Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by mi
 | search_text | TEXT | Composed vectorizable text |
 | search | TSVECTOR generated | Lexical index source |
 | embedding | VECTOR(dim) | Node embedding (nullable) |
+| embedding_epoch / embedding_input_hash | BIGINT / TEXT | Embedding-space epoch the vector belongs to and the canonical hash of its input (staleness detection) |
 | created_by | TEXT | Creating actor |
 | created_at / updated_at | TIMESTAMPTZ | Timestamps |
 
@@ -695,7 +701,7 @@ Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by mi
 | id | BIGINT | Internal id; **PK (tenant_id, id)** |
 | edge_key | TEXT | Deterministic hash of type, src, dst, discriminator; **UNIQUE (tenant_id, edge_key)** |
 | type_id | SMALLINT | **FK (tenant_id, type_id) -> graph_type (tenant_id, id)** |
-| src_node_id / dst_node_id | BIGINT | Endpoints; **FK (tenant_id, src/dst_node_id) -> node (tenant_id, id)**, cascade on node delete |
+| src_node_id / dst_node_id | BIGINT | Endpoints; **FK (tenant_id, src/dst_node_id) -> node (tenant_id, id) ON DELETE RESTRICT** — deletion never cascades into edges, so an analysis edge can never be destroyed as a side effect of removing a static node |
 | payload | JSONB | GTS-validated attributes incl. provenance |
 | created_at | TIMESTAMPTZ | Timestamp |
 
@@ -708,12 +714,13 @@ Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by mi
 | tenant_id | UUID | Tenant scope; part of every key |
 | id | BIGINT | Internal id; **PK (tenant_id, id)** |
 | node_id | BIGINT | Parent node; **FK (tenant_id, node_id) -> node (tenant_id, id)** |
-| chunk_id | TEXT | Location-encoded identifier; **UNIQUE (tenant_id, chunk_id)** |
+| chunk_id | TEXT | Location-encoded identifier, unique within its parent node; **UNIQUE (tenant_id, node_id, chunk_id)** — identical section and offsets recur across nodes, so chunk identity is scoped to the parent |
 | content | TEXT | Chunk text |
 | content_hash | TEXT | Change detection |
 | section / char_start / char_end | TEXT / INT / INT | Location |
 | search | TSVECTOR generated | Lexical index source |
 | embedding | VECTOR(dim) | Chunk embedding (nullable) |
+| embedding_epoch / embedding_input_hash | BIGINT / TEXT | Embedding-space epoch and canonical input hash (staleness detection) |
 
 #### Table: graph_meta
 
@@ -772,6 +779,22 @@ Replacement transactions lock this row exclusively; ordinary ingests into an own
 | created_at | TIMESTAMPTZ | Record time |
 
 Payload-free by construction (Telemetry and Audit Contract); written in the ingest transaction for committed mutations.
+
+#### Table: embedding_space
+
+**ID**: `cpt-cf-graph-storage-dbtable-embedding-space`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| epoch | BIGINT | Embedding-space epoch; **PK**; a new epoch is opened by a model migration |
+| identity_hash | TEXT | Canonical hash of the full identity below; what readiness compares against |
+| model_artifact / tokenizer_artifact | TEXT / TEXT | Exact model and tokenizer artifact (name plus version or content hash) |
+| preprocessing / pooling / normalization | JSONB | Declared preprocessing, pooling, and normalization configuration |
+| dimension | INTEGER | Vector width, cross-checked against the column type |
+| state | TEXT | active / migrating / retired |
+| created_at / activated_at | TIMESTAMPTZ | Lifecycle timestamps |
+
+This is the canonical durable location of the embedding-space identity. `node` and `chunk` carry an `embedding_epoch` column alongside `embedding` and the embedding-input hash: readiness compares the active provider's identity against the epoch its stored vectors reference, similarity search reads only vectors of the active epoch (never absent, stale, or previous-epoch ones), and the re-embedding lifecycle (ADR-0005) writes new-epoch vectors during backfill before an atomic cutover of `state`.
 
 #### Table: analytics_job
 
@@ -959,7 +982,7 @@ The platform baseline (PluginV1, types-registry registration, scoped ClientHub c
 
 - **GTS plugin schemas**: `gts.cf.kg.plugin.embedding_provider.v1~` and `gts.cf.kg.plugin.graph_engine.v1~` (derived from the platform plugin base), with validated properties — provider/engine identity, declared capabilities and authorization predicates, embedding-space identity or projection characteristics, priority.
 - **Versioned SDK traits** (`EmbeddingProviderV1`, `GraphEngineV1`) with typed request/result/error models; the schema major maps one-to-one to the trait version, and a registered instance resolves to a scoped ClientHub client of the matching trait version — an incompatible version is a deterministic selection error, never a silent downgrade.
-- **Selection**: a configured selector picks among registered instances (built-in defaults when none is configured: in-process ONNX provider, built-in PostgreSQL engine); ties break deterministically on (priority, instance id); no-match falls back to the built-in where one exists and fails readiness where it does not.
+- **Selection**: with no selector configured, the built-in default is used (in-process ONNX provider, built-in PostgreSQL engine); ties break deterministically on (priority, instance id). An **explicitly configured selector that matches nothing compatible never falls back** — it is a deterministic selection error and a readiness failure, because silently substituting a different embedding space or engine semantics would hide a deployment error.
 - **Readiness and churn**: a selected plugin participates in readiness; cached selections are invalidated on instance disappearance or re-registration, and re-selection follows the same deterministic rules.
 - **Source epoch fencing (graph engines)**: the gear owns a non-reusable source epoch (timeline identifier) paired with the graph revision; a point-in-time restore of PostgreSQL starts a new epoch. Every engine reports its applied (epoch, revision) cursor; on epoch mismatch, revision rewind, or an unprovable cursor the gear fails closed or routes to the built-in backend until the plugin acknowledges a rebuild from the current epoch. The plugin owns projection reset/rebuild mechanics; the gear owns the epoch, the rebuild handoff, the activation gate, and the routing decision.
 - **Built-in PostgreSQL engine routing**: the Traversal Service always calls `GraphEngineV1` through the port — never a backend directly — and the gear registers its own PostgreSQL adapter as the built-in `GraphEngineV1` implementation with a GTS instance and a scoped ClientHub client, exactly like an external plugin. The adapter itself stays in `graph-storage/src/infra` (no separate crate); what the plugin path adds is uniform registration, selection, capability negotiation, and fallback routing.
