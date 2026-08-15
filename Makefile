@@ -419,12 +419,17 @@ cfs-validate-kit-local: cfs-repair
 
 # -------- API and docs --------
 
-.PHONY: openapi md-fabric slides web-docs-preview
+.PHONY: openapi md-fabric slides web-docs-preview .e2e-server-build .e2e-sidecar-build
+
+.e2e-server-build:
+	cargo build --bin cf-gears-example-server $(GEAR_SERVER_FEATURE_ARGS)
+
+.e2e-sidecar-build:
+	cargo build -p cf-gears-file-storage --bin sidecar
 
 # Generate OpenAPI spec from running cf-gears-example-server
-openapi:
+openapi: .e2e-server-build
 	@command -v curl >/dev/null || (echo "curl is required to generate OpenAPI spec" && exit 1)
-	@cargo build --bin cf-gears-example-server $(GEAR_SERVER_FEATURE_ARGS)
 	@echo "Starting cf-gears-example-server to generate OpenAPI spec..."
 	@mkdir -p $$(dirname "$(if $(GEAR),$(GEAR_OPENAPI_TMP),$(OPENAPI_OUT))") && \
 	$(call start_server_and_wait,target/debug/cf-gears-example-server --config config/quickstart.yaml,$(OPENAPI_URL),300) && \
@@ -503,6 +508,8 @@ GEAR_SERVER_FEATURE_ARGS := $(if $(GEAR),--no-default-features --features $(GEAR
 GEAR_E2E_SCOPE := $(if $(GEAR),$(GEAR_E2E_TARGET) $(E2E_TARGET),$(E2E_TARGET))
 GEAR_COVERAGE_ARGS := $(if $(GEAR),--package $(GEAR_PKG) --e2e-target $(GEAR_E2E_TARGET),)
 GEAR_CLIPPY_ARGS ?= --all-targets --all-features -- -D warnings
+E2E_SIDECAR_PREREQ := $(if $(GEAR),$(if $(filter file-storage,$(GEAR)),.e2e-sidecar-build,),.e2e-sidecar-build)
+E2E_SIDECAR_ENV := $(if $(GEAR),$(if $(filter file-storage,$(GEAR)),FS_SIDECAR_BINARY=target/debug/sidecar,E2E_SKIP_SIDECAR=1),FS_SIDECAR_BINARY=target/debug/sidecar)
 
 
 # -------- Tests --------
@@ -665,8 +672,8 @@ e2e-docker-smoke:
 	$(PYTHON) tools/scripts/ci.py e2e-docker -- -m smoke $(E2E_TARGET)
 
 # Run E2E tests locally, use GEAR=<gear> to scope to testing/e2e/gears/<gear>
-e2e-local:
-	$(PYTHON) tools/scripts/ci.py e2e-local -- $(GEAR_E2E_SCOPE)
+e2e-local: .e2e-server-build $(E2E_SIDECAR_PREREQ)
+	E2E_BINARY=target/debug/cf-gears-example-server $(E2E_SIDECAR_ENV) $(PYTHON) tools/scripts/ci.py e2e-local -- $(GEAR_E2E_SCOPE)
 
 ## Run RG + AuthZ barrier E2E tests with tr-authz-plugin going through TR -> RG
 e2e-tr-authz:
@@ -898,7 +905,7 @@ mini-chat-down:
 
 # -------- Main targets --------
 
-.PHONY: all check ci ci_test ci_docs build .cargo-build .split-debug quickstart example mini-chat mini-chat-docker mini-chat-helm mini-chat-helm-template mini-chat-up mini-chat-down mini-chat-port-forward
+.PHONY: all dist check ci ci_test ci_docs build .cargo-build .split-debug quickstart example mini-chat mini-chat-docker mini-chat-helm mini-chat-helm-template mini-chat-up mini-chat-down mini-chat-port-forward
 
 # Start server with quickstart config
 quickstart:
@@ -945,10 +952,13 @@ ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-u
 # Build the release binary, or a single gear when GEAR=<gear> is set.
 build:
 	$(MAKE) .cargo-build GEAR=$(GEAR) GEAR_PKG=$(GEAR_PKG) GEAR_SDK_PKG=$(GEAR_SDK_PKG) GEAR_FEATURES=$(GEAR_FEATURES) GEAR_BUILD_ARGS=$(GEAR_BUILD_ARGS)
+
+# Build distributable release artifacts.
+dist: build
 	@if [ -z "$(GEAR)" ]; then $(MAKE) .split-debug; fi
 
-# Run all necessary quality checks and tests and then build the release binary
-all: build check test-sqlite e2e-local openapi
+# Run all necessary quality checks and tests using reusable debug artifacts.
+all: check test-sqlite e2e-local openapi
 	@echo ""
 	@echo "============================================================="
 	@echo "  CONGRATULATIONS! All 'make all' tasks have been completed!"
