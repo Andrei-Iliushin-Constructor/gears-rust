@@ -1,4 +1,14 @@
 #!/usr/bin/env python
+"""Cross-platform Gears CI utility (fmt, clippy, test, security, fuzz, E2E).
+
+For E2E this is the *orchestration engine*: `e2e-local` / `e2e-docker` build (or
+reuse) the server binary, start it from a config file, wait for `/healthz`, run
+pytest against the live HTTP API, then tear the server down. Focused local runs
+are driven by `tools/scripts/run_e2e.py`, which calls this script's
+`e2e-local` subcommand for suites whose `launcher` is `e2e-launcher`.
+
+See `testing/e2e/README.md` ("How E2E Is Executed") for the full picture.
+"""
 import argparse
 import os
 import shutil
@@ -370,14 +380,14 @@ def cmd_e2e(args):
         server_process = None
         print("Starting cf-gears-server for local E2E...")
 
-        env_e2e_binary = os.environ.get("E2E_BINARY")
+        env_e2e_binary = os.environ.get("E2E_SERVER_BINARY") or os.environ.get("E2E_BINARY")
         env_fs_sidecar_binary = os.environ.get("FS_SIDECAR_BINARY")
         release_sidecar_bin = None
 
         if env_e2e_binary:
             release_bin = env_e2e_binary
             if not os.path.isfile(release_bin):
-                print(f"\nERROR: E2E_BINARY does not exist: {release_bin}")
+                print(f"\nERROR: E2E server binary does not exist: {release_bin}")
                 sys.exit(1)
         else:
             step("Building release binary for local E2E")

@@ -63,14 +63,14 @@ def make_headers(tenant_id: str, token: str | None = None) -> dict:
 def _check_scope_enforcement_enabled():
     """Skip all tests if scope enforcement is not enabled.
 
-    These tests require a server running with the scope enforcement config:
-    config/e2e-scope-enforcement.yaml
-
-    Set E2E_SCOPE_ENFORCEMENT=1 to run these tests.
+    These tests require a server running with the scope-enforcement overlay
+    (testing/e2e/gears/scope_enforcement/e2e.yaml, applied over
+    config/e2e-local.yaml). Run via: make e2e-local SUITE=scope-enforcement
+    (which sets E2E_SCOPE_ENFORCEMENT=1).
     """
     if not os.getenv("E2E_SCOPE_ENFORCEMENT"):
         pytest.skip(
-            "Scope enforcement tests require E2E_SCOPE_ENFORCEMENT=1 and "
-            "server running with config/e2e-scope-enforcement.yaml",
+            "Scope enforcement tests require E2E_SCOPE_ENFORCEMENT=1 — run via "
+            "make e2e-local SUITE=scope-enforcement",
             allow_module_level=True,
         )

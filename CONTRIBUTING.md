@@ -113,7 +113,7 @@ make all                      # build + check + SQLite integration + local E2E +
 make build GEAR=file-parser   # cf-gears-file-parser plus its SDK crate
 make test GEAR=file-parser    # tests for cf-gears-file-parser plus its SDK crate
 make run GEAR=file-parser     # example server with only this gear feature set
-make e2e-local GEAR=file-parser
+make e2e-local SUITE=file-parser
 make coverage GEAR=file-parser
 ```
 
@@ -170,7 +170,7 @@ python tools/scripts/ci.py all # Windows
 # Scope common Makefile targets to one gear when iterating locally
 make check GEAR=file-parser
 make test GEAR=file-parser
-make e2e-local GEAR=file-parser
+make e2e-local SUITE=file-parser
 ```
 
 Note: CI workflows may not run for PRs that only touch `*.md` files or `docs/**` due to path filters.

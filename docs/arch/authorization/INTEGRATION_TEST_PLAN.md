@@ -305,7 +305,7 @@ curl -H "Authorization: Bearer test" \
 
 ## E2E Test Hierarchy Fixture (AuthZ plugins)
 
-E2E tests using AuthZ plugins (config: `config/e2e-tr-authz.yaml`) require a pre-seeded tenant hierarchy. A session-scoped pytest fixture creates the hierarchy via REST API before any tests run, then all tests reuse it.
+E2E tests using AuthZ plugins (profile `tr-authz` in `testing/e2e/gears/resource_group/e2e.yaml`, applied over `config/e2e-local.yaml`) require a pre-seeded tenant hierarchy. A session-scoped pytest fixture creates the hierarchy via REST API before any tests run, then all tests reuse it.
 
 **Available AuthZ plugins:**
 - `tr-authz-plugin` (priority 50) — resolves tenants via `TenantResolverClient` (recommended, no direct RG dependency)
@@ -328,7 +328,7 @@ Tenant-type recognition is code-prefix-driven: any GTS type whose path starts wi
 
 1. Create tenant type (code starts with `TENANT_RG_TYPE_PATH`, `can_be_root=true`, `allowed_parent_types=[self]`)
 2. Create department type (code outside the tenant prefix, `can_be_root=false`, `allowed_parent_types=[tenant_type]`)
-3. **Seed T1 root tenant** directly in the DB backend used by `config/e2e-tr-authz.yaml` — SQLite in CI/e2e; in production deployments the same seeding query runs against the configured SQL-compatible backend (PostgreSQL by default). `id` = token-a `subject_tenant_id`. Root tenants are created via DB seeding, not API.
+3. **Seed T1 root tenant** directly in the DB backend used by the tr-authz overlay — SQLite in CI/e2e; in production deployments the same seeding query runs against the configured SQL-compatible backend (PostgreSQL by default). `id` = token-a `subject_tenant_id`. Root tenants are created via DB seeding, not API.
 4. `POST /groups` -- T_normal (parent=T1) -- `tenant_id = T_normal.id`
 5. `POST /groups` -- T_barrier (parent=T1, metadata=`{"self_managed": true}`) -- `tenant_id = T_barrier.id`
 6. `POST /groups` -- T_behind (parent=T_barrier) -- `tenant_id = T_behind.id`
@@ -359,8 +359,8 @@ make build
 # Run RG + AuthZ e2e tests (uses whichever authz plugin has higher priority)
 make e2e-tr-authz
 
-# Or manually:
-python3 scripts/ci.py e2e-local --config config/e2e-tr-authz.yaml -- -k "resource_group"
+# Or manually (applies the tr-authz profile, then runs the RG subset):
+python3 tools/scripts/run_e2e.py --suite resource-group --profile tr-authz
 ```
 
 ---

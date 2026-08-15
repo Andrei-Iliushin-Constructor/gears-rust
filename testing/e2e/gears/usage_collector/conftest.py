@@ -27,14 +27,14 @@ from lib.sidecars import TimescaleDbSidecar, skip_without_docker
 
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
-CONFIG = PROJECT_ROOT / "config" / "e2e-usage-collector.yaml"
+CONFIG = HERE / "config.yaml"
 PORT_PLACEHOLDER = "__E2E_TS_PORT__"
 
 SERVER_PORT = 8088
 API_BASE = "/usage-collector/v1"
 REQUEST_TIMEOUT = 5.0
 
-# Must match config/e2e-usage-collector.yaml.
+# Must match this suite's config.yaml.
 TENANT_A = "a0000000-0000-4000-8000-00000000000a"
 TENANT_B = "a0000000-0000-4000-8000-00000000000b"
 TOKEN_A = "e2e-uc-token-tenant-a"

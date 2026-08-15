@@ -3,42 +3,24 @@
 Tests for the Route Policy Enforcement middleware, which performs coarse-grained
 early rejection of requests based on token scopes without calling the PDP.
 
-## Prerequisites
-
-1. Build the server with required features:
-   ```bash
-   cargo build --release --bin cf-gears-server --features users-info-example,static-authn,static-authz,static-tenants
-   ```
-
-2. Start the server with the scope enforcement config:
-   ```bash
-   cargo run --release --bin cf-gears-server --features users-info-example,static-authn,static-authz,static-tenants \
-     -- --config config/e2e-scope-enforcement.yaml
-   ```
-
-3. Install Python dependencies:
-   ```bash
-   pip3 install -r testing/e2e/requirements.txt
-   ```
-
 ## Running Tests
 
-These tests require the scope enforcement config and are **not** part of the standard CI e2e suite.
+These tests use the scope-enforcement overlay
+(`testing/e2e/gears/scope_enforcement/e2e.yaml`, applied over
+`config/e2e-local.yaml`) and are **not** part of the standard CI e2e suite.
 
 ```bash
-# Set the environment variable to enable scope enforcement tests
-export E2E_SCOPE_ENFORCEMENT=1
-
-# Run all scope enforcement tests
-python3 -m pytest testing/e2e/gears/scope_enforcement -v
-
-# Run specific test class
-python3 -m pytest testing/e2e/gears/scope_enforcement/test_scope_enforcement.py::TestScopeEnforcementDenied -v
+# Build the server, apply the overlay, start it, and run this suite:
+make e2e-local SUITE=scope-enforcement
 ```
+
+The runner sets `E2E_SCOPE_ENFORCEMENT=1` automatically (the suite's conftest
+skips without it). The overlay adds the api-gateway `route_policies` rules and
+the scoped test tokens below on top of the shared config.
 
 ## Test Tokens
 
-The config defines these test tokens:
+The overlay defines these test tokens:
 
 | Token | Scopes | Expected Access |
 |-------|--------|-----------------|

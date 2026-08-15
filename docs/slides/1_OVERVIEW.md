@@ -700,7 +700,7 @@ make test            # unit tests (workspace)
 make test GEAR=file-parser  # unit tests for one gear + SDK scope
 make test-sqlite     # integration tests (SQLite, no external DB)
 make e2e-local       # E2E — builds + starts server automatically
-make e2e-local GEAR=file-parser  # gear E2E scope + default E2E target
+make e2e-local SUITE=file-parser  # suite E2E scope + default E2E target
 make coverage-unit   # unit-test coverage
 make coverage GEAR=file-parser   # unit + E2E coverage for one gear scope
 make fuzz            # fuzz smoke tests (30s/target)

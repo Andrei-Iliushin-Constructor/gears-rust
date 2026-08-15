@@ -74,7 +74,8 @@ Most top-level development targets can also be scoped to one gear:
 make build GEAR=file-parser      # Build cf-gears-file-parser and its SDK crate
 make test GEAR=file-parser       # Test cf-gears-file-parser and its SDK crate
 make run GEAR=file-parser        # Run the example server with only this gear feature set
-make e2e-local GEAR=file-parser  # Run this gear's E2E tests plus the default E2E target
+make e2e-local SUITE=file-parser  # Run this one E2E suite plus the default E2E target
+make e2e-local GEAR=credstore    # Run every shared-server E2E suite that exercises a gear
 make coverage GEAR=file-parser   # Collect unit + E2E coverage for this gear scope
 ```
 
@@ -243,7 +244,7 @@ make test            # unit tests (workspace)
 make test GEAR=file-parser  # unit tests for one gear and its SDK crate
 make test-sqlite     # integration tests (SQLite, no external DB required)
 make e2e-local       # end-to-end tests (builds + starts server automatically)
-make e2e-local GEAR=file-parser  # gear E2E scope plus the default E2E target
+make e2e-local SUITE=file-parser  # suite E2E scope plus the default E2E target
 make e2e-docker      # end-to-end tests (builds + starts server in Docker)
 make coverage-unit   # unit test code coverage
 make coverage GEAR=file-parser  # unit + E2E coverage for one gear scope

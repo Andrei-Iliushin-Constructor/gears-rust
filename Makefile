@@ -8,12 +8,27 @@ PYTHON ?= $(PY_ENV_DIR)/bin/python
 PY_ENV_STAMP := $(PY_ENV_DIR)/.requirements-stamp
 PY_REQUIREMENTS := testing/requirements.txt testing/e2e/requirements.txt
 
-OPENAPI_URL ?= http://127.0.0.1:8087/cf/openapi.json
+OPENAPI_PORT ?= 8087
+OPENAPI_URL ?= http://127.0.0.1:$(OPENAPI_PORT)/openapi.json
 OPENAPI_OUT ?= docs/api/api.json
+OPENAPI_CONFIG ?= config/e2e-local.yaml
 
-# E2E feature set (single source of truth: config/e2e-features.txt)
-E2E_FEATURES ?= $(strip $(shell cat config/e2e-features.txt 2>/dev/null))
-E2E_ARGS ?= $(if $(E2E_FEATURES),--features $(E2E_FEATURES),)
+EMPTY :=
+SPACE := $(EMPTY) $(EMPTY)
+COMMA := ,
+
+EXAMPLE_SERVER_BIN ?= cf-gears-example-server
+EXAMPLE_SERVER_DEBUG_BINARY ?= target/debug/$(EXAMPLE_SERVER_BIN)
+EXAMPLE_SERVER_MANIFEST ?= apps/cf-gears-example-server/Cargo.toml
+EXAMPLE_SERVER_FEATURE_EXCLUDES ?= default fips k8s otel oop-example timescaledb-usage-collector
+EXAMPLE_SERVER_ALL_FEATURES := $(strip $(shell awk '/^\[features\]/{in_features=1; next} /^\[/{in_features=0} in_features && /^[[:alnum:]_-]+[[:space:]]*=/{sub(/[[:space:]]*=.*/, ""); print}' $(EXAMPLE_SERVER_MANIFEST) 2>/dev/null))
+EXAMPLE_SERVER_FEATURES ?= $(subst $(SPACE),$(COMMA),$(filter-out $(EXAMPLE_SERVER_FEATURE_EXCLUDES),$(EXAMPLE_SERVER_ALL_FEATURES)))
+EXAMPLE_SERVER_FEATURE_ARGS ?= $(if $(EXAMPLE_SERVER_FEATURES),--features $(EXAMPLE_SERVER_FEATURES),)
+E2E_FEATURES_FILE ?= config/e2e-features.txt
+E2E_SERVER_FEATURES ?= $(strip $(shell cat $(E2E_FEATURES_FILE) 2>/dev/null))
+E2E_SERVER_FEATURE_ARGS ?= $(if $(E2E_SERVER_FEATURES),--features $(E2E_SERVER_FEATURES),)
+OPENAPI_SERVER_FEATURES ?= $(E2E_SERVER_FEATURES)
+OPENAPI_SERVER_FEATURE_ARGS ?= $(E2E_SERVER_FEATURE_ARGS)
 
 # Nightly toolchain for targets that need unstable rustc flags (currently only
 # `shear`, which drives -Zunpretty=expanded). This default serves local runs;
@@ -27,6 +42,21 @@ RUST_NIGHTLY ?= nightly-2026-04-16
 SHEAR_VERSION ?= 1.13.1
 
 # -------- Utility macros --------
+
+BANNER_WIDTH ?= 80
+BANNER_RULE ?= ━
+BANNER_PREFIX ?= ▶
+
+define print_target_banner
+	@timestamp=$$(date '+%Y-%m-%d %H:%M:%S %Z'); \
+	line=$$(printf '%*s' "$(BANNER_WIDTH)" '' | tr ' ' '$(BANNER_RULE)'); \
+	if [ -t 1 ] && [ -z "$${NO_COLOR:-}" ]; then \
+		bold=$$(printf '\033[1m'); dim=$$(printf '\033[2m'); cyan=$$(printf '\033[36m'); reset=$$(printf '\033[0m'); \
+	else \
+		bold=; dim=; cyan=; reset=; \
+	fi; \
+	printf '\n%s%s%s\n%s%s make %s%s %s[%s]%s\n%s%s%s\n' "$$cyan" "$$line" "$$reset" "$$bold" "$(BANNER_PREFIX)" "$@" "$$reset" "$$dim" "$$timestamp" "$$reset" "$$cyan" "$$line" "$$reset"
+endef
 
 define check_tool
     @command -v $(1) >/dev/null || (echo "ERROR: $(1) is not installed. Run 'make setup' to install required tools." && exit 1)
@@ -143,6 +173,7 @@ endef
 
 # Show the help message with list of commands (default target)
 help: py-env
+	$(call print_target_banner)
 	@$(PYTHON) tools/scripts/make_help.py Makefile
 
 
@@ -151,6 +182,7 @@ help: py-env
 .PHONY: setup install-tools check-prereq-local cfs-ensure cfs-validate cfs-repair cfs-validate-kit-local py-env
 
 py-env: $(PY_ENV_STAMP)
+	$(call print_target_banner)
 
 $(PY_ENV_STAMP): $(PY_REQUIREMENTS)
 	@echo "Creating/updating Python virtual environment in $(PY_ENV_DIR)..."
@@ -162,10 +194,12 @@ $(PY_ENV_STAMP): $(PY_REQUIREMENTS)
 
 ## Install all required development tools
 setup: .setup-stamp py-env
+	$(call print_target_banner)
 
 # Re-run setup whenever the tool list changes (Makefile is the source of truth),
 # so developers who already have .setup-stamp pick up newly-added tools.
 .setup-stamp: Makefile
+	$(call print_target_banner)
 	@echo "Installing required development tools..."
 	rustup component add clippy
 	cargo install lychee
@@ -233,12 +267,14 @@ setup: .setup-stamp py-env
 
 ## Verify git submodules (e.g. guidelines/DNA) are initialized; fails otherwise.
 ensure-submodules:
+	$(call print_target_banner)
 	@if git submodule status --recursive 2>/dev/null | grep -q '^-'; then \
 		echo "ERROR: Uninitialized git submodules detected. Run 'git submodule update --init --recursive'." && exit 1; \
 	fi
 
 # Check code formatting
 fmt:
+	$(call print_target_banner)
 	$(call check_rustup_component,rustfmt)
 	$(if $(GEAR),cargo fmt -p $(GEAR_PKG) --check,cargo fmt --all --check)
 
@@ -268,6 +304,7 @@ CLIPPY_HACK_CRATES := -p cf-gears-toolkit -p cf-gears-toolkit-db -p cf-gears-too
 CLIPPY_HACK_EXCLUDE := --exclude-features _any-backend
 
 clippy:
+	$(call print_target_banner)
 	$(call check_rustup_component,clippy)
 ifeq ($(GEAR),)
 	$(call check_tool,cargo-hack)
@@ -280,12 +317,14 @@ endif
 ## Full feature-matrix clippy: one pass per (crate × feature).
 ## ~182 runs — intended for nightly CI and pre-release validation, not PRs.
 clippy-deep:
+	$(call print_target_banner)
 	$(call check_rustup_component,clippy)
 	$(call check_tool,cargo-hack)
 	cargo hack clippy --workspace --all-targets --each-feature $(CLIPPY_HACK_EXCLUDE) $(CLIPPY_FLAGS)
 
 # Run markdown checks with 'lychee'
 lychee: ensure-submodules
+	$(call print_target_banner)
 	$(call check_tool,lychee)
 	lychee --exclude-path 'docs/web-docs' docs examples guidelines gears/system/event-broker/docs
 
@@ -295,28 +334,33 @@ lychee: ensure-submodules
 # docs site with the local content and run lychee over the generated HTML.
 WEB_DOCS_CACHE ?= .web-docs-preview
 web-docs-check:
+	$(call print_target_banner)
 	$(call check_tool,lychee)
 	@bash tools/scripts/docs-preview.sh build
 	lychee --offline --root-dir '$(abspath $(WEB_DOCS_CACHE)/dist)' --exclude 'i18n' '$(WEB_DOCS_CACHE)/dist/**/*.html'
 
 ## The Kani Rust Verifier for checking safety of the code
 kani:
+	$(call print_target_banner)
 	$(call check_tool,kani)
 	cargo kani --workspace --all-features
 
 ## Run Geiger scanner for unsafe code in dependencies
 geiger:
+	$(call print_target_banner)
 	$(call check_tool,cargo-geiger)
 	cd apps/cf-gears-example-server && cargo geiger --all-features
 
 ## Check there are no compile time warnings
 lint:
+	$(call print_target_banner)
 	RUSTFLAGS="-D warnings" cargo check $(GEAR_CARGO_SCOPE) --all-targets --all-features
 
 ## Validate GTS identifiers in .md and .json files (DE0903)
 # Uses gts-validator binary (install via: cargo install gts-validator)
 
 gts-docs:
+	$(call print_target_banner)
 	$(call check_tool,gts-validator)
 	gts-validator \
 		--vendor cf,vendor,example,fabrikam \
@@ -332,6 +376,7 @@ gts-docs:
 NEXTEST_MIN_VERSION := 0.9.130
 
 install-tools: py-env
+	$(call print_target_banner)
 	@NEXTEST_VERSION=$$(cargo nextest --version 2>/dev/null | awk '/^cargo-nextest/ {print $$2}'); \
 	if [ -z "$$NEXTEST_VERSION" ] || ! $(PYTHON) -c "import sys; sys.exit(0 if tuple(map(int, '$$NEXTEST_VERSION'.split('.'))) >= tuple(map(int, '$(NEXTEST_MIN_VERSION)'.split('.'))) else 1)" 2>/dev/null; then \
 		echo "Installing/upgrading cargo-nextest (>= $(NEXTEST_MIN_VERSION) required for CARGO_BIN_EXE_* support)..."; \
@@ -345,28 +390,34 @@ install-tools: py-env
 
 # Run architecture lints via cargo-gears (see Gears.toml for configuration).
 dylint:
+	$(call print_target_banner)
 	$(call check_tool,cargo-gears)
 	cargo gears lint --dylint
 
 # Check for unused dependencies with cargo-shear.
 shear:
+	$(call print_target_banner)
 	$(call check_tool,cargo-shear)
 	cargo +$(RUST_NIGHTLY) shear --expand --deny-warnings
 
 # Run all code safety checks
 safety: clippy kani lint dylint # geiger
+	$(call print_target_banner)
 	@echo "OK. Rust Safety Pipeline complete"
 
 ## Validate gear folder names follow kebab-case convention
 validate-gear-names: py-env
+	$(call print_target_banner)
 	@$(PYTHON) tools/scripts/validate_gear_names.py
 
 ## Validate readme/license-file paths declared by publishable crates exist
 check-packaging-metadata: py-env
+	$(call print_target_banner)
 	@$(PYTHON) tools/scripts/check_packaging_metadata.py
 
 ## Validate that examples/apps/tools are unpublishable and release-plz.toml matches the workspace
 check-release-config: py-env
+	$(call print_target_banner)
 	@$(PYTHON) tools/scripts/check_release_config.py
 
 # -------- Code security checks --------
@@ -375,6 +426,7 @@ check-release-config: py-env
 
 # Check licenses and dependencies
 deny:
+	$(call print_target_banner)
 	$(call check_tool,cargo-deny)
 	$(call check_deny_version)
 	cargo deny check
@@ -384,21 +436,25 @@ deny:
 ## --features fips dep graph. Build-time analogue of Go 1.25 fips140=only.
 ## Run on every PR that touches deps.
 fips-policy:
+	$(call print_target_banner)
 	$(call check_tool,cargo-deny)
 	$(call check_deny_version)
 	cargo deny --config deny-fips.toml check bans
 
 security: deny fips-policy
+	$(call print_target_banner)
 
 # -------- Studio --------
 
 # Validate Constructor Studio artifacts (specs, code, templates).
 cfs-validate: cfs-repair
+	$(call print_target_banner)
 	$(CFS) validate && echo "OK. Constructor Studio validation PASSED" || (echo "ERROR: Constructor Studio validation FAILED"; exit 1)
 
 # Ensure the Constructor Studio CLI is available even when generated runtime
 # files are ignored locally or absent in a clean checkout.
 cfs-ensure:
+	$(call print_target_banner)
 	@if ! command -v $(CFS) >/dev/null 2>&1; then \
 		echo "cfs not found; installing $(CFS_PIPX_SPEC) via pipx"; \
 		if ! command -v pipx >/dev/null 2>&1; then \
@@ -415,36 +471,39 @@ cfs-ensure:
 
 ## Repair ignored/generated Constructor Studio runtime files before validation.
 cfs-repair: cfs-ensure
+	$(call print_target_banner)
 	$(CFS) init --yes
 
 ## Check Constructor Studio spec-to-code traceability coverage.
 cfs-spec-coverage: cfs-repair
+	$(call print_target_banner)
 	$(CFS) spec-coverage --min-coverage 80
 
 ## Validate registered Constructor Studio kits.
 cfs-validate-kits: cfs-repair
+	$(call print_target_banner)
 	$(CFS) validate-kits
 
 ## Validate the local studio-kit-gears checkout as a kit directory.
 cfs-validate-kit-local: cfs-repair
+	$(call print_target_banner)
 	cd studio-kit-gears && $(CFS) validate-kits .
 
 # -------- API and docs --------
 
-.PHONY: openapi md-fabric slides web-docs-preview .e2e-server-build .e2e-sidecar-build
+.PHONY: openapi md-fabric slides web-docs-preview .example-server-build
 
-.e2e-server-build:
-	cargo build --bin cf-gears-example-server $(GEAR_SERVER_FEATURE_ARGS)
-
-.e2e-sidecar-build:
-	cargo build -p cf-gears-file-storage --bin sidecar
+.example-server-build:
+	$(call print_target_banner)
+	cargo build --bin $(EXAMPLE_SERVER_BIN) $(OPENAPI_BUILD_FEATURE_ARGS)
 
 # Generate OpenAPI spec from running cf-gears-example-server
-openapi: .e2e-server-build py-env
+openapi: .example-server-build py-env
+	$(call print_target_banner)
 	@command -v curl >/dev/null || (echo "curl is required to generate OpenAPI spec" && exit 1)
 	@echo "Starting cf-gears-example-server to generate OpenAPI spec..."
 	@mkdir -p $$(dirname "$(if $(GEAR),$(GEAR_OPENAPI_TMP),$(OPENAPI_OUT))") && \
-	$(call start_server_and_wait,target/debug/cf-gears-example-server --config config/quickstart.yaml,$(OPENAPI_URL),300) && \
+	$(call start_server_and_wait,$(EXAMPLE_SERVER_DEBUG_BINARY) --config $(OPENAPI_CONFIG) --port $(OPENAPI_PORT),$(OPENAPI_URL),300) && \
 	echo "Fetching OpenAPI spec..." && \
 	curl -fsS "$(OPENAPI_URL)" -o "$(if $(GEAR),$(GEAR_OPENAPI_TMP),$(OPENAPI_OUT))" && \
 	if [ -n "$(GEAR)" ]; then \
@@ -457,16 +516,19 @@ openapi: .e2e-server-build py-env
 
 ## Generate Markdown files map
 md-fabric: py-env
+	$(call print_target_banner)
 	$(PYTHON) ./tools/scripts/md-fabric.py --out docs/md-fabric/md-fabric.html
 
 ## Build the slides with Marp
 slides:
+	$(call print_target_banner)
 	@command -v npx >/dev/null || (echo "npx is required to build slides. Install Node.js or run 'npm install' from the repo root." && exit 1)
 	npx marp docs/slides/[0-9]*.md --theme-set docs/slides/css/slides.css --allow-local-files
 
 # Preview the documentation website with local docs/web-docs content.
 # Clones the web docs site into .web-docs-preview/ and serves it at localhost:4321.
 web-docs-preview:
+	$(call print_target_banner)
 	@bash tools/scripts/docs-preview.sh
 
 # -------- Development and auto fix --------
@@ -475,18 +537,22 @@ web-docs-preview:
 
 ## Run tests in development mode
 dev-test: install-tools
+	$(call print_target_banner)
 	cargo nextest run --workspace
 
 ## Auto-fix code formatting
 dev-fmt:
+	$(call print_target_banner)
 	cargo fmt --all
 
 ## Auto-fix clippy warnings
 dev-clippy:
+	$(call print_target_banner)
 	cargo clippy --workspace --all-targets --all-features --fix --allow-dirty
 
 # Auto-fix formatting and clippy warnings
 dev: dev-fmt dev-clippy dev-test
+	$(call print_target_banner)
 
 # -------- Optional GEAR= scope for top-level targets --------
 # Examples:
@@ -508,20 +574,22 @@ GEAR_FEATURES ?=
 
 GEAR_FEATURE_ARGS := $(if $(GEAR_FEATURES),--features $(GEAR_FEATURES),)
 GEAR_SERVER_BASE_FEATURES ?= static-tenants,static-authn,static-authz
-GEAR_SERVER_FEATURES ?= $(GEAR),$(GEAR_SERVER_BASE_FEATURES)
+GEAR_SERVER_ALWAYS_LINKED ?= api-gateway gear-orchestrator types-registry tenant-resolver authn-resolver authz-resolver
+GEAR_SERVER_OPTIONAL_FEATURES := $(filter-out $(GEAR_SERVER_ALWAYS_LINKED),$(GEAR))
+GEAR_SERVER_FEATURES ?= $(GEAR_SERVER_OPTIONAL_FEATURES)$(if $(GEAR_SERVER_OPTIONAL_FEATURES),$(COMMA),)$(GEAR_SERVER_BASE_FEATURES)
+GEAR_E2E_KEY := $(subst -,_,$(GEAR))
 GEAR_OPENAPI_TMP ?= target/openapi/$(GEAR).json
-GEAR_E2E_TARGET ?= testing/e2e/gears/$(subst -,_,$(GEAR))
+GEAR_E2E_TARGET ?= testing/e2e/gears/$(GEAR_E2E_KEY)
 GEAR_PKG ?= cf-gears-$(GEAR)
 GEAR_SDK_PKG ?= $(GEAR_PKG)-sdk
 GEAR_SDK_FLAG := $(if $(wildcard gears/$(GEAR)/$(GEAR)-sdk),-p $(GEAR_SDK_PKG))
 GEAR_PKGS := -p $(GEAR_PKG) $(GEAR_SDK_FLAG)
 GEAR_CARGO_SCOPE := $(if $(GEAR),$(GEAR_PKGS),--workspace)
-GEAR_SERVER_FEATURE_ARGS := $(if $(GEAR),--no-default-features --features $(GEAR_SERVER_FEATURES),$(E2E_ARGS))
+GEAR_SERVER_FEATURE_ARGS := $(if $(GEAR),--no-default-features --features $(GEAR_SERVER_FEATURES),$(EXAMPLE_SERVER_FEATURE_ARGS))
+OPENAPI_BUILD_FEATURE_ARGS := $(if $(GEAR),$(GEAR_SERVER_FEATURE_ARGS),$(OPENAPI_SERVER_FEATURE_ARGS))
 GEAR_E2E_SCOPE := $(if $(GEAR),$(GEAR_E2E_TARGET) $(E2E_TARGET),$(E2E_TARGET))
 GEAR_COVERAGE_ARGS := $(if $(GEAR),--package $(GEAR_PKG) --e2e-target $(GEAR_E2E_TARGET),)
 GEAR_CLIPPY_ARGS ?= --all-targets --all-features -- -D warnings
-E2E_SIDECAR_PREREQ := $(if $(GEAR),$(if $(filter file-storage,$(GEAR)),.e2e-sidecar-build,),.e2e-sidecar-build)
-E2E_SIDECAR_ENV := $(if $(GEAR),$(if $(filter file-storage,$(GEAR)),FS_SIDECAR_BINARY=target/debug/sidecar,),FS_SIDECAR_BINARY=target/debug/sidecar)
 
 
 # -------- Tests --------
@@ -530,38 +598,47 @@ E2E_SIDECAR_ENV := $(if $(GEAR),$(if $(filter file-storage,$(GEAR)),FS_SIDECAR_B
 
 # Run all tests, or a single gear when GEAR=<gear> is set
 test: install-tools
+	$(call print_target_banner)
 	cargo nextest run $(GEAR_CARGO_SCOPE) $(GEAR_FEATURE_ARGS) $(GEAR_TEST_ARGS)
 
 test-no-macros: install-tools
+	$(call print_target_banner)
 	cargo nextest run --workspace --exclude cf-gears-toolkit-macros-tests --exclude cf-gears-toolkit-db-macros
 
 test-macros: install-tools
+	$(call print_target_banner)
 	cargo nextest run -p cf-gears-toolkit-db-macros
 	cargo nextest run -p cf-gears-toolkit-macros-tests
 
 ## Run SQLite integration tests
 test-sqlite: install-tools
-	cargo nextest run -p cf-gears-toolkit-db --features sqlite,integration
-	cargo build -p cf-gears-toolkit-db --examples --features sqlite
+	$(call print_target_banner)
+	cargo nextest run -p cf-gears-toolkit-db --features sqlite,integration,preview-outbox
+	cargo build -p cf-gears-toolkit-db --examples --features sqlite,preview-outbox
 
 ## Run PostgreSQL integration tests
 test-pg: install-tools
-	cargo nextest run -p cf-gears-toolkit-db --features pg,integration
+	$(call print_target_banner)
+	cargo nextest run -p cf-gears-toolkit-db --features pg,integration,preview-outbox
 
 ## Run MySQL integration tests
 test-mysql: install-tools
-	cargo nextest run -p cf-gears-toolkit-db --features mysql,integration
+	$(call print_target_banner)
+	cargo nextest run -p cf-gears-toolkit-db --features mysql,integration,preview-outbox
 
 # Run all database integration tests
 test-db: test-sqlite test-pg test-mysql
+	$(call print_target_banner)
 
 ## Run users-info gear integration tests
 test-users-info-pg: install-tools
+	$(call print_target_banner)
 	cargo nextest run -p users-info --features "integration"
 
 ## Run TimescaleDB usage-collector plugin integration tests (Docker required;
 ## the suite spins up its own timescale/timescaledb container via testcontainers)
 test-usage-collector-pg: install-tools
+	$(call print_target_banner)
 	cargo nextest run -p cf-gears-timescaledb-usage-collector-plugin --features postgres
 
 ## Run the Postgres cluster plugin's conformance (Layer 2) and Layer 3
@@ -575,6 +652,7 @@ test-usage-collector-pg: install-tools
 ## short straw. A genuine logic regression fails both attempts, so this absorbs
 ## Docker churn without masking one.
 test-cluster-pg: install-tools
+	$(call print_target_banner)
 	cargo nextest run -p cf-postgres-cluster-plugin --features integration --retries 1
 
 ## Run FIPS-mode integration tests (requires Go for aws-lc-fips-sys).
@@ -592,6 +670,7 @@ test-cluster-pg: install-tools
 ## via its own `fips` feature). Single invocation so the shared FIPS dep graph
 ## compiles once.
 test-fips: install-tools
+	$(call print_target_banner)
 	cargo nextest run -p cf-gears-toolkit -p cf-gears-toolkit-http -p cf-gears-oagw \
 		--features cf-gears-toolkit/bootstrap,cf-gears-toolkit/fips,cf-gears-toolkit-http/fips,cf-gears-oagw/fips
 
@@ -618,6 +697,7 @@ test-fips: install-tools
 ##       --features fips -e features | grep aws-lc-fips    # must be empty
 .PHONY: check-windows-fips
 check-windows-fips:
+	$(call print_target_banner)
 	$(call check_tool,cargo-xwin)
 	$(call check_tool,ninja)
 	rustup target add x86_64-pc-windows-msvc
@@ -630,72 +710,116 @@ check-windows-fips:
 
 ## Run outbox throughput benchmarks against PostgreSQL
 bench-pg:
-	cargo bench -p cf-gears-toolkit-db --features pg --bench outbox_throughput -- postgres
+	$(call print_target_banner)
+	cargo bench -p cf-gears-toolkit-db --features pg,preview-outbox --bench outbox_throughput -- postgres
 
 ## Run outbox throughput benchmarks against MySQL
 bench-mysql:
-	cargo bench -p cf-gears-toolkit-db --features mysql --bench outbox_throughput -- mysql
+	$(call print_target_banner)
+	cargo bench -p cf-gears-toolkit-db --features mysql,preview-outbox --bench outbox_throughput -- mysql
 
 ## Run outbox throughput benchmarks against MariaDB
 bench-mariadb:
-	cargo bench -p cf-gears-toolkit-db --features mysql --bench outbox_throughput -- mariadb
+	$(call print_target_banner)
+	cargo bench -p cf-gears-toolkit-db --features mysql,preview-outbox --bench outbox_throughput -- mariadb
 
 # Run outbox throughput benchmarks against SQLite
 bench-sqlite:
-	cargo bench -p cf-gears-toolkit-db --features sqlite --bench outbox_throughput -- sqlite
+	$(call print_target_banner)
+	cargo bench -p cf-gears-toolkit-db --features sqlite,preview-outbox --bench outbox_throughput -- sqlite
 
 ## Run outbox throughput benchmarks against all database engines
 bench-db: bench-pg bench-mysql bench-mariadb bench-sqlite
+	$(call print_target_banner)
 
 ## Run long-haul (1M+10M) outbox benchmarks against PostgreSQL
 bench-pg-longhaul:
-	cargo bench -p cf-gears-toolkit-db --features pg --bench outbox_throughput -- postgres_longhaul
+	$(call print_target_banner)
+	cargo bench -p cf-gears-toolkit-db --features pg,preview-outbox --bench outbox_throughput -- postgres_longhaul
 
 ## Run long-haul (1M+10M) outbox benchmarks against MySQL
 bench-mysql-longhaul:
-	cargo bench -p cf-gears-toolkit-db --features mysql --bench outbox_throughput -- mysql_longhaul
+	$(call print_target_banner)
+	cargo bench -p cf-gears-toolkit-db --features mysql,preview-outbox --bench outbox_throughput -- mysql_longhaul
 
 ## Run long-haul (1M+10M) outbox benchmarks against MariaDB
 bench-mariadb-longhaul:
-	cargo bench -p cf-gears-toolkit-db --features mysql --bench outbox_throughput -- mariadb_longhaul
+	$(call print_target_banner)
+	cargo bench -p cf-gears-toolkit-db --features mysql,preview-outbox --bench outbox_throughput -- mariadb_longhaul
 
 ## Run long-haul (100K 1P) outbox benchmarks against SQLite
 bench-sqlite-longhaul:
-	cargo bench -p cf-gears-toolkit-db --features sqlite --bench outbox_throughput -- sqlite_longhaul
+	$(call print_target_banner)
+	cargo bench -p cf-gears-toolkit-db --features sqlite,preview-outbox --bench outbox_throughput -- sqlite_longhaul
 
 ## Run long-haul outbox benchmarks against all database engines
 bench-db-longhaul: bench-pg-longhaul bench-mysql-longhaul bench-mariadb-longhaul bench-sqlite-longhaul
+	$(call print_target_banner)
 
 # -------- E2E tests --------
 
 .PHONY: e2e e2e-local e2e-local-smoke e2e-mini-chat e2e-docker e2e-docker-smoke e2e-tr-authz e2e-usage-collector
 
 E2E_TARGET ?=
+# E2E selectors for `make e2e-local`:
+#   SUITE=<suite>  run ONE named scenario under testing/e2e/gears/ (often, but
+#                  not always, a gear crate) — e.g. SUITE=file-parser,
+#                  SUITE=scope-enforcement.
+#   GEAR=<gear>    run EVERY e2e-launcher suite whose e2e.yaml features (incl.
+#                  features_file) include <gear> — e.g. GEAR=credstore runs both
+#                  the credstore and oagw suites. SUITE and GEAR are mutually
+#                  exclusive (enforced by tools/scripts/run_e2e.py).
+SUITE ?=
+
+# SUITE= and GEAR= are mutually exclusive; that check lives in
+# tools/scripts/run_e2e.py (the runner rejects the combination).
 
 # Run E2E tests in Docker (default)
 e2e: e2e-docker
+	$(call print_target_banner)
 
 ## Run E2E tests in Docker environment
 e2e-docker: py-env
+	$(call print_target_banner)
 	$(PYTHON) tools/scripts/ci.py e2e-docker -- $(E2E_TARGET)
 
 ## Run E2E smoke tests in Docker (only tests marked @pytest.mark.smoke)
 e2e-docker-smoke: py-env
+	$(call print_target_banner)
 	$(PYTHON) tools/scripts/ci.py e2e-docker -- -m smoke $(E2E_TARGET)
 
-# Run E2E tests locally, use GEAR=<gear> to scope to testing/e2e/gears/<gear>
-e2e-local: py-env .e2e-server-build $(E2E_SIDECAR_PREREQ)
-	E2E_BINARY=target/debug/cf-gears-example-server $(E2E_SIDECAR_ENV) $(PYTHON) tools/scripts/ci.py e2e-local -- $(GEAR_E2E_SCOPE)
+# Run E2E tests locally. Three ways to use it:
+#   make e2e-local SUITE=<suite>   run ONE suite: build a server for just that
+#                                  suite and run its tests.
+#   make e2e-local GEAR=<gear>     run EVERY e2e-launcher suite whose e2e.yaml
+#                                  features (incl. features_file) include <gear>,
+#                                  each as its own focused build+run. If no suite
+#                                  matches, it is a no-op (so `make all GEAR=` is
+#                                  safe for gears without E2E coverage).
+#   make e2e-local                 run MANY suites: build one server with every
+#                                  E2E feature (config/e2e-features.txt) and run
+#                                  every shared-server suite against it. A
+#                                  "shared-server suite" is one whose e2e.yaml
+#                                  has `launcher: e2e-launcher`.
+# Self-managed suites (`launcher: pytest` — mini-chat, usage-collector) and the
+# tr-authz profile lane start their own server, so plain `make e2e-local` and
+# GEAR= runs skip them; run them via their own targets (e2e-mini-chat,
+# e2e-usage-collector, e2e-tr-authz). All feature/config/sidecar/gear knowledge
+# lives in config/e2e-launcher.yaml and testing/e2e/gears/<suite>/e2e.yaml, so
+# this recipe stays suite-agnostic.
+e2e-local: py-env
+	$(call print_target_banner)
+	$(PYTHON) tools/scripts/run_e2e.py --suite "$(SUITE)" --gear "$(GEAR)" -- $(E2E_TARGET)
 
 ## Run RG + AuthZ barrier E2E tests with tr-authz-plugin going through TR -> RG
 e2e-tr-authz: py-env
-	$(PYTHON) tools/scripts/ci.py e2e-local \
-		--config config/e2e-tr-authz.yaml \
-		-- -k "resource_group"
+	$(call print_target_banner)
+	$(PYTHON) tools/scripts/run_e2e.py --suite resource-group --profile tr-authz --
 
 ## Run E2E smoke tests locally (only tests marked @pytest.mark.smoke)
 e2e-local-smoke: py-env
-	$(PYTHON) tools/scripts/ci.py e2e-local --smoke
+	$(call print_target_banner)
+	$(PYTHON) tools/scripts/run_e2e.py --suite "$(SUITE)" --gear "$(GEAR)" --smoke -- $(E2E_TARGET)
 
 MINI_CHAT_FEATURES = mini-chat,static-authn,static-authz,single-tenant,static-credstore
 MINI_CHAT_K8S_FEATURES = $(MINI_CHAT_FEATURES),k8s
@@ -703,19 +827,15 @@ MINI_CHAT_K8S_FEATURES = $(MINI_CHAT_FEATURES),k8s
 MINI_CHAT_IMAGE ?= cf-gears-mini-chat
 MINI_CHAT_TAG   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo latest)
 
-## Run mini-chat E2E tests (separate binary with mini-chat features)
-e2e-mini-chat: py-env
-	cargo build --bin cf-gears-example-server --features=$(MINI_CHAT_FEATURES)
-	E2E_BINARY=target/debug/cf-gears-example-server \
-		$(PYTHON) -m pytest testing/e2e/gears/mini_chat/ --mode offline -vv
+## Run mini-chat E2E tests (alias for focused local E2E)
+e2e-mini-chat:
+	$(call print_target_banner)
+	$(MAKE) e2e-local SUITE=mini-chat
 
-UC_E2E_FEATURES = usage-collector,timescaledb-usage-collector,static-tenants,static-authn,static-authz
-
-## Run usage-collector E2E tests (dedicated binary + TimescaleDB container; Docker required)
-e2e-usage-collector: py-env
-	cargo build --bin cf-gears-example-server --features=$(UC_E2E_FEATURES)
-	E2E_BINARY=target/debug/cf-gears-example-server \
-		$(PYTHON) -m pytest testing/e2e/gears/usage_collector/ -vv
+## Run usage-collector E2E tests (alias for focused local E2E; Docker required)
+e2e-usage-collector:
+	$(call print_target_banner)
+	$(MAKE) e2e-local SUITE=usage-collector
 
 # -------- Code coverage --------
 
@@ -723,20 +843,24 @@ e2e-usage-collector: py-env
 
 # Generate code coverage report (unit + e2e-local tests)
 coverage: py-env
+	$(call print_target_banner)
 	$(call check_tool,cargo-llvm-cov)
 	$(PYTHON) tools/scripts/coverage.py combined $(GEAR_COVERAGE_ARGS)
 
 # Generate code coverage report (unit tests only)
 coverage-unit: py-env
+	$(call print_target_banner)
 	$(call check_tool,cargo-llvm-cov)
 	$(PYTHON) tools/scripts/coverage.py unit $(if $(GEAR),--package $(GEAR_PKG),)
 
 ## Ensure needed packages and programs installed for local e2e testing
 check-prereq-e2e-local: py-env
+	$(call print_target_banner)
 	$(PYTHON) tools/scripts/check_local_env.py --mode e2e-local
 
 # Generate code coverage report (e2e-local tests only)
 coverage-e2e-local: check-prereq-e2e-local
+	$(call print_target_banner)
 	$(call check_tool,cargo-llvm-cov)
 	$(PYTHON) tools/scripts/coverage.py e2e-local $(if $(GEAR),--e2e-target $(GEAR_E2E_TARGET),)
 
@@ -746,19 +870,23 @@ coverage-e2e-local: check-prereq-e2e-local
 
 ## Check cargo-fuzz is installed (required for fuzzing)
 fuzz-install:
+	$(call print_target_banner)
 	$(call check_tool,cargo-fuzz)
 
 ## Build all fuzz targets
 fuzz-build: fuzz-install
+	$(call print_target_banner)
 	cargo +nightly fuzz build --fuzz-dir tools/fuzz
 
 ## List all available fuzz targets
 fuzz-list: fuzz-install
+	$(call print_target_banner)
 	cargo +nightly fuzz list --fuzz-dir tools/fuzz
 
 ## Run a specific fuzz target (use FUZZ_TARGET=name)
 ## Example: make fuzz-run FUZZ_TARGET=fuzz_odata_filter FUZZ_SECONDS=60
 fuzz-run: fuzz-install
+	$(call print_target_banner)
 	@if [ -z "$(FUZZ_TARGET)" ]; then \
 		echo "ERROR: FUZZ_TARGET is required. Example: make fuzz-run FUZZ_TARGET=fuzz_odata_filter"; \
 		exit 1; \
@@ -767,6 +895,7 @@ fuzz-run: fuzz-install
 
 # Run all fuzz targets for a short time (smoke test)
 fuzz: fuzz-build
+	$(call print_target_banner)
 	@echo "Running all fuzz targets for 30 seconds each..."
 	@FAILED=0; \
 	for target in $$(cargo +nightly fuzz list --fuzz-dir tools/fuzz); do \
@@ -781,12 +910,14 @@ fuzz: fuzz-build
 
 ## Clean fuzzing artifacts and corpus
 fuzz-clean:
+	$(call print_target_banner)
 	rm -rf tools/fuzz/artifacts/
 	rm -rf tools/fuzz/corpus/*/
 	rm -rf tools/fuzz/target/
 
 ## Minimize corpus for a specific target
 fuzz-corpus: fuzz-install
+	$(call print_target_banner)
 	@if [ -z "$(FUZZ_TARGET)" ]; then \
 		echo "ERROR: FUZZ_TARGET is required. Example: make fuzz-corpus FUZZ_TARGET=fuzz_odata_filter"; \
 		exit 1; \
@@ -801,7 +932,8 @@ fuzz-corpus: fuzz-install
 
 # Run server with mini-chat gear
 mini-chat:
-	cargo run --bin cf-gears-example-server --features mini-chat,static-authn,static-authz,single-tenant,static-credstore,otel -- --config config/mini-chat.yaml run
+	$(call print_target_banner)
+	cargo run --bin $(EXAMPLE_SERVER_BIN) --features mini-chat,static-authn,static-authz,single-tenant,static-credstore,otel -- --config config/mini-chat.yaml run
 
 ## Build mini-chat Docker image for K8s (dev build by default, RELEASE=1 for optimized)
 ## On linux: builds on host (reuses local target/), then packages the binary.
@@ -811,6 +943,7 @@ MINI_CHAT_CARGO_RELEASE_FLAG = $(if $(RELEASE),--release,)
 MINI_CHAT_TARGET_DIR = $(or $(CARGO_TARGET_DIR),target)/$(if $(RELEASE),release,debug)
 
 mini-chat-docker:
+	$(call print_target_banner)
 ifeq ($(shell uname -s),Linux)
 	@echo "==> Linux host: building on host, packaging into image"
 	cargo build $(MINI_CHAT_CARGO_RELEASE_FLAG) --bin cf-gears-example-server --package=cf-gears-example-server \
@@ -833,6 +966,7 @@ endif
 
 ## Deploy mini-chat Helm chart to local K8s cluster (build + load + install)
 mini-chat-helm: mini-chat-docker
+	$(call print_target_banner)
 	@if command -v k3s >/dev/null 2>&1; then \
 		docker save $(MINI_CHAT_IMAGE):$(MINI_CHAT_TAG) | sudo k3s ctr images import -; \
 	elif command -v minikube >/dev/null 2>&1; then \
@@ -852,12 +986,14 @@ mini-chat-helm: mini-chat-docker
 
 ## Render mini-chat Helm templates (dry-run)
 mini-chat-helm-template:
+	$(call print_target_banner)
 	helm template mini-chat gears/mini-chat/deploy/helm/mini-chat/
 
 ## One-command: ensure minikube is up, deploy latest chart, port-forward
 ## Usage: make mini-chat-up
 ## If image was rebuilt (make mini-chat-docker), re-run this to pick it up.
 mini-chat-up:
+	$(call print_target_banner)
 	@# --- 1. Ensure cluster is running ---
 	@if command -v minikube >/dev/null 2>&1; then \
 		STATUS=$$(minikube status -f '{{.Host}}' 2>/dev/null || true); \
@@ -903,6 +1039,7 @@ mini-chat-up:
 
 ## Persistent port-forward with auto-reconnect (run in a separate terminal)
 mini-chat-port-forward:
+	$(call print_target_banner)
 	@echo "Port-forward: localhost:8087 -> svc/mini-chat:8087 (auto-reconnect, Ctrl+C to stop)"
 	@while true; do \
 		kubectl port-forward svc/mini-chat 8087:8087 2>&1 || true; \
@@ -912,6 +1049,7 @@ mini-chat-port-forward:
 
 ## Tear down mini-chat from the cluster
 mini-chat-down:
+	$(call print_target_banner)
 	helm uninstall mini-chat 2>/dev/null || true
 	@echo "mini-chat uninstalled"
 
@@ -921,58 +1059,70 @@ mini-chat-down:
 
 # Start server with quickstart config
 quickstart:
-	mkdir -p data
-	cargo run --bin cf-gears-example-server -- --config config/quickstart.yaml run
+	$(call print_target_banner)
+	$(MAKE) run GEAR=types-registry
 
 # Run server with example gear
 example:
-	cargo run --bin cf-gears-example-server $(E2E_ARGS) -- --config config/quickstart.yaml run
+	$(call print_target_banner)
+	cargo run --bin $(EXAMPLE_SERVER_BIN) $(EXAMPLE_SERVER_FEATURE_ARGS) -- --config config/quickstart.yaml run
 
 # Run the default server, or the example server with only one gear feature when GEAR=<gear> is set
 run:
-	cargo run --bin cf-gears-example-server $(GEAR_SERVER_FEATURE_ARGS) -- --config config/quickstart.yaml run $(GEAR_RUN_ARGS)
+	$(call print_target_banner)
+	cargo run --bin $(EXAMPLE_SERVER_BIN) $(GEAR_SERVER_FEATURE_ARGS) -- --config config/quickstart.yaml run $(GEAR_RUN_ARGS)
 
 ## Run server with fips gear
 fips:
+	$(call print_target_banner)
 	cargo run --bin cf-gears-example-server --features fips,static-authn,static-authz,single-tenant,static-credstore,otel -- --config config/quickstart.yaml run
 
 ## Run server with out-of-process example gear
 oop-example:
+	$(call print_target_banner)
 	cargo build -p calculator --features oop_gear
 	cargo run --bin cf-gears-example-server --features oop-example,users-info-example,static-authn,static-authz,static-tenants,static-credstore -- --config config/quickstart.yaml run
 
 # Run all quality checks
 check: fmt cfs-validate clippy lychee security dylint gts-docs test
+	$(call print_target_banner)
 
 ci_test: fmt clippy
+	$(call print_target_banner)
 
 ci_docs: lychee gts-docs
+	$(call print_target_banner)
 
 # Run CI pipeline locally, requires docker
 ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-usage-collector-pg lychee gts-docs dylint
+	$(call print_target_banner)
 
 ## Build the cf-gears-example-server release binary, or a single gear when GEAR=<gear> is set
 .cargo-build:
-	$(if $(GEAR),cargo build --release $(GEAR_PKGS) $(GEAR_FEATURE_ARGS) $(GEAR_BUILD_ARGS),cargo build --release --bin cf-gears-example-server $(E2E_ARGS))
+	$(call print_target_banner)
+	$(if $(GEAR),cargo build --release $(GEAR_PKGS) $(GEAR_FEATURE_ARGS) $(GEAR_BUILD_ARGS),cargo build --release --bin $(EXAMPLE_SERVER_BIN) $(EXAMPLE_SERVER_FEATURE_ARGS))
 
 ## Split debug symbols into separate artifact(s) and strip the binary.
 ## Requires platform tools: objcopy (Linux), dsymutil+strip (macOS).
 ## On Windows MSVC the PDB is already separate; no extra tools needed.
 .split-debug:
+	$(call print_target_banner)
 	cargo xtask split-debug cf-gears-example-server
 
 # Build the release binary, or a single gear when GEAR=<gear> is set.
 build:
+	$(call print_target_banner)
 	$(MAKE) .cargo-build GEAR=$(GEAR) GEAR_PKG=$(GEAR_PKG) GEAR_SDK_PKG=$(GEAR_SDK_PKG) GEAR_FEATURES=$(GEAR_FEATURES) GEAR_BUILD_ARGS=$(GEAR_BUILD_ARGS)
 
 # Build distributable release artifacts.
 dist: build
+	$(call print_target_banner)
 	@if [ -z "$(GEAR)" ]; then $(MAKE) .split-debug; fi
 
 # Run all necessary quality checks and tests using reusable debug artifacts.
 all: check test-sqlite e2e-local openapi
+	$(call print_target_banner)
 	@echo ""
-	@echo "============================================================="
 	@echo "  CONGRATULATIONS! All 'make all' tasks have been completed!"
 	@echo ""
 	@echo "  Next suggestions:"
@@ -980,4 +1130,4 @@ all: check test-sqlite e2e-local openapi
 	@echo "    - make mini-chat-up   # deploy and try the mini-chat demo"
 	@echo ""
 	@echo "  Tip: run 'git status' to inspect changes."
-	@echo "============================================================="
+	@echo ""
