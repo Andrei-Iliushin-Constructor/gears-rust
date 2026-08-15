@@ -131,6 +131,35 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+def _assert_port_available(port: int) -> None:
+    """Fail fast if something is already listening on ``port``.
+
+    The lifecycle server uses a FIXED port (so the control-plane -> sidecar
+    finalize callback URL is stable). If a previous run leaked its server, a
+    plain health poll against ``localhost:<port>`` would silently succeed
+    against that STALE process — the test would then drive the wrong server,
+    whose sidecar writes blobs into the previous run's ``storage_root``, and the
+    on-disk assertion would fail with a confusing "blob absent" error. Refuse to
+    start instead, with an actionable message.
+
+    Detection uses a CONNECT probe rather than ``bind()``: the leaked server
+    binds the wildcard address (``0.0.0.0:<port>``), and on BSD/macOS a
+    ``bind("127.0.0.1", port)`` can still succeed against a wildcard listener
+    (especially with ``SO_REUSEADDR``), giving a false negative. A successful
+    TCP connect proves an active listener regardless of which address it bound.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        if s.connect_ex(("127.0.0.1", port)) == 0:
+            pytest.fail(
+                f"port {port} already has a listener — a previous file-storage "
+                f"lifecycle server likely leaked and is still running.\n"
+                f"Find and stop it, then re-run:\n"
+                f"  lsof -nP -iTCP:{port} -sTCP:LISTEN\n"
+                f"  kill <pid>   # the cf-gears-example-server on :{port} (and its sidecar)"
+            )
+
+
 # ── Sidecar class (SidecarProtocol) ──────────────────────────────────────
 
 class FileStorageSidecar:
@@ -409,6 +438,11 @@ def _lifecycle_test_env(fs_storage_root, fs_signing_seed):
 
     control_base_url = f"http://localhost:{_SERVER_PORT}"
 
+    # Guard the fixed server port BEFORE starting anything: a leaked server from
+    # a prior run would otherwise answer our health poll and silently steal the
+    # test (blobs land in the stale run's storage_root -> "blob absent").
+    _assert_port_available(_SERVER_PORT)
+
     sidecar = FileStorageSidecar(
         storage_root=fs_storage_root,
         public_key_b64=pub_key_b64,
@@ -456,6 +490,18 @@ def _lifecycle_test_env(fs_storage_root, fs_signing_seed):
         env=proc_env,
     )
     print(f"[lifecycle] server started (pid={proc.pid}, port={_SERVER_PORT}, log={log})")
+
+    # 4b. Liveness: fail fast if the server died immediately (bind error, bad
+    # config, ...) instead of letting the health poll below succeed against some
+    # other process that happens to hold the port.
+    time.sleep(0.3)
+    if proc.poll() is not None:
+        log_fh.flush()
+        tail = log.read_text()[-3000:] if log.exists() else ""
+        pytest.fail(
+            f"lifecycle server exited immediately (rc={proc.returncode}, "
+            f"port={_SERVER_PORT}).\nLog tail:\n{tail}"
+        )
 
     # 5. Health check
     _wait_healthy(env)

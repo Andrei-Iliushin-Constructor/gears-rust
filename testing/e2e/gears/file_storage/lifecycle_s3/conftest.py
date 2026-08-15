@@ -90,6 +90,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,7 @@ import pytest
 from gears.file_storage.lifecycle.conftest import (
     FileStorageSidecar,
     _SIGNING_KEY_SEED_B64,
+    _assert_port_available,
     _derive_sidecar_public_key_b64,
 )
 
@@ -309,6 +311,11 @@ def _lifecycle_s3_test_env(fs_s3_storage_root, fs_s3_signing_seed):
     control_base_url = f"http://localhost:{_SERVER_PORT}"
     s3 = _s3_env()
 
+    # Guard the fixed server port before starting anything (see lifecycle/): a
+    # leaked server from a prior run would otherwise answer our health poll and
+    # silently steal the test.
+    _assert_port_available(_SERVER_PORT)
+
     sidecar = FileStorageSidecar(
         storage_root=fs_s3_storage_root,
         public_key_b64=pub_key_b64,
@@ -373,6 +380,18 @@ def _lifecycle_s3_test_env(fs_s3_storage_root, fs_s3_signing_seed):
         env=proc_env,
     )
     print(f"[lifecycle_s3] server started (pid={proc.pid}, port={_SERVER_PORT}, log={log})")
+
+    # 4b. Liveness: fail fast if the server died immediately (bind error, bad
+    # config, ...) instead of letting the health poll below succeed against some
+    # other process that happens to hold the port.
+    time.sleep(0.3)
+    if proc.poll() is not None:
+        log_fh.flush()
+        tail = log.read_text()[-3000:] if log.exists() else ""
+        pytest.fail(
+            f"lifecycle_s3 server exited immediately (rc={proc.returncode}, "
+            f"port={_SERVER_PORT}).\nLog tail:\n{tail}"
+        )
 
     # 5. Health check.
     _wait_healthy(env)
