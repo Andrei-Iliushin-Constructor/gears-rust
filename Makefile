@@ -1,9 +1,12 @@
 CI := 1
 
-# Python interpreter used by helper scripts. Defaults to python3 (Linux/macOS);
-# on Windows, where `python3` is often absent, it falls back to `python`.
-# Override explicitly with `make <target> PYTHON=...` if needed.
-PYTHON ?= $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null || echo python3)
+# Python helper scripts must run inside a repository-managed virtual environment.
+# PYTHON_BOOTSTRAP is used only to create that environment; PYTHON is the venv interpreter.
+PYTHON_BOOTSTRAP ?= $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null || echo python3)
+PY_ENV_DIR ?= .venv
+PYTHON ?= $(PY_ENV_DIR)/bin/python
+PY_ENV_STAMP := $(PY_ENV_DIR)/.requirements-stamp
+PY_REQUIREMENTS := testing/requirements.txt testing/e2e/requirements.txt
 
 OPENAPI_URL ?= http://127.0.0.1:8087/cf/openapi.json
 OPENAPI_OUT ?= docs/api/api.json
@@ -139,17 +142,26 @@ endef
 # -------- Defaults --------
 
 # Show the help message with list of commands (default target)
-help:
+help: py-env
 	@$(PYTHON) tools/scripts/make_help.py Makefile
 
 
 # -------- Set up --------
-# Note: .setup-stamp should be added to .gitignore
 
-.PHONY: setup
+.PHONY: setup install-tools check-prereq-local cfs-ensure cfs-validate cfs-repair cfs-validate-kit-local py-env
+
+py-env: $(PY_ENV_STAMP)
+
+$(PY_ENV_STAMP): $(PY_REQUIREMENTS)
+	@echo "Creating/updating Python virtual environment in $(PY_ENV_DIR)..."
+	$(PYTHON_BOOTSTRAP) -m venv $(PY_ENV_DIR)
+	$(PYTHON) -m pip install --upgrade pip
+	$(PYTHON) -m pip install -r testing/requirements.txt -r testing/e2e/requirements.txt
+	@mkdir -p $(dir $(PY_ENV_STAMP))
+	@cat $(PY_REQUIREMENTS) > $(PY_ENV_STAMP)
 
 ## Install all required development tools
-setup: .setup-stamp
+setup: .setup-stamp py-env
 
 # Re-run setup whenever the tool list changes (Makefile is the source of truth),
 # so developers who already have .setup-stamp pick up newly-added tools.
@@ -319,7 +331,7 @@ gts-docs:
 # set at test runtime, which cargo-nextest only supports from 0.9.130 onward.
 NEXTEST_MIN_VERSION := 0.9.130
 
-install-tools:
+install-tools: py-env
 	@NEXTEST_VERSION=$$(cargo nextest --version 2>/dev/null | awk '/^cargo-nextest/ {print $$2}'); \
 	if [ -z "$$NEXTEST_VERSION" ] || ! $(PYTHON) -c "import sys; sys.exit(0 if tuple(map(int, '$$NEXTEST_VERSION'.split('.'))) >= tuple(map(int, '$(NEXTEST_MIN_VERSION)'.split('.'))) else 1)" 2>/dev/null; then \
 		echo "Installing/upgrading cargo-nextest (>= $(NEXTEST_MIN_VERSION) required for CARGO_BIN_EXE_* support)..."; \
@@ -346,15 +358,15 @@ safety: clippy kani lint dylint # geiger
 	@echo "OK. Rust Safety Pipeline complete"
 
 ## Validate gear folder names follow kebab-case convention
-validate-gear-names:
+validate-gear-names: py-env
 	@$(PYTHON) tools/scripts/validate_gear_names.py
 
 ## Validate readme/license-file paths declared by publishable crates exist
-check-packaging-metadata:
+check-packaging-metadata: py-env
 	@$(PYTHON) tools/scripts/check_packaging_metadata.py
 
 ## Validate that examples/apps/tools are unpublishable and release-plz.toml matches the workspace
-check-release-config:
+check-release-config: py-env
 	@$(PYTHON) tools/scripts/check_release_config.py
 
 # -------- Code security checks --------
@@ -428,7 +440,7 @@ cfs-validate-kit-local: cfs-repair
 	cargo build -p cf-gears-file-storage --bin sidecar
 
 # Generate OpenAPI spec from running cf-gears-example-server
-openapi: .e2e-server-build
+openapi: .e2e-server-build py-env
 	@command -v curl >/dev/null || (echo "curl is required to generate OpenAPI spec" && exit 1)
 	@echo "Starting cf-gears-example-server to generate OpenAPI spec..."
 	@mkdir -p $$(dirname "$(if $(GEAR),$(GEAR_OPENAPI_TMP),$(OPENAPI_OUT))") && \
@@ -444,7 +456,7 @@ openapi: .e2e-server-build
 	echo "OpenAPI spec saved to $(OPENAPI_OUT)"
 
 ## Generate Markdown files map
-md-fabric:
+md-fabric: py-env
 	$(PYTHON) ./tools/scripts/md-fabric.py --out docs/md-fabric/md-fabric.html
 
 ## Build the slides with Marp
@@ -509,7 +521,7 @@ GEAR_E2E_SCOPE := $(if $(GEAR),$(GEAR_E2E_TARGET) $(E2E_TARGET),$(E2E_TARGET))
 GEAR_COVERAGE_ARGS := $(if $(GEAR),--package $(GEAR_PKG) --e2e-target $(GEAR_E2E_TARGET),)
 GEAR_CLIPPY_ARGS ?= --all-targets --all-features -- -D warnings
 E2E_SIDECAR_PREREQ := $(if $(GEAR),$(if $(filter file-storage,$(GEAR)),.e2e-sidecar-build,),.e2e-sidecar-build)
-E2E_SIDECAR_ENV := $(if $(GEAR),$(if $(filter file-storage,$(GEAR)),FS_SIDECAR_BINARY=target/debug/sidecar,E2E_SKIP_SIDECAR=1),FS_SIDECAR_BINARY=target/debug/sidecar)
+E2E_SIDECAR_ENV := $(if $(GEAR),$(if $(filter file-storage,$(GEAR)),FS_SIDECAR_BINARY=target/debug/sidecar,),FS_SIDECAR_BINARY=target/debug/sidecar)
 
 
 # -------- Tests --------
@@ -664,25 +676,25 @@ E2E_TARGET ?=
 e2e: e2e-docker
 
 ## Run E2E tests in Docker environment
-e2e-docker:
+e2e-docker: py-env
 	$(PYTHON) tools/scripts/ci.py e2e-docker -- $(E2E_TARGET)
 
 ## Run E2E smoke tests in Docker (only tests marked @pytest.mark.smoke)
-e2e-docker-smoke:
+e2e-docker-smoke: py-env
 	$(PYTHON) tools/scripts/ci.py e2e-docker -- -m smoke $(E2E_TARGET)
 
 # Run E2E tests locally, use GEAR=<gear> to scope to testing/e2e/gears/<gear>
-e2e-local: .e2e-server-build $(E2E_SIDECAR_PREREQ)
+e2e-local: py-env .e2e-server-build $(E2E_SIDECAR_PREREQ)
 	E2E_BINARY=target/debug/cf-gears-example-server $(E2E_SIDECAR_ENV) $(PYTHON) tools/scripts/ci.py e2e-local -- $(GEAR_E2E_SCOPE)
 
 ## Run RG + AuthZ barrier E2E tests with tr-authz-plugin going through TR -> RG
-e2e-tr-authz:
+e2e-tr-authz: py-env
 	$(PYTHON) tools/scripts/ci.py e2e-local \
 		--config config/e2e-tr-authz.yaml \
 		-- -k "resource_group"
 
 ## Run E2E smoke tests locally (only tests marked @pytest.mark.smoke)
-e2e-local-smoke:
+e2e-local-smoke: py-env
 	$(PYTHON) tools/scripts/ci.py e2e-local --smoke
 
 MINI_CHAT_FEATURES = mini-chat,static-authn,static-authz,single-tenant,static-credstore
@@ -692,7 +704,7 @@ MINI_CHAT_IMAGE ?= cf-gears-mini-chat
 MINI_CHAT_TAG   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo latest)
 
 ## Run mini-chat E2E tests (separate binary with mini-chat features)
-e2e-mini-chat:
+e2e-mini-chat: py-env
 	cargo build --bin cf-gears-example-server --features=$(MINI_CHAT_FEATURES)
 	E2E_BINARY=target/debug/cf-gears-example-server \
 		$(PYTHON) -m pytest testing/e2e/gears/mini_chat/ --mode offline -vv
@@ -700,7 +712,7 @@ e2e-mini-chat:
 UC_E2E_FEATURES = usage-collector,timescaledb-usage-collector,static-tenants,static-authn,static-authz
 
 ## Run usage-collector E2E tests (dedicated binary + TimescaleDB container; Docker required)
-e2e-usage-collector:
+e2e-usage-collector: py-env
 	cargo build --bin cf-gears-example-server --features=$(UC_E2E_FEATURES)
 	E2E_BINARY=target/debug/cf-gears-example-server \
 		$(PYTHON) -m pytest testing/e2e/gears/usage_collector/ -vv
@@ -710,17 +722,17 @@ e2e-usage-collector:
 .PHONY: coverage coverage-unit coverage-e2e-local check-prereq-e2e-local
 
 # Generate code coverage report (unit + e2e-local tests)
-coverage:
+coverage: py-env
 	$(call check_tool,cargo-llvm-cov)
 	$(PYTHON) tools/scripts/coverage.py combined $(GEAR_COVERAGE_ARGS)
 
 # Generate code coverage report (unit tests only)
-coverage-unit:
+coverage-unit: py-env
 	$(call check_tool,cargo-llvm-cov)
 	$(PYTHON) tools/scripts/coverage.py unit $(if $(GEAR),--package $(GEAR_PKG),)
 
 ## Ensure needed packages and programs installed for local e2e testing
-check-prereq-e2e-local:
+check-prereq-e2e-local: py-env
 	$(PYTHON) tools/scripts/check_local_env.py --mode e2e-local
 
 # Generate code coverage report (e2e-local tests only)
