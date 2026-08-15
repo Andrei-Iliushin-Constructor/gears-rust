@@ -600,6 +600,8 @@ GEAR_RUN_ARGS ?=
 GEAR_FEATURES ?=
 # Clippy flags for gear-scoped runs.
 GEAR_CLIPPY_ARGS ?= --all-targets --all-features -- -D warnings
+E2E_SIDECAR_PREREQ := $(if $(GEAR),$(if $(filter file-storage,$(GEAR)),.e2e-sidecar-build,),.e2e-sidecar-build)
+E2E_SIDECAR_ENV := $(if $(GEAR),$(if $(filter file-storage,$(GEAR)),FS_SIDECAR_BINARY=target/debug/sidecar,E2E_SKIP_SIDECAR=1),FS_SIDECAR_BINARY=target/debug/sidecar)
 
 # --- Package resolution ---
 # Regex to match Cargo package names belonging to this gear.
