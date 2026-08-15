@@ -496,7 +496,7 @@ async fn aged_queue_row_is_detected_and_run_completes() {
     let tenant = Uuid::now_v7();
     // Seed one QUEUED PAYMENT_ALLOCATE row queued 3 days ago (older than the 1-day
     // threshold) — directly via SQL (the durable work-state row the scan reads).
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_pending_event_queue \
          (tenant_id, flow, business_id, payload, queued_at, apply_after, status, attempts) \
          VALUES ('{tenant}', 'PAYMENT_ALLOCATE', 'alloc-aged-1', '{{}}'::jsonb, \
@@ -505,7 +505,7 @@ async fn aged_queue_row_is_detected_and_run_completes() {
     .await
     .unwrap();
     // A fresh row (queued now) must NOT be aged.
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_pending_event_queue \
          (tenant_id, flow, business_id, payload, queued_at, apply_after, status, attempts) \
          VALUES ('{tenant}', 'PAYMENT_ALLOCATE', 'alloc-fresh-1', '{{}}'::jsonb, \
@@ -547,7 +547,7 @@ async fn aged_chargeback_queue_row_is_detected() {
     let (raw, provider) = setup(&url).await;
 
     let tenant = Uuid::now_v7();
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_pending_event_queue \
          (tenant_id, flow, business_id, payload, queued_at, apply_after, status, attempts) \
          VALUES ('{tenant}', 'CHARGEBACK', 'cb-aged-1', '{{}}'::jsonb, \
@@ -587,7 +587,7 @@ async fn aged_refund_clearing_is_detected_and_run_completes() {
     // seed would fire the deferred trigger at the entry's own COMMIT, before any
     // line exists, raising LEDGER_ENTRY_EMPTY.)
     let txn = raw.begin().await.unwrap();
-    txn.execute(pg(format!(
+    txn.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_journal_entry \
          (entry_id, tenant_id, legal_entity_id, period_id, entry_currency, source_doc_type, \
           source_business_id, posted_at_utc, effective_at, origin, posted_by_actor_id, \
@@ -599,7 +599,7 @@ async fn aged_refund_clearing_is_detected_and_run_completes() {
     .await
     .unwrap();
     // … its REFUND_CLEARING line (the grain the aged scan reads) …
-    txn.execute(pg(format!(
+    txn.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_journal_line \
          (line_id, entry_id, tenant_id, period_id, payer_tenant_id, account_id, account_class, \
           side, amount_minor, currency, currency_scale, mapping_status) \
@@ -612,7 +612,7 @@ async fn aged_refund_clearing_is_detected_and_run_completes() {
     // … and its balancing DR leg (the money source a stage-1 refund reserves from),
     // making the entry zero-sum per (currency, currency_scale) so the deferred
     // balanced-trigger passes at COMMIT.
-    txn.execute(pg(format!(
+    txn.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_journal_line \
          (line_id, entry_id, tenant_id, period_id, payer_tenant_id, account_id, account_class, \
           side, amount_minor, currency, currency_scale, mapping_status) \
@@ -625,7 +625,7 @@ async fn aged_refund_clearing_is_detected_and_run_completes() {
     txn.commit().await.unwrap();
     // … and the open cache grain (`balance_minor > 0`); `ledger_account_balance`
     // has no balanced-trigger, so a plain autocommit insert is fine here.
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_account_balance \
          (tenant_id, account_id, currency, account_class, normal_side, balance_minor, version) \
          VALUES ('{tenant}', '{account}', 'USD', 'REFUND_CLEARING', 'CR', 500, 0)"
@@ -660,7 +660,7 @@ async fn stage1_orphan_refund_is_detected() {
 
     let tenant = Uuid::now_v7();
     // An `initiated` stage-1 refund 8 days old, NO terminal phase ⇒ orphan.
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_refund \
          (tenant_id, refund_id, psp_refund_id, phase, pattern, payment_id, currency, \
           amount_minor, clearing_state, created_at_utc, version) \
@@ -670,7 +670,7 @@ async fn stage1_orphan_refund_is_detected() {
     .await
     .unwrap();
     // A fully-advanced refund (initiated + confirmed) must NOT be flagged.
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_refund \
          (tenant_id, refund_id, psp_refund_id, phase, pattern, payment_id, currency, \
           amount_minor, clearing_state, created_at_utc, version) \
@@ -679,7 +679,7 @@ async fn stage1_orphan_refund_is_detected() {
     )))
     .await
     .unwrap();
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_refund \
          (tenant_id, refund_id, psp_refund_id, phase, pattern, payment_id, currency, \
           amount_minor, clearing_state, created_at_utc, version) \
@@ -719,7 +719,7 @@ async fn seed_unallocated_grain(
     let entry_id = Uuid::now_v7();
     let cash_account = Uuid::now_v7();
     let txn = raw.begin().await.unwrap();
-    txn.execute(pg(format!(
+    txn.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_journal_entry \
          (entry_id, tenant_id, legal_entity_id, period_id, entry_currency, source_doc_type, \
           source_business_id, posted_at_utc, effective_at, origin, posted_by_actor_id, \
@@ -733,7 +733,7 @@ async fn seed_unallocated_grain(
     // The CR UNALLOCATED leg (the grain the aged-unallocated scan reads): its
     // owning entry's `posted_at_utc` is the age proxy (the resolved G-P5a oldest
     // contributing line's post time).
-    txn.execute(pg(format!(
+    txn.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_journal_line \
          (line_id, entry_id, tenant_id, period_id, payer_tenant_id, account_id, account_class, \
           side, amount_minor, currency, currency_scale, mapping_status) \
@@ -744,7 +744,7 @@ async fn seed_unallocated_grain(
     .await
     .unwrap();
     // … and its balancing DR CASH_CLEARING leg, so the entry is zero-sum at COMMIT.
-    txn.execute(pg(format!(
+    txn.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_journal_line \
          (line_id, entry_id, tenant_id, period_id, payer_tenant_id, account_id, account_class, \
           side, amount_minor, currency, currency_scale, mapping_status) \
@@ -756,7 +756,7 @@ async fn seed_unallocated_grain(
     .unwrap();
     txn.commit().await.unwrap();
     // The open cache grain (`balance_minor`), keyed (tenant, payer, currency).
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_unallocated_balance \
          (tenant_id, payer_tenant_id, account_id, currency, balance_minor, version) \
          VALUES ('{tenant}', '{payer}', '{unallocated_account}', 'USD', {balance_minor}, 0)"
@@ -863,7 +863,7 @@ async fn seed_tax_subbalance(
     filing_period: &str,
     balance_minor: i64,
 ) {
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_tax_subbalance \
          (tenant_id, account_id, tax_jurisdiction, tax_filing_period, balance_minor, version) \
          VALUES ('{tenant}', '{account}', '{jurisdiction}', '{filing_period}', {balance_minor}, 0)"

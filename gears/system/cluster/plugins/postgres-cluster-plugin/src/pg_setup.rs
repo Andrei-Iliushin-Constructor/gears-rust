@@ -3,6 +3,7 @@
 //! [`crate::PostgresLockPlugin`] builders (DESIGN.md §3.2, §3.5).
 
 use cluster_sdk::ClusterError;
+use sqlx::AssertSqlSafe;
 use sqlx::PgConnection;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
@@ -103,7 +104,7 @@ pub fn validate_schema(schema: &str) -> Result<(), ClusterError> {
 /// `after_connect` (PGR-L4) so unqualified migration DDL creates its tables in
 /// the configured schema. `schema` must have passed [`validate_schema`].
 pub async fn set_search_path(conn: &mut PgConnection, schema: &str) -> Result<(), sqlx::Error> {
-    sqlx::query(&format!("SET search_path TO {schema}"))
+    sqlx::query(AssertSqlSafe(format!("SET search_path TO {schema}")))
         .execute(conn)
         .await?;
     Ok(())
@@ -117,10 +118,12 @@ pub async fn set_search_path(conn: &mut PgConnection, schema: &str) -> Result<()
 /// # Errors
 /// Propagates any connectivity/permission error creating the schema.
 pub async fn ensure_schema(pool: &sqlx::PgPool, schema: &str) -> Result<(), ClusterError> {
-    sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
-        .execute(pool)
-        .await
-        .map_err(map_sqlx_error)?;
+    sqlx::query(AssertSqlSafe(format!(
+        "CREATE SCHEMA IF NOT EXISTS {schema}"
+    )))
+    .execute(pool)
+    .await
+    .map_err(map_sqlx_error)?;
     Ok(())
 }
 

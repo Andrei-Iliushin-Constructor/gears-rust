@@ -17,6 +17,7 @@ use cluster_sdk::cache::{PutRequest, Ttl};
 use cluster_sdk::error::ClusterError;
 use postgres_cluster_plugin::{PostgresClusterPlugin, PostgresLockPlugin};
 use serde_json::json;
+use sqlx::AssertSqlSafe;
 
 /// `PG-SPEC-001`: an empty-payload `NOTIFY` on `cluster_cache_changes`
 /// (Postgres's own overflow signal, DESIGN.md §2.3/§4.3) is interpreted as
@@ -693,13 +694,13 @@ async fn pg_spec_009_expired_backlog_swept_in_bounded_batches() {
     // to drain the metadata table. The beacon columns carry an arbitrary key no
     // live instance holds, which is exactly what a dead foreign incarnation's
     // rows look like (DESIGN.md §5.1).
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO {schema}.cluster_lock \
          (name, holder_id, acquired_at, expires_at, holder_beacon_hi, holder_beacon_lo) \
          SELECT 'spec9-' || g, md5('spec9-' || g)::uuid, now() - interval '2 minutes', \
                 now() - interval '1 minute', 1, 1 \
          FROM generate_series(1, {BACKLOG}) AS g"
-    ))
+    )))
     .execute(&control_pool)
     .await
     .expect("seed the expired backlog");
@@ -719,11 +720,12 @@ async fn pg_spec_009_expired_backlog_swept_in_bounded_batches() {
          backlog is gone, not stop after one bounded DELETE"
     );
 
-    let remaining: Vec<String> =
-        sqlx::query_scalar(&format!("SELECT name FROM {schema}.cluster_lock"))
-            .fetch_all(&control_pool)
-            .await
-            .expect("count remaining rows");
+    let remaining: Vec<String> = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT name FROM {schema}.cluster_lock"
+    )))
+    .fetch_all(&control_pool)
+    .await
+    .expect("count remaining rows");
     assert_eq!(
         remaining,
         vec!["spec9-live".to_owned()],

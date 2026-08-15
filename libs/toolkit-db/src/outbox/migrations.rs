@@ -1,4 +1,4 @@
-use sea_orm::{ConnectionTrait, DatabaseBackend, DbErr, Statement};
+use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseExecutor, DbErr, Statement};
 use sea_orm_migration::prelude::*;
 
 use super::tables::OutboxTables;
@@ -77,7 +77,7 @@ impl MigrationTrait for CreateOutboxSchema {
             self.tables.partitions(),
             self.tables.body(),
         ] {
-            conn.execute(Statement::from_string(
+            conn.execute_raw(Statement::from_string(
                 backend,
                 format!("DROP TABLE IF EXISTS {table}"),
             ))
@@ -87,13 +87,26 @@ impl MigrationTrait for CreateOutboxSchema {
     }
 }
 
+/// Error for a database backend the outbox schema has no DDL for.
+///
+/// `DatabaseBackend` is `#[non_exhaustive]` as of `SeaORM` 2.0, so every DDL
+/// helper below needs a fallback arm. Returning an error (rather than picking a
+/// dialect) keeps us from creating outbox tables with SQL meant for a different
+/// engine.
+fn unsupported_backend(backend: DatabaseBackend) -> DbErr {
+    DbErr::Custom(format!(
+        "outbox migrations support Postgres, SQLite and MySQL only; \
+         got unsupported database backend {backend:?}"
+    ))
+}
+
 async fn create_body(
-    conn: &dyn ConnectionTrait,
+    conn: &DatabaseExecutor<'_>,
     backend: DatabaseBackend,
     tables: &OutboxTables,
 ) -> Result<(), DbErr> {
     let body_table = tables.body();
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         backend,
         match backend {
             DatabaseBackend::Postgres => {
@@ -126,6 +139,7 @@ async fn create_body(
             )"
                 )
             }
+            _ => return Err(unsupported_backend(backend)),
         },
     ))
     .await?;
@@ -133,12 +147,12 @@ async fn create_body(
 }
 
 async fn create_partitions(
-    conn: &dyn ConnectionTrait,
+    conn: &DatabaseExecutor<'_>,
     backend: DatabaseBackend,
     tables: &OutboxTables,
 ) -> Result<(), DbErr> {
     let partitions = tables.partitions();
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         backend,
         match backend {
             DatabaseBackend::Postgres => {
@@ -174,6 +188,7 @@ async fn create_partitions(
             )"
                 )
             }
+            _ => return Err(unsupported_backend(backend)),
         },
     ))
     .await?;
@@ -181,14 +196,14 @@ async fn create_partitions(
 }
 
 async fn create_incoming(
-    conn: &dyn ConnectionTrait,
+    conn: &DatabaseExecutor<'_>,
     backend: DatabaseBackend,
     tables: &OutboxTables,
 ) -> Result<(), DbErr> {
     let incoming = tables.incoming();
     let partitions = tables.partitions();
     let body_table = tables.body();
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         backend,
         match backend {
             DatabaseBackend::Postgres => {
@@ -220,11 +235,12 @@ async fn create_incoming(
             )"
                 )
             }
+            _ => return Err(unsupported_backend(backend)),
         },
     ))
     .await?;
 
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         backend,
         format!(
             "CREATE INDEX {} ON {} (partition_id, id)",
@@ -236,7 +252,7 @@ async fn create_incoming(
 
     // Index on body_id to accelerate FK constraint checks during
     // DELETE FROM outbox body WHERE id IN (...).
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         backend,
         format!(
             "CREATE INDEX {} ON {} (body_id)",
@@ -249,14 +265,14 @@ async fn create_incoming(
 }
 
 async fn create_outgoing(
-    conn: &dyn ConnectionTrait,
+    conn: &DatabaseExecutor<'_>,
     backend: DatabaseBackend,
     tables: &OutboxTables,
 ) -> Result<(), DbErr> {
     let outgoing = tables.outgoing();
     let partitions = tables.partitions();
     let body_table = tables.body();
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         backend,
         match backend {
             DatabaseBackend::Postgres => {
@@ -294,11 +310,12 @@ async fn create_outgoing(
             )"
                 )
             }
+            _ => return Err(unsupported_backend(backend)),
         },
     ))
     .await?;
 
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         backend,
         format!(
             "CREATE UNIQUE INDEX {} ON {} (partition_id, seq)",
@@ -310,7 +327,7 @@ async fn create_outgoing(
 
     // Index on body_id to accelerate FK constraint checks during
     // DELETE FROM outbox body WHERE id IN (...).
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         backend,
         format!(
             "CREATE INDEX {} ON {} (body_id)",
@@ -323,13 +340,13 @@ async fn create_outgoing(
 }
 
 async fn create_dead_letters(
-    conn: &dyn ConnectionTrait,
+    conn: &DatabaseExecutor<'_>,
     backend: DatabaseBackend,
     tables: &OutboxTables,
 ) -> Result<(), DbErr> {
     let dead_letters = tables.dead_letters();
     let partitions = tables.partitions();
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         backend,
         match backend {
             DatabaseBackend::Postgres => {
@@ -387,12 +404,13 @@ async fn create_dead_letters(
             )"
                 )
             }
+            _ => return Err(unsupported_backend(backend)),
         },
     ))
     .await?;
 
     // Index for replay query (status = 'pending' OR (status = 'reprocessing' AND deadline < now()))
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         backend,
         match backend {
             DatabaseBackend::Postgres => {
@@ -409,12 +427,13 @@ async fn create_dead_letters(
                     tables.dead_letters()
                 )
             }
+            _ => return Err(unsupported_backend(backend)),
         },
     ))
     .await?;
 
     // Index for list queries with status filter + ORDER BY failed_at DESC
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         backend,
         match backend {
             DatabaseBackend::Postgres => {
@@ -431,6 +450,7 @@ async fn create_dead_letters(
                     tables.dead_letters()
                 )
             }
+            _ => return Err(unsupported_backend(backend)),
         },
     ))
     .await?;
@@ -438,13 +458,13 @@ async fn create_dead_letters(
 }
 
 async fn create_processor(
-    conn: &dyn ConnectionTrait,
+    conn: &DatabaseExecutor<'_>,
     backend: DatabaseBackend,
     tables: &OutboxTables,
 ) -> Result<(), DbErr> {
     let processor = tables.processor();
     let partitions = tables.partitions();
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         backend,
         match backend {
             DatabaseBackend::Postgres => {
@@ -484,6 +504,7 @@ async fn create_processor(
             )"
                 )
             }
+            _ => return Err(unsupported_backend(backend)),
         },
     ))
     .await?;
@@ -491,13 +512,13 @@ async fn create_processor(
 }
 
 async fn create_vacuum_counter(
-    conn: &dyn ConnectionTrait,
+    conn: &DatabaseExecutor<'_>,
     backend: DatabaseBackend,
     tables: &OutboxTables,
 ) -> Result<(), DbErr> {
     let vacuum_counter = tables.vacuum_counter();
     let partitions = tables.partitions();
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         backend,
         match backend {
             DatabaseBackend::Postgres => {
@@ -527,6 +548,7 @@ async fn create_vacuum_counter(
             )"
                 )
             }
+            _ => return Err(unsupported_backend(backend)),
         },
     ))
     .await?;
@@ -534,7 +556,7 @@ async fn create_vacuum_counter(
 }
 
 async fn create_mysql_id_sequence_tables(
-    conn: &dyn ConnectionTrait,
+    conn: &DatabaseExecutor<'_>,
     backend: DatabaseBackend,
     tables: &OutboxTables,
 ) -> Result<(), DbErr> {
@@ -543,12 +565,12 @@ async fn create_mysql_id_sequence_tables(
     }
 
     for table in [tables.body_id_sequence(), tables.incoming_id_sequence()] {
-        conn.execute(Statement::from_string(
+        conn.execute_raw(Statement::from_string(
             backend,
             mysql_create_id_sequence_sql(table),
         ))
         .await?;
-        conn.execute(Statement::from_string(
+        conn.execute_raw(Statement::from_string(
             backend,
             mysql_seed_id_sequence_sql(table),
         ))

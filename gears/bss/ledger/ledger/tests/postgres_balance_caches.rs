@@ -46,7 +46,7 @@ async fn account_balance_rejects_negative_ar() {
     let account_id = Uuid::new_v4();
 
     let err = db
-        .execute(exec(format!(
+        .execute_raw(exec(format!(
             "INSERT INTO bss.ledger_account_balance
                 (tenant_id, account_id, currency, account_class, normal_side, balance_minor)
              VALUES ('{tenant_id}', '{account_id}', 'USD', 'AR', 'DR', -5)"
@@ -68,7 +68,7 @@ async fn account_balance_allows_negative_revenue() {
 
     // REVENUE is not in the no-negative class set; a credit-normal balance
     // may legitimately be negative on the cache row's signed convention.
-    db.execute(exec(format!(
+    db.execute_raw(exec(format!(
         "INSERT INTO bss.ledger_account_balance
             (tenant_id, account_id, currency, account_class, normal_side, balance_minor)
          VALUES ('{tenant_id}', '{account_id}', 'USD', 'REVENUE', 'CR', -100)"
@@ -84,7 +84,7 @@ async fn tax_subbalance_allows_negative() {
     let tenant_id = Uuid::new_v4();
     let account_id = Uuid::new_v4();
 
-    db.execute(exec(format!(
+    db.execute_raw(exec(format!(
         "INSERT INTO bss.ledger_tax_subbalance
             (tenant_id, account_id, tax_jurisdiction, tax_filing_period, balance_minor)
          VALUES ('{tenant_id}', '{account_id}', 'US-CA', '2026Q2', -42)"

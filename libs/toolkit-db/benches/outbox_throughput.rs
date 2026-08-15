@@ -1198,17 +1198,17 @@ async fn cleanup_outbox_tables(db_url: &str, profile: &BenchProfile) {
         for table in table_family(prefix) {
             let sql = match backend {
                 sea_orm::DbBackend::Postgres => format!("TRUNCATE TABLE {table} CASCADE"),
-                sea_orm::DbBackend::Sqlite | sea_orm::DbBackend::MySql => {
-                    format!("DELETE FROM {table}")
-                }
+                // `DbBackend` is `#[non_exhaustive]` as of SeaORM 2.0; plain
+                // DELETE is the portable fallback for a bench cleanup.
+                _ => format!("DELETE FROM {table}"),
             };
-            db.execute(Statement::from_string(backend, sql))
+            db.execute_raw(Statement::from_string(backend, sql))
                 .await
                 .unwrap();
         }
         if backend == sea_orm::DbBackend::MySql {
             for table in sequence_tables(prefix) {
-                db.execute(Statement::from_string(
+                db.execute_raw(Statement::from_string(
                     backend,
                     format!("UPDATE {table} SET next_id = 1 WHERE slot = 1"),
                 ))

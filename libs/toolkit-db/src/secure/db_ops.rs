@@ -18,13 +18,13 @@ use crate::secure::{
 fn sea_value_to_scope_value(v: &sea_orm::Value) -> Option<toolkit_security::ScopeValue> {
     use toolkit_security::ScopeValue;
     match v {
-        sea_orm::Value::Uuid(Some(u)) => Some(ScopeValue::Uuid(**u)),
+        sea_orm::Value::Uuid(Some(u)) => Some(ScopeValue::Uuid(*u)),
         sea_orm::Value::String(Some(s)) => {
             // Try UUID first for consistent matching
             if let Ok(uuid) = uuid::Uuid::parse_str(s) {
                 Some(ScopeValue::Uuid(uuid))
             } else {
-                Some(ScopeValue::String(s.to_string()))
+                Some(ScopeValue::String(s.clone()))
             }
         }
         sea_orm::Value::BigInt(Some(n)) => Some(ScopeValue::Int(*n)),
@@ -237,14 +237,13 @@ where
     };
 
     if let Some(tcol) = E::tenant_col() {
-        let stored = match existing.get(tcol) {
-            sea_orm::Value::Uuid(Some(u)) => *u,
-            _ => return Err(ScopeError::Invalid("tenant_id has unexpected type")),
+        let sea_orm::Value::Uuid(Some(stored)) = existing.get(tcol) else {
+            return Err(ScopeError::Invalid("tenant_id has unexpected type"));
         };
 
         let incoming = match am.get(tcol) {
             sea_orm::ActiveValue::Set(v) | sea_orm::ActiveValue::Unchanged(v) => match v {
-                sea_orm::Value::Uuid(Some(u)) => Some(*u),
+                sea_orm::Value::Uuid(Some(u)) => Some(u),
                 sea_orm::Value::Uuid(None) => {
                     return Err(ScopeError::Invalid("tenant_id is required"));
                 }
@@ -502,6 +501,163 @@ where
     /// validation that was applied during `.scope_with_model()` / `.scope_unchecked()`.
     #[must_use]
     pub fn into_inner(self) -> sea_orm::Insert<A> {
+        self.inner
+    }
+}
+
+/// Secure wrapper around a multi-row `SeaORM` insert.
+///
+/// `SeaORM` 2.0 split `Entity::insert_many` out of `Insert<A>` into its own
+/// `InsertMany<A>` builder, so the single-row [`SecureInsertOne`] wrapper no
+/// longer covers it. This is the multi-row counterpart, with the same
+/// `Unscoped` -> `Scoped` type-state so a batch insert cannot be executed
+/// before a scope decision has been made.
+///
+/// Unlike [`SecureInsertOne`], there is no `scope_with_model` equivalent:
+/// `InsertMany` has already lowered its rows into an `InsertStatement` and does
+/// not hand back the `ActiveModel`s, so per-row validation is not possible
+/// here. Callers that need validated rows should scope each row through
+/// [`SecureInsertOne`] instead.
+pub struct SecureInsertMany<A, S>
+where
+    A: ActiveModelTrait,
+{
+    pub(crate) inner: sea_orm::InsertMany<A>,
+    pub(crate) _state: PhantomData<S>,
+}
+
+/// Extension trait to convert a `SeaORM` `InsertMany` into a `SecureInsertMany`.
+pub trait SecureInsertManyExt<A: ActiveModelTrait>: Sized {
+    /// Convert this batch insert into a secure (unscoped) insert.
+    /// You must call `.scope_unchecked()` before executing.
+    fn secure(self) -> SecureInsertMany<A, Unscoped>;
+}
+
+impl<A> SecureInsertManyExt<A> for sea_orm::InsertMany<A>
+where
+    A: ActiveModelTrait,
+{
+    fn secure(self) -> SecureInsertMany<A, Unscoped> {
+        SecureInsertMany {
+            inner: self,
+            _state: PhantomData,
+        }
+    }
+}
+
+impl<A> SecureInsertMany<A, Unscoped>
+where
+    A: ActiveModelTrait + Send,
+    A::Entity: ScopableEntity + EntityTrait,
+    <A::Entity as EntityTrait>::Column: ColumnTrait + Copy,
+{
+    /// Transition to `Scoped` **without** validating the rows against the scope.
+    ///
+    /// # Safety (logical)
+    ///
+    /// Performs no validation — see the type-level note on why per-row
+    /// validation is unavailable for batch inserts. The caller is responsible
+    /// for ensuring every row satisfies the scope. This is the appropriate mode
+    /// for entities declared `no_tenant`/`no_resource`/`no_owner`/`no_type`
+    /// (e.g. cross-tenant closure tables).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScopeError`] if the access scope cannot be applied.
+    pub fn scope_unchecked(
+        self,
+        scope: &AccessScope,
+    ) -> Result<SecureInsertMany<A, Scoped>, ScopeError> {
+        if scope.is_deny_all() {
+            return Err(ScopeError::Denied(
+                "insert denied: scope has no constraints",
+            ));
+        }
+        Ok(SecureInsertMany {
+            inner: self.inner,
+            _state: PhantomData,
+        })
+    }
+}
+
+impl<A> SecureInsertMany<A, Scoped>
+where
+    A: ActiveModelTrait,
+    A::Entity: ScopableEntity + EntityTrait,
+    <A::Entity as EntityTrait>::Column: ColumnTrait + Copy,
+{
+    /// Set the `ON CONFLICT` clause using [`SecureOnConflict`], which enforces
+    /// tenant immutability.
+    #[must_use]
+    pub fn on_conflict(mut self, on_conflict: SecureOnConflict<A::Entity>) -> Self {
+        self.inner = self.inner.on_conflict(on_conflict.build());
+        self
+    }
+
+    /// Set the `ON CONFLICT` clause using raw `SeaORM` `OnConflict`.
+    ///
+    /// # Safety
+    ///
+    /// Bypasses tenant-immutability validation; the caller must ensure
+    /// `tenant_id` is not among the update columns. Prefer
+    /// [`on_conflict`](Self::on_conflict).
+    #[must_use]
+    pub fn on_conflict_raw(mut self, on_conflict: OnConflict) -> Self {
+        self.inner = self.inner.on_conflict(on_conflict);
+        self
+    }
+}
+
+impl<A> SecureInsertMany<A, Scoped>
+where
+    A: ActiveModelTrait,
+{
+    /// Execute the batch insert.
+    ///
+    /// Note the `SeaORM` 2.0 semantics: an empty row set is **not** an error, it
+    /// yields `InsertManyResult { last_insert_id: None }`.
+    ///
+    /// # Errors
+    /// Returns `ScopeError::Db` if the database operation fails.
+    #[allow(clippy::disallowed_methods)]
+    pub async fn exec<C>(self, runner: &C) -> Result<sea_orm::InsertManyResult<A>, ScopeError>
+    where
+        C: DBRunner,
+        A: Send,
+    {
+        match DBRunnerInternal::as_seaorm(runner) {
+            SeaOrmRunner::Conn(db) => Ok(self.inner.exec(db).await?),
+            SeaOrmRunner::Tx(tx) => Ok(self.inner.exec(tx).await?),
+        }
+    }
+
+    /// Execute the batch insert and return the inserted models.
+    ///
+    /// # Errors
+    /// Returns `ScopeError::Db` if the database operation fails.
+    #[allow(clippy::disallowed_methods)]
+    pub async fn exec_with_returning<C>(
+        self,
+        runner: &C,
+    ) -> Result<Vec<<A::Entity as EntityTrait>::Model>, ScopeError>
+    where
+        C: DBRunner,
+        A: Send,
+        <A::Entity as EntityTrait>::Model: IntoActiveModel<A>,
+    {
+        match DBRunnerInternal::as_seaorm(runner) {
+            SeaOrmRunner::Conn(db) => Ok(self.inner.exec_with_returning(db).await?),
+            SeaOrmRunner::Tx(tx) => Ok(self.inner.exec_with_returning(tx).await?),
+        }
+    }
+
+    /// Unwrap the inner `SeaORM` `InsertMany` for advanced use cases.
+    ///
+    /// # Safety
+    /// The caller must ensure they don't remove or bypass the security
+    /// decision applied during `.scope_unchecked()`.
+    #[must_use]
+    pub fn into_inner(self) -> sea_orm::InsertMany<A> {
         self.inner
     }
 }

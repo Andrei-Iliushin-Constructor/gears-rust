@@ -235,7 +235,7 @@ async fn setup(
         .await
         .unwrap();
 
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_fiscal_period (tenant_id, legal_entity_id, period_id, fiscal_tz, status)
          VALUES ('{tenant}','{legal_entity}','{period_id}','UTC','OPEN')"
     )))
@@ -426,7 +426,7 @@ async fn run_over_drifted_tenant_emits_alarm() {
 
     // Corrupt the AR balance cache grain (add 1 so no-negative check stays
     // satisfied while creating a variance for the tie-out).
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "UPDATE bss.ledger_account_balance SET balance_minor = balance_minor + 1 \
          WHERE tenant_id='{}' AND account_id='{}' AND currency='USD'",
         f.tenant, f.ar_account
@@ -1036,7 +1036,7 @@ async fn incremental_tie_out_equals_full_across_periods() {
     service.post(&ctx, &scope, e1, l1, None).await.unwrap();
 
     // Close period 1 and snapshot its verified baseline (mirrors period-close).
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "UPDATE bss.ledger_fiscal_period SET status='CLOSED' \
          WHERE tenant_id='{}' AND period_id='{}'",
         f.tenant, f.period_id
@@ -1050,7 +1050,7 @@ async fn incremental_tie_out_equals_full_across_periods() {
         .expect("snapshot baseline at close");
 
     // Open period 2 and post into it.
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_fiscal_period (tenant_id, legal_entity_id, period_id, fiscal_tz, status) \
          VALUES ('{}','{}','202607','UTC','OPEN')",
         f.tenant, f.legal_entity

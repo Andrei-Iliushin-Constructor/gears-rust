@@ -38,7 +38,7 @@ fn pg(sql: impl Into<String>) -> Statement {
 
 /// Hex string of a single-column, single-row SELECT, `None` when absent/NULL.
 async fn scalar_hex(conn: &DatabaseConnection, sql: &str) -> Option<String> {
-    let row = conn.query_one(pg(sql.to_owned())).await.unwrap();
+    let row = conn.query_one_raw(pg(sql.to_owned())).await.unwrap();
     row.and_then(|r| r.try_get_by_index::<Option<String>>(0).unwrap())
 }
 
@@ -159,7 +159,7 @@ async fn appends_first_record_sealed_with_genesis_prev() {
     );
 
     let tip_points: i64 = raw
-        .query_one(pg(format!(
+        .query_one_raw(pg(format!(
             "SELECT COUNT(*) FROM bss.audit_chain_state \
              WHERE tenant_id='{tenant}' AND last_audit_id='{audit_id}' AND last_seq=1"
         )))
@@ -229,7 +229,7 @@ async fn links_second_record_to_first() {
     );
 
     let tip_seq: i64 = raw
-        .query_one(pg(format!(
+        .query_one_raw(pg(format!(
             "SELECT last_seq FROM bss.audit_chain_state WHERE tenant_id='{tenant}'"
         )))
         .await
@@ -262,7 +262,7 @@ async fn append_only_trigger_rejects_update_and_delete() {
     .await;
 
     let upd = raw
-        .execute(pg(format!(
+        .execute_raw(pg(format!(
             "UPDATE bss.secured_audit_record SET reason_code='X' WHERE audit_id='{audit_id}'"
         )))
         .await;
@@ -273,7 +273,7 @@ async fn append_only_trigger_rejects_update_and_delete() {
     );
 
     let del = raw
-        .execute(pg(format!(
+        .execute_raw(pg(format!(
             "DELETE FROM bss.secured_audit_record WHERE audit_id='{audit_id}'"
         )))
         .await;
@@ -335,7 +335,7 @@ async fn rewalk_detects_tamper() {
     // epoch-seconds product and the bigint cast are lossless — the recompute
     // matches the seal exactly.
     let row = raw
-        .query_one(pg(format!(
+        .query_one_raw(pg(format!(
             "SELECT event_type, actor_ref, reason_code, before_after::text, \
                     correlation_id::text, (EXTRACT(epoch FROM at_utc) * 1000000)::bigint \
              FROM bss.secured_audit_record WHERE audit_id='{first}'"
@@ -376,19 +376,19 @@ async fn rewalk_detects_tamper() {
 
     // Tamper the first record's row_hash out-of-band (the append-only trigger
     // forbids any UPDATE, so disable it for the tamper and re-enable after).
-    raw.execute(pg(
+    raw.execute_raw(pg(
         "ALTER TABLE bss.secured_audit_record DISABLE TRIGGER trg_secured_audit_append_only",
     ))
     .await
     .unwrap();
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "UPDATE bss.secured_audit_record \
          SET row_hash = decode('deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef','hex') \
          WHERE audit_id='{first}'"
     )))
     .await
     .unwrap();
-    raw.execute(pg(
+    raw.execute_raw(pg(
         "ALTER TABLE bss.secured_audit_record ENABLE TRIGGER trg_secured_audit_append_only",
     ))
     .await
@@ -411,7 +411,7 @@ async fn rewalk_detects_tamper() {
 
 /// Collect a single text column over many rows into a `Vec<String>`.
 async fn fetch_hex_set(conn: &DatabaseConnection, sql: &str) -> Vec<String> {
-    conn.query_all(pg(sql.to_owned()))
+    conn.query_all_raw(pg(sql.to_owned()))
         .await
         .unwrap()
         .into_iter()
@@ -527,7 +527,7 @@ async fn concurrent_appends_form_linear_audit_chain() {
 
     // The tip advanced exactly N times.
     let tip_seq: i64 = raw
-        .query_one(pg(format!(
+        .query_one_raw(pg(format!(
             "SELECT last_seq FROM bss.audit_chain_state WHERE tenant_id='{tenant}'"
         )))
         .await

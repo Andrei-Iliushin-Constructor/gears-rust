@@ -28,7 +28,7 @@ async fn migrator_creates_bss_schema() {
     Migrator::up(&db, None).await.unwrap();
 
     let row = db
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             db.get_database_backend(),
             "SELECT schema_name FROM information_schema.schemata WHERE schema_name = 'bss'"
                 .to_owned(),

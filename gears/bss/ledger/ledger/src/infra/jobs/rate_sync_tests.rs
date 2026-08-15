@@ -204,7 +204,7 @@ async fn fans_rates_out_to_every_provisioned_tenant() {
     let tenant_a = Uuid::now_v7();
     let tenant_b = Uuid::now_v7();
     for t in [tenant_a, tenant_b] {
-        raw.execute(pg(format!(
+        raw.execute_raw(pg(format!(
             "INSERT INTO bss.ledger_fiscal_calendar
                (tenant_id, legal_entity_id, fiscal_tz, granularity, fy_start_month)
              VALUES ('{t}','{t}','UTC','MONTH',1)"

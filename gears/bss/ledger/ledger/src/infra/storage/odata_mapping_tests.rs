@@ -148,7 +148,7 @@ fn account_info_cursor_account_id_is_uuid() {
     let model = sample_tenant_account();
     let val =
         AccountInfoODataMapper::extract_cursor_value(&model, AccountInfoFilterField::AccountId);
-    assert_eq!(val, sea_orm::Value::Uuid(Some(Box::new(model.account_id))));
+    assert_eq!(val, sea_orm::Value::Uuid(Some(model.account_id)));
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn account_info_cursor_account_class_is_string() {
     let model = sample_tenant_account();
     let val =
         AccountInfoODataMapper::extract_cursor_value(&model, AccountInfoFilterField::AccountClass);
-    assert_eq!(val, sea_orm::Value::String(Some(Box::new("AR".to_owned()))));
+    assert_eq!(val, sea_orm::Value::String(Some("AR".to_owned())));
 }
 
 #[test]
@@ -164,10 +164,7 @@ fn account_info_cursor_currency_is_string() {
     let model = sample_tenant_account();
     let val =
         AccountInfoODataMapper::extract_cursor_value(&model, AccountInfoFilterField::Currency);
-    assert_eq!(
-        val,
-        sea_orm::Value::String(Some(Box::new("USD".to_owned()))),
-    );
+    assert_eq!(val, sea_orm::Value::String(Some("USD".to_owned())),);
 }
 
 #[test]
@@ -175,10 +172,7 @@ fn account_info_cursor_revenue_stream_some() {
     let model = sample_tenant_account();
     let val =
         AccountInfoODataMapper::extract_cursor_value(&model, AccountInfoFilterField::RevenueStream);
-    assert_eq!(
-        val,
-        sea_orm::Value::String(Some(Box::new("SAAS".to_owned()))),
-    );
+    assert_eq!(val, sea_orm::Value::String(Some("SAAS".to_owned())),);
 }
 
 #[test]
@@ -197,10 +191,7 @@ fn account_info_cursor_lifecycle_state_is_string() {
         &model,
         AccountInfoFilterField::LifecycleState,
     );
-    assert_eq!(
-        val,
-        sea_orm::Value::String(Some(Box::new("active".to_owned()))),
-    );
+    assert_eq!(val, sea_orm::Value::String(Some("active".to_owned())),);
 }
 
 // ---------------------------------------------------------------------------
@@ -255,7 +246,7 @@ fn journal_line_map_invoice_id() {
 fn journal_line_cursor_line_id_is_uuid() {
     let model = sample_journal_line();
     let val = JournalLineODataMapper::extract_cursor_value(&model, JournalLineFilterField::LineId);
-    assert_eq!(val, sea_orm::Value::Uuid(Some(Box::new(model.line_id))));
+    assert_eq!(val, sea_orm::Value::Uuid(Some(model.line_id)));
 }
 
 #[test]
@@ -263,10 +254,7 @@ fn journal_line_cursor_payer_tenant_id_is_uuid() {
     let model = sample_journal_line();
     let val =
         JournalLineODataMapper::extract_cursor_value(&model, JournalLineFilterField::PayerTenantId);
-    assert_eq!(
-        val,
-        sea_orm::Value::Uuid(Some(Box::new(Uuid::from_u128(0x3B)))),
-    );
+    assert_eq!(val, sea_orm::Value::Uuid(Some(Uuid::from_u128(0x3B))),);
 }
 
 #[test]
@@ -274,7 +262,7 @@ fn journal_line_cursor_account_class_is_string() {
     let model = sample_journal_line();
     let val =
         JournalLineODataMapper::extract_cursor_value(&model, JournalLineFilterField::AccountClass);
-    assert_eq!(val, sea_orm::Value::String(Some(Box::new("AR".to_owned()))));
+    assert_eq!(val, sea_orm::Value::String(Some("AR".to_owned())));
 }
 
 #[test]
@@ -282,10 +270,7 @@ fn journal_line_cursor_period_id_is_string() {
     let model = sample_journal_line();
     let val =
         JournalLineODataMapper::extract_cursor_value(&model, JournalLineFilterField::PeriodId);
-    assert_eq!(
-        val,
-        sea_orm::Value::String(Some(Box::new("2025-01".to_owned()))),
-    );
+    assert_eq!(val, sea_orm::Value::String(Some("2025-01".to_owned())),);
 }
 
 #[test]
@@ -293,10 +278,7 @@ fn journal_line_cursor_invoice_id_some() {
     let model = sample_journal_line();
     let val =
         JournalLineODataMapper::extract_cursor_value(&model, JournalLineFilterField::InvoiceId);
-    assert_eq!(
-        val,
-        sea_orm::Value::String(Some(Box::new("INV-001".to_owned()))),
-    );
+    assert_eq!(val, sea_orm::Value::String(Some("INV-001".to_owned())),);
 }
 
 #[test]
@@ -344,28 +326,19 @@ fn balance_map_currency() {
 fn balance_cursor_account_id_is_uuid() {
     let model = sample_account_balance();
     let val = BalanceODataMapper::extract_cursor_value(&model, BalanceFilterField::AccountId);
-    assert_eq!(
-        val,
-        sea_orm::Value::Uuid(Some(Box::new(Uuid::from_u128(0xB1)))),
-    );
+    assert_eq!(val, sea_orm::Value::Uuid(Some(Uuid::from_u128(0xB1))),);
 }
 
 #[test]
 fn balance_cursor_account_class_is_string() {
     let model = sample_account_balance();
     let val = BalanceODataMapper::extract_cursor_value(&model, BalanceFilterField::AccountClass);
-    assert_eq!(
-        val,
-        sea_orm::Value::String(Some(Box::new("REVENUE".to_owned()))),
-    );
+    assert_eq!(val, sea_orm::Value::String(Some("REVENUE".to_owned())),);
 }
 
 #[test]
 fn balance_cursor_currency_is_string() {
     let model = sample_account_balance();
     let val = BalanceODataMapper::extract_cursor_value(&model, BalanceFilterField::Currency);
-    assert_eq!(
-        val,
-        sea_orm::Value::String(Some(Box::new("GBP".to_owned()))),
-    );
+    assert_eq!(val, sea_orm::Value::String(Some("GBP".to_owned())),);
 }

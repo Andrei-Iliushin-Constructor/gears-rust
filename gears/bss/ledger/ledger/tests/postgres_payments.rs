@@ -262,13 +262,13 @@ async fn list_open_ar_invoices_filters_and_orders() {
                      {balance}, '{posted}')"
         ))
     };
-    raw.execute(insert("inv-late", 800, "2026-02-01T00:00:00Z"))
+    raw.execute_raw(insert("inv-late", 800, "2026-02-01T00:00:00Z"))
         .await
         .unwrap();
-    raw.execute(insert("inv-early", 300, "2026-01-01T00:00:00Z"))
+    raw.execute_raw(insert("inv-early", 300, "2026-01-01T00:00:00Z"))
         .await
         .unwrap();
-    raw.execute(insert("inv-paid", 0, "2026-01-15T00:00:00Z"))
+    raw.execute_raw(insert("inv-paid", 0, "2026-01-15T00:00:00Z"))
         .await
         .unwrap();
 
@@ -315,7 +315,7 @@ async fn bump_allocation_refund_nets_and_caps() {
 
     let allocated: i64 = {
         let row = raw
-            .query_one(pg(format!(
+            .query_one_raw(pg(format!(
                 "SELECT allocated_minor FROM bss.ledger_payment_allocation_refund
                  WHERE tenant_id='{tenant}' AND payment_id='{payment_id}' AND invoice_id='inv-a'"
             )))
@@ -329,14 +329,14 @@ async fn bump_allocation_refund_nets_and_caps() {
     // Drive refunded_minor up to allocated (500) directly, then a further
     // refund would break refunded_minor <= allocated_minor — verifying the
     // CHECK exists on the table (the refund increment is Slice 3's path).
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "UPDATE bss.ledger_payment_allocation_refund SET refunded_minor = 500
          WHERE tenant_id='{tenant}' AND payment_id='{payment_id}' AND invoice_id='inv-a'"
     )))
     .await
     .expect("refunded_minor = allocated_minor is allowed");
     let err = raw
-        .execute(pg(format!(
+        .execute_raw(pg(format!(
             "UPDATE bss.ledger_payment_allocation_refund SET refunded_minor = 600
              WHERE tenant_id='{tenant}' AND payment_id='{payment_id}' AND invoice_id='inv-a'"
         )))
@@ -411,7 +411,7 @@ async fn setup_seller(raw: &sea_orm::DatabaseConnection, provider: &DBProvider<D
         })
         .await
         .unwrap();
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_fiscal_period (tenant_id, legal_entity_id, period_id, fiscal_tz, status)
          VALUES ('{}','{}','{}','UTC','OPEN')",
         s.tenant, s.tenant, s.period_id
@@ -488,7 +488,7 @@ async fn account_balance(
     s: &Seller,
     account: Uuid,
 ) -> Option<i64> {
-    raw.query_one(pg(format!(
+    raw.query_one_raw(pg(format!(
         "SELECT balance_minor FROM bss.ledger_account_balance \
          WHERE tenant_id='{}' AND account_id='{}' AND currency='USD'",
         s.tenant, account
@@ -503,7 +503,7 @@ async fn ar_invoice_balance(
     s: &Seller,
     invoice_id: &str,
 ) -> Option<i64> {
-    raw.query_one(pg(format!(
+    raw.query_one_raw(pg(format!(
         "SELECT balance_minor FROM bss.ledger_ar_invoice_balance \
          WHERE tenant_id='{}' AND invoice_id='{}'",
         s.tenant, invoice_id
@@ -514,7 +514,7 @@ async fn ar_invoice_balance(
 }
 
 async fn count_allocations(raw: &sea_orm::DatabaseConnection, s: &Seller, payment_id: &str) -> i64 {
-    raw.query_one(pg(format!(
+    raw.query_one_raw(pg(format!(
         "SELECT COUNT(*) FROM bss.ledger_payment_allocation \
          WHERE tenant_id='{}' AND payment_id='{}'",
         s.tenant, payment_id
@@ -530,7 +530,7 @@ async fn allocation_refund(
     payment_id: &str,
     invoice_id: &str,
 ) -> Option<i64> {
-    raw.query_one(pg(format!(
+    raw.query_one_raw(pg(format!(
         "SELECT allocated_minor FROM bss.ledger_payment_allocation_refund \
          WHERE tenant_id='{}' AND payment_id='{}' AND invoice_id='{}'",
         s.tenant, payment_id, invoice_id
@@ -1288,7 +1288,7 @@ async fn payment_grains_are_invisible_to_a_foreign_tenant_scope() {
     // (`reusable_credit_subbalance`) is the most sensitive.
     let acct = Uuid::now_v7();
     let ts = Utc::now().to_rfc3339();
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_reusable_credit_subbalance \
          (tenant_id, payer_tenant_id, account_id, currency, credit_grant_event_type, \
           first_granted_at, balance_minor, version) \
@@ -1296,14 +1296,14 @@ async fn payment_grains_are_invisible_to_a_foreign_tenant_scope() {
     )))
     .await
     .expect("seed wallet sub-grain");
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_unallocated_balance \
          (tenant_id, payer_tenant_id, account_id, currency, balance_minor, version) \
          VALUES ('{tenant_a}','{payer}','{acct}','USD',700,0)"
     )))
     .await
     .expect("seed unallocated pool");
-    raw.execute(pg(format!(
+    raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_tenant_precedence_policy \
          (tenant_id, version, effective_from, strategy, created_at_utc) \
          VALUES ('{tenant_a}',1,'{ts}','oldest-first.v1','{ts}')"
