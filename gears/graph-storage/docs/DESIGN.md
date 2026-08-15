@@ -656,10 +656,10 @@ Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by mi
 
 | Column | Type | Description |
 |--------|------|-------------|
-| id | SMALLINT PK | Interned type id |
-| tenant_id | UUID | Tenant scope |
-| type_uuid | UUID UNIQUE | Deterministic UUIDv5 of the GTS identifier |
-| type_id | TEXT UNIQUE | Human-readable GTS identifier |
+| tenant_id | UUID | Tenant scope; part of every key |
+| id | SMALLINT | Interned type id; **PK (tenant_id, id)** |
+| type_uuid | UUID | Deterministic UUIDv5 of the GTS identifier; **UNIQUE (tenant_id, type_uuid)** |
+| type_id | TEXT | Human-readable GTS identifier; **UNIQUE (tenant_id, type_id)** |
 | kind | TEXT | node / edge / attribute |
 | json_schema | JSONB | Draft-07 schema with gear extension keywords |
 | created_at | TIMESTAMPTZ | Registration time |
@@ -670,10 +670,10 @@ Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by mi
 
 | Column | Type | Description |
 |--------|------|-------------|
-| id | BIGINT PK | Internal id |
-| tenant_id | UUID | Tenant scope |
-| node_key | TEXT | Producer-supplied stable key, unique per tenant |
-| type_id | SMALLINT FK | graph_type reference |
+| tenant_id | UUID | Tenant scope; part of every key |
+| id | BIGINT | Internal id; **PK (tenant_id, id)** |
+| node_key | TEXT | Producer-supplied stable key; **UNIQUE (tenant_id, node_key)** |
+| type_id | SMALLINT | **FK (tenant_id, type_id) -> graph_type (tenant_id, id)** |
 | name | TEXT | Display name |
 | payload | JSONB | GTS-validated attributes (ceiling-bounded) |
 | search_text | TEXT | Composed vectorizable text |
@@ -688,11 +688,11 @@ Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by mi
 
 | Column | Type | Description |
 |--------|------|-------------|
-| id | BIGINT PK | Internal id |
-| tenant_id | UUID | Tenant scope |
-| edge_key | TEXT | Deterministic hash of type, src, dst, discriminator; unique per tenant |
-| type_id | SMALLINT FK | graph_type reference |
-| src_node_id / dst_node_id | BIGINT FK | Endpoints (cascade on node delete) |
+| tenant_id | UUID | Tenant scope; part of every key |
+| id | BIGINT | Internal id; **PK (tenant_id, id)** |
+| edge_key | TEXT | Deterministic hash of type, src, dst, discriminator; **UNIQUE (tenant_id, edge_key)** |
+| type_id | SMALLINT | **FK (tenant_id, type_id) -> graph_type (tenant_id, id)** |
+| src_node_id / dst_node_id | BIGINT | Endpoints; **FK (tenant_id, src/dst_node_id) -> node (tenant_id, id)**, cascade on node delete |
 | payload | JSONB | GTS-validated attributes incl. provenance |
 | created_at | TIMESTAMPTZ | Timestamp |
 
@@ -702,10 +702,10 @@ Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by mi
 
 | Column | Type | Description |
 |--------|------|-------------|
-| id | BIGINT PK | Internal id |
-| tenant_id | UUID | Tenant scope |
-| node_id | BIGINT FK | Parent node |
-| chunk_id | TEXT UNIQUE | Location-encoded identifier |
+| tenant_id | UUID | Tenant scope; part of every key |
+| id | BIGINT | Internal id; **PK (tenant_id, id)** |
+| node_id | BIGINT | Parent node; **FK (tenant_id, node_id) -> node (tenant_id, id)** |
+| chunk_id | TEXT | Location-encoded identifier; **UNIQUE (tenant_id, chunk_id)** |
 | content | TEXT | Chunk text |
 | content_hash | TEXT | Change detection |
 | section / char_start / char_end | TEXT / INT / INT | Location |
@@ -730,7 +730,7 @@ Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by mi
 |--------|------|-------------|
 | tenant_id | UUID | Tenant scope |
 | producer | TEXT | Producer identity (from the security context) |
-| idempotency_key | TEXT | Producer-chosen key; unique per (tenant, producer) |
+| idempotency_key | TEXT | Producer-chosen key; **PK (tenant_id, producer, idempotency_key)** |
 | request_hash | TEXT | Canonical hash of the ingest request |
 | graph_revision | BIGINT | Revision committed by the original request |
 | response | JSONB | Recorded outcome returned to identical retries |
@@ -743,7 +743,7 @@ Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by mi
 | Column | Type | Description |
 |--------|------|-------------|
 | tenant_id | UUID | Tenant scope |
-| scope_attribute / scope_value | TEXT / TEXT | Canonical scope identity |
+| scope_attribute / scope_value | TEXT / TEXT | Canonical scope identity; **PK (tenant_id, scope_attribute, scope_value)** |
 | owner_producer | TEXT | Producer owning this scope |
 | generation | BIGINT | Highest accepted source generation (fencing) |
 | request_hash | TEXT | Hash of the last accepted replacement snapshot |
@@ -776,9 +776,9 @@ Payload-free by construction (Telemetry and Audit Contract); written in the inge
 
 | Column | Type | Description |
 |--------|------|-------------|
-| tenant_id | UUID | Tenant scope |
+| tenant_id | UUID | Tenant scope; part of every key |
 | graph_revision | BIGINT | Revision the result was computed at |
-| metric | TEXT | Metric name + canonicalized parameters |
+| metric | TEXT | Metric name + canonicalized parameters; **PK (tenant_id, graph_revision, metric)** |
 | payload | JSONB | Per-node metric values |
 | computed_at | TIMESTAMPTZ | Computation time |
 
