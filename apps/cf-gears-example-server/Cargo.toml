@@ -89,6 +89,7 @@ credstore = { package = "cf-gears-credstore", path = "../../gears/credstore/cred
 anyhow = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
+serde_json = { workspace = true }
 
 # Optional mini-chat gear
 mini-chat = { package = "cf-gears-mini-chat", path = "../../gears/mini-chat/mini-chat", optional = true }
@@ -118,4 +119,3 @@ calculator = { path = "../../examples/oop-gears/calculator/calculator", optional
 [dev-dependencies]
 tempfile = { workspace = true }
 serde-saphyr = { workspace = true }
-serde_json = { workspace = true }
