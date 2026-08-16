@@ -4,7 +4,11 @@ CI := 1
 # PYTHON_BOOTSTRAP is used only to create that environment; PYTHON is the venv interpreter.
 PYTHON_BOOTSTRAP ?= $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null || echo python3)
 PY_ENV_DIR ?= .venv
+ifeq ($(OS),Windows_NT)
+PYTHON ?= $(PY_ENV_DIR)/Scripts/python
+else
 PYTHON ?= $(PY_ENV_DIR)/bin/python
+endif
 PY_ENV_STAMP := $(PY_ENV_DIR)/.requirements-stamp
 PY_REQUIREMENTS := testing/requirements.txt testing/e2e/requirements.txt
 
@@ -67,7 +71,7 @@ DENY_MIN_VERSION := 0.20.0
 
 define check_deny_version
     @DENY_VERSION=$$(cargo deny --version 2>/dev/null | awk '{print $$2}'); \
-	if [ -z "$$DENY_VERSION" ] || ! $(PYTHON) -c "import sys; sys.exit(0 if tuple(map(int, '$$DENY_VERSION'.split('.'))) > tuple(map(int, '$(DENY_MIN_VERSION)'.split('.'))) else 1)" 2>/dev/null; then \
+	if [ -z "$$DENY_VERSION" ] || ! $(PYTHON_BOOTSTRAP) -c "import sys; sys.exit(0 if tuple(map(int, '$$DENY_VERSION'.split('.'))) > tuple(map(int, '$(DENY_MIN_VERSION)'.split('.'))) else 1)" 2>/dev/null; then \
 		echo "ERROR: cargo-deny > $(DENY_MIN_VERSION) is required (found: $${DENY_VERSION:-none}). Run 'cargo install --locked cargo-deny' to upgrade." && exit 1; \
 	fi
 endef
@@ -557,14 +561,15 @@ dev: dev-fmt dev-clippy dev-test
 # -------- Optional GEAR= scope for top-level targets --------
 # Examples:
 #   make test GEAR=file-parser
-#     -> cargo nextest run -p cf-gears-file-parser -p cf-gears-file-parser-sdk
+#     -> cargo nextest run -p cf-gears-file-parser -p cf-gears-file-parser-sdk -p cf-gears-example-server
+#        (gear crates + all workspace crates that depend on them, resolved by resolve_gear_deps.py)
 #   make run GEAR=file-parser
 #     -> cargo run --bin cf-gears-example-server --no-default-features \
 #        --features file-parser,static-tenants,static-authn,static-authz
 #   make build GEAR=bss-ledger GEAR_PKG=bss-ledger GEAR_SDK_PKG=bss-ledger-sdk
 #     -> cargo build --release -p bss-ledger -p bss-ledger-sdk
 #   make test GEAR=file-parser GEAR_FEATURES=integration
-#     -> cargo nextest run -p cf-gears-file-parser -p cf-gears-file-parser-sdk --features integration
+#     -> cargo nextest run -p cf-gears-file-parser -p cf-gears-file-parser-sdk -p cf-gears-example-server --features integration
 
 GEAR ?=
 GEAR_BUILD_ARGS ?=
@@ -610,10 +615,18 @@ GEAR_NO_TESTS_FLAG := $(if $(GEAR),--no-tests=warn)
 
 .PHONY: test test-no-macros test-macros test-sqlite test-pg test-mysql test-db test-users-info-pg test-usage-collector-pg test-cluster-pg test-fips
 
-# Run all tests, or a single gear when GEAR=<gear> is set
-test: install-tools
+# Run all tests, or a single gear when GEAR=<gear> is set.
+# When GEAR= is set, resolve_gear_deps.py finds all crates inside gears/<gear>/
+# plus every workspace crate that depends on them (transitive reverse deps).
+test: install-tools py-env
 	$(call print_target_banner)
-	cargo nextest run $(GEAR_CARGO_SCOPE) $(GEAR_FEATURE_ARGS) $(GEAR_TEST_ARGS) $(GEAR_NO_TESTS_FLAG)
+ifeq ($(GEAR),)
+	cargo nextest run --workspace $(GEAR_FEATURE_ARGS) $(GEAR_TEST_ARGS)
+else
+	@GEAR_SCOPE=$$($(PYTHON) tools/scripts/resolve_gear_deps.py $(GEAR)) || exit 1; \
+	echo "cargo nextest run $$GEAR_SCOPE $(GEAR_FEATURE_ARGS) $(GEAR_TEST_ARGS) $(GEAR_NO_TESTS_FLAG)"; \
+	cargo nextest run $$GEAR_SCOPE $(GEAR_FEATURE_ARGS) $(GEAR_TEST_ARGS) $(GEAR_NO_TESTS_FLAG)
+endif
 
 test-no-macros: install-tools
 	$(call print_target_banner)
