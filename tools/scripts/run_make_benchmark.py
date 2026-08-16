@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -91,6 +92,7 @@ class Result:
     status: str             # "OK" or "FAIL"
     elapsed_minutes: float
     target_size_mb: float
+    log_file: Path
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +113,40 @@ def get_target_size_mb() -> float:
         except (IndexError, ValueError):
             pass
     return 0.0
+
+
+def stream_command_to_log(command: str, log_file: Path, verbose: bool) -> int:
+    """Run ``command`` and stream combined stdout/stderr to ``log_file``."""
+    with log_file.open("w", encoding="utf-8") as lf:
+        proc = subprocess.Popen(
+            ["bash", "-lc", command],
+            cwd=str(ROOT_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            lf.write(line)
+            lf.flush()
+            if verbose:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+
+        proc.stdout.close()
+        return proc.wait()
+
+
+def display_path(path: Path) -> str:
+    """Prefer repo-relative paths for user-facing output."""
+    try:
+        return str(path.relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
 
 
 # ---------------------------------------------------------------------------
@@ -157,24 +193,22 @@ def build_scenarios(gear: str) -> List[Scenario]:
 # Runner
 # ---------------------------------------------------------------------------
 
-def run_scenario(scenario: Scenario, verbose: bool) -> Result:
+def run_scenario(scenario: Scenario, verbose: bool, run_dir: Path) -> Result:
+    log_file = run_dir / f"scenario-{scenario.number:02d}.log"
+
     # Clean phase (not timed)
     if scenario.clean_target:
         print(f"  {C.dim}Removing target/ ...{C.reset}", flush=True)
         shutil.rmtree(TARGET_DIR, ignore_errors=True)
 
+    print(f"  {C.dim}Log: {display_path(log_file)}{C.reset}", flush=True)
     print(f"  {C.dim}Running: {scenario.command}{C.reset}", flush=True)
 
     start = time.monotonic()
-    proc = subprocess.run(
-        ["bash", "-lc", scenario.command],
-        cwd=str(ROOT_DIR),
-        stdout=None if verbose else subprocess.PIPE,
-        stderr=None if verbose else subprocess.STDOUT,
-    )
+    returncode = stream_command_to_log(scenario.command, log_file, verbose)
     elapsed = time.monotonic() - start
 
-    status = "OK" if proc.returncode == 0 else "FAIL"
+    status = "OK" if returncode == 0 else "FAIL"
     target_size = get_target_size_mb()
 
     return Result(
@@ -182,6 +216,7 @@ def run_scenario(scenario: Scenario, verbose: bool) -> Result:
         status=status,
         elapsed_minutes=elapsed / 60.0,
         target_size_mb=target_size,
+        log_file=log_file,
     )
 
 
@@ -297,6 +332,14 @@ def print_report(results: List[Result], gear: str) -> None:
           f"{C.green}{passed} OK{C.reset}  "
           f"{C.red if failed else ''}{failed} FAIL{C.reset if failed else ''}  "
           f"{format_time(total_time)} elapsed")
+
+    if failed:
+        print()
+        print(f"  {C.bold}Failed scenario logs:{C.reset}")
+        for result in results:
+            if result.status == "FAIL":
+                print(f"    - #{result.scenario.number} {result.scenario.name}")
+                print(f"      {display_path(result.log_file)}")
     print()
 
 
@@ -335,6 +378,13 @@ def main() -> int:
     args = parse_args()
     gear: str = args.gear
 
+    log_root = Path(os.environ.get("LOG_ROOT", str(ROOT_DIR / ".logs" / "make-benchmark")))
+    run_id = os.environ.get("RUN_ID", datetime.now().strftime("%Y%m%d-%H%M%S"))
+    run_dir = log_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    results_file = run_dir / "results.tsv"
+    results_file.write_text("scenario\tstatus\tminutes\ttarget_mb\tlog_file\tcommand\n", encoding="utf-8")
+
     all_scenarios = build_scenarios(gear)
 
     # Filter scenarios
@@ -353,6 +403,7 @@ def main() -> int:
     print(f"\n{C.bold}Benchmark: {len(selected)} scenario(s){C.reset}")
     print(f"{C.bold}Root:{C.reset}  {ROOT_DIR}")
     print(f"{C.bold}Gear:{C.reset}  {gear}")
+    print(f"{C.bold}Logs:{C.reset}  {display_path(run_dir)}")
     print()
 
     # Execute
@@ -364,18 +415,27 @@ def main() -> int:
             f"{label_color}#{scenario.number}{C.reset} "
             f"{C.bold}{scenario.name}{C.reset}"
         )
-        result = run_scenario(scenario, verbose=args.verbose)
+        result = run_scenario(scenario, verbose=args.verbose, run_dir=run_dir)
+        with results_file.open("a", encoding="utf-8") as rf:
+            rf.write(
+                f"{result.scenario.number}\t{result.status}\t{result.elapsed_minutes:.6f}\t"
+                f"{result.target_size_mb:.0f}\t{display_path(result.log_file)}\t"
+                f"{result.scenario.command}\n"
+            )
         status_color = C.green if result.status == "OK" else C.red
         print(
             f"  {status_color}{result.status}{C.reset}  "
             f"{format_time(result.elapsed_minutes)}  "
-            f"target/={format_size(result.target_size_mb)}"
+            f"target/={format_size(result.target_size_mb)}  "
+            f"log={display_path(result.log_file)}"
         )
         print()
         results.append(result)
 
     # Report
     print_report(results, gear)
+    print(f"{C.bold}Results:{C.reset}  {display_path(results_file)}")
+    print()
 
     return 1 if any(r.status == "FAIL" for r in results) else 0
 
