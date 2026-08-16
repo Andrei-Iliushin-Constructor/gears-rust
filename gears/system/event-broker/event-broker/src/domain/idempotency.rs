@@ -3,12 +3,14 @@
 //! `ADR/0004-idempotent-producer-protocol.md`). Signatures only.
 
 use async_trait::async_trait;
+use toolkit::domain_model;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 
 /// Outcome of an idempotency check for one incoming event's producer
 /// chain (`meta.producer_id`, `meta.previous`, `meta.sequence`).
+#[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdempotencyOutcome {
     Accept,

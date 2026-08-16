@@ -7,7 +7,7 @@ use toolkit_contract::ContractError;
 /// Resource error constructors for payment operations.
 ///
 /// Generates typed constructors like `PaymentResourceError::not_found(detail)`.
-#[resource_error("gts.cf.demo.api_contracts.payment.v1~")]
+#[resource_error(gts_id!("cf.demo.api_contracts.payment.v1~"))]
 pub struct PaymentResourceError;
 
 /// Domain errors that flow across the `PaymentApi` wire boundary as

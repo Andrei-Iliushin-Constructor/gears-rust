@@ -3,6 +3,7 @@
 //! (REST API implementation) and #4347 (standalone runtime).
 
 use async_trait::async_trait;
+use toolkit::domain_model;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
@@ -12,6 +13,7 @@ use crate::domain::model::{Event, Subscription};
 /// JOIN request body (`DESIGN.md:692`: `consumer_group` + `interests[]`).
 /// Exact shape (typed filters per ADR-0005) is finalized alongside the REST
 /// DTOs in #4346.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub struct JoinRequest {
     pub consumer_group: String,
@@ -20,6 +22,7 @@ pub struct JoinRequest {
 
 /// Long-poll response - events plus topology-version-aware metadata
 /// (`DESIGN.md:657`). Exact shape finalized in #4346.
+#[domain_model]
 #[derive(Debug, Clone, Default)]
 pub struct PollResponse {
     pub events: Vec<Event>,
@@ -30,6 +33,7 @@ pub struct PollResponse {
 /// assignments/cursors are identified by the full `(topic, partition)`
 /// pair (`DESIGN.md:658`) - keying by `partition` alone would collapse
 /// partition `0` of two different topics into one entry.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub struct SeekPosition {
     pub topic: String,

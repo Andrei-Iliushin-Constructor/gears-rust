@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 // (overridable via the `GTS_ID_PREFIX` env var at build
 // time). Used to assemble the canonical error type id prefix without
 // hard-coding the literal prefix.
-use toolkit_gts::{GTS_ID_PREFIX, GTS_ID_URI_PREFIX, gts_uri};
+use toolkit_gts::{GTS_ID_PREFIX, GTS_ID_URI_PREFIX, gts_id, gts_uri};
 
 use crate::context::{
     Aborted, AlreadyExists, Cancelled, DataLoss, DeadlineExceeded, FailedPrecondition, Internal,
@@ -58,28 +58,40 @@ impl ProblemCategory {
     #[must_use]
     pub fn gts_fragment(self) -> &'static str {
         match self {
-            Self::Cancelled => "gts.cf.core.errors.err.v1~cf.core.err.cancelled.v1~",
-            Self::Unknown => "gts.cf.core.errors.err.v1~cf.core.err.unknown.v1~",
-            Self::InvalidArgument => "gts.cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~",
-            Self::DeadlineExceeded => "gts.cf.core.errors.err.v1~cf.core.err.deadline_exceeded.v1~",
-            Self::NotFound => "gts.cf.core.errors.err.v1~cf.core.err.not_found.v1~",
-            Self::AlreadyExists => "gts.cf.core.errors.err.v1~cf.core.err.already_exists.v1~",
-            Self::PermissionDenied => "gts.cf.core.errors.err.v1~cf.core.err.permission_denied.v1~",
+            Self::Cancelled => gts_id!("cf.core.errors.err.v1~cf.core.err.cancelled.v1~"),
+            Self::Unknown => gts_id!("cf.core.errors.err.v1~cf.core.err.unknown.v1~"),
+            Self::InvalidArgument => {
+                gts_id!("cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~")
+            }
+            Self::DeadlineExceeded => {
+                gts_id!("cf.core.errors.err.v1~cf.core.err.deadline_exceeded.v1~")
+            }
+            Self::NotFound => gts_id!("cf.core.errors.err.v1~cf.core.err.not_found.v1~"),
+            Self::AlreadyExists => {
+                gts_id!("cf.core.errors.err.v1~cf.core.err.already_exists.v1~")
+            }
+            Self::PermissionDenied => {
+                gts_id!("cf.core.errors.err.v1~cf.core.err.permission_denied.v1~")
+            }
             Self::ResourceExhausted => {
-                "gts.cf.core.errors.err.v1~cf.core.err.resource_exhausted.v1~"
+                gts_id!("cf.core.errors.err.v1~cf.core.err.resource_exhausted.v1~")
             }
             Self::FailedPrecondition => {
-                "gts.cf.core.errors.err.v1~cf.core.err.failed_precondition.v1~"
+                gts_id!("cf.core.errors.err.v1~cf.core.err.failed_precondition.v1~")
             }
-            Self::Aborted => "gts.cf.core.errors.err.v1~cf.core.err.aborted.v1~",
-            Self::OutOfRange => "gts.cf.core.errors.err.v1~cf.core.err.out_of_range.v1~",
-            Self::Unimplemented => "gts.cf.core.errors.err.v1~cf.core.err.unimplemented.v1~",
-            Self::Internal => "gts.cf.core.errors.err.v1~cf.core.err.internal.v1~",
+            Self::Aborted => gts_id!("cf.core.errors.err.v1~cf.core.err.aborted.v1~"),
+            Self::OutOfRange => gts_id!("cf.core.errors.err.v1~cf.core.err.out_of_range.v1~"),
+            Self::Unimplemented => {
+                gts_id!("cf.core.errors.err.v1~cf.core.err.unimplemented.v1~")
+            }
+            Self::Internal => gts_id!("cf.core.errors.err.v1~cf.core.err.internal.v1~"),
             Self::ServiceUnavailable => {
-                "gts.cf.core.errors.err.v1~cf.core.err.service_unavailable.v1~"
+                gts_id!("cf.core.errors.err.v1~cf.core.err.service_unavailable.v1~")
             }
-            Self::DataLoss => "gts.cf.core.errors.err.v1~cf.core.err.data_loss.v1~",
-            Self::Unauthenticated => "gts.cf.core.errors.err.v1~cf.core.err.unauthenticated.v1~",
+            Self::DataLoss => gts_id!("cf.core.errors.err.v1~cf.core.err.data_loss.v1~"),
+            Self::Unauthenticated => {
+                gts_id!("cf.core.errors.err.v1~cf.core.err.unauthenticated.v1~")
+            }
         }
     }
 

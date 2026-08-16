@@ -3,6 +3,7 @@
 //! and #4347 (standalone runtime).
 
 use async_trait::async_trait;
+use toolkit::domain_model;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
@@ -12,6 +13,7 @@ use crate::domain::model::Event;
 /// Result of a batch publish - which events were accepted (in submission
 /// order) and which were rejected with a reason. Exact shape is finalized
 /// alongside the REST DTOs in #4346.
+#[domain_model]
 #[derive(Debug, Clone, Default)]
 pub struct BatchResult {
     pub accepted: Vec<Uuid>,

@@ -8,6 +8,9 @@ repository.workspace = true
 description = "Proc macros for ToolKit contracts"
 rust-version.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+
 [lib]
 proc-macro = true
 name = "toolkit_contract_macros"

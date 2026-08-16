@@ -6,9 +6,11 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
+use toolkit::domain_model;
 use uuid::Uuid;
 
 /// `gts.cf.core.events.topic.v1~` - a named, partitioned event log.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub struct Topic {
     pub id: String,
@@ -21,6 +23,7 @@ pub struct Topic {
 
 /// `gts.cf.core.events.event_type.v1~` - schema and constraints for one
 /// category of events within a topic.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub struct EventType {
     pub id: String,
@@ -33,6 +36,7 @@ pub struct EventType {
 
 /// `gts.cf.core.events.event.v1~` - an immutable record in a
 /// `(topic, partition)` log.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub struct Event {
     pub id: Uuid,
@@ -56,6 +60,7 @@ pub struct Event {
 }
 
 /// Producer chain metadata. Publish-input only; stripped on read.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub struct Meta {
     pub version: i32,
@@ -66,6 +71,7 @@ pub struct Meta {
 
 /// `gts.cf.core.events.subscription.v1~` - ephemeral, in-cache consumer
 /// instance.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub struct Subscription {
     pub id: Uuid,
@@ -78,6 +84,7 @@ pub struct Subscription {
     pub expires_at: DateTime<Utc>,
 }
 
+#[domain_model]
 #[derive(Debug, Clone)]
 pub struct Assignment {
     pub topic: String,
@@ -87,6 +94,7 @@ pub struct Assignment {
 }
 
 /// Ephemeral, in-cache runtime state of a consumer group.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub struct GroupState {
     pub consumer_group: String,
@@ -98,6 +106,7 @@ pub struct GroupState {
 }
 
 /// Ephemeral, in-cache group progress for one `(topic, partition)`.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub struct Cursor {
     pub topic: String,

@@ -8,6 +8,9 @@ repository.workspace = true
 description = "Generate idiomatic .proto files from ToolKit ContractIr + JsonSchema"
 rust-version.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+
 [lib]
 name = "toolkit_contract_protogen"
 
