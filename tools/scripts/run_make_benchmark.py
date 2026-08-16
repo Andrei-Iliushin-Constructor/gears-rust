@@ -158,12 +158,12 @@ def build_scenarios(gear: str) -> List[Scenario]:
 
     # Group A — all gears
     group_a = [
-        (True,  "make all",       "All gears: clean build (make all)"),
-        (True,  "make build",     "All gears: clean build (make build)"),
-        (False, "make check",     "All gears: check"),
-        (False, "make test",      "All gears: test"),
-        (False, "make e2e-local", "All gears: e2e-local"),
-        (False, "make dist",      "All gears: dist"),
+        (True,  "make all",       "rm -rf target/; make all"),
+        (True,  "make build",     "rm -rf target/; make build"),
+        (False, "make check",     "make check"),
+        (False, "make test",      "make test"),
+        (False, "make e2e-local", "make e2e-local"),
+        (False, "make dist",      "make dist"),
     ]
     for i, (clean, cmd, name) in enumerate(group_a, start=1):
         scenarios.append(Scenario(
@@ -173,12 +173,12 @@ def build_scenarios(gear: str) -> List[Scenario]:
 
     # Group B — specific gear
     group_b = [
-        (True,  f"make all GEAR={gear}",       f"Gear {gear}: clean build (make all)"),
-        (True,  f"make build GEAR={gear}",     f"Gear {gear}: clean build (make build)"),
-        (False, f"make check GEAR={gear}",     f"Gear {gear}: check"),
-        (False, f"make test GEAR={gear}",      f"Gear {gear}: test"),
-        (False, f"make e2e-local GEAR={gear}", f"Gear {gear}: e2e-local"),
-        (False, f"make dist GEAR={gear}",      f"Gear {gear}: dist"),
+        (True,  f"make all GEAR={gear}",       f"rm -rf target/; make all GEAR={gear}"),
+        (True,  f"make build GEAR={gear}",     f"rm -rf target/; make build GEAR={gear}"),
+        (False, f"make check GEAR={gear}",     f"make check GEAR={gear}"),
+        (False, f"make test GEAR={gear}",      f"make test GEAR={gear}"),
+        (False, f"make e2e-local GEAR={gear}", f"make e2e-local GEAR={gear}"),
+        (False, f"make dist GEAR={gear}",      f"make dist GEAR={gear}"),
     ]
     for i, (clean, cmd, name) in enumerate(group_b, start=7):
         scenarios.append(Scenario(
