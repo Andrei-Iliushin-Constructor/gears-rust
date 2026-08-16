@@ -1140,6 +1140,20 @@ full-make-matrix: py-env
 	$(call print_target_banner)
 	$(PYTHON) tools/scripts/run_make_matrix.py $(MATRIX_PRESET)
 
+## Benchmark make targets: measure time, status, and target/ size.
+## Options: BENCH_GROUP=all-gears|specific-gear  BENCH_GEAR=<name>  BENCH_SCENARIO=<num>  BENCH_VERBOSE=1
+BENCH_GROUP ?=
+BENCH_GEAR ?= file-parser
+BENCH_SCENARIO ?=
+BENCH_VERBOSE ?=
+make_benchmark: py-env
+	$(call print_target_banner)
+	$(PYTHON) tools/scripts/run_make_benchmark.py \
+		$(if $(BENCH_GROUP),--group $(BENCH_GROUP)) \
+		$(if $(BENCH_SCENARIO),--scenario $(BENCH_SCENARIO)) \
+		--gear $(BENCH_GEAR) \
+		$(if $(filter-out 0,$(BENCH_VERBOSE)),--verbose)
+
 # Run all necessary quality checks and tests using reusable debug artifacts.
 all: check test-sqlite e2e-local openapi
 	$(call print_target_banner)

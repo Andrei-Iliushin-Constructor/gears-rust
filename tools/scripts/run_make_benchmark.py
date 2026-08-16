@@ -1,0 +1,384 @@
+#!/usr/bin/env python3
+"""
+run_benchmark.py — Benchmark Makefile targets and report timing, status, and target/ size.
+
+Runs two groups of scenarios:
+  Group all-gears (1–6):    targets without GEAR= scope
+  Group specific-gear (7–12): targets with GEAR=<name> (default: file-parser)
+
+Each scenario records wall-clock execution time, pass/fail exit status, and
+the total size of ``target/`` after the step completes.  Scenarios marked as
+"clean" remove ``target/`` before running; the removal time is excluded from
+the measurement.
+
+Usage examples:
+  python run_benchmark.py                       # run all 12 scenarios
+  python run_benchmark.py --group all-gears      # all-gears group only
+  python run_benchmark.py --group specific-gear   # specific-gear group only
+  python run_benchmark.py --gear credstore      # override gear for specific-gear group
+  python run_benchmark.py --scenario 3          # run only scenario #3
+  python run_benchmark.py --scenario 1 --scenario 9   # run scenarios 1 and 9
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Optional
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+TARGET_DIR = ROOT_DIR / "target"
+
+
+# ---------------------------------------------------------------------------
+# Color helpers (same style as run_make_matrix.py)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Colors:
+    bold: str = ""
+    dim: str = ""
+    green: str = ""
+    red: str = ""
+    yellow: str = ""
+    cyan: str = ""
+    reset: str = ""
+
+
+def make_colors() -> Colors:
+    if sys.stdout.isatty() and not os.environ.get("NO_COLOR"):
+        return Colors(
+            bold="\033[1m",
+            dim="\033[2m",
+            green="\033[32m",
+            red="\033[31m",
+            yellow="\033[33m",
+            cyan="\033[36m",
+            reset="\033[0m",
+        )
+    return Colors()
+
+
+C = make_colors()
+
+
+# ---------------------------------------------------------------------------
+# Scenario / Result data
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Scenario:
+    number: int
+    group: str          # "all-gears" or "specific-gear"
+    name: str
+    command: str
+    clean_target: bool
+
+
+@dataclass
+class Result:
+    scenario: Scenario
+    status: str             # "OK" or "FAIL"
+    elapsed_minutes: float
+    target_size_mb: float
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def get_target_size_mb() -> float:
+    """Return total size of target/ in megabytes (``du -sm``)."""
+    if not TARGET_DIR.exists():
+        return 0.0
+    proc = subprocess.run(
+        ["du", "-sm", str(TARGET_DIR)],
+        capture_output=True, text=True,
+    )
+    if proc.returncode == 0:
+        try:
+            return float(proc.stdout.split()[0])
+        except (IndexError, ValueError):
+            pass
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Scenario definitions
+# ---------------------------------------------------------------------------
+
+def build_scenarios(gear: str) -> List[Scenario]:
+    scenarios: List[Scenario] = []
+
+    # Group A — all gears
+    group_a = [
+        (True,  "make all",       "All gears: clean build (make all)"),
+        (True,  "make build",     "All gears: clean build (make build)"),
+        (False, "make check",     "All gears: check"),
+        (False, "make test",      "All gears: test"),
+        (False, "make e2e-local", "All gears: e2e-local"),
+        (False, "make dist",      "All gears: dist"),
+    ]
+    for i, (clean, cmd, name) in enumerate(group_a, start=1):
+        scenarios.append(Scenario(
+            number=i, group="all-gears", name=name,
+            command=cmd, clean_target=clean,
+        ))
+
+    # Group B — specific gear
+    group_b = [
+        (True,  f"make all GEAR={gear}",       f"Gear {gear}: clean build (make all)"),
+        (True,  f"make build GEAR={gear}",     f"Gear {gear}: clean build (make build)"),
+        (False, f"make check GEAR={gear}",     f"Gear {gear}: check"),
+        (False, f"make test GEAR={gear}",      f"Gear {gear}: test"),
+        (False, f"make e2e-local GEAR={gear}", f"Gear {gear}: e2e-local"),
+        (False, f"make dist GEAR={gear}",      f"Gear {gear}: dist"),
+    ]
+    for i, (clean, cmd, name) in enumerate(group_b, start=7):
+        scenarios.append(Scenario(
+            number=i, group="specific-gear", name=name,
+            command=cmd, clean_target=clean,
+        ))
+
+    return scenarios
+
+
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
+
+def run_scenario(scenario: Scenario, verbose: bool) -> Result:
+    # Clean phase (not timed)
+    if scenario.clean_target:
+        print(f"  {C.dim}Removing target/ ...{C.reset}", flush=True)
+        shutil.rmtree(TARGET_DIR, ignore_errors=True)
+
+    print(f"  {C.dim}Running: {scenario.command}{C.reset}", flush=True)
+
+    start = time.monotonic()
+    proc = subprocess.run(
+        ["bash", "-lc", scenario.command],
+        cwd=str(ROOT_DIR),
+        stdout=None if verbose else subprocess.PIPE,
+        stderr=None if verbose else subprocess.STDOUT,
+    )
+    elapsed = time.monotonic() - start
+
+    status = "OK" if proc.returncode == 0 else "FAIL"
+    target_size = get_target_size_mb()
+
+    return Result(
+        scenario=scenario,
+        status=status,
+        elapsed_minutes=elapsed / 60.0,
+        target_size_mb=target_size,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+
+def format_time(minutes: float) -> str:
+    if minutes < 1.0:
+        return f"{minutes * 60:.1f}s"
+    return f"{minutes:.2f}m"
+
+
+def format_size(mb: float) -> str:
+    if mb >= 1024:
+        return f"{mb / 1024:.2f} GB"
+    return f"{mb:.0f} MB"
+
+
+def print_table(results: List[Result]) -> None:
+    # Column headers
+    headers = ["#", "Scenario", "Clean target/", "Status", "Time", "target/ size"]
+
+    # Build rows
+    rows: list[tuple[str, ...]] = []
+    separator_after: set[int] = set()
+
+    for r in results:
+        rows.append((
+            str(r.scenario.number),
+            r.scenario.name,
+            "YES" if r.scenario.clean_target else "NO",
+            r.status,
+            format_time(r.elapsed_minutes),
+            format_size(r.target_size_mb),
+        ))
+
+    # Detect group boundary for separator
+    for i in range(len(results) - 1):
+        if results[i].scenario.group != results[i + 1].scenario.group:
+            separator_after.add(i)
+
+    # Column widths
+    col_widths = [len(h) for h in headers]
+    for row in rows:
+        for j, cell in enumerate(row):
+            col_widths[j] = max(col_widths[j], len(cell))
+
+    def fmt_row(cells: tuple[str, ...] | list[str], align: Optional[List[str]] = None) -> str:
+        parts: list[str] = []
+        for j, cell in enumerate(cells):
+            w = col_widths[j]
+            a = (align[j] if align else "l")
+            if a == "r":
+                parts.append(cell.rjust(w))
+            elif a == "c":
+                parts.append(cell.center(w))
+            else:
+                parts.append(cell.ljust(w))
+        return "| " + " | ".join(parts) + " |"
+
+    def sep_line() -> str:
+        return "+-" + "-+-".join("-" * w for w in col_widths) + "-+"
+
+    # Alignment: #=right, scenario=left, clean=center, status=center, time=right, size=right
+    aligns = ["r", "l", "c", "c", "r", "r"]
+
+    # Print
+    print()
+    print(sep_line())
+    print(fmt_row(tuple(headers), ["c"] * len(headers)))
+    print(sep_line())
+    for i, row in enumerate(rows):
+        color = C.red if row[3] == "FAIL" else ""
+        line = fmt_row(row, aligns)
+        if color:
+            print(f"{color}{line}{C.reset}")
+        else:
+            print(line)
+        if i in separator_after:
+            print(sep_line())
+    print(sep_line())
+    print()
+
+
+def print_report(results: List[Result], gear: str) -> None:
+    print()
+    print(f"{C.bold}{'=' * 78}{C.reset}")
+    print(f"{C.bold}  Benchmark Report{C.reset}")
+    print(f"{C.bold}{'=' * 78}{C.reset}")
+    print()
+    print("  This report shows the execution results of Makefile target benchmarks.")
+    print("  Two groups of scenarios were defined:")
+    print()
+    print(f"    {C.bold}all-gears (1–6){C.reset}:      targets without GEAR= scoping")
+    print(f"    {C.bold}specific-gear (7–12){C.reset}: targets with GEAR={gear}")
+    print()
+    print("  Columns:")
+    print("    - #              Scenario number")
+    print("    - Scenario       Description of the make target")
+    print("    - Clean target/  Whether target/ was removed before execution (YES/NO)")
+    print("    - Status         Exit status of the make command (OK/FAIL)")
+    print("    - Time           Wall-clock execution time (rm target/ excluded)")
+    print("    - target/ size   Total size of target/ directory after the step")
+
+    print_table(results)
+
+    passed = sum(1 for r in results if r.status == "OK")
+    failed = sum(1 for r in results if r.status == "FAIL")
+    total_time = sum(r.elapsed_minutes for r in results)
+
+    print(f"  {C.bold}Total:{C.reset}  {len(results)} scenarios  "
+          f"{C.green}{passed} OK{C.reset}  "
+          f"{C.red if failed else ''}{failed} FAIL{C.reset if failed else ''}  "
+          f"{format_time(total_time)} elapsed")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Benchmark Makefile targets: measure time, status, and target/ size.",
+    )
+    parser.add_argument(
+        "--group", choices=["all-gears", "specific-gear"],
+        help="Run only the specified group (all-gears or specific-gear).",
+    )
+    parser.add_argument(
+        "--gear", default="file-parser",
+        help="Gear name for specific-gear group scenarios (default: file-parser).",
+    )
+    parser.add_argument(
+        "--scenario", type=int, action="append", dest="scenarios",
+        help="Run only the specified scenario number (1–12). Can be repeated.",
+    )
+    parser.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Stream make output to stdout instead of capturing it.",
+    )
+    return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    args = parse_args()
+    gear: str = args.gear
+
+    all_scenarios = build_scenarios(gear)
+
+    # Filter scenarios
+    selected = all_scenarios
+    if args.group:
+        selected = [s for s in selected if s.group == args.group]
+    if args.scenarios:
+        nums = set(args.scenarios)
+        selected = [s for s in selected if s.number in nums]
+
+    if not selected:
+        print("No scenarios matched the given filters.", file=sys.stderr)
+        return 2
+
+    # Header
+    print(f"\n{C.bold}Benchmark: {len(selected)} scenario(s){C.reset}")
+    print(f"{C.bold}Root:{C.reset}  {ROOT_DIR}")
+    print(f"{C.bold}Gear:{C.reset}  {gear}")
+    print()
+
+    # Execute
+    results: List[Result] = []
+    for i, scenario in enumerate(selected, start=1):
+        label_color = C.green if scenario.group == "all-gears" else C.yellow
+        print(
+            f"{C.cyan}[{i}/{len(selected)}]{C.reset} "
+            f"{label_color}#{scenario.number}{C.reset} "
+            f"{C.bold}{scenario.name}{C.reset}"
+        )
+        result = run_scenario(scenario, verbose=args.verbose)
+        status_color = C.green if result.status == "OK" else C.red
+        print(
+            f"  {status_color}{result.status}{C.reset}  "
+            f"{format_time(result.elapsed_minutes)}  "
+            f"target/={format_size(result.target_size_mb)}"
+        )
+        print()
+        results.append(result)
+
+    # Report
+    print_report(results, gear)
+
+    return 1 if any(r.status == "FAIL" for r in results) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
