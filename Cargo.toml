@@ -592,7 +592,7 @@ proc-macro-crate = "3"
 
 # Testing utilities
 trybuild = "1"
-serial_test = "3"
+serial_test = { version = "3", features = ["file_locks"] }
 criterion = { version = "0.8", default-features = false }
 testcontainers = { version = "0.27", default-features = false, features = ["aws-lc-rs"] }
 testcontainers-modules = { version = "0.15", default-features = false, features = ["aws-lc-rs", "postgres", "mysql"] }

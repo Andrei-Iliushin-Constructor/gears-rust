@@ -71,6 +71,7 @@ tempfile = { workspace = true }
 temp-env = { workspace = true }
 # Test-cert + test-key generation for server-side handshake_smoke.
 rcgen = { workspace = true }
+serial_test = { workspace = true }
 # Cross-implementation RSA-PSS verifier (pure-Rust RustCrypto) — used to
 # assert that Apple's PSS signatures use the RFC-mandated salt_len =
 # hash_len. See TODO-4 in README. `pkcs1` (DER parsing of Apple's public
