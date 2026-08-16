@@ -66,11 +66,11 @@ def suite_manifest_path(suite_name: str, explicit: str | None) -> Path | None:
         path = (ROOT / explicit).resolve()
         return path if path.exists() else None
 
-    default = ROOT / "testing" / "e2e" / "gears" / suite_key(suite_name) / "e2e.yaml"
+    default = ROOT / "testing" / "e2e" / "suites" / suite_key(suite_name) / "e2e.yaml"
     if default.exists():
         return default
 
-    for path in (ROOT / "testing" / "e2e" / "gears").glob("**/e2e.yaml"):
+    for path in (ROOT / "testing" / "e2e" / "suites").glob("**/e2e.yaml"):
         data = load_yaml(path)
         if data.get("suite") == suite_name:
             return path
@@ -379,7 +379,7 @@ def discover_launcher_test_paths(global_cfg: dict[str, Any]) -> list[str]:
     """
     paths: list[str] = []
     seen: set[str] = set()
-    for manifest in sorted((ROOT / "testing" / "e2e" / "gears").glob("**/e2e.yaml")):
+    for manifest in sorted((ROOT / "testing" / "e2e" / "suites").glob("**/e2e.yaml")):
         data = load_yaml(manifest)
         if data.get("launcher", "e2e-launcher") != "e2e-launcher":
             continue
@@ -417,7 +417,7 @@ def discover_suites_for_gear(gear: str) -> list[tuple[str, Path]]:
     shared-server model.
     """
     matches: list[tuple[str, Path]] = []
-    for manifest in sorted((ROOT / "testing" / "e2e" / "gears").glob("**/e2e.yaml")):
+    for manifest in sorted((ROOT / "testing" / "e2e" / "suites").glob("**/e2e.yaml")):
         data = load_yaml(manifest)
         if data.get("launcher", "e2e-launcher") != "e2e-launcher":
             continue
