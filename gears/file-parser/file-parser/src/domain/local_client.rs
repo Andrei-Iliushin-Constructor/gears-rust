@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use file_parser_sdk::{FileParserClientError, FileParserClientV1, ParseBytesRequest, ParsedText};
+use toolkit_macros::domain_model;
 use toolkit_security::SecurityContext;
 
 use crate::domain::error::DomainError;
@@ -39,6 +40,7 @@ impl From<DomainError> for FileParserClientError {
 
 /// In-process implementation of [`FileParserClientV1`], registered in
 /// `ClientHub` by `FileParserGear::init`.
+#[domain_model]
 pub struct FileParserLocalClient {
     svc: Arc<FileParserService>,
 }
