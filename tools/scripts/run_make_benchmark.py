@@ -15,7 +15,7 @@ Usage examples:
   python run_benchmark.py                       # run all 12 scenarios
   python run_benchmark.py --group all-gears      # all-gears group only
   python run_benchmark.py --group specific-gear   # specific-gear group only
-  python run_benchmark.py --gear credstore      # override gear for specific-gear group
+  python run_benchmark.py --gear credstore      # implies --group=specific-gear
   python run_benchmark.py --scenario 3          # run only scenario #3
   python run_benchmark.py --scenario 1 --scenario 9   # run scenarios 1 and 9
 """
@@ -356,7 +356,7 @@ def parse_args() -> argparse.Namespace:
         help="Run only the specified group (all-gears or specific-gear).",
     )
     parser.add_argument(
-        "--gear", default="file-parser",
+        "--gear", default=None,
         help="Gear name for specific-gear group scenarios (default: file-parser).",
     )
     parser.add_argument(
@@ -376,14 +376,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    gear: str = args.gear
+    gear_explicit = args.gear is not None
+    gear: str = args.gear or "file-parser"
 
     # When --gear is explicitly provided but --group is not, automatically
     # select the specific-gear group.  This makes
     #   make make-benchmark BENCH_GEAR=credstore
     # imply BENCH_GROUP=specific-gear without requiring both flags.
     group: Optional[str] = args.group
-    if group is None and gear != "file-parser":
+    if group is None and gear_explicit:
         group = "specific-gear"
 
     log_root = Path(os.environ.get("LOG_ROOT", str(ROOT_DIR / ".logs" / "make-benchmark")))
