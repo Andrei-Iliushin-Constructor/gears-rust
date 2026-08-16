@@ -378,6 +378,14 @@ def main() -> int:
     args = parse_args()
     gear: str = args.gear
 
+    # When --gear is explicitly provided but --group is not, automatically
+    # select the specific-gear group.  This makes
+    #   make make-benchmark BENCH_GEAR=credstore
+    # imply BENCH_GROUP=specific-gear without requiring both flags.
+    group: Optional[str] = args.group
+    if group is None and gear != "file-parser":
+        group = "specific-gear"
+
     log_root = Path(os.environ.get("LOG_ROOT", str(ROOT_DIR / ".logs" / "make-benchmark")))
     run_id = os.environ.get("RUN_ID", datetime.now().strftime("%Y%m%d-%H%M%S"))
     run_dir = log_root / run_id
@@ -389,8 +397,8 @@ def main() -> int:
 
     # Filter scenarios
     selected = all_scenarios
-    if args.group:
-        selected = [s for s in selected if s.group == args.group]
+    if group:
+        selected = [s for s in selected if s.group == group]
     if args.scenarios:
         nums = set(args.scenarios)
         selected = [s for s in selected if s.number in nums]
