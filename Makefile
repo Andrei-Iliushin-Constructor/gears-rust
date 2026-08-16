@@ -603,6 +603,7 @@ OPENAPI_BUILD_FEATURE_ARGS := $(if $(GEAR),$(GEAR_OPENAPI_FEATURE_ARGS),$(OPENAP
 GEAR_E2E_SCOPE := $(if $(GEAR),$(GEAR_E2E_TARGET) $(E2E_TARGET),$(E2E_TARGET))
 GEAR_COVERAGE_ARGS := $(if $(GEAR),--package $(GEAR_PKG) --e2e-target $(GEAR_E2E_TARGET),)
 GEAR_CLIPPY_ARGS ?= --all-targets --all-features -- -D warnings
+GEAR_NO_TESTS_FLAG := $(if $(GEAR),--no-tests=warn)
 
 
 # -------- Tests --------
@@ -612,7 +613,7 @@ GEAR_CLIPPY_ARGS ?= --all-targets --all-features -- -D warnings
 # Run all tests, or a single gear when GEAR=<gear> is set
 test: install-tools
 	$(call print_target_banner)
-	cargo nextest run $(GEAR_CARGO_SCOPE) $(GEAR_FEATURE_ARGS) $(GEAR_TEST_ARGS)
+	cargo nextest run $(GEAR_CARGO_SCOPE) $(GEAR_FEATURE_ARGS) $(GEAR_TEST_ARGS) $(GEAR_NO_TESTS_FLAG)
 
 test-no-macros: install-tools
 	$(call print_target_banner)
@@ -1068,7 +1069,7 @@ mini-chat-down:
 
 # -------- Main targets --------
 
-.PHONY: all dist check ci ci_test ci_docs build .cargo-build .split-debug quickstart example mini-chat mini-chat-docker mini-chat-helm mini-chat-helm-template mini-chat-up mini-chat-down mini-chat-port-forward
+.PHONY: all dist check ci ci_test ci_docs build .cargo-build .split-debug quickstart example mini-chat mini-chat-docker mini-chat-helm mini-chat-helm-template mini-chat-up mini-chat-down mini-chat-port-forward full-make-matrix
 
 # Start server with quickstart config
 quickstart:
@@ -1131,6 +1132,13 @@ build:
 dist: build
 	$(call print_target_banner)
 	@if [ -z "$(GEAR)" ]; then $(MAKE) .split-debug; fi
+
+## Run the full Makefile target matrix across all tracked gears (preset: default).
+## Override with MATRIX_PRESET=smoke|extended|custom.
+MATRIX_PRESET ?= default
+full-make-matrix: py-env
+	$(call print_target_banner)
+	$(PYTHON) tools/scripts/run_make_matrix.py $(MATRIX_PRESET)
 
 # Run all necessary quality checks and tests using reusable debug artifacts.
 all: check test-sqlite e2e-local openapi
