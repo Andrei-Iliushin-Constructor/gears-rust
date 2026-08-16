@@ -1159,7 +1159,7 @@ BENCH_GROUP ?=
 BENCH_GEAR ?= file-parser
 BENCH_SCENARIO ?=
 BENCH_VERBOSE ?=
-make_benchmark: py-env
+make-benchmark: py-env
 	$(call print_target_banner)
 	$(PYTHON) tools/scripts/run_make_benchmark.py \
 		$(if $(BENCH_GROUP),--group $(BENCH_GROUP)) \
