@@ -118,8 +118,13 @@ def get_target_size_mb() -> float:
 def stream_command_to_log(command: str, log_file: Path, verbose: bool) -> int:
     """Run ``command`` and stream combined stdout/stderr to ``log_file``."""
     with log_file.open("w", encoding="utf-8") as lf:
+        # Use a NON-login shell (`-c`, not `-lc`): a login shell re-sources
+        # profile files and can reorder $PATH (e.g. putting /usr/bin — Apple's
+        # LibreSSL `openssl` — ahead of Homebrew/MacPorts OpenSSL), which does
+        # not match how a developer runs `make all` interactively. Inheriting
+        # the caller's environment keeps benchmark runs faithful to manual ones.
         proc = subprocess.Popen(
-            ["bash", "-lc", command],
+            ["bash", "-c", command],
             cwd=str(ROOT_DIR),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
