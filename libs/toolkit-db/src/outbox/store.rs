@@ -433,7 +433,10 @@ impl<'a> OutboxStore<'a> {
         self.statements.vacuum().decrement_counter()
     }
 
-    #[cfg(test)]
+    /// Only the `SQLite` integration suite resets the counter, so the gate
+    /// matches that module's (`#[cfg(test)] #[cfg(feature = "sqlite")]`) —
+    /// otherwise this is dead code in a pg- or mysql-only build.
+    #[cfg(all(test, feature = "sqlite"))]
     pub(super) fn reset_vacuum_counter(&self) -> &str {
         self.statements.vacuum().reset_counter()
     }

@@ -9,7 +9,9 @@
 //! # Features
 //! - `pg`, `mysql`, `sqlite`: enable `SQLx` backends
 //! - `sea-orm`: add `SeaORM` integration for type-safe operations
-//! - `preview-outbox`: enable the transactional outbox pipeline (experimental — API may change)
+//!
+//! The transactional outbox pipeline ([`outbox`]) is always available — it is no
+//! longer behind a preview feature flag.
 //!
 //! # New Architecture
 //! The crate now supports:
@@ -81,8 +83,6 @@ pub mod manager;
 pub mod migration_runner;
 pub mod odata;
 pub mod options;
-
-#[cfg(feature = "preview-outbox")]
 pub mod outbox;
 pub mod secure;
 

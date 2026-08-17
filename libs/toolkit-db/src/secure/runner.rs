@@ -26,11 +26,6 @@ pub enum SeaOrmRunner<'a> {
     Tx(&'a sea_orm::DatabaseTransaction),
 }
 
-// Only the outbox module needs `executor()` today; the whole impl block is
-// gated to match so it isn't flagged as dead code (and the block itself
-// doesn't trip an elidable-lifetime warning once empty) when `preview-outbox`
-// is off.
-#[cfg(feature = "preview-outbox")]
 impl<'a> SeaOrmRunner<'a> {
     /// Erase the connection/transaction distinction into `SeaORM`'s own executor enum.
     ///

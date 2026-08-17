@@ -97,7 +97,7 @@ toolkit-gts = { workspace = true }
 # `::gts::*` paths (the compile-time `<S as GtsSchema>::SCHEMA_ID` prefix
 # assert plus `GtsInstanceId::new(...)`).
 gts = { workspace = true }
-toolkit-db = { workspace = true, features = ["sqlite", "pg", "preview-outbox"] }
+toolkit-db = { workspace = true, features = ["sqlite", "pg"] }
 toolkit-db-macros = { workspace = true }
 toolkit-security = { workspace = true }
 toolkit-macros = { workspace = true }

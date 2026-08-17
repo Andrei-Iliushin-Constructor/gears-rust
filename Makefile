@@ -249,19 +249,24 @@ export PATH := $(HOME)/.local/bin:$(PATH)
 # Use `make clippy-deep` for the full 182-run matrix (nightly / pre-release).
 CLIPPY_FLAGS := -- -D warnings -D clippy::perf
 CLIPPY_HACK_CRATES := -p cf-gears-toolkit -p cf-gears-toolkit-db -p cf-gears-toolkit-http
+# `_any-backend` is toolkit-db's internal "some backend is on" marker (see its
+# [features] block); enabling it *alone* asserts a driver exists while none does,
+# which the outbox benchmarks reject with a compile_error!. Not a configuration
+# anyone can ship, so it is not worth a lint pass.
+CLIPPY_HACK_EXCLUDE := --exclude-features _any-backend
 
 clippy:
 	$(call check_rustup_component,clippy)
 	$(call check_tool,cargo-hack)
 	cargo clippy --workspace --all-targets --all-features $(CLIPPY_FLAGS)
-	cargo hack clippy $(CLIPPY_HACK_CRATES) --all-targets --each-feature $(CLIPPY_FLAGS)
+	cargo hack clippy $(CLIPPY_HACK_CRATES) --all-targets --each-feature $(CLIPPY_HACK_EXCLUDE) $(CLIPPY_FLAGS)
 
 ## Full feature-matrix clippy: one pass per (crate × feature).
 ## ~182 runs — intended for nightly CI and pre-release validation, not PRs.
 clippy-deep:
 	$(call check_rustup_component,clippy)
 	$(call check_tool,cargo-hack)
-	cargo hack clippy --workspace --all-targets --each-feature $(CLIPPY_FLAGS)
+	cargo hack clippy --workspace --all-targets --each-feature $(CLIPPY_HACK_EXCLUDE) $(CLIPPY_FLAGS)
 
 # Run markdown checks with 'lychee'
 lychee: ensure-submodules
@@ -475,16 +480,16 @@ test-macros: install-tools
 
 ## Run SQLite integration tests
 test-sqlite: install-tools
-	cargo nextest run -p cf-gears-toolkit-db --features sqlite,integration,preview-outbox
-	cargo build -p cf-gears-toolkit-db --examples --features sqlite,preview-outbox
+	cargo nextest run -p cf-gears-toolkit-db --features sqlite,integration
+	cargo build -p cf-gears-toolkit-db --examples --features sqlite
 
 ## Run PostgreSQL integration tests
 test-pg: install-tools
-	cargo nextest run -p cf-gears-toolkit-db --features pg,integration,preview-outbox
+	cargo nextest run -p cf-gears-toolkit-db --features pg,integration
 
 ## Run MySQL integration tests
 test-mysql: install-tools
-	cargo nextest run -p cf-gears-toolkit-db --features mysql,integration,preview-outbox
+	cargo nextest run -p cf-gears-toolkit-db --features mysql,integration
 
 # Run all database integration tests
 test-db: test-sqlite test-pg test-mysql
@@ -564,38 +569,38 @@ check-windows-fips:
 
 ## Run outbox throughput benchmarks against PostgreSQL
 bench-pg:
-	cargo bench -p cf-gears-toolkit-db --features pg,preview-outbox --bench outbox_throughput -- postgres
+	cargo bench -p cf-gears-toolkit-db --features pg --bench outbox_throughput -- postgres
 
 ## Run outbox throughput benchmarks against MySQL
 bench-mysql:
-	cargo bench -p cf-gears-toolkit-db --features mysql,preview-outbox --bench outbox_throughput -- mysql
+	cargo bench -p cf-gears-toolkit-db --features mysql --bench outbox_throughput -- mysql
 
 ## Run outbox throughput benchmarks against MariaDB
 bench-mariadb:
-	cargo bench -p cf-gears-toolkit-db --features mysql,preview-outbox --bench outbox_throughput -- mariadb
+	cargo bench -p cf-gears-toolkit-db --features mysql --bench outbox_throughput -- mariadb
 
 # Run outbox throughput benchmarks against SQLite
 bench-sqlite:
-	cargo bench -p cf-gears-toolkit-db --features sqlite,preview-outbox --bench outbox_throughput -- sqlite
+	cargo bench -p cf-gears-toolkit-db --features sqlite --bench outbox_throughput -- sqlite
 
 ## Run outbox throughput benchmarks against all database engines
 bench-db: bench-pg bench-mysql bench-mariadb bench-sqlite
 
 ## Run long-haul (1M+10M) outbox benchmarks against PostgreSQL
 bench-pg-longhaul:
-	cargo bench -p cf-gears-toolkit-db --features pg,preview-outbox --bench outbox_throughput -- postgres_longhaul
+	cargo bench -p cf-gears-toolkit-db --features pg --bench outbox_throughput -- postgres_longhaul
 
 ## Run long-haul (1M+10M) outbox benchmarks against MySQL
 bench-mysql-longhaul:
-	cargo bench -p cf-gears-toolkit-db --features mysql,preview-outbox --bench outbox_throughput -- mysql_longhaul
+	cargo bench -p cf-gears-toolkit-db --features mysql --bench outbox_throughput -- mysql_longhaul
 
 ## Run long-haul (1M+10M) outbox benchmarks against MariaDB
 bench-mariadb-longhaul:
-	cargo bench -p cf-gears-toolkit-db --features mysql,preview-outbox --bench outbox_throughput -- mariadb_longhaul
+	cargo bench -p cf-gears-toolkit-db --features mysql --bench outbox_throughput -- mariadb_longhaul
 
 ## Run long-haul (100K 1P) outbox benchmarks against SQLite
 bench-sqlite-longhaul:
-	cargo bench -p cf-gears-toolkit-db --features sqlite,preview-outbox --bench outbox_throughput -- sqlite_longhaul
+	cargo bench -p cf-gears-toolkit-db --features sqlite --bench outbox_throughput -- sqlite_longhaul
 
 ## Run long-haul outbox benchmarks against all database engines
 bench-db-longhaul: bench-pg-longhaul bench-mysql-longhaul bench-mariadb-longhaul bench-sqlite-longhaul

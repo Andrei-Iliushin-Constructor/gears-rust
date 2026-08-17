@@ -55,7 +55,7 @@ opentelemetry_sdk = { workspace = true, features = [
 # `db` enables the `DatabaseCapability` trait; the REST API layer is not
 # feature-gated, so no toolkit feature bump is needed for `rest`.
 toolkit = { workspace = true, features = ["db"] }
-toolkit-db = { workspace = true, features = ["pg", "sqlite", "preview-outbox"] }
+toolkit-db = { workspace = true, features = ["pg", "sqlite"] }
 toolkit-db-macros = { workspace = true }
 # Canonical OData list surface: the `FilterField` / `FieldKind` traits, the
 # `OData` query, `Page<T>` (with-utoipa for the `OpenAPI` response schema), and

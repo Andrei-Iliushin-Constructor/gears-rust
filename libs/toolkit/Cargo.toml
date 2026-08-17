@@ -80,8 +80,6 @@ otel = [
     "dep:opentelemetry-otlp",
     "dep:tonic",
 ]
-# Transactional outbox pipeline (preview — API may change)
-preview-outbox = ["db", "toolkit-db/preview-outbox"]
 
 bootstrap = [
     "db",
