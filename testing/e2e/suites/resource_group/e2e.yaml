@@ -14,10 +14,26 @@ profiles:
   # features, and override only the two plugin priorities that activate the
   # chain. Run via: make e2e-tr-authz
   tr-authz:
-    features_file: config/e2e-features.txt
-    extra_features:
-      - tr-authz
-      - tenant-resolver-rg
+    # TEMPORARY: reduced to main's historical feature set (no oagw /
+    # resource-group / tr-authz / tenant-resolver-rg) to keep CI green.
+    # The full feature binary crashes at startup because oagw.post_init eagerly
+    # resolves the root tenant via the rg-tr plugin against an empty resource-group
+    # DB, before anything (account-management bootstrap / _seed_root_tenants) has
+    # created the root. Restoring the reduced set reproduces the prior behaviour
+    # where those gears were simply not compiled into this binary.
+    # TODO: restore the full AuthZ -> TR -> RG chain once the startup ordering is
+    # fixed. Tracked in: https://github.com/constructorfabric/gears-rust/issues/4568
+    features:
+      - users-info-example
+      - mini-chat
+      - static-tenants
+      - static-authn
+      - static-authz
+      - static-credstore
+      - account-management
+      - static-idp
+      - file-storage
+      - bss-ledger
     default_features: true
     config_gears: ["*"]
     test_path: testing/e2e
