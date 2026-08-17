@@ -1,6 +1,6 @@
 [package]
 name = "bss-ledger-sdk"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 license.workspace = true
 description = "BSS Billing Ledger SDK: infrastructure-free contract for ClientHub consumers"
