@@ -3,8 +3,8 @@
 run_benchmark.py — Benchmark Makefile targets and report timing, status, and target/ size.
 
 Runs two groups of scenarios:
-  Group all-gears (1–6):    targets without GEAR= scope
-  Group specific-gear (7–12): targets with GEAR=<name> (default: file-parser)
+  Group all-gears (1–7):    targets without GEAR= scope
+  Group specific-gear (8–14): targets with GEAR=<name> (default: file-parser)
 
 Each scenario records wall-clock execution time, pass/fail exit status, and
 the total size of ``target/`` after the step completes.  Scenarios marked as
@@ -12,12 +12,12 @@ the total size of ``target/`` after the step completes.  Scenarios marked as
 the measurement.
 
 Usage examples:
-  python run_benchmark.py                       # run all 12 scenarios
+  python run_benchmark.py                       # run all 14 scenarios
   python run_benchmark.py --group all-gears      # all-gears group only
   python run_benchmark.py --group specific-gear   # specific-gear group only
   python run_benchmark.py --gear credstore      # implies --group=specific-gear
   python run_benchmark.py --scenario 3          # run only scenario #3
-  python run_benchmark.py --scenario 1 --scenario 9   # run scenarios 1 and 9
+  python run_benchmark.py --scenario 1 --scenario 10  # run scenarios 1 and 10
 """
 
 from __future__ import annotations
@@ -164,6 +164,7 @@ def build_scenarios(gear: str) -> List[Scenario]:
     # Group A — all gears
     group_a = [
         (True,  "make all",       "rm -rf target/; make all"),
+        (False, "make all (warm)", "make all"),
         (True,  "make build",     "rm -rf target/; make build"),
         (False, "make check",     "make check"),
         (False, "make test",      "make test"),
@@ -179,13 +180,14 @@ def build_scenarios(gear: str) -> List[Scenario]:
     # Group B — specific gear
     group_b = [
         (True,  f"make all GEAR={gear}",       f"rm -rf target/; make all GEAR={gear}"),
+        (False, f"make all GEAR={gear} (warm)", f"make all GEAR={gear}"),
         (True,  f"make build GEAR={gear}",     f"rm -rf target/; make build GEAR={gear}"),
         (False, f"make check GEAR={gear}",     f"make check GEAR={gear}"),
         (False, f"make test GEAR={gear}",      f"make test GEAR={gear}"),
         (False, f"make e2e-local GEAR={gear}", f"make e2e-local GEAR={gear}"),
         (False, f"make dist GEAR={gear}",      f"make dist GEAR={gear}"),
     ]
-    for i, (clean, cmd, name) in enumerate(group_b, start=7):
+    for i, (clean, cmd, name) in enumerate(group_b, start=8):
         scenarios.append(Scenario(
             number=i, group="specific-gear", name=name,
             command=cmd, clean_target=clean,
@@ -316,8 +318,8 @@ def print_report(results: List[Result], gear: str) -> None:
     print("  This report shows the execution results of Makefile target benchmarks.")
     print("  Two groups of scenarios were defined:")
     print()
-    print(f"    {C.bold}all-gears (1–6){C.reset}:      targets without GEAR= scoping")
-    print(f"    {C.bold}specific-gear (7–12){C.reset}: targets with GEAR={gear}")
+    print(f"    {C.bold}all-gears (1–7){C.reset}:      targets without GEAR= scoping")
+    print(f"    {C.bold}specific-gear (8–14){C.reset}: targets with GEAR={gear}")
     print()
     print("  Columns:")
     print("    - #              Scenario number")
@@ -366,7 +368,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--scenario", type=int, action="append", dest="scenarios",
-        help="Run only the specified scenario number (1–12). Can be repeated.",
+        help="Run only the specified scenario number (1–14). Can be repeated.",
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true",
