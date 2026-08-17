@@ -15,7 +15,10 @@ pub mod resource_types;
 pub mod actions {
     pub const LIST: &str = "list";
     pub const CREATE: &str = "create";
-    pub const READ: &str = "read";
+    // Aligned with the authorization-engine action vocabulary
+    // ([list, get, create, update, delete]); the gear previously emitted
+    // "read", which is outside that enum and cannot back a read/get ACE.
+    pub const READ: &str = "get";
     pub const UPDATE: &str = "update";
     pub const DELETE: &str = "delete";
 }
