@@ -64,7 +64,7 @@ impl MigrationTrait for Migration {
             ],
             _ => {
                 return Err(DbErr::Custom(MYSQL_NOT_SUPPORTED.to_owned()));
-            }
+            } // @cpt-end:cpt-cf-account-management-dbtable-tenant-metadata:p2:inst-dbtable-tenant-metadata-index-schema
         };
 
         for sql in statements {
