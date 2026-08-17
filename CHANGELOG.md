@@ -9,6 +9,607 @@ release-plz updates this file in the Release PR.
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-event-broker-v0.2.0...cf-gears-event-broker-v0.2.1) - 2026-08-17
+
+### Fixed
+
+- *(lints)* make `make dylint` fully green (DE0904, DE0309, DE1201) (by @Artifizer)
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+* @Artifizer
+
+## [0.2.0](https://github.com/constructorfabric/gears-rust/compare/cf-gears-event-broker-sdk-v0.1.4...cf-gears-event-broker-sdk-v0.2.0) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+- *(deps)* [**breaking**] upgrade SeaORM 1.1 -> 2.0 and sqlx 0.8 -> 0.9 (by @MikeFalcon77)
+
+### Contributors
+
+* @github-actions[bot]
+* @MikeFalcon77
+
+## [0.1.5](https://github.com/constructorfabric/gears-rust/compare/cf-gears-llm-gateway-sdk-v0.1.4...cf-gears-llm-gateway-sdk-v0.1.5) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.6](https://github.com/constructorfabric/gears-rust/compare/cf-gears-model-registry-sdk-v0.1.5...cf-gears-model-registry-sdk-v0.1.6) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.8](https://github.com/constructorfabric/gears-rust/compare/cf-gears-noop-usage-collector-plugin-v0.1.7...cf-gears-noop-usage-collector-plugin-v0.1.8) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.6](https://github.com/constructorfabric/gears-rust/compare/cf-gears-oidc-authn-plugin-v0.2.5...cf-gears-oidc-authn-plugin-v0.2.6) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.3.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-cluster-conformance-v0.3.0...cf-gears-cluster-conformance-v0.3.1) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-cluster-v0.2.0...cf-gears-cluster-v0.2.1) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.3.0](https://github.com/constructorfabric/gears-rust/compare/cf-postgres-cluster-plugin-v0.2.0...cf-postgres-cluster-plugin-v0.3.0) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+- *(deps)* [**breaking**] upgrade SeaORM 1.1 -> 2.0 and sqlx 0.8 -> 0.9 (by @MikeFalcon77)
+
+### Contributors
+
+* @github-actions[bot]
+* @MikeFalcon77
+
+## [0.2.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-standalone-cluster-plugin-v0.2.0...cf-gears-standalone-cluster-plugin-v0.2.1) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-cluster-sdk-v0.2.0...cf-gears-cluster-sdk-v0.2.1) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.9](https://github.com/constructorfabric/gears-rust/compare/cf-gears-usage-collector-v0.2.8...cf-gears-usage-collector-v0.2.9) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.14](https://github.com/constructorfabric/gears-rust/compare/cf-gears-tr-authz-plugin-v0.1.13...cf-gears-tr-authz-plugin-v0.1.14) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.0](https://github.com/constructorfabric/gears-rust/compare/cf-gears-timescaledb-usage-collector-plugin-v0.1.6...cf-gears-timescaledb-usage-collector-plugin-v0.2.0) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+- *(deps)* [**breaking**] upgrade SeaORM 1.1 -> 2.0 and sqlx 0.8 -> 0.9 (by @MikeFalcon77)
+
+### Contributors
+
+* @github-actions[bot]
+* @MikeFalcon77
+
+## [0.3.7](https://github.com/constructorfabric/gears-rust/compare/cf-gears-usage-collector-sdk-v0.3.6...cf-gears-usage-collector-sdk-v0.3.7) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.32](https://github.com/constructorfabric/gears-rust/compare/cf-gears-static-tr-plugin-v0.1.31...cf-gears-static-tr-plugin-v0.1.32) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.11](https://github.com/constructorfabric/gears-rust/compare/cf-gears-static-idp-plugin-v0.1.10...cf-gears-static-idp-plugin-v0.1.11) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.8](https://github.com/constructorfabric/gears-rust/compare/cf-gears-static-credstore-plugin-v0.2.7...cf-gears-static-credstore-plugin-v0.2.8) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.31](https://github.com/constructorfabric/gears-rust/compare/cf-gears-static-authz-plugin-v0.1.30...cf-gears-static-authz-plugin-v0.1.31) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.3.11](https://github.com/constructorfabric/gears-rust/compare/cf-gears-static-authn-plugin-v0.3.10...cf-gears-static-authn-plugin-v0.3.11) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.33](https://github.com/constructorfabric/gears-rust/compare/cf-gears-single-tenant-tr-plugin-v0.1.32...cf-gears-single-tenant-tr-plugin-v0.1.33) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.14](https://github.com/constructorfabric/gears-rust/compare/cf-gears-rg-tr-plugin-v0.1.13...cf-gears-rg-tr-plugin-v0.1.14) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.36](https://github.com/constructorfabric/gears-rust/compare/cf-gears-nodes-registry-v0.1.35...cf-gears-nodes-registry-v0.1.36) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.27](https://github.com/constructorfabric/gears-rust/compare/cf-gears-nodes-registry-sdk-v0.1.26...cf-gears-nodes-registry-sdk-v0.1.27) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.3.0](https://github.com/constructorfabric/gears-rust/compare/cf-gears-mini-chat-v0.2.8...cf-gears-mini-chat-v0.3.0) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+- Merge pull request #4546 from parviz-93/cleanup-mini-chat-attachment-retry-after (by @MikeFalcon77) - #4546
+- *(deps)* [**breaking**] upgrade SeaORM 1.1 -> 2.0 and sqlx 0.8 -> 0.9 (by @MikeFalcon77)
+
+### Contributors
+
+* @github-actions[bot]
+* @MikeFalcon77
+
+## [0.10.18](https://github.com/constructorfabric/gears-rust/compare/cf-gears-mini-chat-sdk-v0.10.17...cf-gears-mini-chat-sdk-v0.10.18) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.37](https://github.com/constructorfabric/gears-rust/compare/cf-gears-gear-orchestrator-v0.1.36...cf-gears-gear-orchestrator-v0.1.37) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.38](https://github.com/constructorfabric/gears-rust/compare/cf-gears-file-parser-v0.1.37...cf-gears-file-parser-v0.1.38) - 2026-08-17
+
+### Fixed
+
+- *(lints)* make `make dylint` fully green (DE0904, DE0309, DE1201) (by @Artifizer)
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+* @Artifizer
+
+## [0.3.0](https://github.com/constructorfabric/gears-rust/compare/cf-chat-engine-v0.2.7...cf-chat-engine-v0.3.0) - 2026-08-17
+
+### Fixed
+
+- *(chat-engine)* map authz READ action to "get"
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+- *(deps)* [**breaking**] upgrade SeaORM 1.1 -> 2.0 and sqlx 0.8 -> 0.9 (by @MikeFalcon77)
+- Merge pull request #4223 from Ritmix3300/feat/chat-engine-authz (by @MikeFalcon77) - #4223
+
+### Contributors
+
+* @github-actions[bot]
+* @MikeFalcon77
+
+## [0.1.2](https://github.com/constructorfabric/gears-rust/compare/bss-rate-provider-http-json-plugin-v0.1.1...bss-rate-provider-http-json-plugin-v0.1.2) - 2026-08-17
+
+### Fixed
+
+- *(lints)* make `make dylint` fully green (DE0904, DE0309, DE1201) (by @Artifizer)
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+* @Artifizer
+
+## [0.1.2](https://github.com/constructorfabric/gears-rust/compare/bss-rate-provider-ecb-plugin-v0.1.1...bss-rate-provider-ecb-plugin-v0.1.2) - 2026-08-17
+
+### Fixed
+
+- *(lints)* make `make dylint` fully green (DE0904, DE0309, DE1201) (by @Artifizer)
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+* @Artifizer
+
+## [0.1.2](https://github.com/constructorfabric/gears-rust/compare/bss-rate-provider-v0.1.1...bss-rate-provider-v0.1.2) - 2026-08-17
+
+### Fixed
+
+- *(lints)* make `make dylint` fully green (DE0904, DE0309, DE1201) (by @Artifizer)
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+* @Artifizer
+
+## [0.1.2](https://github.com/constructorfabric/gears-rust/compare/bss-rate-provider-sdk-v0.1.1...bss-rate-provider-sdk-v0.1.2) - 2026-08-17
+
+### Fixed
+
+- *(lints)* make `make dylint` fully green (DE0904, DE0309, DE1201) (by @Artifizer)
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+* @Artifizer
+
+## [0.1.2](https://github.com/constructorfabric/gears-rust/compare/bss-ledger-sdk-v0.1.1...bss-ledger-sdk-v0.1.2) - 2026-08-17
+
+### Fixed
+
+- *(lints)* make `make dylint` fully green (DE0904, DE0309, DE1201) (by @Artifizer)
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+* @Artifizer
+
+## [0.4.8](https://github.com/constructorfabric/gears-rust/compare/cf-gears-api-gateway-v0.4.7...cf-gears-api-gateway-v0.4.8) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.18](https://github.com/constructorfabric/gears-rust/compare/cf-gears-grpc-hub-v0.2.17...cf-gears-grpc-hub-v0.2.18) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.28](https://github.com/constructorfabric/gears-rust/compare/cf-gears-authn-resolver-v0.2.27...cf-gears-authn-resolver-v0.2.28) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.3.28](https://github.com/constructorfabric/gears-rust/compare/cf-gears-authn-resolver-sdk-v0.3.27...cf-gears-authn-resolver-sdk-v0.3.28) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.4.0](https://github.com/constructorfabric/gears-rust/compare/cf-gears-oagw-v0.3.8...cf-gears-oagw-v0.4.0) - 2026-08-17
+
+### Fixed
+
+- *(oagw)* [**breaking**] relay WebSocket frames without parsing (by @fluiderson)
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+* @fluiderson
+
+## [0.5.8](https://github.com/constructorfabric/gears-rust/compare/cf-gears-oagw-sdk-v0.5.7...cf-gears-oagw-sdk-v0.5.8) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.3.0](https://github.com/constructorfabric/gears-rust/compare/cf-gears-credstore-v0.2.7...cf-gears-credstore-v0.3.0) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+- *(deps)* [**breaking**] upgrade SeaORM 1.1 -> 2.0 and sqlx 0.8 -> 0.9 (by @MikeFalcon77)
+
+### Contributors
+
+* @github-actions[bot]
+* @MikeFalcon77
+
+## [0.2.8](https://github.com/constructorfabric/gears-rust/compare/cf-gears-credstore-sdk-v0.2.7...cf-gears-credstore-sdk-v0.2.8) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.6.0](https://github.com/constructorfabric/gears-rust/compare/cf-gears-account-management-v0.5.4...cf-gears-account-management-v0.6.0) - 2026-08-17
+
+### Fixed
+
+- *(account-management)* close unbalanced traceability marker in m0005
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+- *(deps)* [**breaking**] upgrade SeaORM 1.1 -> 2.0 and sqlx 0.8 -> 0.9 (by @MikeFalcon77)
+
+### Contributors
+
+* @github-actions[bot]
+* @MikeFalcon77
+
+## [0.1.32](https://github.com/constructorfabric/gears-rust/compare/cf-gears-tenant-resolver-v0.1.31...cf-gears-tenant-resolver-v0.1.32) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.3.0](https://github.com/constructorfabric/gears-rust/compare/cf-gears-resource-group-v0.2.8...cf-gears-resource-group-v0.3.0) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+- *(deps)* [**breaking**] upgrade SeaORM 1.1 -> 2.0 and sqlx 0.8 -> 0.9 (by @MikeFalcon77)
+
+### Contributors
+
+* @github-actions[bot]
+* @MikeFalcon77
+
+## [0.2.6](https://github.com/constructorfabric/gears-rust/compare/cf-gears-resource-group-sdk-v0.2.5...cf-gears-resource-group-sdk-v0.2.6) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.36](https://github.com/constructorfabric/gears-rust/compare/cf-gears-authz-resolver-v0.1.35...cf-gears-authz-resolver-v0.1.36) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.34](https://github.com/constructorfabric/gears-rust/compare/cf-gears-types-registry-v0.1.33...cf-gears-types-registry-v0.1.34) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.3.5](https://github.com/constructorfabric/gears-rust/compare/cf-gears-types-registry-sdk-v0.3.4...cf-gears-types-registry-sdk-v0.3.5) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.3.20](https://github.com/constructorfabric/gears-rust/compare/cf-gears-authz-resolver-sdk-v0.3.19...cf-gears-authz-resolver-sdk-v0.3.20) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.5.6](https://github.com/constructorfabric/gears-rust/compare/cf-gears-account-management-sdk-v0.5.5...cf-gears-account-management-sdk-v0.5.6) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.3.20](https://github.com/constructorfabric/gears-rust/compare/cf-gears-tenant-resolver-sdk-v0.3.19...cf-gears-tenant-resolver-sdk-v0.3.20) - 2026-08-17
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.6.24](https://github.com/constructorfabric/gears-rust/compare/cf-gears-toolkit-v0.6.23...cf-gears-toolkit-v0.6.24) - 2026-08-17
+
+### Fixed
+
+- *(lints)* make `make dylint` fully green (DE0904, DE0309, DE1201) (by @Artifizer)
+
+### Other
+
+- release (by @github-actions[bot]) - #4528
+
+### Contributors
+
+* @github-actions[bot]
+* @Artifizer
+
 ## [0.1.5](https://github.com/constructorfabric/gears-rust/compare/cf-gears-llm-gateway-sdk-v0.1.4...cf-gears-llm-gateway-sdk-v0.1.5) - 2026-08-17
 
 ### Other
