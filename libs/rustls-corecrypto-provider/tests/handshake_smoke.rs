@@ -137,11 +137,33 @@ fn openssl_or_skip() -> Option<PathBuf> {
     resolved
 }
 
+/// RAII guard for a spawned `openssl s_server`.
+///
+/// `std::process::Child` does **not** terminate the process on drop, so any
+/// panic between spawn and an explicit `kill()`/`wait()` — e.g. inside
+/// `do_handshake_and_get` or socket setup — would leak the server process.
+/// This guard reaps the child in `Drop`, making cleanup unwind-safe. The
+/// tempdir holding the cert/key is held alongside so it outlives the server.
+struct SServer {
+    child: Child,
+    /// Port the server is listening on.
+    port: u16,
+    _tmp: tempfile::TempDir,
+}
+
+impl Drop for SServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// Spawn openssl s_server with a fresh self-signed cert/key.
 ///
-/// `openssl` is a genuine OpenSSL binary from [`resolve_openssl`]. Returns
-/// (child handle, listening port, tempdir holding cert files).
-fn spawn_s_server(openssl: &Path, extra_args: &[&str]) -> (Child, u16, tempfile::TempDir) {
+/// `openssl` is a genuine OpenSSL binary from [`resolve_openssl`]. Returns an
+/// [`SServer`] guard that carries the child handle, listening port, and the
+/// tempdir holding cert files, and reaps the child on drop.
+fn spawn_s_server(openssl: &Path, extra_args: &[&str]) -> SServer {
     let tmp = tempfile::tempdir().expect("tempdir");
     let cert = tmp.path().join("cert.pem");
     let key = tmp.path().join("key.pem");
@@ -241,7 +263,11 @@ fn spawn_s_server(openssl: &Path, extra_args: &[&str]) -> (Child, u16, tempfile:
             // Child still alive: a successful connect means our server is
             // ready and owns the port.
             if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                return (child, port, tmp);
+                return SServer {
+                    child,
+                    port,
+                    _tmp: tmp,
+                };
             }
             if std::time::Instant::now() >= deadline {
                 let _ = child.kill();
@@ -315,13 +341,11 @@ fn handshake_tls13_aes128_gcm_sha256() {
     let Some(openssl) = openssl_or_skip() else {
         return;
     };
-    let (mut server, port, _tmp) = spawn_s_server(
+    let server = spawn_s_server(
         &openssl,
         &["-tls1_3", "-ciphersuites", "TLS_AES_128_GCM_SHA256"],
     );
-    let (version, suite, body) = do_handshake_and_get(client_config(), port);
-    let _ = server.kill();
-    let _ = server.wait();
+    let (version, suite, body) = do_handshake_and_get(client_config(), server.port);
 
     assert_eq!(version, rustls::ProtocolVersion::TLSv1_3);
     assert_eq!(suite.suite(), rustls::CipherSuite::TLS13_AES_128_GCM_SHA256);
@@ -341,13 +365,11 @@ fn handshake_tls13_aes256_gcm_sha384() {
     let Some(openssl) = openssl_or_skip() else {
         return;
     };
-    let (mut server, port, _tmp) = spawn_s_server(
+    let server = spawn_s_server(
         &openssl,
         &["-tls1_3", "-ciphersuites", "TLS_AES_256_GCM_SHA384"],
     );
-    let (version, suite, body) = do_handshake_and_get(client_config(), port);
-    let _ = server.kill();
-    let _ = server.wait();
+    let (version, suite, body) = do_handshake_and_get(client_config(), server.port);
 
     assert_eq!(version, rustls::ProtocolVersion::TLSv1_3);
     assert_eq!(suite.suite(), rustls::CipherSuite::TLS13_AES_256_GCM_SHA384);
@@ -368,13 +390,11 @@ fn handshake_tls12_ecdhe_rsa_aes256_gcm_sha384() {
     let Some(openssl) = openssl_or_skip() else {
         return;
     };
-    let (mut server, port, _tmp) = spawn_s_server(
+    let server = spawn_s_server(
         &openssl,
         &["-tls1_2", "-cipher", "ECDHE-RSA-AES256-GCM-SHA384"],
     );
-    let (version, suite, body) = do_handshake_and_get(client_config(), port);
-    let _ = server.kill();
-    let _ = server.wait();
+    let (version, suite, body) = do_handshake_and_get(client_config(), server.port);
 
     assert_eq!(version, rustls::ProtocolVersion::TLSv1_2);
     assert_eq!(
@@ -615,7 +635,7 @@ fn tls13_pkcs1_v1_5_certificate_verify_is_rejected() {
     };
     // `-sigalgs rsa_pkcs1_sha256` restricts openssl's offered signature
     // schemes; under TLS 1.3 this is the disallowed half of the surface.
-    let (mut server, port, _tmp) = spawn_s_server(
+    let server = spawn_s_server(
         &openssl,
         &[
             "-tls1_3",
@@ -630,7 +650,7 @@ fn tls13_pkcs1_v1_5_certificate_verify_is_rejected() {
     // negotiation (`NoCommonSignatureAlgorithms`-style) or at
     // CertificateVerify validation. Both are acceptable; the contract
     // is "must not complete with PKCS#1 v1.5 in TLS 1.3".
-    let mut sock = TcpStream::connect(("localhost", port)).expect("tcp connect");
+    let mut sock = TcpStream::connect(("localhost", server.port)).expect("tcp connect");
     sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     sock.set_write_timeout(Some(Duration::from_secs(5)))
         .unwrap();
@@ -643,8 +663,6 @@ fn tls13_pkcs1_v1_5_certificate_verify_is_rejected() {
     // Failure mode is `Err`; on success (i.e. regression) we keep going
     // and surface it via the version/suite check.
     let neg_version = conn.protocol_version();
-    let _ = server.kill();
-    let _ = server.wait();
 
     assert!(
         probe.is_err() || neg_version.is_none(),
