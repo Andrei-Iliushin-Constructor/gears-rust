@@ -5498,12 +5498,13 @@ dependencies = [
 
 [[package]]
 name = "gts"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04c85c9d9cd01c81990a8ccb5f9d584d83571f2d4df2ae6d974170c780bdf693"
+checksum = "50466a7592e7bf40cb7a7d264831b7585bd5fc46bea6721956ec773860f86e2e"
 dependencies = [
  "gts-id",
  "jsonschema",
+ "num-cmp",
  "schemars 1.2.1",
  "serde",
  "serde-saphyr 0.0.24",
@@ -5532,9 +5533,9 @@ dependencies = [
 
 [[package]]
 name = "gts-id"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb0e34e1934f1197b1cb68eb0020cb5aadd79a93b7b8f030d9ebee8dc5a027f2"
+checksum = "616caf5d36d9f91fe219c7f11beeb061964f55bfee8ed67ac055758b2a34721f"
 dependencies = [
  "thiserror 2.0.18",
  "uuid",
@@ -5542,9 +5543,9 @@ dependencies = [
 
 [[package]]
 name = "gts-macros"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07961d01ac64b0ec00940d53a1361926cf759df8750fbaf236d43990e6718efe"
+checksum = "3b5284f7190894d6f0030493ce0dba9d92ea0428491f065470f3537e79f16836"
 dependencies = [
  "gts-id",
  "proc-macro2",
@@ -11124,7 +11125,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
