@@ -38,12 +38,23 @@ impl From<DbBackend> for Dialect {
             DbBackend::Postgres => Self::Postgres,
             DbBackend::Sqlite => Self::Sqlite,
             DbBackend::MySql => Self::MySql,
-            other => panic!(
-                "toolkit-db outbox supports Postgres, SQLite and MySQL only; \
-                 got unsupported database backend {other:?}"
-            ),
+            other => unsupported_backend(other),
         }
     }
+}
+
+/// Diverging helper for the unreachable arm of [`Dialect::from`].
+///
+/// `coverage(off)` sits here rather than on `from` itself so the three real arms
+/// stay in the coverage numerator (they are exercised by `dialect_from_dbbackend`)
+/// while the unreachable panic body leaves the denominator. `DbBackend` has
+/// exactly three constructible variants, so no test can reach this.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn unsupported_backend(backend: DbBackend) -> ! {
+    panic!(
+        "toolkit-db outbox supports Postgres, SQLite and MySQL only; \
+         got unsupported database backend {backend:?}"
+    )
 }
 
 /// SQL for the vacuum's bounded-chunk cleanup operation.

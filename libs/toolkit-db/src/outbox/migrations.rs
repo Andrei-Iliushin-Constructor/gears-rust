@@ -93,6 +93,11 @@ impl MigrationTrait for CreateOutboxSchema {
 /// helper below needs a fallback arm. Returning an error (rather than picking a
 /// dialect) keeps us from creating outbox tables with SQL meant for a different
 /// engine.
+///
+/// `coverage(off)`: the enum has exactly three constructible variants, so the
+/// nine arms that call this are unreachable without transmuting an invalid
+/// discriminant. Excluded from the denominator rather than faked with a test.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn unsupported_backend(backend: DatabaseBackend) -> DbErr {
     DbErr::Custom(format!(
         "outbox migrations support Postgres, SQLite and MySQL only; \

@@ -74,6 +74,22 @@ pub enum MigrationError {
     },
 }
 
+/// Build the [`MigrationError::UnsupportedBackend`] returned by every
+/// backend-dispatching helper below.
+///
+/// `coverage(off)`: `DatabaseBackend` has exactly three constructible variants
+/// (`MySql`/`Postgres`/`Sqlite`) — `#[non_exhaustive]` restricts matching, it
+/// does not add values — so no test can reach the arms that call this without
+/// transmuting an invalid discriminant. Excluding it keeps unreachable lines out
+/// of the coverage denominator instead of inviting a fake test.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn unsupported_backend(gear_name: &str, backend: DatabaseBackend) -> MigrationError {
+    MigrationError::UnsupportedBackend {
+        gear: gear_name.to_owned(),
+        backend,
+    }
+}
+
 /// Result of a migration run.
 #[derive(Debug, Clone)]
 pub struct MigrationResult {
@@ -171,12 +187,7 @@ async fn ensure_migration_table(
             )
             "#
         ),
-        _ => {
-            return Err(MigrationError::UnsupportedBackend {
-                gear: gear_name.to_owned(),
-                backend,
-            });
-        }
+        _ => return Err(unsupported_backend(gear_name, backend)),
     };
 
     conn.execute_raw(Statement::from_string(backend, sql))
@@ -202,12 +213,7 @@ async fn get_applied_migrations(
             format!(r#"SELECT version FROM "{table_name}""#)
         }
         DatabaseBackend::MySql => format!(r"SELECT version FROM `{table_name}`"),
-        _ => {
-            return Err(MigrationError::UnsupportedBackend {
-                gear: gear_name.to_owned(),
-                backend,
-            });
-        }
+        _ => return Err(unsupported_backend(gear_name, backend)),
     };
 
     let records: Vec<MigrationRecord> =
@@ -236,12 +242,7 @@ async fn record_migration(
             format!(r#"INSERT INTO "{table_name}" (version) VALUES ($1)"#)
         }
         DatabaseBackend::MySql => format!(r"INSERT INTO `{table_name}` (version) VALUES (?)"),
-        _ => {
-            return Err(MigrationError::UnsupportedBackend {
-                gear: gear_name.to_owned(),
-                backend,
-            });
-        }
+        _ => return Err(unsupported_backend(gear_name, backend)),
     };
 
     conn.execute_raw(Statement::from_sql_and_values(
@@ -565,12 +566,7 @@ async fn get_pending_migrations_internal(
             row.and_then(|r| r.try_get_by_index::<i32>(0).ok())
                 .is_some_and(|c| c > 0)
         }
-        _ => {
-            return Err(MigrationError::UnsupportedBackend {
-                gear: gear_name.to_owned(),
-                backend,
-            });
-        }
+        _ => return Err(unsupported_backend(gear_name, backend)),
     };
 
     if !table_exists {

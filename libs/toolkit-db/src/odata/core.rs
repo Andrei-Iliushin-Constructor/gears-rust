@@ -956,3 +956,343 @@ fn build_cursor<E: EntityTrait>(
         })
         .transpose()
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    // `super` aliases `toolkit_odata::ast` as `core`, which shadows the `core`
+    // crate inside this module; spell the path out to disambiguate.
+    use self::core::Value as V;
+
+    // -----------------------------------------------------------------------
+    // coerce — one arm per FieldKind, asserting which `sea_orm::Value` variant
+    // the OData literal lands in. The variant matters beyond equality: the
+    // keyset comparison and the bound parameter's SQL type both follow from it.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn coerce_string_produces_string_value() {
+        let got = coerce(FieldKind::String, &V::String("abc".to_owned())).unwrap();
+        assert_eq!(got, sea_orm::Value::String(Some("abc".to_owned())));
+    }
+
+    #[test]
+    fn coerce_integral_number_produces_big_int() {
+        let got = coerce(FieldKind::I64, &V::Number(BigDecimal::from(42))).unwrap();
+        assert_eq!(got, sea_orm::Value::BigInt(Some(42)));
+    }
+
+    #[test]
+    fn coerce_number_for_f64_produces_double() {
+        let bd: BigDecimal = "1.5".parse().unwrap();
+        let got = coerce(FieldKind::F64, &V::Number(bd)).unwrap();
+        assert_eq!(got, sea_orm::Value::Double(Some(1.5)));
+    }
+
+    /// Decimal must go through the string round-trip, not `to_f64`, or the
+    /// fractional digits a money column depends on are silently lost.
+    #[test]
+    fn coerce_number_for_decimal_preserves_scale() {
+        let bd: BigDecimal = "10.05".parse().unwrap();
+        let got = coerce(FieldKind::Decimal, &V::Number(bd)).unwrap();
+        assert_eq!(
+            got,
+            sea_orm::Value::Decimal(Some("10.05".parse::<Decimal>().unwrap()))
+        );
+    }
+
+    #[test]
+    fn coerce_bool_produces_bool_value() {
+        let got = coerce(FieldKind::Bool, &V::Bool(true)).unwrap();
+        assert_eq!(got, sea_orm::Value::Bool(Some(true)));
+    }
+
+    #[test]
+    fn coerce_uuid_produces_uuid_value() {
+        let u = uuid::Uuid::from_u128(0x51);
+        let got = coerce(FieldKind::Uuid, &V::Uuid(u)).unwrap();
+        assert_eq!(got, sea_orm::Value::Uuid(Some(u)));
+    }
+
+    #[test]
+    fn coerce_datetime_produces_chrono_datetime_utc() {
+        let dt = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let got = coerce(FieldKind::DateTimeUtc, &V::DateTime(dt)).unwrap();
+        assert_eq!(got, sea_orm::Value::ChronoDateTimeUtc(Some(dt)));
+    }
+
+    #[test]
+    fn coerce_date_produces_chrono_date() {
+        let d = NaiveDate::from_ymd_opt(2025, 6, 15).unwrap();
+        let got = coerce(FieldKind::Date, &V::Date(d)).unwrap();
+        assert_eq!(got, sea_orm::Value::ChronoDate(Some(d)));
+    }
+
+    #[test]
+    fn coerce_time_produces_chrono_time() {
+        let t = NaiveTime::from_hms_opt(13, 45, 30).unwrap();
+        let got = coerce(FieldKind::Time, &V::Time(t)).unwrap();
+        assert_eq!(got, sea_orm::Value::ChronoTime(Some(t)));
+    }
+
+    // -----------------------------------------------------------------------
+    // coerce — error paths. A filter that names a field of one type but passes
+    // a literal of another must be rejected, not coerced: silently accepting it
+    // would compare a column against the wrong SQL type.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn coerce_reports_the_offending_literal_type_on_mismatch() {
+        let err = coerce(FieldKind::I64, &V::String("nope".to_owned())).unwrap_err();
+        match err {
+            ODataBuildError::TypeMismatch { expected, got } => {
+                assert_eq!(expected, FieldKind::I64);
+                assert_eq!(got, "string");
+            }
+            other => panic!("expected TypeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_rejects_null_literal_with_its_own_tag() {
+        let err = coerce(FieldKind::String, &V::Null).unwrap_err();
+        match err {
+            ODataBuildError::TypeMismatch { expected, got } => {
+                assert_eq!(expected, FieldKind::String);
+                assert_eq!(got, "null");
+            }
+            other => panic!("expected TypeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_rejects_uuid_literal_against_string_field() {
+        let err = coerce(FieldKind::String, &V::Uuid(uuid::Uuid::nil())).unwrap_err();
+        assert!(matches!(
+            err,
+            ODataBuildError::TypeMismatch { got: "uuid", .. }
+        ));
+    }
+
+    #[test]
+    fn coerce_rejects_bool_literal_against_date_field() {
+        let err = coerce(FieldKind::Date, &V::Bool(false)).unwrap_err();
+        assert!(matches!(
+            err,
+            ODataBuildError::TypeMismatch { got: "bool", .. }
+        ));
+    }
+
+    /// A number too large for `i64` must fail rather than wrap or saturate.
+    #[test]
+    fn coerce_rejects_number_out_of_i64_range() {
+        let huge: BigDecimal = "99999999999999999999999999".parse().unwrap();
+        let err = coerce(FieldKind::I64, &V::Number(huge)).unwrap_err();
+        assert!(matches!(
+            err,
+            ODataBuildError::TypeMismatch {
+                expected: FieldKind::I64,
+                got: "number"
+            }
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // coerce_many
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn coerce_many_maps_every_literal_in_order() {
+        let items = vec![
+            core::Expr::Value(V::Number(BigDecimal::from(1))),
+            core::Expr::Value(V::Number(BigDecimal::from(2))),
+        ];
+        let got = coerce_many(FieldKind::I64, &items).unwrap();
+        assert_eq!(
+            got,
+            vec![
+                sea_orm::Value::BigInt(Some(1)),
+                sea_orm::Value::BigInt(Some(2))
+            ]
+        );
+    }
+
+    /// `x in (y)` where `y` is a column reference rather than a literal must be
+    /// rejected — otherwise the identifier would be bound as a string parameter.
+    #[test]
+    fn coerce_many_rejects_non_literal_items() {
+        let items = vec![core::Expr::Identifier("some_column".to_owned())];
+        let err = coerce_many(FieldKind::I64, &items).unwrap_err();
+        assert!(matches!(err, ODataBuildError::NonLiteralInList));
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_cursor_value — the decode half of the keyset cursor. A cursor is
+    // attacker-supplied (it arrives as an opaque query parameter), so every
+    // malformed input must produce an error, never a panic or a wrong type.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_cursor_string_is_infallible() {
+        let got = parse_cursor_value(FieldKind::String, "anything").unwrap();
+        assert_eq!(got, sea_orm::Value::String(Some("anything".to_owned())));
+    }
+
+    #[test]
+    fn parse_cursor_i64_round_trips() {
+        let got = parse_cursor_value(FieldKind::I64, "-7").unwrap();
+        assert_eq!(got, sea_orm::Value::BigInt(Some(-7)));
+    }
+
+    #[test]
+    fn parse_cursor_f64_round_trips() {
+        let got = parse_cursor_value(FieldKind::F64, "2.25").unwrap();
+        assert_eq!(got, sea_orm::Value::Double(Some(2.25)));
+    }
+
+    #[test]
+    fn parse_cursor_bool_round_trips() {
+        let got = parse_cursor_value(FieldKind::Bool, "true").unwrap();
+        assert_eq!(got, sea_orm::Value::Bool(Some(true)));
+    }
+
+    #[test]
+    fn parse_cursor_uuid_round_trips() {
+        let u = uuid::Uuid::from_u128(0x52);
+        let got = parse_cursor_value(FieldKind::Uuid, &u.to_string()).unwrap();
+        assert_eq!(got, sea_orm::Value::Uuid(Some(u)));
+    }
+
+    #[test]
+    fn parse_cursor_datetime_normalizes_offset_to_utc() {
+        // Same instant, expressed in +02:00 — must come back as the UTC value so
+        // the keyset comparison is against a comparable timestamp.
+        let got = parse_cursor_value(FieldKind::DateTimeUtc, "2025-06-15T14:00:00+02:00").unwrap();
+        let expected = chrono::DateTime::parse_from_rfc3339("2025-06-15T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(got, sea_orm::Value::ChronoDateTimeUtc(Some(expected)));
+    }
+
+    #[test]
+    fn parse_cursor_date_round_trips() {
+        let got = parse_cursor_value(FieldKind::Date, "2025-06-15").unwrap();
+        assert_eq!(
+            got,
+            sea_orm::Value::ChronoDate(Some(NaiveDate::from_ymd_opt(2025, 6, 15).unwrap()))
+        );
+    }
+
+    #[test]
+    fn parse_cursor_time_round_trips() {
+        let got = parse_cursor_value(FieldKind::Time, "13:45:30").unwrap();
+        assert_eq!(
+            got,
+            sea_orm::Value::ChronoTime(Some(NaiveTime::from_hms_opt(13, 45, 30).unwrap()))
+        );
+    }
+
+    #[test]
+    fn parse_cursor_decimal_round_trips() {
+        let got = parse_cursor_value(FieldKind::Decimal, "10.05").unwrap();
+        assert_eq!(
+            got,
+            sea_orm::Value::Decimal(Some("10.05".parse::<Decimal>().unwrap()))
+        );
+    }
+
+    /// Every kind must reject garbage with its own message, so a malformed
+    /// cursor surfaces as a 400 rather than a panic or a silent default.
+    #[test]
+    fn parse_cursor_rejects_garbage_for_every_typed_kind() {
+        let cases = [
+            (FieldKind::I64, "invalid i64 in cursor"),
+            (FieldKind::F64, "invalid f64 in cursor"),
+            (FieldKind::Bool, "invalid bool in cursor"),
+            (FieldKind::Uuid, "invalid uuid in cursor"),
+            (FieldKind::DateTimeUtc, "invalid datetime in cursor"),
+            (FieldKind::Date, "invalid date in cursor"),
+            (FieldKind::Time, "invalid time in cursor"),
+            (FieldKind::Decimal, "invalid decimal in cursor"),
+        ];
+        for (kind, expected_msg) in cases {
+            let err = parse_cursor_value(kind, "!!not-a-value!!").unwrap_err();
+            match err {
+                ODataBuildError::Other(msg) => {
+                    assert_eq!(msg, expected_msg, "wrong message for {kind:?}: got {msg:?}");
+                }
+                other => panic!("expected Other for {kind:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// An empty cursor segment is the realistic malformed case (a truncated
+    /// token), and it must be rejected for typed kinds while staying valid for
+    /// `String` — where the empty string is a legitimate key.
+    #[test]
+    fn parse_cursor_empty_segment_is_rejected_for_typed_kinds_but_ok_for_string() {
+        assert_eq!(
+            parse_cursor_value(FieldKind::String, "").unwrap(),
+            sea_orm::Value::String(Some(String::new()))
+        );
+        assert!(parse_cursor_value(FieldKind::I64, "").is_err());
+        assert!(parse_cursor_value(FieldKind::Uuid, "").is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // LIKE escaping — `contains`/`startswith`/`endswith` interpolate user text
+    // into a LIKE pattern, so the wildcards must be neutralised or a filter of
+    // "%" would match every row.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn like_escape_neutralises_wildcards_and_the_escape_char() {
+        assert_eq!(like_escape("100%"), r"100\%");
+        assert_eq!(like_escape("a_b"), r"a\_b");
+        assert_eq!(like_escape(r"back\slash"), r"back\\slash");
+    }
+
+    #[test]
+    fn like_escape_leaves_ordinary_text_untouched() {
+        assert_eq!(like_escape("plain text 42"), "plain text 42");
+    }
+
+    #[test]
+    fn like_helpers_anchor_the_pattern_on_the_expected_side() {
+        assert_eq!(like_contains("ab"), "%ab%");
+        assert_eq!(like_starts("ab"), "ab%");
+        assert_eq!(like_ends("ab"), "%ab");
+    }
+
+    /// The wildcard in the *user's* text stays escaped while the anchors the
+    /// helper adds stay live — that distinction is the whole point.
+    #[test]
+    fn like_helpers_escape_user_wildcards_but_keep_their_own_anchors() {
+        assert_eq!(like_contains("50%"), r"%50\%%");
+        assert_eq!(like_starts("_x"), r"\_x%");
+    }
+
+    // -----------------------------------------------------------------------
+    // bigdecimal_to_decimal
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bigdecimal_to_decimal_preserves_fractional_digits() {
+        let bd: BigDecimal = "123.4500".parse().unwrap();
+        assert_eq!(
+            bigdecimal_to_decimal(&bd).unwrap(),
+            "123.45".parse::<Decimal>().unwrap()
+        );
+    }
+
+    /// `rust_decimal` is a 96-bit fixed-point type, so a `BigDecimal` beyond its
+    /// range must error rather than truncate a monetary amount.
+    #[test]
+    fn bigdecimal_to_decimal_rejects_out_of_range_values() {
+        let bd: BigDecimal = "1e40".parse().unwrap();
+        let err = bigdecimal_to_decimal(&bd).unwrap_err();
+        assert!(matches!(err, ODataBuildError::Other("invalid decimal")));
+    }
+}
