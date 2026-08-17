@@ -161,6 +161,24 @@ def _user(base: str, tid: str, uid: str) -> str:
     return f"{base}/account-management/v1/tenants/{tid}/users/{uid}"
 
 
+def _service_accounts(base: str, tid: str) -> str:
+    return f"{base}/account-management/v1/tenants/{tid}/service-accounts"
+
+
+def _service_account(base: str, tid: str, client_id: str) -> str:
+    return (
+        f"{base}/account-management/v1/tenants/{tid}"
+        f"/service-accounts/{client_id}"
+    )
+
+
+def _service_account_rotate(base: str, tid: str, client_id: str) -> str:
+    return (
+        f"{base}/account-management/v1/tenants/{tid}"
+        f"/service-accounts/{client_id}/rotate-secret"
+    )
+
+
 def _conversions(base: str, tid: str) -> str:
     return f"{base}/account-management/v1/tenants/{tid}/conversions"
 
