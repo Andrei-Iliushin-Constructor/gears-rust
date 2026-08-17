@@ -171,7 +171,7 @@ def build_scenarios(gear: str) -> List[Scenario]:
         (False, "make e2e-local", "make e2e-local"),
         (False, "make dist",      "make dist"),
     ]
-    for i, (clean, cmd, name) in enumerate(group_a, start=1):
+    for i, (clean, name, cmd) in enumerate(group_a, start=1):
         scenarios.append(Scenario(
             number=i, group="all-gears", name=name,
             command=cmd, clean_target=clean,
@@ -187,7 +187,7 @@ def build_scenarios(gear: str) -> List[Scenario]:
         (False, f"make e2e-local GEAR={gear}", f"make e2e-local GEAR={gear}"),
         (False, f"make dist GEAR={gear}",      f"make dist GEAR={gear}"),
     ]
-    for i, (clean, cmd, name) in enumerate(group_b, start=8):
+    for i, (clean, name, cmd) in enumerate(group_b, start=8):
         scenarios.append(Scenario(
             number=i, group="specific-gear", name=name,
             command=cmd, clean_target=clean,
