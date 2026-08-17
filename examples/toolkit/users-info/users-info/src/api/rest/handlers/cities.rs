@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::Extension;
 use axum::extract::Path;
 use axum::http::Uri;
@@ -24,7 +26,7 @@ use crate::gear::ConcreteAppServices;
 )]
 pub async fn list_cities(
     Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<std::sync::Arc<ConcreteAppServices>>,
+    Extension(svc): Extension<Arc<ConcreteAppServices>>,
     OData(query): OData,
 ) -> ApiResult<JsonPage<serde_json::Value>> {
     info!(
@@ -49,7 +51,7 @@ pub async fn list_cities(
 )]
 pub async fn get_city(
     Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<std::sync::Arc<ConcreteAppServices>>,
+    Extension(svc): Extension<Arc<ConcreteAppServices>>,
     Path(id): Path<Uuid>,
     OData(query): OData,
 ) -> ApiResult<JsonBody<serde_json::Value>> {
@@ -81,7 +83,7 @@ pub async fn get_city(
 pub async fn create_city(
     uri: Uri,
     Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<std::sync::Arc<ConcreteAppServices>>,
+    Extension(svc): Extension<Arc<ConcreteAppServices>>,
     Json(req_body): Json<CreateCityReq>,
 ) -> ApiResult<impl IntoResponse> {
     info!(
@@ -109,7 +111,7 @@ pub async fn create_city(
 )]
 pub async fn update_city(
     Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<std::sync::Arc<ConcreteAppServices>>,
+    Extension(svc): Extension<Arc<ConcreteAppServices>>,
     Path(id): Path<Uuid>,
     Json(req_body): Json<UpdateCityReq>,
 ) -> ApiResult<JsonBody<CityDto>> {
@@ -135,7 +137,7 @@ pub async fn update_city(
 )]
 pub async fn delete_city(
     Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<std::sync::Arc<ConcreteAppServices>>,
+    Extension(svc): Extension<Arc<ConcreteAppServices>>,
     Path(id): Path<Uuid>,
 ) -> ApiResult<impl IntoResponse> {
     info!(

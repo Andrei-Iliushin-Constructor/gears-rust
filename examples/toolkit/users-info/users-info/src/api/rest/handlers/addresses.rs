@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::Extension;
 use axum::extract::Path;
 use axum::response::IntoResponse;
@@ -20,7 +22,7 @@ use crate::gear::ConcreteAppServices;
 )]
 pub async fn get_user_address(
     Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<std::sync::Arc<ConcreteAppServices>>,
+    Extension(svc): Extension<Arc<ConcreteAppServices>>,
     Path(user_id): Path<Uuid>,
 ) -> ApiResult<JsonBody<AddressDto>> {
     info!(
@@ -48,7 +50,7 @@ pub async fn get_user_address(
 )]
 pub async fn put_user_address(
     Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<std::sync::Arc<ConcreteAppServices>>,
+    Extension(svc): Extension<Arc<ConcreteAppServices>>,
     Path(user_id): Path<Uuid>,
     Json(req_body): Json<PutAddressReq>,
 ) -> ApiResult<impl IntoResponse> {
@@ -78,7 +80,7 @@ pub async fn put_user_address(
 )]
 pub async fn delete_user_address(
     Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<std::sync::Arc<ConcreteAppServices>>,
+    Extension(svc): Extension<Arc<ConcreteAppServices>>,
     Path(user_id): Path<Uuid>,
 ) -> ApiResult<impl IntoResponse> {
     info!(
