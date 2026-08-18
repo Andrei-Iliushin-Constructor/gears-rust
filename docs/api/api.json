@@ -1363,6 +1363,25 @@
         ],
         "type": "object"
       },
+      "GithubMirrorHealthDto": {
+        "properties": {
+          "api_base_url": {
+            "type": "string"
+          },
+          "gear": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "gear",
+          "version",
+          "api_base_url"
+        ],
+        "type": "object"
+      },
       "GpuInfoDto": {
         "properties": {
           "cores": {
@@ -12730,6 +12749,38 @@
         "summary": "List all registered gears",
         "tags": [
           "Gear Orchestrator"
+        ]
+      }
+    },
+    "/github-mirror/v1/health": {
+      "get": {
+        "description": "Reports that the github-mirror gear is loaded and serving requests",
+        "operationId": "github_mirror.health",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubMirrorHealthDto"
+                }
+              }
+            },
+            "description": "Gear is healthy"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "summary": "GitHub Mirror health",
+        "tags": [
+          "GitHub Mirror"
         ]
       }
     },
