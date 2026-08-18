@@ -2345,6 +2345,9 @@ dependencies = [
  "cf-gears-toolkit-macros",
  "inventory",
  "serde",
+ "serde_json",
+ "tokio",
+ "tower",
  "tracing",
  "utoipa",
 ]

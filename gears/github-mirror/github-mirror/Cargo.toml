@@ -29,3 +29,8 @@ axum = { workspace = true, features = ["macros"] }
 
 toolkit = { workspace = true }
 toolkit-macros = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+serde_json = { workspace = true }

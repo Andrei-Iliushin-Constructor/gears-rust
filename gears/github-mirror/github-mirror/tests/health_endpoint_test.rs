@@ -1,0 +1,69 @@
+use std::sync::Arc;
+
+use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use github_mirror::api::rest::routes::register_routes;
+use github_mirror::domain::service::{Service, ServiceConfig};
+use toolkit::api::OpenApiRegistryImpl;
+use tower::ServiceExt;
+
+fn test_router(api_base_url: &str) -> Router {
+    let service = Arc::new(Service::new(ServiceConfig {
+        api_base_url: api_base_url.to_owned(),
+    }));
+    let openapi = OpenApiRegistryImpl::new();
+    register_routes(Router::new(), &openapi, service)
+}
+
+async fn body_json(response: axum::http::Response<Body>) -> serde_json::Value {
+    let bytes = to_bytes(response.into_body(), 1_000_000)
+        .await
+        .unwrap_or_default();
+    serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+}
+
+#[tokio::test]
+async fn health_returns_200_with_gear_identity() {
+    let router = test_router("https://api.github.com");
+
+    let request = Request::builder()
+        .uri("/github-mirror/v1/health")
+        .body(Body::empty())
+        .unwrap_or_default();
+    let response = router.oneshot(request).await.unwrap_or_default();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["gear"], "github-mirror");
+    assert_eq!(json["api_base_url"], "https://api.github.com");
+    assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+}
+
+#[tokio::test]
+async fn health_reflects_configured_base_url() {
+    let router = test_router("https://github.example.corp/api/v3");
+
+    let request = Request::builder()
+        .uri("/github-mirror/v1/health")
+        .body(Body::empty())
+        .unwrap_or_default();
+    let response = router.oneshot(request).await.unwrap_or_default();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["api_base_url"], "https://github.example.corp/api/v3");
+}
+
+#[tokio::test]
+async fn unknown_route_returns_404() {
+    let router = test_router("https://api.github.com");
+
+    let request = Request::builder()
+        .uri("/github-mirror/v1/nope")
+        .body(Body::empty())
+        .unwrap_or_default();
+    let response = router.oneshot(request).await.unwrap_or_default();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
