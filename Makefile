@@ -25,7 +25,7 @@ EXAMPLE_SERVER_BIN ?= cf-gears-example-server
 EXAMPLE_SERVER_DEBUG_BINARY ?= target/debug/$(EXAMPLE_SERVER_BIN)
 EXAMPLE_SERVER_MANIFEST ?= apps/cf-gears-example-server/Cargo.toml
 EXAMPLE_SERVER_FEATURE_EXCLUDES ?= default fips k8s otel oop-example timescaledb-usage-collector
-EXAMPLE_SERVER_ALL_FEATURES := $(strip $(shell awk '/^\[features\]/{in_features=1; next} /^\[/{in_features=0} in_features && /^[[:alnum:]_-]+[[:space:]]*=/{sub(/[[:space:]]*=.*/, ""); print}' $(EXAMPLE_SERVER_MANIFEST) 2>/dev/null))
+EXAMPLE_SERVER_ALL_FEATURES := $(strip $(shell cargo gears ls features --manifest $(EXAMPLE_SERVER_MANIFEST) 2>/dev/null))
 EXAMPLE_SERVER_FEATURES ?= $(subst $(SPACE),$(COMMA),$(filter-out $(EXAMPLE_SERVER_FEATURE_EXCLUDES),$(EXAMPLE_SERVER_ALL_FEATURES)))
 EXAMPLE_SERVER_FEATURE_ARGS ?= $(if $(EXAMPLE_SERVER_FEATURES),--features $(EXAMPLE_SERVER_FEATURES),)
 E2E_FEATURES_FILE ?= config/e2e-features.txt
@@ -66,14 +66,16 @@ define check_tool
     @command -v $(1) >/dev/null || (echo "ERROR: $(1) is not installed. Run 'make setup' to install required tools." && exit 1)
 endef
 
-# fips-policy relies on cargo-deny bans-check behavior only available since 0.20.0
+# Minimum tool versions — checked via `cargo gears tools check-version`.
 DENY_MIN_VERSION := 0.20.0
+NEXTEST_MIN_VERSION := 0.9.130
+CARGO_GEARS_MIN_VERSION := 0.0.3
 
-define check_deny_version
-    @DENY_VERSION=$$(cargo deny --version 2>/dev/null | awk '{print $$2}'); \
-	if [ -z "$$DENY_VERSION" ] || ! $(PYTHON_BOOTSTRAP) -c "import sys; sys.exit(0 if tuple(map(int, '$$DENY_VERSION'.split('.'))) > tuple(map(int, '$(DENY_MIN_VERSION)'.split('.'))) else 1)" 2>/dev/null; then \
-		echo "ERROR: cargo-deny > $(DENY_MIN_VERSION) is required (found: $${DENY_VERSION:-none}). Run 'cargo install --locked cargo-deny' to upgrade." && exit 1; \
-	fi
+# check_tool_version(tool, requirement)
+# Verify a tool satisfies a semver requirement. Exits with an error if not.
+define check_tool_version
+    @cargo gears tools check-version $(1) '$(2)' >/dev/null 2>&1 \
+	|| (echo "ERROR: $(1) $(2) is required. Run 'cargo install $(1)' to install/upgrade." && exit 1)
 endef
 
 define check_rustup_component
@@ -207,7 +209,7 @@ setup: .setup-stamp py-env
 	@echo "Installing required development tools..."
 	rustup component add clippy
 	cargo install lychee
-	cargo install cargo-geiger
+	cargo install cargo-geigerfi
 	cargo install cargo-deny
 	cargo install cargo-gears
 	cargo install cargo-fuzz
@@ -280,7 +282,7 @@ ensure-submodules:
 fmt:
 	$(call print_target_banner)
 	$(call check_rustup_component,rustfmt)
-	$(if $(GEAR),cargo fmt -p $(GEAR_PKG) --check,cargo fmt --all --check)
+	$(if $(GEAR),cargo fmt $(GEAR_PKGS) --check,cargo fmt --all --check)
 
 CFS ?= cfs
 CFS_PIPX_SPEC ?= git+https://github.com/constructorfabric/studio.git
@@ -315,7 +317,7 @@ ifeq ($(GEAR),)
 	cargo clippy --workspace --all-targets --all-features $(CLIPPY_FLAGS)
 	cargo hack clippy $(CLIPPY_HACK_CRATES) --all-targets --each-feature $(CLIPPY_HACK_EXCLUDE) $(CLIPPY_FLAGS)
 else
-	cargo clippy -p $(GEAR_PKG) $(GEAR_CLIPPY_ARGS)
+	cargo clippy $(GEAR_PKGS) $(GEAR_CLIPPY_ARGS)
 endif
 
 ## Full feature-matrix clippy: one pass per (crate × feature).
@@ -358,7 +360,7 @@ geiger:
 ## Check there are no compile time warnings
 lint:
 	$(call print_target_banner)
-	RUSTFLAGS="-D warnings" cargo check $(GEAR_CARGO_SCOPE) --all-targets --all-features
+	RUSTFLAGS="-D warnings" cargo check $(if $(GEAR),$(GEAR_PKGS),--workspace) --all-targets --all-features
 
 ## Validate GTS identifiers in .md and .json files (DE0903)
 # Uses gts-validator binary (install via: cargo install gts-validator)
@@ -375,22 +377,14 @@ gts-docs:
 		--exclude "**/helm/*/templates/*" \
 		docs gears libs examples
 
-# cli_smoke_tests.rs / migrate_command_tests.rs rely on CARGO_BIN_EXE_<name> being
-# set at test runtime, which cargo-nextest only supports from 0.9.130 onward.
-NEXTEST_MIN_VERSION := 0.9.130
-
 install-tools: py-env
 	$(call print_target_banner)
-	@NEXTEST_VERSION=$$(cargo nextest --version 2>/dev/null | awk '/^cargo-nextest/ {print $$2}'); \
-	if [ -z "$$NEXTEST_VERSION" ] || ! $(PYTHON) -c "import sys; sys.exit(0 if tuple(map(int, '$$NEXTEST_VERSION'.split('.'))) >= tuple(map(int, '$(NEXTEST_MIN_VERSION)'.split('.'))) else 1)" 2>/dev/null; then \
-		echo "Installing/upgrading cargo-nextest (>= $(NEXTEST_MIN_VERSION) required for CARGO_BIN_EXE_* support)..."; \
-		cargo install --locked cargo-nextest; \
-	fi
-	@DENY_VERSION=$$(cargo deny --version 2>/dev/null | awk '{print $$2}'); \
-	if [ -z "$$DENY_VERSION" ] || ! $(PYTHON) -c "import sys; sys.exit(0 if tuple(map(int, '$$DENY_VERSION'.split('.'))) > tuple(map(int, '$(DENY_MIN_VERSION)'.split('.'))) else 1)" 2>/dev/null; then \
-		echo "Installing/upgrading cargo-deny (> $(DENY_MIN_VERSION) required for fips-policy)..."; \
-		cargo install --locked cargo-deny; \
-	fi
+	@cargo gears --check-version '>=$(CARGO_GEARS_MIN_VERSION)' >/dev/null 2>&1 \
+	|| (echo "Installing cargo-gears >= $(CARGO_GEARS_MIN_VERSION)..." && cargo install cargo-gears)
+	@cargo gears tools check-version cargo-nextest '>=$(NEXTEST_MIN_VERSION)' >/dev/null 2>&1 \
+	|| (echo "Installing cargo-nextest >= $(NEXTEST_MIN_VERSION)..." && cargo install --locked cargo-nextest)
+	@cargo gears tools check-version cargo-deny '>=$(DENY_MIN_VERSION)' >/dev/null 2>&1 \
+	|| (echo "Installing cargo-deny >= $(DENY_MIN_VERSION)..." && cargo install --locked cargo-deny)
 
 # Run architecture lints via cargo-gears (see Gears.toml for configuration).
 dylint:
@@ -432,7 +426,7 @@ check-release-config: py-env
 deny:
 	$(call print_target_banner)
 	$(call check_tool,cargo-deny)
-	$(call check_deny_version)
+	$(call check_tool_version,cargo-deny,>=$(DENY_MIN_VERSION))
 	cargo deny check
 
 ## FIPS dependency-graph policy (see deny-fips.toml + ADR 0005).
@@ -442,7 +436,7 @@ deny:
 fips-policy:
 	$(call print_target_banner)
 	$(call check_tool,cargo-deny)
-	$(call check_deny_version)
+	$(call check_tool_version,cargo-deny,>=$(DENY_MIN_VERSION))
 	cargo deny --config deny-fips.toml check bans
 
 security: deny fips-policy
@@ -559,56 +553,67 @@ dev: dev-fmt dev-clippy dev-test
 	$(call print_target_banner)
 
 # -------- Optional GEAR= scope for top-level targets --------
+#
+# Scope fmt, clippy, build, test, run, e2e-local, openapi, and coverage
+# to a single gear instead of the whole workspace.
+#
+# Package resolution uses `cargo gears ls packages` with a regex filter
+# on Cargo package names, so naming conventions (cf-gears-*, bss-*, bare)
+# are handled automatically.  Requires cargo-gears >= 0.0.3.
+#
 # Examples:
-#   make test GEAR=file-parser
-#     -> cargo nextest run -p cf-gears-file-parser -p cf-gears-file-parser-sdk -p cf-gears-example-server
-#        (gear crates + all workspace crates that depend on them, resolved by resolve_gear_deps.py)
-#   make run GEAR=file-parser
-#     -> cargo run --bin cf-gears-example-server --no-default-features \
-#        --features file-parser,static-tenants,static-authn,static-authz
-#   make build GEAR=bss-ledger GEAR_PKG=bss-ledger GEAR_SDK_PKG=bss-ledger-sdk
-#     -> cargo build --release -p bss-ledger -p bss-ledger-sdk
-#   make test GEAR=file-parser GEAR_FEATURES=integration
-#     -> cargo nextest run -p cf-gears-file-parser -p cf-gears-file-parser-sdk -p cf-gears-example-server --features integration
+#   make fmt GEAR=file-parser         -> cargo fmt -p cf-gears-file-parser -p cf-gears-file-parser-sdk --check
+#   make test GEAR=ledger             -> cargo nextest run -p bss-ledger -p bss-ledger-sdk ... (+ reverse deps)
+#   make run GEAR=file-parser         -> cargo run --bin cf-gears-example-server --features file-parser,...
 
+# --- User-facing knobs ---
 GEAR ?=
 GEAR_BUILD_ARGS ?=
 GEAR_TEST_ARGS ?=
 GEAR_RUN_ARGS ?=
+# Extra Cargo features to pass with --features (e.g. GEAR_FEATURES=integration).
 GEAR_FEATURES ?=
+# Clippy flags for gear-scoped runs.
+GEAR_CLIPPY_ARGS ?= --all-targets --all-features -- -D warnings
 
+# --- Package resolution ---
+# Regex to match Cargo package names belonging to this gear.
+# Handles: <gear>, <gear>-sdk, cf-gears-<gear>, cf-gears-<gear>-sdk,
+#          <prefix>-<gear>, <prefix>-<gear>-sdk (e.g. bss-ledger).
+# Override with GEAR_NAME_REGEXP= for non-standard naming.
+GEAR_NAME_REGEXP ?= ^(?:(?:cf-gears-)?(?:[a-z]+-)?)?$(GEAR)(?:-sdk)?$$
+ifdef GEAR
+  GEAR_PKGS := $(shell cargo gears ls packages --scope-dirs gears,libs --filter '$(GEAR_NAME_REGEXP)' -f cargo-flags)
+endif
+
+# --- Derived variables ---
 GEAR_FEATURE_ARGS := $(if $(GEAR_FEATURES),--features $(GEAR_FEATURES),)
+GEAR_NO_TESTS_FLAG := $(if $(GEAR),--no-tests=warn)
+# E2E suite key: kebab-case gear name → snake_case directory name.
+GEAR_E2E_KEY := $(subst -,_,$(GEAR))
+GEAR_E2E_TARGET ?= testing/e2e/suites/$(GEAR_E2E_KEY)
+GEAR_E2E_SCOPE := $(if $(GEAR),$(GEAR_E2E_TARGET) $(E2E_TARGET),$(E2E_TARGET))
+# Coverage: pass the first resolved package + e2e target path to coverage.py.
+GEAR_COVERAGE_ARGS := $(if $(GEAR),--package $(firstword $(subst -p ,,$(GEAR_PKGS))) --e2e-target $(GEAR_E2E_TARGET),)
+
+# --- Server feature selection for run / openapi ---
+# Base features always enabled when running a focused server.
 GEAR_SERVER_BASE_FEATURES ?= static-tenants,static-authn,static-authz
+# System gears that are non-optional deps of the example server (always linked).
 GEAR_SERVER_ALWAYS_LINKED ?= api-gateway gear-orchestrator types-registry tenant-resolver authn-resolver authz-resolver
+# The gear itself as an optional feature (empty if it's an always-linked gear).
 GEAR_SERVER_OPTIONAL_FEATURES := $(filter-out $(GEAR_SERVER_ALWAYS_LINKED),$(GEAR))
 GEAR_SERVER_FEATURES ?= $(GEAR_SERVER_OPTIONAL_FEATURES)$(if $(GEAR_SERVER_OPTIONAL_FEATURES),$(COMMA),)$(GEAR_SERVER_BASE_FEATURES)
-GEAR_E2E_KEY := $(subst -,_,$(GEAR))
-GEAR_OPENAPI_TMP ?= target/openapi/$(GEAR).json
-GEAR_E2E_TARGET ?= testing/e2e/suites/$(GEAR_E2E_KEY)
-GEAR_PKG ?= cf-gears-$(GEAR)
-GEAR_SDK_PKG ?= $(GEAR_PKG)-sdk
-GEAR_SDK_FLAG := $(if $(wildcard gears/$(GEAR)/$(GEAR)-sdk),-p $(GEAR_SDK_PKG))
-GEAR_PKGS := -p $(GEAR_PKG) $(GEAR_SDK_FLAG)
-GEAR_CARGO_SCOPE := $(if $(GEAR),$(GEAR_PKGS),--workspace)
 GEAR_SERVER_FEATURE_ARGS := $(if $(GEAR),--no-default-features --features $(GEAR_SERVER_FEATURES),$(EXAMPLE_SERVER_FEATURE_ARGS))
-# GTS envelope providers that config/e2e-local.yaml's seeds depend on at LINK
-# time: account-management registers the `gts.cf.core.am.tenant_type.v1~` base
-# schema via inventory::submit!, while that config seeds its derived tenant
-# types. A focused `GEAR=` build must link these providers or the server won't
-# boot against the shared config (types-registry ready-commit fails chain
-# validation on the seeded derived tenant types).
+
+# --- OpenAPI ---
+GEAR_OPENAPI_TMP ?= target/openapi/$(GEAR).json
+# GTS envelope providers that config/e2e-local.yaml's seeds depend on at link
+# time (account-management registers tenant_type base schemas via inventory).
 OPENAPI_ENVELOPE_FEATURES ?= account-management,static-idp
 GEAR_OPENAPI_FEATURE_ARGS := --no-default-features --features $(GEAR_SERVER_FEATURES),$(OPENAPI_ENVELOPE_FEATURES)
-# `make openapi` (no GEAR): build the FULL curated server (every gear in
-# config/e2e-features.txt) so docs/api/api.json is the complete all-gears spec.
-# `make openapi GEAR=xxx`: build a focused server for that gear (plus the
-# envelope providers above) and MERGE its /openapi.json into docs/api/api.json,
-# patching just that gear's paths without a full rebuild.
+# No GEAR: full curated server.  GEAR=xxx: focused server, merged into api.json.
 OPENAPI_BUILD_FEATURE_ARGS := $(if $(GEAR),$(GEAR_OPENAPI_FEATURE_ARGS),$(OPENAPI_SERVER_FEATURE_ARGS))
-GEAR_E2E_SCOPE := $(if $(GEAR),$(GEAR_E2E_TARGET) $(E2E_TARGET),$(E2E_TARGET))
-GEAR_COVERAGE_ARGS := $(if $(GEAR),--package $(GEAR_PKG) --e2e-target $(GEAR_E2E_TARGET),)
-GEAR_CLIPPY_ARGS ?= --all-targets --all-features -- -D warnings
-GEAR_NO_TESTS_FLAG := $(if $(GEAR),--no-tests=warn)
 
 
 # -------- Tests --------
@@ -616,14 +621,14 @@ GEAR_NO_TESTS_FLAG := $(if $(GEAR),--no-tests=warn)
 .PHONY: test test-no-macros test-macros test-sqlite test-pg test-mysql test-db test-users-info-pg test-usage-collector-pg test-cluster-pg test-fips
 
 # Run all tests, or a single gear when GEAR=<gear> is set.
-# When GEAR= is set, resolve_gear_deps.py finds all crates inside gears/<gear>/
-# plus every workspace crate that depends on them (transitive reverse deps).
+# When GEAR= is set, cargo gears ls packages finds matching crates + their
+# transitive reverse deps (every workspace crate that depends on them).
 test: install-tools py-env
 	$(call print_target_banner)
 ifeq ($(GEAR),)
 	cargo nextest run --workspace $(GEAR_FEATURE_ARGS) $(GEAR_TEST_ARGS)
 else
-	@GEAR_SCOPE=$$($(PYTHON) tools/scripts/resolve_gear_deps.py $(GEAR)) || exit 1; \
+	@GEAR_SCOPE=$$(cargo gears ls packages --scope-dirs gears,libs --filter '$(GEAR_NAME_REGEXP)' --include-rdeps -f cargo-flags) || exit 1; \
 	echo "cargo nextest run $$GEAR_SCOPE $(GEAR_FEATURE_ARGS) $(GEAR_TEST_ARGS) $(GEAR_NO_TESTS_FLAG)"; \
 	cargo nextest run $$GEAR_SCOPE $(GEAR_FEATURE_ARGS) $(GEAR_TEST_ARGS) $(GEAR_NO_TESTS_FLAG)
 endif
@@ -878,7 +883,7 @@ coverage: py-env
 coverage-unit: py-env
 	$(call print_target_banner)
 	$(call check_tool,cargo-llvm-cov)
-	$(PYTHON) tools/scripts/coverage.py unit $(if $(GEAR),--package $(GEAR_PKG),)
+	$(PYTHON) tools/scripts/coverage.py unit $(if $(GEAR),--package $(firstword $(subst -p ,,$(GEAR_PKGS))),)
 
 ## Ensure needed packages and programs installed for local e2e testing
 check-prereq-e2e-local: py-env
@@ -1139,7 +1144,7 @@ ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-u
 # Build the release binary, or a single gear when GEAR=<gear> is set.
 build:
 	$(call print_target_banner)
-	$(MAKE) .cargo-build GEAR=$(GEAR) GEAR_PKG=$(GEAR_PKG) GEAR_SDK_PKG=$(GEAR_SDK_PKG) GEAR_FEATURES=$(GEAR_FEATURES) GEAR_BUILD_ARGS=$(GEAR_BUILD_ARGS)
+	$(MAKE) .cargo-build GEAR=$(GEAR) GEAR_FEATURES=$(GEAR_FEATURES) GEAR_BUILD_ARGS=$(GEAR_BUILD_ARGS)
 
 # Build distributable release artifacts.
 dist: build
