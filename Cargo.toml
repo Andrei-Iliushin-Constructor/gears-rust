@@ -12,12 +12,10 @@ readme = "README.md"
 # Incremental is for local dev cycles. CI workflows set CARGO_INCREMENTAL=0 in
 # their env, which overrides this (the env var wins in both directions).
 incremental = true
-codegen-units = 16
 debug = "line-tables-only" # line tables for backtraces without full debuginfo bloat
 
 [profile.test]
 incremental = true # same rationale as [profile.dev] above
-codegen-units = 16
 debug = "line-tables-only" # to minimize build sizes in gitworkflows
 
 [profile.release]
