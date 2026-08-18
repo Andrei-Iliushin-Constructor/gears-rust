@@ -6,9 +6,10 @@
 //! builds. Not gear-specific: any crate enables the feature as a
 //! dev-dependency and uses these types directly.
 //!
-//! [`QueryRecorder`] attaches a `SeaORM` metric callback to a connection
-//! *before* it is wrapped into a [`crate::DBProvider`] (see
-//! [`connect_with_recorder`]) so every statement is captured.
+//! [`crate::test_support::QueryRecorder`] attaches a `SeaORM` metric callback
+//! to a connection *before* it is wrapped into a [`crate::DBProvider`] (see
+//! [`crate::test_support::connect_with_recorder`]) so every statement is
+//! captured.
 //!
 //! Captured per statement: normalized SQL (literals redacted, placeholder
 //! lists collapsed so batch size doesn't change the "shape"), kind, target
@@ -508,7 +509,8 @@ pub fn snapshot_trace(name: &str, rec: &QueryRecorder) {
     std::fs::write(&path, rec.dump()).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
-/// Connect and return a [`Db`] with a [`QueryRecorder`] already attached.
+/// Connect and return a [`crate::Db`] with a [`QueryRecorder`] already
+/// attached.
 ///
 /// The callback must be installed before the connection is wrapped, hence
 /// this pairs the two steps. Migrations run through the same callback, so

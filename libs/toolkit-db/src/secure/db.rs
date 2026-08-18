@@ -62,8 +62,8 @@ use crate::{DbError, DbHandle};
 ///   `SQLite` `BUSY` / `BUSY_SNAPSHOT`);
 /// - bounded latency on the hot path — the success path pays no backoff at
 ///   all, and even a fully-exhausted retry sequence only ever waits through
-///   [`RETRY_BACKOFF_MAX`]-capped, millisecond-scale delays (see
-///   [`retry_backoff_delay`]), not a real exponential-backoff schedule;
+///   `RETRY_BACKOFF_MAX`-capped, millisecond-scale delays (see
+///   `retry_backoff_delay`), not a real exponential-backoff schedule;
 /// - predictable failure semantics — after exhausting attempts the
 ///   original error is returned, so callers can surface e.g.
 ///   `503 Service Unavailable`.
@@ -604,7 +604,7 @@ impl Db {
     ///      [`crate::contention::is_retryable_contention`] flags as
     ///      retryable for the active backend, and attempts remain, log at
     ///      `WARN`, wait a small jittered backoff (see
-    ///      [`retry_backoff_delay`]), and retry;
+    ///      `retry_backoff_delay`), and retry;
     ///    - otherwise, return the error.
     ///
     /// On exhausting all attempts the **last** error is returned. The
