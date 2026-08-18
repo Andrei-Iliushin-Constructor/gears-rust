@@ -212,30 +212,37 @@ where
 /// any row reaches the database: if any model fails, nothing is inserted --
 /// stronger than looping `secure_insert`, which can leave earlier rows committed.
 ///
+/// This is what [`SecureInsertMany`] cannot offer: by the time a row reaches
+/// `InsertMany` it has been lowered into an `InsertStatement`, so that wrapper
+/// can only take the scope on trust. Here the `ActiveModel`s are still in
+/// hand, so the batch gets the same per-row check a single `secure_insert`
+/// performs -- and then goes on to execute *through* [`SecureInsertMany`], so
+/// the statement still passes the secure type-state rather than bypassing it.
+///
 /// # Batching
 ///
 /// A multi-row insert binds one parameter per column per row, and each
-/// backend caps that count (see [`max_bind_params`]); the batch is split
+/// backend caps that count (see [`max_bind_params_for`]); the batch is split
 /// into as many statements as needed, one statement when it fits.
 ///
 /// **A split batch is not atomic on its own** -- wrap the call in a
 /// transaction if a partial commit across split statements is unacceptable.
 ///
-/// # Divergences from `secure_insert`, checked against sea-orm 1.1.20
+/// # Divergences from `secure_insert`, checked against sea-orm 2.0.2
 ///
-/// Both are consequences of going through `Insert::add_many` rather than one
+/// Both are consequences of going through `InsertMany::many` rather than one
 /// `ActiveModelTrait::insert` per model, and neither is a reason to forbid
 /// heterogeneous batches -- a legitimate scenario -- only to know about
 /// before mixing `Set`/`NotSet` shapes in one call:
 ///
 /// - A column that is `NotSet` on one model but `Set` on another in the same
-///   batch is not left to the database's `DEFAULT`: `add_many` binds a
-///   typed `NULL` for every row where it's `NotSet`, once any row in the
-///   batch sets it (`Insert::add_many` in `sea_orm::query::insert`). A
+///   batch is not left to the database's `DEFAULT`: `many` records the typed
+///   null of whichever row does set the column, and binds it for every row
+///   where it's `NotSet` (`InsertMany::many` in `sea_orm::query::insert`). A
 ///   column-default that isn't `NULL` is silently discarded for those rows.
 /// - `ActiveModelBehavior::before_save` never runs. It lives on
 ///   `ActiveModelTrait::insert`, which this helper does not call --
-///   `Insert::exec` has no hook for it. Any invariant a model normally
+///   `InsertMany::exec` has no hook for it. Any invariant a model normally
 ///   enforces in `before_save` is the caller's job for a batched insert.
 ///
 /// # Errors
@@ -269,24 +276,24 @@ where
         validate_insert_scope(am, scope)?;
     }
 
-    let backend = match DBRunnerInternal::as_seaorm(runner) {
-        SeaOrmRunner::Conn(db) => sea_orm::ConnectionTrait::get_database_backend(db),
-        SeaOrmRunner::Tx(tx) => sea_orm::ConnectionTrait::get_database_backend(tx),
-    };
+    let backend = sea_orm::ConnectionTrait::get_database_backend(
+        &DBRunnerInternal::as_seaorm(runner).executor(),
+    );
     let rows_per_statement = rows_per_insert::<E>(backend);
 
     let mut rest = models;
     while !rest.is_empty() {
         let take = rows_per_statement.min(rest.len());
         let chunk: Vec<E::ActiveModel> = rest.drain(..take).collect();
-        match DBRunnerInternal::as_seaorm(runner) {
-            SeaOrmRunner::Conn(db) => {
-                E::insert_many(chunk).exec(db).await?;
-            }
-            SeaOrmRunner::Tx(tx) => {
-                E::insert_many(chunk).exec(tx).await?;
-            }
-        }
+        // Through `SecureInsertMany` rather than around it: the rows are
+        // already validated above, so `scope_unchecked` is the honest
+        // transition, and the batch stays inside the secure type-state
+        // instead of reaching `InsertMany::exec` directly.
+        E::insert_many(chunk)
+            .secure()
+            .scope_unchecked(scope)?
+            .exec(runner)
+            .await?;
     }
     Ok(())
 }
@@ -409,10 +416,9 @@ where
 
     // SeaORM 2.0's `execute` takes the `StatementBuilder` itself and builds it
     // against the connection's own backend, so there is nothing to build here.
-    let result = match DBRunnerInternal::as_seaorm(runner) {
-        SeaOrmRunner::Conn(db) => sea_orm::ConnectionTrait::execute(db, stmt).await?,
-        SeaOrmRunner::Tx(tx) => sea_orm::ConnectionTrait::execute(tx, stmt).await?,
-    };
+    let result =
+        sea_orm::ConnectionTrait::execute(&DBRunnerInternal::as_seaorm(runner).executor(), stmt)
+            .await?;
     Ok(result.rows_affected())
 }
 
@@ -444,10 +450,9 @@ const fn max_bind_params(backend: sea_orm::DbBackend) -> usize {
 /// number or discovering it as a driver error on a large enough input.
 #[must_use]
 pub fn max_bind_params_for(runner: &impl DBRunner) -> usize {
-    let backend = match DBRunnerInternal::as_seaorm(runner) {
-        SeaOrmRunner::Conn(db) => sea_orm::ConnectionTrait::get_database_backend(db),
-        SeaOrmRunner::Tx(tx) => sea_orm::ConnectionTrait::get_database_backend(tx),
-    };
+    let backend = sea_orm::ConnectionTrait::get_database_backend(
+        &DBRunnerInternal::as_seaorm(runner).executor(),
+    );
     max_bind_params(backend)
 }
 
@@ -777,8 +782,11 @@ where
 /// Unlike [`SecureInsertOne`], there is no `scope_with_model` equivalent:
 /// `InsertMany` has already lowered its rows into an `InsertStatement` and does
 /// not hand back the `ActiveModel`s, so per-row validation is not possible
-/// here. Callers that need validated rows should scope each row through
-/// [`SecureInsertOne`] instead.
+/// here. Callers that need validated rows have two options: scope each row
+/// through [`SecureInsertOne`], or hand the whole batch to
+/// [`secure_insert_many`], which validates the `ActiveModel`s while it still
+/// has them and then executes through this wrapper -- one statement per
+/// bind-budget chunk rather than one per row.
 pub struct SecureInsertMany<A, S>
 where
     A: ActiveModelTrait,
