@@ -5,8 +5,8 @@ database, enforces authorization in SQL, resolves secrets hierarchically across
 the tenant tree, and stores the secret **value** in a backend plugin discovered
 via the types registry.
 
-> Design: the [technical design](https://github.com/constructorfabric/gears-rust/blob/main/gears/credstore/docs/DESIGN.md) is the baseline; the shipped
-> implementation is described in the [design addendum](https://github.com/constructorfabric/gears-rust/blob/main/gears/credstore/docs/DESIGN-ADDENDUM.md)
+> Design: [`docs/DESIGN.md`](../docs/DESIGN.md) is the baseline; the shipped
+> implementation is described in [`docs/DESIGN-ADDENDUM.md`](../docs/DESIGN-ADDENDUM.md)
 > (stateful gear, `credstore_secrets` table, PDP-scope authz, versioning/ETag,
 > write saga).
 
