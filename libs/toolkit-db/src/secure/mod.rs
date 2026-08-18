@@ -104,6 +104,7 @@
 
 // Gear declarations
 mod cond;
+mod cte;
 mod db;
 mod db_ops;
 pub mod docs;
@@ -153,6 +154,9 @@ pub use select::{
     Scoped, SecureEntityExt, SecureFindRelatedExt, SecureSelect, SecureSelectTwo,
     SecureSelectTwoMany, Unscoped,
 };
+
+// CTE (`WITH`) operations -- see docs/arch/secure-orm/ADR/0001-secure-cte-policy.md
+pub use cte::{RecursiveCte, RecursiveDedup, SecureCteSelect};
 
 // Update/Delete/Insert operations
 pub use db_ops::{
