@@ -1116,7 +1116,7 @@ mini-chat-down:
 
 # -------- Main targets --------
 
-.PHONY: all dist check ci ci_test ci_docs build .cargo-build .split-debug quickstart example mini-chat mini-chat-docker mini-chat-helm mini-chat-helm-template mini-chat-up mini-chat-down mini-chat-port-forward full-make-matrix
+.PHONY: all dist check gear-ci ci ci_test ci_docs build .cargo-build .split-debug quickstart example mini-chat mini-chat-docker mini-chat-helm mini-chat-helm-template mini-chat-up mini-chat-down mini-chat-port-forward full-make-matrix
 
 # Start server with quickstart config
 quickstart:
@@ -1155,6 +1155,13 @@ oop-example:
 
 # Run all quality checks
 check: fmt cfs-validate clippy lychee security dylint gts-docs test
+	$(call print_target_banner)
+
+# Lightweight quality check for gear-scoped CI (gear-scoped-ci.yml).
+# Runs only targets that need no extra tools beyond cargo, rustfmt, clippy,
+# nextest, and cargo-gears. Skips cfs-validate, lychee, security, dylint,
+# gts-docs, test-sqlite, e2e-local, and openapi.
+gear-ci: fmt clippy test
 	$(call print_target_banner)
 
 ci_test: fmt clippy

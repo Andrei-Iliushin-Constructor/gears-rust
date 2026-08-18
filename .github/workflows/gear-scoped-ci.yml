@@ -5,8 +5,8 @@
 #   `gears/<gear>/...`, `gears/*/<gear>/...`, or `libs/<gear>/...` — it runs a
 #   scoped Makefile fast path;
 # - both executable gear scopes under `gears/` and library scopes under `libs/`
-#   run `make all GEAR=<gear>` so the Makefile limits scoped work to that gear
-#   and its direct dependency graph;
+#   run `make gear-ci GEAR=<gear>` (fmt + clippy + test, no extra tools)
+#   so the Makefile limits scoped work to that gear and its dependency graph;
 # - if the diff touches multiple supported scopes, workspace files, docs, CI, or any
 #   non-gear path, this workflow intentionally does not run tests and leaves a summary
 #   note that full CI should be run without `GEAR=...`.
@@ -118,26 +118,15 @@ jobs:
 
           def classify_scope(scope_rel: str, scope_path: Path) -> tuple[str, str, str, str]:
               gear = scope_path.name
-              if scope_rel.startswith("libs/"):
-                  scope_kind = "lib"
-                  gear_pkg = read_package_name(scope_path / "Cargo.toml")
-                  sdk_pkg = ""
-                  make_target = "all"
-              else:
-                  scope_kind = "gear"
-                  gear_pkg = read_package_name(scope_path / gear / "Cargo.toml") or read_package_name(scope_path / "Cargo.toml")
-                  sdk_pkg = read_package_name(scope_path / f"{gear}-sdk" / "Cargo.toml")
-                  make_target = "all"
+              scope_kind = "lib" if scope_rel.startswith("libs/") else "gear"
+              gear_pkg = read_package_name(scope_path / "Cargo.toml") or read_package_name(scope_path / gear / "Cargo.toml")
 
               if not gear_pkg:
                   raise RuntimeError(f"Unable to resolve package metadata for scope {scope_rel}")
 
-              cmd_parts = ["make", f"GEAR={gear}", f"GEAR_PKG={gear_pkg}"]
-              if sdk_pkg:
-                  cmd_parts.append(f"GEAR_SDK_PKG={sdk_pkg}")
-              cmd_parts.extend(make_target.split())
+              cmd = f"make GEAR={gear} gear-ci"
 
-              return scope_kind, gear, gear_pkg, " ".join(cmd_parts)
+              return scope_kind, gear, gear_pkg, cmd
 
           diff = subprocess.run(
               ["git", "diff", "--name-only", os.environ["BASE_SHA"], os.environ["HEAD_SHA"]],
