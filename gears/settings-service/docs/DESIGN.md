@@ -109,6 +109,7 @@ The service is delivered as a **Constructor Fabric Gear** — the platform's uni
 | `cpt-cf-settings-service-fr-cascading-inheritance` | Ancestor-id walk via the Tenant Resolver, nearest-match wins; `inheritance_trail` on the read; bounded `cascading_impact` report |
 | `cpt-cf-settings-service-fr-tenant-scope-enforcement` | Server-side subtree check on every operation; reads gated by `tenant_visible`, writes by `tenant_overridable` |
 | `cpt-cf-settings-service-fr-authn-role-gating` | Bearer token via the AuthN Resolver, then a fail-closed `PolicyEnforcer` decision; step-up on apply and on behavior-affecting declaration actions |
+| `cpt-cf-settings-service-fr-category-access` | `categories.access_restricted` (`false` by default) decides whether a category needs a grant at all: open categories are reached on the ordinary settings right with no authorization question, restricted ones additionally require a grant naming that category — type `gts.cf.toolkit.settings.category.v1~` and id `categories.key`, the slug. Lists ask about the restricted categories only, in one batch, and filter on `NOT access_restricted OR key = ANY(granted_slugs)` (§4.8 *Category access*, §4.7) |
 | `cpt-cf-settings-service-fr-audit-mutations` | Audit Emitter writes synchronously inside the mutation transaction, fail-closed; canonical `resource` id makes history an exact-match query |
 | `cpt-cf-settings-service-fr-feature-license-gating` | `licence_feature` checked through the License Resolver on administrative read paths only; the in-process reader is not gated |
 | `cpt-cf-settings-service-fr-standard-advanced-mode` | `mode` on the declaration; mode-filtered lists expose `hidden_advanced_count`; per-user preference persisted |
@@ -370,7 +371,7 @@ OIDC bearer via the AuthN Resolver / IdP. Apply requires **step-up = re-authenti
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-constraint-rbac-policy-enforcer`
 
-RBAC `PolicyEnforcer` gates read/mutate/apply against `gts.cf.toolkit.settings.*` resource types.
+RBAC `PolicyEnforcer` gates read/mutate/apply against `gts.cf.toolkit.settings.*` resources. A category may additionally be **restricted**, and then reaching its settings needs a grant on that category (§4.8 *Category access*).
 
 #### Feature/licence entitlement
 
@@ -1472,6 +1473,7 @@ sequenceDiagram
 | `name` | `varchar(256)` | No | — | **Unique** (`uq_category_name`) |
 | `description` | `varchar(4096)` | Yes | — | |
 | `domain_affinity` | text | Yes | — | |
+| `access_restricted` | boolean | No | `false` | When `false` — the default — the base right on `gts.cf.toolkit.settings.value.v1~` is enough to reach this category's settings. When `true`, a grant on **this category** is required as well (§4.8 *Category access*). Set by a platform administrator, never by a contributing gear. |
 | `sort_order` | integer | No | `0` | |
 | `icon` | text | Yes | — | |
 | `created_at` | `timestamptz` | No | current timestamp | |
@@ -1661,17 +1663,17 @@ Authorization is enforced server-side via the RBAC `PolicyEnforcer` (fail-closed
 | Any call without valid authentication | Valid bearer token (AuthN Resolver) | — | `401`. AuthN runs before AuthZ. |
 | Read effective value / browse / search | `read` on `gts.cf.toolkit.settings.value.v1~`; further gated by `tenant_visible` + licence | Caller scope subtree | `404` for not-visible settings (no existence leak, `cpt-cf-settings-service-nfr-scope-isolation`) |
 | Stage override (set/revert/remove) | `write` on `gts.cf.toolkit.settings.value.v1~`; **for a tenant caller** also `tenant_overridable` (see the note below) | Target scope, within the caller's subtree | `403`/`409` |
-| Stage a **clone** | `read` on `…value.v1~` at the **source** scope **and** `write` at the **target**, plus `tenant_overridable` there **when the caller is a tenant** — both within the caller's subtree (§4.2 *Staging Manager*). Read authorization on the source is mandatory: without it, clone would exfiltrate a value the caller may not read. | Source + target scope | `403`/`409` |
-| Create declaration / category | `create` on `…declaration.v1~` / `…category.v1~` | Platform (admin) | `403` |
-| Update declaration / category (metadata; declaration incl. `tenant_visible`/`tenant_overridable`) | `update` on `…declaration.v1~` / `…category.v1~` | Platform only | `403` — tenants MUST NOT change their own visibility/override (`cpt-cf-settings-service-fr-tenant-scope-enforcement`) |
-| Retire declaration (soft-delete) | `delete` on `…declaration.v1~` **+ IdP step-up** — behavior-affecting: it drops a live setting out of resolution (§4.2 *Declaration Management*) | Platform (admin) | `401`/`403`/`409` |
-| Reactivate declaration (re-declare-to-revive) | `create` on `…declaration.v1~` **+ IdP step-up** — behavior-affecting: it puts a setting back into live resolution (§4.3). The **module** revive path is machine-side and not step-up gated (§4.2 *Contribution Reconciler*). | Platform (admin) | `401`/`403` |
-| Delete (empty) category | `delete` on `…category.v1~` — **no step-up**: an empty category holds no setting, so its removal changes no effective value | Platform (admin) | `403`/`409` |
-| Apply pending changes | `apply` on `…value.v1~` **+ IdP step-up** | Own scope | `401`/`403` |
-| List / read pending changes (`GET /v1/pending`, `GET /v1/pending/{key}`) | `read` on `…value.v1~` | Own scope subtree | `403` |
-| Discard pending (`DELETE /v1/pending/{id}` \| `/{key}`, `POST /v1/pending:discard`) | `write` on `…value.v1~` (mutates staged state) | Own scope subtree | `403`/`409` |
-| Preview apply (`POST /v1/applies:preview`) | `apply` on `…value.v1~` — **no step-up** (read-only preview, §4.2 *Apply Orchestrator*) | Own scope | `403` |
-| Read apply commit facet (`GET /v1/applies/{apply_id}/commit`) | `read` on `…value.v1~` | Apply's scope | `404` when not visible, or after **settle** (execution facet deleted — §4.2 *Apply Orchestrator*/§4.7; history via audit §4.3, activation facet via `GET /v1/applies/{apply_id}/activation`, activation §4.3). |
+| Stage a **clone** | `read` on `gts.cf.toolkit.settings.value.v1~` at the **source** scope **and** `write` at the **target**, plus `tenant_overridable` there **when the caller is a tenant** — both within the caller's subtree (§4.2 *Staging Manager*). Read authorization on the source is mandatory: without it, clone would exfiltrate a value the caller may not read. | Source + target scope | `403`/`409` |
+| Create declaration / category | `create` on `gts.cf.toolkit.settings.declaration.v1~` / `gts.cf.toolkit.settings.category.v1~` | Platform (admin) | `403` |
+| Update declaration / category (metadata; declaration incl. `tenant_visible`/`tenant_overridable`) | `update` on `gts.cf.toolkit.settings.declaration.v1~` / `gts.cf.toolkit.settings.category.v1~` | Platform only | `403` — tenants MUST NOT change their own visibility/override (`cpt-cf-settings-service-fr-tenant-scope-enforcement`) |
+| Retire declaration (soft-delete) | `delete` on `gts.cf.toolkit.settings.declaration.v1~` **+ IdP step-up** — behavior-affecting: it drops a live setting out of resolution (§4.2 *Declaration Management*) | Platform (admin) | `401`/`403`/`409` |
+| Reactivate declaration (re-declare-to-revive) | `create` on `gts.cf.toolkit.settings.declaration.v1~` **+ IdP step-up** — behavior-affecting: it puts a setting back into live resolution (§4.3). The **module** revive path is machine-side and not step-up gated (§4.2 *Contribution Reconciler*). | Platform (admin) | `401`/`403` |
+| Delete (empty) category | `delete` on `gts.cf.toolkit.settings.category.v1~` — **no step-up**: an empty category holds no setting, so its removal changes no effective value | Platform (admin) | `403`/`409` |
+| Apply pending changes | `apply` on `gts.cf.toolkit.settings.value.v1~` **+ IdP step-up** | Own scope | `401`/`403` |
+| List / read pending changes (`GET /v1/pending`, `GET /v1/pending/{key}`) | `read` on `gts.cf.toolkit.settings.value.v1~` | Own scope subtree | `403` |
+| Discard pending (`DELETE /v1/pending/{id}` \| `/{key}`, `POST /v1/pending:discard`) | `write` on `gts.cf.toolkit.settings.value.v1~` (mutates staged state) | Own scope subtree | `403`/`409` |
+| Preview apply (`POST /v1/applies:preview`) | `apply` on `gts.cf.toolkit.settings.value.v1~` — **no step-up** (read-only preview, §4.2 *Apply Orchestrator*) | Own scope | `403` |
+| Read apply commit facet (`GET /v1/applies/{apply_id}/commit`) | `read` on `gts.cf.toolkit.settings.value.v1~` | Apply's scope | `404` when not visible, or after **settle** (execution facet deleted — §4.2 *Apply Orchestrator*/§4.7; history via audit §4.3, activation facet via `GET /v1/applies/{apply_id}/activation`, activation §4.3). |
 | Resolve a secret's plaintext (`resolve_secret`, machine path) | **Machine-only — no administrative action exists.** Authorized **per setting** against the **calling service**; audited as a secret-use event (§4.2 *Secret Manager*). Depends on a verified caller identity (§6 prerequisite). | Caller's scope | `403` |
 | Read/set own mode preference (`GET`/`PUT /v1/me/preferences`) | Authenticated caller, **own record only** — `user_id` forced to the token subject; no cross-user access (§4.3) | Self | `401` (no valid bearer) |
 | Internal **SDK traits** (`SettingsReaderClient` read; `SettingsContributionClient` register/retire) | **Trusted caller** — no in-service service-identity check (§6). Caller owns `tenant_id` correctness/scope-read right (read) and `owner_module` correctness (contribution). Valid **within the deployment's trust boundary** only. | — | — |
@@ -1679,6 +1681,35 @@ Authorization is enforced server-side via the RBAC `PolicyEnforcer` (fail-closed
 `PATCH`/`DELETE` on categories and declarations additionally require the `If-Match` precondition (§4.3).
 
 **`tenant_overridable` binds tenant callers, not the platform administrator.** The flag answers "may a **tenant** set its own value for this setting" (§4.1, `cpt-cf-settings-service-fr-tenant-scope-enforcement`), so a platform administrator targeting a specific tenant (§4.3 *Revert & Clone Staging Rules*) is not blocked by it. Reading the flag as an unconditional gate would erase a shape the model deliberately supports: a `cascading` or `local` setting with `tenant_overridable = false` carries **different values per tenant, inherited by their subtrees, writable only centrally** — a per-tenant quota or limit set by the platform. `scope_class = global` is the separate case: there the flag is forced `false` by a `CHECK` (§4.7) and **nobody**, platform administrator included, writes a tenant-scoped value, because a `global` setting has none to write.
+
+#### Category access
+
+Each setting sits in exactly one category. Access is controlled per **category**, never per single setting (`cpt-cf-settings-service-fr-category-access`).
+
+A category is either **open** or **restricted** — `categories.access_restricted`, `false` by default.
+
+| Category | Who can reach its settings |
+|---|---|
+| open | anyone holding the right on `gts.cf.toolkit.settings.value.v1~` (`read` / `write` / `apply`) |
+| restricted | only callers granted that category — `{ type: gts.cf.toolkit.settings.category.v1~, id: <category slug> }`, the slug being `categories.key` (§4.1), so the two fields together are the category's GTS instance id |
+
+**Reading one setting.** Look at its category. Open — allowed. Restricted — ask `authz-resolver` once about that category, allow or deny.
+
+**Reading a list.** Return settings whose category is open, plus those whose category is restricted and granted:
+
+```sql
+... AND (NOT c.access_restricted OR c.key = ANY($granted_slugs))
+```
+
+The gear already knows which categories are restricted — it is a column in its own table — so it asks about those only, in one batch, and asks nothing at all when none is restricted.
+
+**Splitting two roles**, which is what this exists for: restrict `billing` and `infra`, grant `billing` to one role and `infra` to the other. Every other category stays open.
+
+**Still checked on top:** `tenant_visible`, licence, and the caller's subtree. An open category grants nothing by itself — it only adds no check of its own.
+
+**Limits.** One setting cannot be restricted on its own, only its whole category. A category nobody restricted is reachable by every settings administrator — which is what happens today, where the right on the type is the only gate.
+
+> Grants live in the deployment's policy manager, not here: this gear asks and enforces, stores no roles, and cannot assign anything. It owes the platform a published list of what can be granted — its actions as permission entries of `gts.cf.toolkit.authz.permission.v1~` — and that is not done yet.
 
 #### Security Controls
 
@@ -1938,6 +1969,11 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | Declaration create — default mandatory | repos | An **omitted** `default_value` → `422 DefaultRequired`; an explicit JSON `null` on a type admitting `null` is **accepted**, stored as `'null'::jsonb`, and resolves with `source=schema_default` — the two are not the same input (§4.1) |
 | Declaration create — secret-trait type | `MockGtsValidator` resolves `secret` trait, `MockSecretManager` | `has_secret_trait=true`; a **non-empty** `default_value` → `422`; an **empty** placeholder is accepted and stored inline, with the Secret Manager **not** called for it; an **omitted** default → `422 DefaultRequired` like any other declaration (§4.2 *Secret Manager*) |
 | Secret masking on read | `MockSecretManager` | Read/search/list return the mask token, never plaintext (`cpt-cf-settings-service-fr-typed-value-validation`) |
+| Category access — open by default | a freshly contributed setting in a category with no grant anywhere | Readable on the base `read` right alone, and **no** authorization question is asked about the category (§4.8 *Category access*) |
+| Category access — restricted separates two roles | billing and infrastructure both `access_restricted`, one granted per role | Each role reads its own category and gets the not-visible response for the other; a third, unrestricted category stays readable by both |
+| Category access — lists ask only about restricted categories | mixed open and restricted categories | Browse and search issue **one** batch covering the restricted ones only, and none at all when nothing is restricted; the count never grows with the number of settings |
+| Category access — restricted and not granted | `MockAuthZClient` denying the restricted category | Its settings are absent from browse and search and give the not-visible response on a single read, while open categories are unaffected |
+| Category access — narrows only | an open category holding a declaration with `tenant_visible = false` | Still not returned to a tenant caller: an open category grants nothing by itself, it only declines to add a check |
 | Machine secret-use — authorized vs. unauthorized consumer | `MockSecretManager` | `resolve_secret` returns plaintext for a consumer authorized to **that** setting and emits `event_secret_used` with the value masked; an unauthorized consumer gets `Unauthorized` and no plaintext (§4.2 *Secret Manager*) |
 | Machine secret-use — unconfigured secret | `MockSecretManager` | A `secret`-trait setting with no override anywhere: `get_effective` returns a `SecretHandle` like any other, with `source=schema_default`; `resolve_secret` on it returns `NotFound` — **not** `Unauthorized`, and never the placeholder default as plaintext (§4.5) |
 | Classification-aware masking | `MockSecretManager`, `MockAuthZ` | `public` passes through; `pii` masked for a caller without PII entitlement and unmasked for one with it; `secret` masked for every administrative caller regardless of entitlement (§4.2 *Secret Manager*) |
