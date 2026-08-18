@@ -856,7 +856,7 @@ mini-chat-down:
 
 # -------- Main targets --------
 
-.PHONY: all check ci ci_test ci_docs build .cargo-build .split-debug quickstart example mini-chat mini-chat-docker mini-chat-helm mini-chat-helm-template mini-chat-up mini-chat-down mini-chat-port-forward
+.PHONY: all check ci ci_test ci_docs build build-debug .cargo-build .split-debug quickstart example mini-chat mini-chat-docker mini-chat-helm mini-chat-helm-template mini-chat-up mini-chat-down mini-chat-port-forward
 
 # Start server with quickstart config
 quickstart:
@@ -900,6 +900,13 @@ ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-u
 # Use 'make cargo-build' if you don't need stripped artifacts or lack
 # platform debug-splitting tools (objcopy, dsymutil).
 build: .cargo-build .split-debug
+
+# Build the cf-gears-example-server with full debuginfo (the 'debugging' profile)
+# Artifacts land in target/debugging/ and are not stripped, so no split-debug step
+# here. Costs a separate rebuild of the dependency graph; target/debug is untouched.
+build-debug:
+	cargo build --profile debugging --bin cf-gears-example-server $(E2E_ARGS)
+	@echo "binary: target/debugging/cf-gears-example-server"
 
 # Run all necessary quality checks and tests and then build the release binary
 all: build check test-sqlite e2e-local openapi
