@@ -51,7 +51,7 @@ The decision is which storage and traversal topology the productized Rust gear c
 
 - A. PostgreSQL source of truth plus Apache AGE traversal mirror (prototype topology)
 - B. Dedicated graph database (ArcadeDB / FalkorDB class) as the primary store
-- C. Single PostgreSQL 19 instance with graph queries behind a port: SQL/PGQ backend active from v1, recursive-CTE backend for variable depth and fallback
+- C. Single PostgreSQL 19 instance with graph queries behind a port: SQL/PGQ backend active from v1, iterative-CTE backend for variable depth and fallback
 - D. Single PostgreSQL instance with recursive-CTE traversal only, no graph-query language path
 
 ## Decision Outcome
@@ -154,7 +154,7 @@ The full engine evaluation — 12-engine scoreboard with license verification, F
 
 This decision directly addresses:
 
-- `cpt-cf-graph-storage-fr-graph-traversal` — traversal served through the GraphQueryPort by engine-native backends (recursive CTE, then SQL/PGQ)
+- `cpt-cf-graph-storage-fr-graph-traversal` — traversal served through the GraphQueryPort by engine-native backends (SQL/PGQ for fixed depth, iterative CTE for variable depth)
 - `cpt-cf-graph-storage-fr-neighborhood-projection` — neighborhood queries served from the same single store
 - `cpt-cf-graph-storage-fr-tenant-isolation` — one enforcement layer for tenant scoping across all query shapes; no out-of-ORM query dialect
 - `cpt-cf-graph-storage-nfr-traversal-latency` — latency budget drives the edge-table index design and the backend benchmark gate
