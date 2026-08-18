@@ -89,7 +89,7 @@ Design the **Settings Service** — the platform's single, centralized, declarat
 
 This document defines the complete Settings Service — its scope is the whole capability described below.
 
-The service is delivered as a **Cyber Fabric Gear** — the platform's unit of composable, infrastructure-agnostic capability (reference example: the [`credstore` gear](../../credstore)). Like every gear it owns its API surface and database and is consumed through a **Rust-native SDK that facades local (in-process) vs. remote calls**; concretely it is bootstrapped by the Cyber Fabric **ToolKit** runtime (`cf-gears-toolkit`) and registers its typed clients in `ClientHub`, following the same SDK/implementation split, REST surface, and PostgreSQL persistence model used by the `authz-resolver` gear. It is shipped both as that **SDK** (for in-process access) and as the **gear implementation** (§4.9). It consumes the GTS Schema Registry for value typing, the Multi-Tenancy Model for the scope hierarchy, the RBAC Engine for access gating, the IdP for authentication and apply step-up, the Credential Store for secret values, the platform Event Broker for apply-lifecycle events and cross-instance cache invalidation, and the platform audit subsystem for change history.
+The service is delivered as a **Constructor Fabric Gear** — the platform's unit of composable, infrastructure-agnostic capability (reference example: the [`credstore` gear](../../credstore)). Like every gear it owns its API surface and database and is consumed through a **Rust-native SDK that facades local (in-process) vs. remote calls**; concretely it is bootstrapped by the Constructor Fabric **ToolKit** runtime (`cf-gears-toolkit`) and registers its typed clients in `ClientHub`, following the same SDK/implementation split, REST surface, and PostgreSQL persistence model used by the `authz-resolver` gear. It is shipped both as that **SDK** (for in-process access) and as the **gear implementation** (§4.9). It consumes the GTS Schema Registry for value typing, the Multi-Tenancy Model for the scope hierarchy, the RBAC Engine for access gating, the IdP for authentication and apply step-up, the Credential Store for secret values, the platform Event Broker for apply-lifecycle events and cross-instance cache invalidation, and the platform audit subsystem for change history.
 
 ### 1.2 Architecture Drivers
 
@@ -330,11 +330,11 @@ Authorization, entitlement, type validation, and audit all fail closed. A mutati
 
 Declarations, categories, values, pending changes, and apply records stored in PostgreSQL via the `toolkit-db`.
 
-#### Cyber Fabric Gear
+#### Constructor Fabric Gear
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-constraint-supplied-as-gear`
 
-Settings Service is **supplied as a Cyber Fabric Gear** — an SDK crate plus a gear implementation (§4.9), hosted by the Cyber Fabric **ToolKit** runtime and registering its typed clients in `ClientHub`. `ClientHub` resolves each dependency to an in-process implementation or a generated REST client per the active deployment profile, so consumers call the same SDK trait either way: co-located, effective-value reads run **in-process** via `SettingsReaderClient` (no network call on the hot path); when the gear runs out-of-process the same trait is served over REST.
+Settings Service is **supplied as a Constructor Fabric Gear** — an SDK crate plus a gear implementation (§4.9), hosted by the Constructor Fabric **ToolKit** runtime and registering its typed clients in `ClientHub`. `ClientHub` resolves each dependency to an in-process implementation or a generated REST client per the active deployment profile, so consumers call the same SDK trait either way: co-located, effective-value reads run **in-process** via `SettingsReaderClient` (no network call on the hot path); when the gear runs out-of-process the same trait is served over REST.
 
 #### Setting key by author
 
@@ -412,9 +412,9 @@ On Apply the value is committed and is **effective on next read**; consumers rea
 | Effective Value | `gts.cf.toolkit.settings.effective_value.v1~` |
 | Apply Bundle | `gts.cf.toolkit.settings.apply_bundle.v1~` |
 
-GTS identifiers follow `gts.<vendor>.<package>.<namespace>.<type>.v<MAJOR>[.<MINOR>]~`. **These are the control-plane entity types** — the shape of a category row, a declaration row, and so on — used as RBAC resource types and internal schemas. They are authored by the gear itself, so they carry vendor `cf` (Cyber Fabric), package `toolkit`, namespace `settings`.
+GTS identifiers follow `gts.<vendor>.<package>.<namespace>.<type>.v<MAJOR>[.<MINOR>]~`. **These are the control-plane entity types** — the shape of a category row, a declaration row, and so on — used as RBAC resource types and internal schemas. They are authored by the gear itself, so they carry vendor `cf` (Constructor Fabric), package `toolkit`, namespace `settings`.
 
-**Why `toolkit`, not `core`.** In the Cyber Fabric namespace, `core` holds ambient primitives with no service in front of them — the error taxonomy, the event bus, monitoring metrics, the account model's tenant-type (`gts.cf.core.{errors,events,mon,am}.*`); nobody calls "the errors service". `toolkit` holds a discrete subsystem with its own registry, RBAC, and lifecycle (e.g. authz, `gts.cf.toolkit.authz.*`). The Settings Service is the second kind — a gear with its own declaration registry, RBAC resource types, and apply lifecycle — so it is a peer of authz under `toolkit`, not of the error taxonomy under `core`.
+**Why `toolkit`, not `core`.** In the Constructor Fabric namespace, `core` holds ambient primitives with no service in front of them — the error taxonomy, the event bus, monitoring metrics, the account model's tenant-type (`gts.cf.core.{errors,events,mon,am}.*`); nobody calls "the errors service". `toolkit` holds a discrete subsystem with its own registry, RBAC, and lifecycle (e.g. authz, `gts.cf.toolkit.authz.*`). The Settings Service is the second kind — a gear with its own declaration registry, RBAC resource types, and apply lifecycle — so it is a peer of authz under `toolkit`, not of the error taxonomy under `core`.
 
 These control-plane types are **separate** from **setting keys** and **value types**. A setting `key` is a GTS **instance** id `<value-type>~<instance-id>` (§4.1); its **instance** half is authored by the *deploying party* (module or admin) and its vendor is that party's — not necessarily `cf` — see §4.2 *Declaration Management* / *Contribution Reconciler* and §4.7. Its **value-type** half is a curated catalog type under `gts.cf.toolkit.settings.types.*~` (the only GTS-registered part).
 
@@ -1706,7 +1706,7 @@ Config required to reach the settings-store, or to load before `ClientHub` init,
 
 ### 4.9 Deployment Topology
 
-The Settings Service is **supplied as a Cyber Fabric Gear** — a composable, infrastructure-agnostic capability that owns its API surface and database and is consumed through a **Rust-native SDK that facades local (in-process) vs. remote calls**. It mirrors the layout of the reference [`credstore` gear](../../credstore): an **SDK crate** (in-process access) plus a **gear implementation crate**, with optional **plugins** for swappable backends. The gear is hosted by the Cyber Fabric **ToolKit** runtime (`cf-gears-toolkit` / `HostRuntime`) and registers its typed clients in `ClientHub` — the same SDK/implementation shape used by the RBAC Service.
+The Settings Service is **supplied as a Constructor Fabric Gear** — a composable, infrastructure-agnostic capability that owns its API surface and database and is consumed through a **Rust-native SDK that facades local (in-process) vs. remote calls**. It mirrors the layout of the reference [`credstore` gear](../../credstore): an **SDK crate** (in-process access) plus a **gear implementation crate**, with optional **plugins** for swappable backends. The gear is hosted by the Constructor Fabric **ToolKit** runtime (`cf-gears-toolkit` / `HostRuntime`) and registers its typed clients in `ClientHub` — the same SDK/implementation shape used by the RBAC Service.
 
 **Gear layout** (mirrors `gears/credstore/`):
 

@@ -259,7 +259,7 @@ A bundle stays open until every await-record is terminal. There is no automatic 
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-constraint-activation-in-settings-gear`
 
-Settings Activation is a mechanism **inside** the Settings Service; the publisher and state tables ship in the Settings Service Cyber Fabric Gear (ToolKit runtime); consumers reach the subscription contract through the settings SDK registered in `ClientHub`.
+Settings Activation is a mechanism **inside** the Settings Service; the publisher and state tables ship in the Settings Service Constructor Fabric Gear (ToolKit runtime); consumers reach the subscription contract through the settings SDK registered in `ClientHub`.
 
 #### Event Broker transport only
 
