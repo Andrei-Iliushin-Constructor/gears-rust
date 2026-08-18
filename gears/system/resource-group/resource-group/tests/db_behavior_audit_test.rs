@@ -223,17 +223,16 @@ async fn trace_create_root_group() {
         "create_group must run its writes inside a transaction:\n{}",
         rec.dump()
     );
-    // Exactly 1 resource_group SELECT, and it is not ours: SeaORM's
-    // non-RETURNING-fallback re-select after the insert (no
-    // `sqlite-use-returning-for-3_35`), which PostgreSQL does not issue at
-    // all. `create_group_inner` used to add a second, reading the row back to
-    // build the response it could assemble from the insert (RG-08).
+    // No resource_group SELECT at all. `create_group_inner` used to read the
+    // row back to build a response it could assemble from the insert (RG-08),
+    // and SeaORM used to add a re-select of its own on SQLite; as of SeaORM
+    // 2.0 the insert carries RETURNING on every backend, so neither remains.
     let rg_selects = count_in(&rec.stats(), QueryKind::Select, "resource_group");
     assert_eq!(
         rg_selects,
-        1,
-        "RG-08 regression: expected only SeaORM's non-RETURNING fallback, \
-         got {rg_selects} resource_group SELECTs:\n{}",
+        0,
+        "RG-08 regression: the insert returns the row, so nothing should \
+         re-read it; got {rg_selects} resource_group SELECTs:\n{}",
         rec.dump()
     );
     // Exactly 1 gts_type SELECT: `find_by_code_with_model`'s combined
@@ -395,15 +394,16 @@ async fn trace_create_type() {
          known defect by the static rule at the bottom of this file:\n{}",
         rec.dump()
     );
-    // Exactly 2 gts_type SELECTs: the "does this code already exist"
-    // pre-check plus SeaORM's non-RETURNING-fallback re-select
-    // (absent on PostgreSQL).
+    // Exactly 1 gts_type SELECT: the "does this code already exist" pre-check.
+    // SeaORM used to add a re-select after the insert on SQLite; as of SeaORM
+    // 2.0 the insert carries RETURNING there too, so only the pre-check is
+    // left.
     let type_selects = count_in(&rec.stats(), QueryKind::Select, "gts_type");
     assert_eq!(
         type_selects,
-        2,
-        "RG-08 regression: expected exactly 2 gts_type SELECTs (the exists-check + \
-         SeaORM's non-RETURNING fallback), got {type_selects}:\n{}",
+        1,
+        "RG-08 regression: expected exactly 1 gts_type SELECT (the \
+         exists-check), got {type_selects}:\n{}",
         rec.dump()
     );
 }
@@ -542,14 +542,17 @@ async fn trace_add_membership() {
 
     snapshot_trace("add_membership", &rec);
 
+    // No SELECT whose own table is resource_group_membership: the
+    // tenant-compatibility check reads FROM resource_group and derives the
+    // member groups in a subquery, and nothing reads the row back after the
+    // insert -- SeaORM's SQLite re-select is gone as of SeaORM 2.0.
     let membership_selects = count_in(&rec.stats(), QueryKind::Select, "resource_group_membership");
     assert_eq!(
         membership_selects,
-        1,
-        "RG-08 regression: expected exactly 1 resource_group_membership SELECT \
-         (the tenant-compatibility check, whose subquery derives the member \
-         groups in the database), with no read-back after the insert, got \
-         {membership_selects}:\n{}",
+        0,
+        "RG-08 regression: the tenant check reads FROM resource_group and the \
+         insert returns its row, so nothing should select from \
+         resource_group_membership; got {membership_selects}:\n{}",
         rec.dump()
     );
 

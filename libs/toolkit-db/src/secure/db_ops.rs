@@ -407,15 +407,11 @@ where
     })?;
     let stmt = &insert;
 
+    // SeaORM 2.0's `execute` takes the `StatementBuilder` itself and builds it
+    // against the connection's own backend, so there is nothing to build here.
     let result = match DBRunnerInternal::as_seaorm(runner) {
-        SeaOrmRunner::Conn(db) => {
-            let backend = sea_orm::ConnectionTrait::get_database_backend(db);
-            sea_orm::ConnectionTrait::execute(db, backend.build(stmt)).await?
-        }
-        SeaOrmRunner::Tx(tx) => {
-            let backend = sea_orm::ConnectionTrait::get_database_backend(tx);
-            sea_orm::ConnectionTrait::execute(tx, backend.build(stmt)).await?
-        }
+        SeaOrmRunner::Conn(db) => sea_orm::ConnectionTrait::execute(db, stmt).await?,
+        SeaOrmRunner::Tx(tx) => sea_orm::ConnectionTrait::execute(tx, stmt).await?,
     };
     Ok(result.rows_affected())
 }
@@ -431,7 +427,11 @@ where
 const fn max_bind_params(backend: sea_orm::DbBackend) -> usize {
     match backend {
         sea_orm::DbBackend::Postgres | sea_orm::DbBackend::MySql => 60_000,
-        sea_orm::DbBackend::Sqlite => 30_000,
+        // SQLite, and the floor for any backend `DbBackend` gains later -- it
+        // is `#[non_exhaustive]` as of SeaORM 2.0, and an unknown backend is
+        // better off chunked too small (a few extra statements) than too
+        // large (a driver error).
+        _ => 30_000,
     }
 }
 

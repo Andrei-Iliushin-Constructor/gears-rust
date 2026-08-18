@@ -829,6 +829,11 @@ impl GroupRepositoryTrait for GroupRepository {
         child_id: Uuid,
         parent_id: Uuid,
     ) -> Result<(), DomainError> {
+        // `Expr`'s combinators (`eq`, `add`) live on `ExprTrait` as of
+        // sea-query 1.0. Imported here rather than file-wide: its `min`
+        // would shadow `Ord::min` for the paginating methods above.
+        use sea_orm::ExprTrait;
+
         let scope = system_scope();
         // One statement for the whole ancestor chain: every row the parent
         // has as a descendant becomes a row for the child, one deeper. The
@@ -1100,6 +1105,11 @@ impl GroupRepositoryTrait for GroupRepository {
         group_id: Uuid,
         new_parent_id: Option<Uuid>,
     ) -> Result<(), DomainError> {
+        // `Expr`'s combinators (`eq`, `add`) live on `ExprTrait` as of
+        // sea-query 1.0. Imported here rather than file-wide: its `min`
+        // would shadow `Ord::min` for the paginating methods above.
+        use sea_orm::ExprTrait;
+
         // @cpt-begin:cpt-cf-resource-group-algo-entity-hier-closure-rebuild:p1:inst-closure-rebuild-1
         // Collect subtree: SELECT descendant_id FROM resource_group_closure
         // WHERE ancestor_id = group_id -- the group itself included, via its
