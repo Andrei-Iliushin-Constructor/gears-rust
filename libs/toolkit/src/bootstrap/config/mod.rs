@@ -165,6 +165,13 @@ pub struct OopHttpConfig {
     /// unspecified host (`0.0.0.0`) rewritten to `127.0.0.1`.
     #[serde(default)]
     pub advertise_uri: Option<String>,
+    /// Allow a loopback / unspecified `advertise_uri` (`127.0.0.1`, `::1`,
+    /// `localhost`, `0.0.0.0`, `[::]`). Off by default: such an endpoint is
+    /// registered-but-unreachable in multi-host Profile 2 / Profile 3, so
+    /// bootstrap fails fast (`cpt-cf-adr-instance-addressable-discovery`).
+    /// Set `true` only for single-host / local-dev.
+    #[serde(default)]
+    pub allow_loopback_advertise: bool,
     /// Platform-plane (`InternalAuthenticator`) configuration. When present it
     /// drives both the *inbound* HTTP validator on the gear's own routes and
     /// the *outbound* credential attached to the gear's `DirectoryService`
@@ -173,6 +180,19 @@ pub struct OopHttpConfig {
     /// feature.
     #[serde(default)]
     pub internal_auth: Option<toolkit_security::InternalAuthConfig>,
+    /// Stable addressing labels (k8s `matchLabels` style) advertised with this
+    /// instance's directory registration, for label-based instance selection
+    /// (`DirectoryClient::resolve_by_labels`).
+    ///
+    /// Sourced from config (`oop_http.labels.<key>`) or the environment
+    /// (`APP__OOP_HTTP__LABELS__<KEY>`). A bare-numeric env *value* (e.g. a
+    /// `StatefulSet` ordinal injected as `APP__OOP_HTTP__LABELS__SHARD=7`) is
+    /// coerced to a string here rather than aborting the config load. Note:
+    /// environment-sourced keys are still lower-cased by the config loader, so
+    /// keys that must preserve case or contain `.`/`-` should be set in the
+    /// config file rather than via env.
+    #[serde(default, deserialize_with = "de_labels_scalar_to_string")]
+    pub labels: std::collections::BTreeMap<String, String>,
 }
 
 fn default_drain_timeout_secs() -> u64 {
@@ -181,6 +201,50 @@ fn default_drain_timeout_secs() -> u64 {
 
 fn default_healthcheck_timeout_ms() -> u64 {
     500
+}
+
+/// Deserialize a label map, coercing scalar values (numbers, booleans) to
+/// strings.
+///
+/// The environment layer parses a bare-numeric value like
+/// `APP__OOP_HTTP__LABELS__SHARD=7` into an integer, which would otherwise fail
+/// to deserialize into a `String` and abort the entire `AppConfig::load_layered`
+/// — precisely on the path a k8s `StatefulSet` ordinal is injected. Accepting the
+/// scalar and rendering it as a string keeps that value load-able as a label.
+fn de_labels_scalar_to_string<'de, D>(
+    deserializer: D,
+) -> Result<std::collections::BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    // Ordering matters for `untagged`: a string input matches `Str`; an integer
+    // matches `I64`/`U64` before `F64`, so `7` renders as `"7"` not `"7.0"`.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Scalar {
+        Str(String),
+        Bool(bool),
+        I64(i64),
+        U64(u64),
+        F64(f64),
+    }
+
+    let raw = std::collections::BTreeMap::<String, Scalar>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .map(|(k, v)| {
+            let value = match v {
+                Scalar::Str(s) => s,
+                Scalar::Bool(b) => b.to_string(),
+                Scalar::I64(i) => i.to_string(),
+                Scalar::U64(u) => u.to_string(),
+                Scalar::F64(f) => f.to_string(),
+            };
+            (k, value)
+        })
+        .collect())
 }
 
 impl ConfigProvider for AppConfig {
@@ -1455,6 +1519,26 @@ mod tests {
 
         // Gears bag is empty by default
         assert!(config.gears.is_empty());
+    }
+
+    #[test]
+    fn oop_http_labels_coerce_numeric_and_bool_values_to_strings() {
+        // A bare-numeric env value (e.g. `APP__OOP_HTTP__LABELS__SHARD=7`) is
+        // parsed as an integer by the env layer; it must load as a string
+        // label rather than aborting the config parse.
+        let cfg: OopHttpConfig = serde_json::from_value(serde_json::json!({
+            "listen_addr": "0.0.0.0:8080",
+            "labels": {
+                "shard": 7,
+                "role": "ingest",
+                "canary": true,
+            }
+        }))
+        .expect("numeric/bool label values must deserialize");
+
+        assert_eq!(cfg.labels.get("shard").map(String::as_str), Some("7"));
+        assert_eq!(cfg.labels.get("role").map(String::as_str), Some("ingest"));
+        assert_eq!(cfg.labels.get("canary").map(String::as_str), Some("true"));
     }
 
     // `#[serial]`: calls load_layered, which reads the APP__ env layer; serialize
@@ -3027,6 +3111,49 @@ vendor:
                 assert_eq!(v.api_token, "from_env");
             },
         );
+    }
+
+    #[test]
+    #[serial]
+    fn test_oop_http_labels_from_yaml_and_env() {
+        let tmp = tempdir().unwrap();
+        let cfg_path = tmp.path().join("cfg.yaml");
+        let yaml = r#"
+server:
+  home_dir: "~/.test_oop_labels"
+oop_http:
+  listen_addr: "0.0.0.0:8080"
+  labels:
+    role: "ingest"
+"#;
+        fs::write(&cfg_path, yaml).unwrap();
+
+        // Env layer adds a second label. Env keys are lower-cased by the loader,
+        // so `ZONE` lands as `zone`.
+        with_var("APP__OOP_HTTP__LABELS__ZONE", Some("us-east-1"), || {
+            let config = AppConfig::load_layered(&cfg_path).unwrap();
+            let oop = config.oop_http.expect("oop_http present");
+            assert_eq!(oop.labels.get("role"), Some(&"ingest".to_owned()));
+            assert_eq!(
+                oop.labels.get("zone"),
+                Some(&"us-east-1".to_owned()),
+                "APP__OOP_HTTP__LABELS__ZONE should populate labels[zone]"
+            );
+        });
+
+        // A bare-numeric env value (e.g. a StatefulSet ordinal injected as
+        // `APP__OOP_HTTP__LABELS__SHARD=7`) is coerced to its string
+        // representation by `de_labels_scalar_to_string` rather than failing the
+        // config load, so numeric-looking labels can be set via the environment.
+        with_var("APP__OOP_HTTP__LABELS__SHARD", Some("7"), || {
+            let config = AppConfig::load_layered(&cfg_path).unwrap();
+            let oop = config.oop_http.expect("oop_http present");
+            assert_eq!(
+                oop.labels.get("shard"),
+                Some(&"7".to_owned()),
+                "a bare-numeric env label value should be coerced to the string \"7\""
+            );
+        });
     }
 
     #[test]

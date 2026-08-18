@@ -665,6 +665,22 @@ async fn build_oop_serve_options(
         .clone()
         .unwrap_or_else(|| default_advertise_uri(listen_addr));
 
+    // Fail fast on a malformed or unreachable advertise_uri rather than only
+    // when the directory rejects the registration — the same late-failure the
+    // label validation below avoids.
+    validate_advertise_uri(&advertise_uri, cfg.allow_loopback_advertise)?;
+
+    // Fail fast on a mis-configured label (bad charset, over-long, too many)
+    // at start-up, using the same shared rules the directory enforces. Without
+    // this the process would come up, attempt to register, and only then be
+    // permanently rejected by the directory — a confusing late failure for what
+    // is a static configuration error. Checked before authenticator init so a
+    // static config error is reported without any async backend setup.
+    cf_system_sdks::directory::validate_labels(&cfg.labels).with_context(|| {
+        "invalid oop_http.labels: label keys/values must be <=63 chars, <=64 entries, and use \
+         only ASCII alphanumerics plus '-', '_', '.' (starting and ending alphanumeric)"
+    })?;
+
     let internal_authenticator = build_internal_authenticator(cfg.internal_auth.as_ref()).await?;
 
     Ok(OopServeOptions {
@@ -680,6 +696,7 @@ async fn build_oop_serve_options(
         directory,
         bearer_authenticator: None,
         internal_authenticator,
+        labels: cfg.labels.clone(),
     })
 }
 
@@ -740,6 +757,46 @@ fn default_advertise_uri(listen_addr: std::net::SocketAddr) -> String {
         std::net::SocketAddr::V6(addr) => format!("[{}]", addr.ip()),
     };
     format!("http://{host}:{}", listen_addr.port())
+}
+
+/// Reject a malformed or unreachable `advertise_uri` at start-up (fail fast).
+///
+/// Checks shape (parseable `http`/`https` URL, non-empty host, no userinfo) and,
+/// unless `allow_loopback`, rejects a loopback / unspecified host - a
+/// registered-but-unreachable instance in multi-host Profile 2 / Profile 3
+/// (`cpt-cf-adr-instance-addressable-discovery` section 5). The default derives
+/// loopback from an unspecified bind, so this also covers an *unset* value. The
+/// directory enforces its full endpoint ruleset server-side.
+fn validate_advertise_uri(uri: &str, allow_loopback: bool) -> Result<()> {
+    let parsed = url::Url::parse(uri)
+        .with_context(|| format!("invalid oop_http.advertise_uri: not a valid URL: {uri}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        anyhow::bail!(
+            "invalid oop_http.advertise_uri: scheme must be http or https (got '{}')",
+            parsed.scheme()
+        );
+    }
+    if parsed.host_str().is_none_or(str::is_empty) {
+        anyhow::bail!("invalid oop_http.advertise_uri: missing host: {uri}");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        anyhow::bail!("invalid oop_http.advertise_uri: must not contain userinfo: {uri}");
+    }
+    let is_loopback = match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_unspecified(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.is_unspecified(),
+        Some(url::Host::Domain(d)) => d.trim_end_matches('.').eq_ignore_ascii_case("localhost"),
+        None => false,
+    };
+    if !allow_loopback && is_loopback {
+        anyhow::bail!(
+            "invalid oop_http.advertise_uri: '{uri}' is a loopback/unspecified address, which is \
+             unreachable by other gears in multi-host Profile 2 / Profile 3 (a registered-but-\
+             unreachable instance). Set oop_http.advertise_uri to a routable host, or set \
+             oop_http.allow_loopback_advertise = true for single-host / local-dev."
+        );
+    }
+    Ok(())
 }
 
 #[allow(unknown_lints, de1301_no_print_macros)] // direct stdout config print before exit

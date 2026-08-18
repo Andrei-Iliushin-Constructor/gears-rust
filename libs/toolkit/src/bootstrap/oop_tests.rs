@@ -806,3 +806,76 @@ mod full_oop_config {
         assert_eq!(gear_config["config"]["master_setting"], "value");
     }
 }
+
+// =============================================================================
+// advertise_uri startup validation
+// =============================================================================
+
+mod advertise_uri {
+    use super::*;
+
+    #[test]
+    fn accepts_well_formed_routable_hosts() {
+        validate_advertise_uri("http://billing.default.svc.cluster.local:8080", false).unwrap();
+        validate_advertise_uri("https://billing:8080", false).unwrap();
+        // A routable IP passes without the loopback opt-out.
+        validate_advertise_uri("http://10.0.0.5:8080", false).unwrap();
+    }
+
+    #[test]
+    fn rejects_malformed() {
+        // Missing scheme (parses without a host).
+        assert!(validate_advertise_uri("billing:8080", false).is_err());
+        // Unsupported scheme.
+        assert!(validate_advertise_uri("ftp://billing:8080", false).is_err());
+        // Not a URL at all.
+        assert!(validate_advertise_uri("not a uri", false).is_err());
+        // Embedded userinfo (credential smuggling).
+        assert!(validate_advertise_uri("http://billing@evil.com:8080", false).is_err());
+        assert!(validate_advertise_uri("http://user:pass@billing:8080", false).is_err());
+        // Missing-host authority.
+        assert!(validate_advertise_uri("http://", false).is_err());
+    }
+
+    #[test]
+    fn rejects_loopback_and_unspecified_by_default() {
+        // ADR-0009 section 5: a loopback / unspecified advertise_uri is a
+        // registered-but-unreachable instance in multi-host Profile 2 / 3.
+        for uri in [
+            "http://127.0.0.1:8080",
+            "http://localhost:8080",
+            // Fully-qualified `localhost.` (trailing dot) is DNS-equivalent to
+            // `localhost`, so it must still be treated as loopback.
+            "http://localhost.:8080",
+            "http://0.0.0.0:8080",
+            "http://[::1]:8080",
+            "http://[::]:8080",
+        ] {
+            assert!(
+                validate_advertise_uri(uri, false).is_err(),
+                "{uri} must be rejected without the loopback opt-out"
+            );
+        }
+        // The generated default (unspecified bind -> loopback) is exactly the
+        // unset-advertise_uri trap and must be rejected too.
+        let default = default_advertise_uri("0.0.0.0:8080".parse().unwrap());
+        assert!(validate_advertise_uri(&default, false).is_err());
+    }
+
+    #[test]
+    fn allows_loopback_when_opted_in() {
+        // Single-host / local-dev opt-out (oop_http.allow_loopback_advertise).
+        for uri in [
+            "http://127.0.0.1:8080",
+            "http://localhost:8080",
+            "http://localhost.:8080",
+            "http://0.0.0.0:8080",
+            "http://[::1]:8080",
+        ] {
+            validate_advertise_uri(uri, true).unwrap();
+        }
+        // The default still passes its own validation with the opt-out.
+        let default = default_advertise_uri("0.0.0.0:8080".parse().unwrap());
+        validate_advertise_uri(&default, true).unwrap();
+    }
+}

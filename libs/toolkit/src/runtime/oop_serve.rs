@@ -28,6 +28,7 @@
 //! gear routes. Self-registration and dependency resolution live in
 //! [`super::oop_registration`].
 
+use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -67,6 +68,13 @@ const STARTING_RETRY_AFTER_SECONDS: u64 = 1;
 
 /// Configuration and collaborators for the `OoP` HTTP runtime, assembled by the
 /// bootstrap layer and consumed by `HostRuntime`'s `OoP` serving path.
+///
+/// `#[non_exhaustive]` so new fields (like `labels`) stay additive: the type is
+/// built by the bootstrap layer, never struct-literal-constructed from another
+/// crate, so adding a field never breaks a downstream constructor. (A `Default`
+/// impl is intentionally not provided — the `directory` collaborator is a
+/// required dependency with no meaningful default.)
+#[non_exhaustive]
 pub struct OopServeOptions {
     /// Logical gear name (used for registration + `OpenAPI` title).
     pub gear_name: String,
@@ -102,6 +110,9 @@ pub struct OopServeOptions {
     /// Platform-plane authenticator; when `Some`, `internal_auth_middleware` is
     /// installed on gear routes (runs before the tenant plane).
     pub internal_authenticator: Option<DynInternalAuthenticator>,
+    /// Stable addressing labels (k8s `matchLabels` style) advertised with this
+    /// instance's directory registration for label-based selection.
+    pub labels: BTreeMap<String, String>,
 }
 
 impl std::fmt::Debug for OopServeOptions {
@@ -121,6 +132,7 @@ impl std::fmt::Debug for OopServeOptions {
                 "internal_authenticator",
                 &self.internal_authenticator.is_some(),
             )
+            .field("labels", &self.labels)
             .finish_non_exhaustive()
     }
 }
@@ -632,14 +644,16 @@ impl OopHttpServer {
         // Single directory-presence task: registration + heartbeat + self-heal.
         // Dependency resolution is handled by the proxy-wiring phase (typed
         // `#[toolkit::consumes]` clients), which runs before serving.
-        let registration_info = RegisterInstanceInfo {
-            gear: self.options.gear_name.clone(),
-            instance_id: self.options.instance_id.clone(),
-            grpc_services: vec![],
-            version: self.options.version.clone(),
-            rest_endpoint: Some(ServiceEndpoint::new(self.options.advertise_uri.clone())),
-            openapi_spec: Some(openapi_arc.to_string()),
-        };
+        let mut registration_info = RegisterInstanceInfo::new(
+            self.options.gear_name.clone(),
+            self.options.instance_id.clone(),
+        )
+        .with_rest_endpoint(ServiceEndpoint::new(self.options.advertise_uri.clone()))
+        .with_openapi_spec(openapi_arc.to_string())
+        .with_labels(self.options.labels.clone());
+        if let Some(version) = self.options.version.clone() {
+            registration_info = registration_info.with_version(version);
+        }
         self.registration_task = Some(tokio::spawn(super::oop_registration::presence_loop(
             Arc::clone(&self.options.directory),
             registration_info,
