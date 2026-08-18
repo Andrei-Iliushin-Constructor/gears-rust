@@ -1,3 +1,5 @@
+pub use github_mirror_sdk::{GithubMirrorClientV1, MirrorStatus, Repository};
+
 pub mod gear;
 pub use gear::GithubMirrorGear;
 

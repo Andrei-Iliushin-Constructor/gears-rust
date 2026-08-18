@@ -2341,8 +2341,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "cf-gears-github-mirror-sdk",
  "cf-gears-toolkit",
+ "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-odata",
+ "cf-gears-toolkit-security",
  "inventory",
  "serde",
  "serde_json",
@@ -2352,6 +2356,18 @@ dependencies = [
  "tracing",
  "utoipa",
  "uuid",
+]
+
+[[package]]
+name = "cf-gears-github-mirror-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-odata",
+ "cf-gears-toolkit-security",
 ]
 
 [[package]]

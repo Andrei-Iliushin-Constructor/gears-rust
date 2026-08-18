@@ -19,6 +19,8 @@ name = "github_mirror"
 workspace = true
 
 [dependencies]
+github-mirror-sdk = { package = "cf-gears-github-mirror-sdk", version = "0.1.0", path = "../github-mirror-sdk" }
+
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
@@ -28,7 +30,10 @@ utoipa = { workspace = true }
 axum = { workspace = true, features = ["macros"] }
 
 toolkit = { workspace = true }
+toolkit-canonical-errors = { workspace = true }
 toolkit-macros = { workspace = true }
+toolkit-odata = { workspace = true }
+toolkit-security = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -36,3 +41,5 @@ tokio-util = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+toolkit-odata = { workspace = true }
+toolkit-security = { workspace = true }

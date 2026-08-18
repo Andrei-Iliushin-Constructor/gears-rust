@@ -6,8 +6,11 @@ use toolkit::api::OpenApiRegistry;
 use toolkit::{Gear, GearCtx, RestApiCapability};
 use tracing::info;
 
+use github_mirror_sdk::GithubMirrorClientV1;
+
 use crate::api::rest::routes;
 use crate::config::GithubMirrorConfig;
+use crate::domain::local_client::LocalClient;
 use crate::domain::service::{Service, ServiceConfig};
 
 #[toolkit::gear(
@@ -37,8 +40,12 @@ impl Gear for GithubMirrorGear {
         }));
 
         self.service
-            .set(service)
+            .set(service.clone())
             .map_err(|_| anyhow::anyhow!("{} gear already initialized", Self::MODULE_NAME))?;
+
+        let client: Arc<dyn GithubMirrorClientV1> = Arc::new(LocalClient::new(service));
+        ctx.client_hub()
+            .register::<dyn GithubMirrorClientV1>(client);
 
         Ok(())
     }
