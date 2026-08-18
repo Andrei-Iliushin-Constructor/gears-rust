@@ -121,6 +121,70 @@ async fn generic_mysql() -> Result<()> {
     run_common_suite(&dut.url).await
 }
 
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn outbox_schema_reapplies_cleanly_sqlite() -> Result<()> {
+    let dut = common::bring_up_sqlite();
+    run_outbox_reapply_suite(&dut.url).await
+}
+
+#[cfg(feature = "pg")]
+#[tokio::test]
+async fn outbox_schema_reapplies_cleanly_postgres() -> Result<()> {
+    let dut = common::bring_up_postgres().await?;
+    run_outbox_reapply_suite(&dut.url).await
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn outbox_schema_reapplies_cleanly_mysql() -> Result<()> {
+    let dut = common::bring_up_mysql().await?;
+    run_outbox_reapply_suite(&dut.url).await
+}
+
+/// Applies the identical outbox DDL twice over the same database.
+///
+/// This is the crash-before-recording-then-retry path: every `CREATE TABLE` and
+/// `CREATE INDEX` in the outbox schema meets an object that already exists. Two
+/// *gear* names are used because each gear tracks its migration history
+/// independently, so the second run genuinely re-executes the DDL instead of
+/// skipping it -- which the `applied` assertions below pin down.
+///
+/// Covers the backend that the unit tests can only assert at the SQL-string
+/// level: on `MySQL` there is no `CREATE INDEX IF NOT EXISTS`, so idempotency
+/// rests on the `information_schema` probe actually working against a live
+/// server.
+async fn run_outbox_reapply_suite(database_url: &str) -> Result<()> {
+    let db = toolkit_db::connect_db(database_url, toolkit_db::ConnectOpts::default()).await?;
+
+    let first = toolkit_db::migration_runner::run_migrations_for_gear(
+        &db,
+        "outbox_reapply_first",
+        toolkit_db::outbox::outbox_migrations(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    assert_eq!(first.applied, 1, "first run should create the schema");
+
+    // Same DDL, fresh migration history -> re-executed against the schema the
+    // first run just built. Fails on the very first index without idempotent
+    // index creation.
+    let second = toolkit_db::migration_runner::run_migrations_for_gear(
+        &db,
+        "outbox_reapply_second",
+        toolkit_db::outbox::outbox_migrations(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    assert_eq!(
+        second.applied, 1,
+        "second run must actually re-execute the DDL, not skip it"
+    );
+    assert_eq!(second.skipped, 0);
+
+    Ok(())
+}
+
 /// Runs the same assertions for any backend.
 async fn run_common_suite(database_url: &str) -> Result<()> {
     // Test basic connection

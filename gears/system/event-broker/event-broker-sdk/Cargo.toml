@@ -21,7 +21,9 @@ path = "src/lib.rs"
 [features]
 default = []
 db = ["dep:sea-orm", "dep:toolkit-db", "toolkit-db/sqlite"]
-outbox = ["db", "toolkit-db/preview-outbox"]
+# Gates this SDK's own transactional-outbox producer surface (see src/producer/).
+# `toolkit-db`'s outbox pipeline is unconditional, so `db` is all this needs.
+outbox = ["db"]
 integration = []
 test-util = ["dep:async-stream"]
 

@@ -40,10 +40,10 @@
 //!
 //! **Run examples:**
 //!   ```sh
-//!   cargo bench --bench outbox_throughput --features preview-outbox,pg
-//!   cargo bench --bench outbox_throughput --features preview-outbox,pg -- "16p16c"
-//!   BENCH_LONGHAUL=1 cargo bench --bench outbox_throughput --features preview-outbox,pg
-//!   BENCH_STRESS=1 cargo bench --bench outbox_throughput --features preview-outbox,pg -- "2i"
+//!   cargo bench --bench outbox_throughput --features pg
+//!   cargo bench --bench outbox_throughput --features pg -- "16p16c"
+//!   BENCH_LONGHAUL=1 cargo bench --bench outbox_throughput --features pg
+//!   BENCH_STRESS=1 cargo bench --bench outbox_throughput --features pg -- "2i"
 //!   ```
 
 use std::collections::HashSet;
