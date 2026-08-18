@@ -17,5 +17,3 @@ impl From<MirrorStatus> for GithubMirrorHealthDto {
         }
     }
 }
-
-
