@@ -14,6 +14,7 @@
   - [F7. DDL notes](#f7-ddl-notes)
 - [Consequences for the gear](#consequences-for-the-gear)
 - [Caveats](#caveats)
+- [Follow-up: measured again on the gear's own stand (2026-08-18)](#follow-up-measured-again-on-the-gears-own-stand-2026-08-18)
 
 <!-- /toc -->
 
@@ -82,3 +83,32 @@ One SQL statement combining pgvector HNSW KNN (top-5 seeds) -> PGQ 1-hop expansi
 ## Caveats
 
 Warm cache, single client, synthetic graph (uniform + power-law mix), no tenant predicates, WSL2 laptop — numbers are for shape comparison, not capacity planning. The reproduction assets (Dockerfile, seed, benchmark scripts) are in the spike workspace and are trivially recreatable from this report.
+
+## Follow-up: measured again on the gear's own stand (2026-08-18)
+
+This report deliberately stopped at kernel timings. A Rust development stand for
+the gear has since re-measured on its real schema — composite `(tenant_id, id)`
+keys, 200,003 nodes / 600,000 edges, hub-skewed destinations — and extended the
+measurement end to end:
+
+| Shape | p50 | p95 |
+|---|---|---|
+| Two scoped queries (shipped implementation) | 0.183 ms | 0.371 ms |
+| Single statement with a scoped CTE | 0.213 ms | 0.432 ms |
+| SQL/PGQ `GRAPH_TABLE`, direction-explicit union | 0.402 ms | 0.645 ms |
+
+Depth-3 neighbourhood through HTTP, debug build, naive visited set: p95 89 ms
+against the 1 s NFR. That covers bounded expansion, budget enforcement and
+authorization — still not degree ordering, hydration or metric annotations, so
+the NFR claim remains partial, but the part this spike could not measure is now
+measured.
+
+Two findings that change how the backends are written:
+
+* Composite element keys are accepted by `CREATE PROPERTY GRAPH`, and because the
+  edge's source and destination keys carry `tenant_id`, no pattern can cross a
+  tenant boundary even before a scope predicate is applied.
+* The loopback deployment makes the extra round trip of the two-query shape
+  nearly free, which is why it leads the table here; on a network with a
+  millisecond round trip the single-statement shapes would lead instead. The
+  ranking is a property of the deployment, not of the shapes.

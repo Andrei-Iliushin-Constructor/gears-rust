@@ -770,7 +770,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 | Types Registry gear | Platform registration of the gear's GTS base types and permission instances | p1 |
 | Embedding provider | In-process ONNX runtime or remote inference endpoint producing fixed-dimension vectors | p1 |
 | File Storage gear | Blob storage for heavy content referenced from node payloads | p2 |
-| ToolKit `toolkit-db` scoped custom-query API | Secure execution path for the hand-written traversal SQL (recursive CTE, `GRAPH_TABLE`) under a compiled access scope — the platform data layer otherwise forbids raw SQL outside migrations; a blocking platform prerequisite tracked with the ToolKit owners | p1 |
+| ToolKit `toolkit-db` scoped custom-query API | Secure execution path for single-statement traversal (scoped CTE, `GRAPH_TABLE`) under a compiled access scope. Not required for correctness — bounded traversal ships as two scoped queries per hop — but required for single-statement composition of vector, graph and full-text retrieval; tracked with the ToolKit owners | p2 |
 
 ## 11. Assumptions
 
@@ -792,7 +792,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 | Shared ontologies evolve incompatibly across producers | Ingest failures or semantic drift between producers | Immutable schemas per GTS version, conflict-rejecting registration, family patterns that keep older derived types valid |
 | PostgreSQL 19 GA slips, or a PG19 beta regression hits the pinned stack | The gear ships on a beta database longer than planned | The stack is pinned (beta image + pgvector revision) and validated by the PG19 spike and the prototype's full test suite; the recursive-CTE backend can serve the whole fixed-depth API if a PGQ-specific regression appears; re-pin to stock at GA |
 | SQL/PGQ variable-length paths arrive later than PG20 | The CTE backend carries variable-depth expansion longer | The traversal port isolates the split; consumers see no API difference; a dedicated traversal mirror remains the measured-bottleneck contingency (ADR-0001) |
-| The `toolkit-db` scoped custom-query primitive is not delivered in time | Traversal SQL has no compliant secure execution path; implementation blocks | Requirement raised with ToolKit owners early (narrow `query_scoped` primitive with alias-to-scope bindings, fail-closed compilation); conformance tests agreed as part of the contract; the raw executor and any lint exception stay inside toolkit-db |
+| The `toolkit-db` scoped custom-query primitive is not delivered | Single-statement traversal and single-statement hybrid composition stay unavailable; each hop costs an extra database round trip | Bounded traversal is implemented and verified without the primitive (two scoped queries per hop, p95 0.37 ms per hop at reference scale), so delivery affects performance and expressiveness rather than viability; the requirement is tracked with the ToolKit owners and an executable test in the gear fails once the primitive lands |
 
 ## 13. Open Questions
 
