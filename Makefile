@@ -493,11 +493,24 @@ cfs-validate-kit-local: cfs-repair
 
 .example-server-build:
 	$(call print_target_banner)
+ifneq ($(GEAR),)
+ifeq ($(GEAR_HAS_SERVER_FEATURE),)
+	@echo "SKIP: GEAR=$(GEAR) has no example-server feature — skipping server build."
+else
 	cargo build --bin $(EXAMPLE_SERVER_BIN) $(OPENAPI_BUILD_FEATURE_ARGS)
+endif
+else
+	cargo build --bin $(EXAMPLE_SERVER_BIN) $(OPENAPI_BUILD_FEATURE_ARGS)
+endif
 
-# Generate OpenAPI spec from running cf-gears-example-server
+# Generate OpenAPI spec from running cf-gears-example-server.
+# Skipped when GEAR has no corresponding example-server feature.
 openapi: .example-server-build py-env
 	$(call print_target_banner)
+ifneq ($(GEAR),)
+ifeq ($(GEAR_HAS_SERVER_FEATURE),)
+	@echo "SKIP: GEAR=$(GEAR) has no example-server feature — skipping openapi."
+else
 	@command -v curl >/dev/null || (echo "curl is required to generate OpenAPI spec" && exit 1)
 	@echo "Starting cf-gears-example-server to generate OpenAPI spec..."
 	@mkdir -p $$(dirname "$(if $(GEAR),$(GEAR_OPENAPI_TMP),$(OPENAPI_OUT))") && \
@@ -511,6 +524,18 @@ openapi: .example-server-build py-env
 	echo "Sorting OpenAPI JSON for deterministic ordering..." && \
 	$(PYTHON) tools/scripts/sort_openapi_json.py "$(OPENAPI_OUT)" && \
 	echo "OpenAPI spec saved to $(OPENAPI_OUT)"
+endif
+else
+	@command -v curl >/dev/null || (echo "curl is required to generate OpenAPI spec" && exit 1)
+	@echo "Starting cf-gears-example-server to generate OpenAPI spec..."
+	@mkdir -p $$(dirname "$(OPENAPI_OUT)") && \
+	$(call start_server_and_wait,$(EXAMPLE_SERVER_DEBUG_BINARY) --config $(OPENAPI_CONFIG) --port $(OPENAPI_PORT),$(OPENAPI_URL),300) && \
+	echo "Fetching OpenAPI spec..." && \
+	curl -fsS "$(OPENAPI_URL)" -o "$(OPENAPI_OUT)" && \
+	echo "Sorting OpenAPI JSON for deterministic ordering..." && \
+	$(PYTHON) tools/scripts/sort_openapi_json.py "$(OPENAPI_OUT)" && \
+	echo "OpenAPI spec saved to $(OPENAPI_OUT)"
+endif
 
 ## Generate Markdown files map
 md-fabric: py-env
@@ -601,10 +626,14 @@ GEAR_COVERAGE_ARGS := $(if $(GEAR),--package $(firstword $(subst -p ,,$(GEAR_PKG
 GEAR_SERVER_BASE_FEATURES ?= static-tenants,static-authn,static-authz
 # System gears that are non-optional deps of the example server (always linked).
 GEAR_SERVER_ALWAYS_LINKED ?= api-gateway gear-orchestrator types-registry tenant-resolver authn-resolver authz-resolver
+# Check whether GEAR is a valid example-server feature or an always-linked gear.
+# When GEAR has no server feature (e.g. toolkit-db, toolkit-http), server-dependent
+# targets (run, openapi, e2e-local) are skipped; library-safe targets still work.
+GEAR_HAS_SERVER_FEATURE := $(or $(filter $(GEAR),$(GEAR_SERVER_ALWAYS_LINKED)),$(filter $(GEAR),$(EXAMPLE_SERVER_ALL_FEATURES)))
 # The gear itself as an optional feature (empty if it's an always-linked gear).
-GEAR_SERVER_OPTIONAL_FEATURES := $(filter-out $(GEAR_SERVER_ALWAYS_LINKED),$(GEAR))
+GEAR_SERVER_OPTIONAL_FEATURES := $(if $(GEAR_HAS_SERVER_FEATURE),$(filter-out $(GEAR_SERVER_ALWAYS_LINKED),$(GEAR)),)
 GEAR_SERVER_FEATURES ?= $(GEAR_SERVER_OPTIONAL_FEATURES)$(if $(GEAR_SERVER_OPTIONAL_FEATURES),$(COMMA),)$(GEAR_SERVER_BASE_FEATURES)
-GEAR_SERVER_FEATURE_ARGS := $(if $(GEAR),--no-default-features --features $(GEAR_SERVER_FEATURES),$(EXAMPLE_SERVER_FEATURE_ARGS))
+GEAR_SERVER_FEATURE_ARGS := $(if $(GEAR),$(if $(GEAR_HAS_SERVER_FEATURE),--no-default-features --features $(GEAR_SERVER_FEATURES),),$(EXAMPLE_SERVER_FEATURE_ARGS))
 
 # --- OpenAPI ---
 GEAR_OPENAPI_TMP ?= target/openapi/$(GEAR).json
@@ -1099,10 +1128,19 @@ example:
 	$(call print_target_banner)
 	cargo run --bin $(EXAMPLE_SERVER_BIN) $(EXAMPLE_SERVER_FEATURE_ARGS) -- --config config/quickstart.yaml run
 
-# Run the default server, or the example server with only one gear feature when GEAR=<gear> is set
+# Run the default server, or the example server with only one gear feature when GEAR=<gear> is set.
+# Skipped when GEAR has no corresponding example-server feature (e.g. libs).
 run:
 	$(call print_target_banner)
+ifneq ($(GEAR),)
+ifeq ($(GEAR_HAS_SERVER_FEATURE),)
+	@echo "SKIP: GEAR=$(GEAR) has no example-server feature — nothing to run."
+else
 	cargo run --bin $(EXAMPLE_SERVER_BIN) $(GEAR_SERVER_FEATURE_ARGS) -- --config config/quickstart.yaml run $(GEAR_RUN_ARGS)
+endif
+else
+	cargo run --bin $(EXAMPLE_SERVER_BIN) $(GEAR_SERVER_FEATURE_ARGS) -- --config config/quickstart.yaml run $(GEAR_RUN_ARGS)
+endif
 
 ## Run server with fips gear
 fips:
