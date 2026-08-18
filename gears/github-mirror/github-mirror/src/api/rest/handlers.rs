@@ -10,5 +10,6 @@ use super::dto::GithubMirrorHealthDto;
 pub async fn health(
     Extension(svc): Extension<Arc<Service>>,
 ) -> ApiResult<JsonBody<GithubMirrorHealthDto>> {
-    Ok(Json(svc.status().into()))
+    let status = svc.status();
+    Ok(Json(status.into()))
 }
