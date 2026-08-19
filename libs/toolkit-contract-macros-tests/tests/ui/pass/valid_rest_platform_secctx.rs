@@ -1,8 +1,9 @@
-//! Platform-plane REST projections are rejected at compile time (H-1): the
-//! generated client cannot yet source the internal token, so it would emit an
-//! UNAUTHENTICATED request. Until token injection lands the macro must reject
-//! `PlatformSecurityContext` methods rather than silently generate a broken
-//! client. Serve platform-plane contracts over gRPC or a manual client.
+//! A REST projection whose first argument is `&PlatformSecurityContext` is a
+//! platform-plane method: the marker is accepted, kept off the wire, and the
+//! generated client routes it to the transport-injected internal token
+//! (`X-ToolKit-Internal-Token`) rather than `Authorization: Bearer`
+//! (`cpt-cf-adr-two-plane-auth`). It must compile — the historic compile-time
+//! rejection of platform-plane REST projections is gone.
 
 use toolkit_contract::{contract, rest_contract};
 use toolkit_security::PlatformSecurityContext;
