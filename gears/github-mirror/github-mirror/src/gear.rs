@@ -13,9 +13,9 @@ use crate::api::rest::routes;
 use crate::config::GithubMirrorConfig;
 use crate::domain::local_client::LocalClient;
 use crate::domain::service::{Service, ServiceConfig};
-use crate::infra::storage::sea_orm_repo::SeaOrmRepositoriesRepository;
+use crate::infra::storage::sea_orm_repo::SeaOrmGithubRepoRepository;
 
-type ConcreteService = Service<SeaOrmRepositoriesRepository>;
+type ConcreteService = Service<SeaOrmGithubRepoRepository>;
 
 #[toolkit::gear(
     name = "github-mirror",
@@ -48,7 +48,7 @@ impl Gear for GithubMirrorGear {
         info!(api_base_url = %cfg.api_base_url, "Initializing github-mirror gear");
 
         let db = Arc::new(ctx.db_required()?);
-        let repo = Arc::new(SeaOrmRepositoriesRepository::new());
+        let repo = Arc::new(SeaOrmGithubRepoRepository::new());
 
         let authz = ctx
             .client_hub()

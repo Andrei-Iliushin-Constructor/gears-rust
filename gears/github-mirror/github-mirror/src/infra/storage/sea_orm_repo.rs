@@ -8,20 +8,20 @@ use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::repo::{RepositoriesRepository, RepositoryRecord};
+use crate::domain::repo::{GithubRepoRepository, RepositoryRecord};
 
-use super::entity::repositories::{self, Entity as RepositoriesEntity};
+use super::entity::repositories::{self, Entity as GithubRepoEntity};
 
-pub struct SeaOrmRepositoriesRepository;
+pub struct SeaOrmGithubRepoRepository;
 
-impl SeaOrmRepositoriesRepository {
+impl SeaOrmGithubRepoRepository {
     #[must_use]
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Default for SeaOrmRepositoriesRepository {
+impl Default for SeaOrmGithubRepoRepository {
     fn default() -> Self {
         Self::new()
     }
@@ -55,7 +55,7 @@ fn active_model(tenant_id: Uuid, r: &RepositoryRecord) -> repositories::ActiveMo
 }
 
 #[async_trait]
-impl RepositoriesRepository for SeaOrmRepositoriesRepository {
+impl GithubRepoRepository for SeaOrmGithubRepoRepository {
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,
@@ -63,7 +63,7 @@ impl RepositoriesRepository for SeaOrmRepositoriesRepository {
         tenant_id: Uuid,
         record: RepositoryRecord,
     ) -> Result<Repository, DomainError> {
-        let on_conflict = SecureOnConflict::<RepositoriesEntity>::columns([
+        let on_conflict = SecureOnConflict::<GithubRepoEntity>::columns([
             repositories::Column::TenantId,
             repositories::Column::Id,
         ])
@@ -80,7 +80,7 @@ impl RepositoriesRepository for SeaOrmRepositoriesRepository {
         ])
         .map_err(map_scope_error)?;
 
-        RepositoriesEntity::insert(active_model(tenant_id, &record))
+        GithubRepoEntity::insert(active_model(tenant_id, &record))
             .secure()
             .scope_with_model(scope, &active_model(tenant_id, &record))
             .map_err(map_scope_error)?
@@ -105,7 +105,7 @@ impl RepositoriesRepository for SeaOrmRepositoriesRepository {
         scope: &AccessScope,
         limit: u64,
     ) -> Result<Vec<Repository>, DomainError> {
-        let rows = RepositoriesEntity::find()
+        let rows = GithubRepoEntity::find()
             .secure()
             .scope_with(scope)
             .order_by(repositories::Column::FullName, Order::Asc)

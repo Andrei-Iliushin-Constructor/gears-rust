@@ -6,9 +6,9 @@ use toolkit::api::{OpenApiRegistry, OperationBuilder};
 
 use crate::api::rest::{dto, handlers};
 use crate::domain::service::Service;
-use crate::infra::storage::sea_orm_repo::SeaOrmRepositoriesRepository;
+use crate::infra::storage::sea_orm_repo::SeaOrmGithubRepoRepository;
 
-pub type ConcreteService = Service<SeaOrmRepositoriesRepository>;
+pub type ConcreteService = Service<SeaOrmGithubRepoRepository>;
 
 const API_TAG: &str = "GitHub Mirror";
 

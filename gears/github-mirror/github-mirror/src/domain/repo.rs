@@ -24,7 +24,7 @@ pub struct RepositoryRecord {
 }
 
 #[async_trait]
-pub trait RepositoriesRepository: Send + Sync {
+pub trait GithubRepoRepository: Send + Sync {
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,

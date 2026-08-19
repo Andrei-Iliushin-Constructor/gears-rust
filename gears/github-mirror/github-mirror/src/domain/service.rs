@@ -8,7 +8,7 @@ use toolkit_odata::{ODataQuery, Page, PageInfo};
 use toolkit_security::{SecurityContext, pep_properties};
 
 use super::error::DomainError;
-use super::repo::{RepositoriesRepository, RepositoryRecord};
+use super::repo::{GithubRepoRepository, RepositoryRecord};
 
 pub const GEAR_NAME: &str = "github-mirror";
 
@@ -41,14 +41,14 @@ pub struct MirrorStatus {
 }
 
 #[domain_model]
-pub struct Service<R: RepositoriesRepository> {
+pub struct Service<R: GithubRepoRepository> {
     db: Arc<DbProvider>,
     repo: Arc<R>,
     policy_enforcer: PolicyEnforcer,
     config: ServiceConfig,
 }
 
-impl<R: RepositoriesRepository> Service<R> {
+impl<R: GithubRepoRepository> Service<R> {
     pub fn new(
         db: Arc<DbProvider>,
         repo: Arc<R>,
