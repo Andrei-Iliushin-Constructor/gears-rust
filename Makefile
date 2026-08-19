@@ -647,7 +647,7 @@ OPENAPI_BUILD_FEATURE_ARGS := $(if $(GEAR),$(GEAR_OPENAPI_FEATURE_ARGS),$(OPENAP
 
 # -------- Tests --------
 
-.PHONY: test test-no-macros test-macros test-sqlite test-pg test-mysql test-db test-users-info-pg test-usage-collector-pg test-cluster-pg test-fips
+.PHONY: test test-no-macros test-macros test-sqlite test-pg test-mysql test-db test-users-info-pg test-usage-collector-pg test-cluster-pg test-rg-pg test-fips
 
 # Run all tests, or a single gear when GEAR=<gear> is set.
 # When GEAR= is set, cargo gears ls packages finds matching crates + their
@@ -715,6 +715,12 @@ test-usage-collector-pg: install-tools
 test-cluster-pg: install-tools
 	$(call print_target_banner)
 	cargo nextest run -p cf-postgres-cluster-plugin --features integration --retries 1
+
+## Run resource-group gear PostgreSQL smoke tests (Docker required; spins up
+## its own postgres container via testcontainers -- see
+## gears/system/resource-group/resource-group/tests/pg_smoke_test.rs)
+test-rg-pg: install-tools
+	cargo nextest run -p cf-gears-resource-group --features integration
 
 ## Run FIPS-mode integration tests (requires Go for aws-lc-fips-sys).
 ## Covers:
@@ -1116,7 +1122,7 @@ mini-chat-down:
 
 # -------- Main targets --------
 
-.PHONY: all dist check gear-ci ci ci_test ci_docs build .cargo-build .split-debug quickstart example mini-chat mini-chat-docker mini-chat-helm mini-chat-helm-template mini-chat-up mini-chat-down mini-chat-port-forward full-make-matrix
+.PHONY: all dist check gear-ci ci ci_test ci_docs build build-debug .cargo-build .split-debug quickstart example mini-chat mini-chat-docker mini-chat-helm mini-chat-helm-template mini-chat-up mini-chat-down mini-chat-port-forward full-make-matrix
 
 # Start server with quickstart config
 quickstart:
@@ -1185,6 +1191,13 @@ ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-u
 .split-debug:
 	$(call print_target_banner)
 	cargo xtask split-debug cf-gears-example-server
+
+# Build the cf-gears-example-server with full debuginfo (the 'debugging' profile)
+# Artifacts land in target/debugging/ and are not stripped, so no split-debug step
+# here. Costs a separate rebuild of the dependency graph; target/debug is untouched.
+build-debug:
+	cargo build --profile debugging --bin cf-gears-example-server $(E2E_ARGS)
+	@echo "binary: target/debugging/cf-gears-example-server"
 
 # Build the release binary, or a single gear when GEAR=<gear> is set.
 build:
