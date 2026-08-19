@@ -19,6 +19,7 @@ fn default_api_base_url() -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -30,15 +31,14 @@ mod tests {
 
     #[test]
     fn deserializes_with_missing_field_using_default() {
-        let cfg: GithubMirrorConfig = serde_json::from_str("{}").unwrap_or_default();
+        let cfg: GithubMirrorConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.api_base_url, "https://api.github.com");
     }
 
     #[test]
     fn deserializes_explicit_base_url() {
         let cfg: GithubMirrorConfig =
-            serde_json::from_str(r#"{"api_base_url":"https://ghe.local/api/v3"}"#)
-                .unwrap_or_default();
+            serde_json::from_str(r#"{"api_base_url":"https://ghe.local/api/v3"}"#).unwrap();
         assert_eq!(cfg.api_base_url, "https://ghe.local/api/v3");
     }
 }
