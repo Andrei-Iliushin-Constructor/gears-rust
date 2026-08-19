@@ -102,8 +102,12 @@ pub struct StaticConfig {
 }
 
 impl ConfigProvider for StaticConfig {
-    fn get_gear_config(&self, _gear_name: &str) -> Option<&serde_json::Value> {
-        self.section.as_ref()
+    fn get_gear_config(&self, gear_name: &str) -> Option<&serde_json::Value> {
+        if gear_name == "github-mirror" {
+            self.section.as_ref()
+        } else {
+            None
+        }
     }
 }
 

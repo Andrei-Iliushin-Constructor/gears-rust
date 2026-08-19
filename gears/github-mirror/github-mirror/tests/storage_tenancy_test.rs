@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod common;
 
 use github_mirror::domain::repo::RepositoryRecord;

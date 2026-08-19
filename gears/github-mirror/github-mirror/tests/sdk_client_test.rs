@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod common;
 
 use std::sync::Arc;
@@ -29,7 +31,7 @@ async fn consumer_resolves_client_from_hub_and_queries_status() {
     let gear = GithubMirrorGear::default();
     gear.init(&common::gear_ctx(hub.clone(), None).await)
         .await
-        .unwrap_or_default();
+        .expect("init must succeed");
 
     let client = hub
         .get::<dyn GithubMirrorClientV1>()
@@ -66,7 +68,7 @@ async fn list_repositories_via_hub_returns_seeded_rows() {
     let gear_ctx = common::gear_ctx(hub.clone(), None)
         .await
         .with_db(toolkit_db::DBProvider::new(db));
-    gear.init(&gear_ctx).await.unwrap_or_default();
+    gear.init(&gear_ctx).await.expect("init must succeed");
 
     let client = hub
         .get::<dyn GithubMirrorClientV1>()
