@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::sync::Arc;
 
 use axum::Router;
@@ -14,8 +16,12 @@ struct StaticConfig {
 }
 
 impl ConfigProvider for StaticConfig {
-    fn get_gear_config(&self, _gear_name: &str) -> Option<&serde_json::Value> {
-        self.section.as_ref()
+    fn get_gear_config(&self, gear_name: &str) -> Option<&serde_json::Value> {
+        if gear_name == "github-mirror" {
+            self.section.as_ref()
+        } else {
+            None
+        }
     }
 }
 
@@ -36,24 +42,22 @@ async fn init_then_register_rest_serves_health_with_configured_url() {
         "config": { "api_base_url": "https://ghe.corp/api/v3" }
     })));
 
-    gear.init(&ctx).await.unwrap_or_default();
+    gear.init(&ctx).await.expect("init must succeed");
 
     let openapi = OpenApiRegistryImpl::new();
     let router = gear
         .register_rest(&ctx, Router::new(), &openapi)
-        .unwrap_or_default();
+        .expect("register_rest must succeed after init");
 
     let request = Request::builder()
         .uri("/github-mirror/v1/health")
         .body(Body::empty())
-        .unwrap_or_default();
-    let response = router.oneshot(request).await.unwrap_or_default();
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    let bytes = to_bytes(response.into_body(), 1_000_000)
-        .await
-        .unwrap_or_default();
-    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(json["api_base_url"], "https://ghe.corp/api/v3");
 }
 
@@ -72,11 +76,10 @@ async fn second_init_fails_with_already_initialized() {
     let gear = GithubMirrorGear::default();
     let ctx = ctx_with(None);
 
-    gear.init(&ctx).await.unwrap_or_default();
+    gear.init(&ctx).await.expect("first init must succeed");
     let second = gear.init(&ctx).await;
 
-    assert!(second.is_err());
-    let message = second.err().map(|e| e.to_string()).unwrap_or_default();
+    let message = second.expect_err("second init must fail").to_string();
     assert!(message.contains("already initialized"));
 }
 
@@ -88,7 +91,8 @@ async fn register_rest_before_init_fails() {
     let openapi = OpenApiRegistryImpl::new();
     let result = gear.register_rest(&ctx, Router::new(), &openapi);
 
-    assert!(result.is_err());
-    let message = result.err().map(|e| e.to_string()).unwrap_or_default();
+    let message = result
+        .expect_err("register_rest before init must fail")
+        .to_string();
     assert!(message.contains("Service not initialized"));
 }

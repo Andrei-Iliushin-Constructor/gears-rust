@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::sync::Arc;
 
 use axum::Router;
@@ -17,10 +19,8 @@ fn test_router(api_base_url: &str) -> Router {
 }
 
 async fn body_json(response: axum::http::Response<Body>) -> serde_json::Value {
-    let bytes = to_bytes(response.into_body(), 1_000_000)
-        .await
-        .unwrap_or_default();
-    serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
 }
 
 #[tokio::test]
@@ -30,8 +30,8 @@ async fn health_returns_200_with_gear_identity() {
     let request = Request::builder()
         .uri("/github-mirror/v1/health")
         .body(Body::empty())
-        .unwrap_or_default();
-    let response = router.oneshot(request).await.unwrap_or_default();
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
@@ -47,8 +47,8 @@ async fn health_reflects_configured_base_url() {
     let request = Request::builder()
         .uri("/github-mirror/v1/health")
         .body(Body::empty())
-        .unwrap_or_default();
-    let response = router.oneshot(request).await.unwrap_or_default();
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
@@ -62,8 +62,8 @@ async fn unknown_route_returns_404() {
     let request = Request::builder()
         .uri("/github-mirror/v1/nope")
         .body(Body::empty())
-        .unwrap_or_default();
-    let response = router.oneshot(request).await.unwrap_or_default();
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
