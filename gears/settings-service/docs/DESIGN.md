@@ -110,6 +110,7 @@ The service is delivered as a **Constructor Fabric Gear** — the platform's uni
 | `cpt-cf-settings-service-fr-tenant-scope-enforcement` | Server-side subtree check on every operation; reads gated by `tenant_visible`, writes by `tenant_overridable` |
 | `cpt-cf-settings-service-fr-authn-role-gating` | Bearer token via the AuthN Resolver, then a fail-closed `PolicyEnforcer` decision; step-up on apply and on behavior-affecting declaration actions |
 | `cpt-cf-settings-service-fr-category-access` | `categories.access_restricted` (`false` by default) decides whether a category needs a grant at all: open categories are reached on the ordinary settings right with no authorization question, restricted ones additionally require a grant naming that category — type `gts.cf.toolkit.settings.category.v1~` and id `categories.key`, the slug. Lists ask about the restricted categories only, in one batch, and filter on `NOT access_restricted OR key = ANY(granted_slugs)` (§4.8 *Category access*, §4.7) |
+| `cpt-cf-settings-service-fr-file-valued-settings` | §3 *Files*: a `file-reference`-trait value is an inline reference (`value`, §4.1) to a file in the `file-storage` gear, never the bytes. The Type Validator resolves the reference's existence as a hard check and the Staging Manager asks `file-storage` whether the caller may use the file (§4.2); the reference is always pinned to a version, so a `bind` under it changes nothing until the setting is repointed; declared content-type and size constraints are checked from the version metadata; apply re-resolves every reference and refuses a broken one (§4.2 *Apply Orchestrator*); `file.deleted` flags referencing values `needs_review` (§4.4 *Events Consumed*); content is never indexed (§4.2 *Search*); `secret` + `file-reference` is rejected (`422`) while `pii` is carried. |
 | `cpt-cf-settings-service-fr-audit-mutations` | Audit Emitter writes synchronously inside the mutation transaction, fail-closed; canonical `resource` id makes history an exact-match query |
 | `cpt-cf-settings-service-fr-feature-license-gating` | `licence_feature` checked through the License Resolver on administrative read paths only; the in-process reader is not gated |
 | `cpt-cf-settings-service-fr-standard-advanced-mode` | `mode` on the declaration; mode-filtered lists expose `hidden_advanced_count`; per-user preference persisted |
@@ -153,6 +154,7 @@ The service is delivered as a **Constructor Fabric Gear** — the platform's uni
 ├─────────────────────────────────────────────────────────────┤
 │  External │ types-registry · tenant-resolver · authz/authn  │
 │           │ credstore · event-broker · audit · license      │
+│           │ file-storage (file-reference values, p2)        │
 ├─────────────────────────────────────────────────────────────┤
 │  Storage  │ PostgreSQL (declarations, values, pending)      │
 └─────────────────────────────────────────────────────────────┘
@@ -164,7 +166,7 @@ The service is delivered as a **Constructor Fabric Gear** — the platform's uni
 | Gear | REST surface, authorization, declaration lifecycle, staging and apply, resolution, search | Rust crate (`settings-service`), ToolKit gear, Axum |
 | Domain | Effective-value resolution, Scope Class behaviour, staging/apply state machine, type validation, secret handling | In-process Rust modules |
 | Infrastructure | Hot-path effective-value cache with signal-driven invalidation; fail-closed audit emission | In-memory cache, Event Broker client |
-| External | Type and trait resolution, tenant ancestry, authentication and authorization decisions, secret storage, event transport, audit, entitlement | `types-registry`, `tenant-resolver`, `authn-resolver`, `authz-resolver`, `credstore`, `event-broker`, audit, `license-resolver` |
+| External | Type and trait resolution, tenant ancestry, authentication and authorization decisions, secret storage, file-reference targets, event transport, audit, entitlement | `types-registry`, `tenant-resolver`, `authn-resolver`, `authz-resolver`, `credstore`, `file-storage`, `event-broker`, audit, `license-resolver` |
 | Storage | Declarations, categories, values, pending changes, apply records | PostgreSQL via `toolkit-db` |
 
 #### Context View
@@ -185,6 +187,7 @@ C4Context
  System(audit, "Audit Subsystem", "Immutable change history")
  System(policy_engine, "Policy Engine", "Feature/licence entitlement gating")
  System(credstore, "Credential Store", "the credstore backend: secret-trait value storage")
+ System(file_storage, "File Storage", "the file-storage gear: file-reference value targets")
  System(event_broker, "Event Broker", "Apply-lifecycle events; tenant_deleted consumption")
  SystemDb(settings_db, "Settings Database", "PostgreSQL: declarations, values, pending, apply")
  }
@@ -202,6 +205,7 @@ C4Context
  Rel(settings_service, audit, "emit audit records", "audit API")
  Rel(settings_service, policy_engine, "check feature/licence entitlement (read paths)", "in-process (ClientHub)")
  Rel(settings_service, credstore, "store/resolve secret values (machine path)", "credstore API")
+ Rel(settings_service, file_storage, "resolve file references (exists + authorized)", "in-process (ClientHub)")
  Rel(settings_service, event_broker, "publish apply/lifecycle events + activation signals (apply_notification per subscriber, cache_invalidate broadcast); consume tenant_deleted", "Event Broker")
  Rel(modules, event_broker, "subscribe to apply_notification; ack activation", "Event Broker")
 ```
@@ -224,6 +228,7 @@ C4Container
  Container_Ext(audit, "Audit Subsystem", "Audit API", "Mutation records")
  Container_Ext(policy_engine, "Policy Engine", "ClientHub", "Feature/licence entitlement gating")
  Container_Ext(credstore, "Credential Store", "credstore API", "the credstore backend secret-value storage")
+ Container_Ext(file_storage, "File Storage", "ClientHub", "file-reference target existence + authorization")
  Container_Ext(event_broker, "Event Broker", "Event Broker", "Publish/consume + cross-instance cache invalidation")
 
  Rel(rest, domain, "delegates", "in-process")
@@ -238,6 +243,7 @@ C4Container
  Rel(domain, audit, "emit", "audit API")
  Rel(domain, policy_engine, "feature/licence entitlement", "ClientHub")
  Rel(domain, credstore, "store/resolve secret values (machine path)", "credstore API")
+ Rel(domain, file_storage, "resolve file references", "ClientHub")
  Rel(domain, event_broker, "publish/consume; cross-instance invalidation", "Event Broker")
 ```
 
@@ -360,6 +366,43 @@ Scopes are tenant-hierarchy paths: `/` (platform root) or `/tenants/{id}`. Ances
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-constraint-secrets-by-reference`
 
 `secret`-trait values are backed by the Credential Store (the credstore backend). Plaintext never enters the settings DB, cache, search index, or audit trail — the row holds only an opaque `secret_ref`; values are masked on every **administrative** read/search/list and there is **no human reveal path**. Plaintext is resolved only through the **machine-only** Settings Reader path (§4.5), per-setting authorized and audited as a secret-use event (§4.2 *Secret Manager*).
+
+#### Files
+
+- [ ] `p2` - **ID**: `cpt-cf-settings-service-constraint-files-by-reference`
+
+A `file-reference`-trait value names a file held by the `file-storage` gear; the bytes never enter the settings DB, cache, search index, or audit trail. The value is a two-field object — `{ file_id, version_id }` — and both fields are always present (*always pinned*, below). Unlike a secret the reference needs no side channel, a file id not being sensitive in itself, so it is an ordinary **inline** value in `value` (§4.1): no column, index, or size rule changes. The consumer fetches content straight from `file-storage`, which issues a signed URL against its own data plane, so no settings path ever carries bytes and the 64 KiB value cap (§4.2 *Type Validator*) stands untouched.
+
+**What this does *not* mirror about a secret is the byte path.** A secret's plaintext flows *through* this service, and the SDK deliberately withholds a credstore-resolvable handle, because credstore knows nothing of settings or consumers and only this service can enforce per-setting authorization and the secret-use audit record (§4.2 *Secret Manager*). `file-storage` enforces its own access on both its control and data planes, so routing file content through here would buy no guarantee and cost the one property this section exists to keep. Stored by reference: alike. Who carries the content: opposite.
+
+**The reference is always pinned to a version.** `file-storage` guarantees content immutability per version — a backend object lives at `/{file_id}/{version_id}` and is immutable, and a replacement is always a new version plus a pointer swap — so `version_id` *is* the identity of the bytes. A reference naming only `file_id` would instead resolve through that gear's `content_id` pointer, which an ordinary `bind` call swaps under optimistic CAS: content would change for every consumer with **no** value change, no staged change, no apply, no audit record, and no activation signal. This design therefore has **no floating variant** — one shape, both fields, always. Showing consumers different content means repointing the setting at another version, which is an ordinary staged change (§4.2 *Staging Manager*). A stored content checksum would add nothing: it would restate a fact `file-storage` already guarantees, this service never reads bytes so could never compare it, and a consumer that wants to verify its download reads the per-version hash from `file-storage` directly.
+
+> **This rests on a `file-storage` invariant.** Version immutability is that gear's published contract, not something this service can verify — it never reads content. Were the invariant weakened, `version_id` would stop being a content identity and this section would need revisiting.
+
+**Write-time validation — three checks, two places, and one deliberate omission.**
+
+| Check | Where | Failure |
+|-------|-------|---------|
+| the reference resolves — file and version exist | Type Validator (§4.2): a type-level rule needing no caller identity, which is why `validate_value` takes none | `422` |
+| declared constraints hold — permitted content types, maximum size, both trait parameters on the value type | Type Validator, from the version metadata `file-storage` returns alongside existence | `422` |
+| **this** caller may use **that** file | Staging Manager (§4.2), the only point carrying `Context` | `403` |
+
+File permissions stay in `file-storage` — this service keeps no second copy — so a caller entitled to write the setting still cannot attach a file it has no right to. Two things are deliberately **not** checked. The **content** itself: asserting that a file really is well-formed SAML metadata would mean reading bytes this service never reads, so a trait may constrain type and size, which the metadata carries, and nothing finer. And whether every future **consumer** can read the file: consumers are not enumerable at write time, and one that cannot fetch learns so from `file-storage`, not from a settings read.
+
+**A dangling reference — what is promised, and what is not.** Two mechanisms, both narrow:
+
+- **At apply**, every `file-reference` in the set is re-resolved and an apply carrying one that no longer resolves is refused (§4.2 *Apply Orchestrator*, step 3). This is a synchronous pre-flight check on this service's own write path, so it holds unconditionally: a broken reference never goes live.
+- **On `file.deleted`** — published by `file-storage` through its transactional outbox for administrative deletes and retention sweeps alike (§4.4 *Events Consumed*) — every value referencing that file is flagged `needs_review`, excluded from apply, and surfaced to the administrator, while reads fall through to the nearest valid ancestor or the Schema Default (§4.2 *Value Resolver*).
+
+What is **not** promised is noticing that a pinned version vanished under an already-applied value. `file-storage` publishes no version-deleted event, and `DELETE /files/{id}/versions/{version_id}` refuses only the file's *current* version — so the very version a settled setting pins is the one most freely deletable, while the file lives on and `file.deleted` never fires. There the failure surfaces where the content is actually needed: the consumer's fetch fails at `file-storage`, never on a settings read path. Closing it properly needs one of two things **from `file-storage`** — a version-deleted signal, or a hold that keeps a referenced version undeletable — and neither is this service's to build, since it cannot see the other references a hold would have to count. A background reconciliation sweep over applied references is a possible later addition (§6), not a v1 promise.
+
+**The reference does not own the file.** Removing the value, retiring the declaration, or deleting the tenant removes the *reference* — the file itself is never touched. Two reasons: this service did not create it (it existed before the setting, uploaded by its own owner), and it cannot see who else points at it, since another setting, another scope, or something outside settings entirely may hold the same reference; deleting would destroy data this service neither owns nor has a complete view of. This is the deliberate opposite of a secret, whose Credential-Store entry this service *does* create and which `delete_secret` therefore removes when the override is removed or applied away (§4.2 *Secret Manager*). Cleanup belongs to `file-storage`: owner deletion is already a requirement it carries, and long-lived orphans are its retention sweep's business. One useful consequence — a file-valued setting is **cloneable** where a secret one is not (`422 SecretNotCloneable`, §4.2 *Staging Manager*): the hazard there is the source's credstore entry being deleted underneath the clone, and nothing here is ever deleted underneath anything.
+
+**What the trait buys over a plain string.** Storage-wise, nothing — a reference is a small JSON object, so an adopter could put one in an ordinary structured setting today and it would work. The trait is what turns that convention into checked behaviour: write-time resolution, the `file.deleted` coupling, the version-pinned shape, exclusion from the search corpus, the `secret` bar, and the resolved trait set a client reads to render a file picker rather than a text box (`cpt-cf-settings-service-fr-typed-value-validation`). Without it each adopter invents its own reference shape and its own failure modes — the ad-hoc per-gear file handling `file-storage` exists to end.
+
+**`secret` is refused, PII is carried.** A type carrying both `secret` and `file-reference` is rejected at declaration (`422`). The `secret` trait promises an absolute — masked on every administrative path, **no human reveal path**, plaintext only through the machine-only reader, every resolution audited — while a file has its own independent access path through `file-storage`: masking the reference would hide a pointer to content anyone that gear authorizes still reads, none of it audited here. Promising a guarantee this service cannot keep is worse than refusing the combination, so a secret that happens to be file-shaped stays a secret value in the Credential Store. **PII is different and is supported.** Its promise is relative — unmasked only for a caller authorized for unmasked PII, masked everywhere else — and that is honourable over reference *metadata*, which can itself disclose (a filename carrying someone's name), so a `pii`-classified file reference is masked on administrative reads exactly like any other PII value (§4.2 *Search*, §4.3).
+
+> **Prerequisites.** The `file-reference` trait must exist in the Types Registry, carrying its content-type and size parameters, and `file-storage` must expose the existence and use-authorization checks through its inter-gear client — `FileStorageClientV1` declares only `module_name` today. Download-URL issuance is **not** on this list: that call belongs to the consumer, not to this service. Both are prerequisites for this `p2` item; nothing here sits on the v1 path.
 
 #### AuthN / step-up
 
@@ -497,7 +540,7 @@ An **applied** override at a specific scope (distinct from the Schema Default an
 | `id` | UUID | Yes | Unique value ID (UUIDv7). |
 | `declaration_id` | UUID | Yes | Declaration this value belongs to (FK). |
 | `tenant_id` | UUID | No | Scope as an id, not a path: `NULL` ⇒ platform scope (`/`); a tenant UUID ⇒ that tenant. Ancestry is resolved by the Tenant Resolver, never parsed from this field (§4.2 *Value Resolver*, §4.7). |
-| `value` | JSON | No | The inline (non-secret) override value; `NULL` when the value is a secret held by reference. |
+| `value` | JSON | No | The inline (non-secret) override value — a `file-reference` value is inline too, since a file id is not sensitive (§3 *Files*); `NULL` when the value is a secret held by reference. |
 | `secret_ref` | string | No | Opaque Credential-Store reference for a `secret`-trait value (§4.2 *Secret Manager*); `NULL` for inline values. Exactly one of `value`/`secret_ref` is set. |
 | `needs_review` | boolean | Yes | `true` when the value no longer validates against the setting's current GTS type (flagged by the Reconciler on an invalidating type upgrade, §4.2 *Contribution Reconciler*). Excluded from apply until corrected; cleared on a valid re-stage/apply or revert (§4.7; PRD Schema/type-versioning decision). |
 | `needs_review_detail` | string | No | Short reason for the flag, shown to the admin (§4.3); `NULL` when `needs_review = false`. |
@@ -697,6 +740,7 @@ graph TD
  audit[/"Audit Subsystem"/]
  policy[/"Policy Engine<br/><small>ClientHub · entitlement</small>"/]
  credstore[("Credential Store<br/><small>the credstore backend</small>")]
+ fstorage[("File Storage<br/><small>the file-storage gear</small>")]
  broker[/"Event Broker<br/><small>publish/consume</small>"/]
  pg[("PostgreSQL")]
  end
@@ -721,6 +765,8 @@ graph TD
  resolver -->|reads| pg
  resolver -->|mask secret| secrets
  validator -->|type+traits| types
+ validator -->|file exists?| fstorage
+ staging -->|caller may use it?| fstorage
  apply -->|invalidate (local)| cache
  apply -->|validate step-up token| idp
  apply -->|publish apply_notification + cache_invalidate| broker
@@ -839,7 +885,7 @@ Both rows coexist, matched by the version-stripped path `cf.toolkit.settings.cat
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-component-type-validator`
 
-**Dependencies:** `TypesRegistryClient` (GTS Schema Registry, in-process via ClientHub)
+**Dependencies:** `TypesRegistryClient` (GTS Schema Registry, in-process via ClientHub), `FileStorageClientV1` (`file-reference` existence, in-process via ClientHub — §3 *Files*)
 
 **Operations:**
 
@@ -912,7 +958,7 @@ The consequence worth stating plainly, because it is the part that surprises: co
 
 Implements the **staged-then-apply** model for all value mutations (`cpt-cf-settings-service-fr-staged-change-pending`, `cpt-cf-settings-service-fr-tenant-overrides`).
 
-**Dependencies:** `TypeValidator`, `ScopeClassEngine`, Declaration Management, Secret Manager, PostgreSQL, Audit Emitter
+**Dependencies:** `TypeValidator`, `ScopeClassEngine`, Declaration Management, Secret Manager, `FileStorageClientV1` (`file-reference` use authorization — §3 *Files*), PostgreSQL, Audit Emitter
 
 **Operations:**
 
@@ -943,7 +989,7 @@ The explicit, credential-verified activation of pending changes (`cpt-cf-setting
 | Operation | Input | Output | Key Behavior |
 |-----------|-------|--------|--------------|
 | `preview` | `scope`, `Context` | `ApplyPreview` | List pending changes (old → new, scope, staged-by) and compute the `checksum` over the pending set (§4.3). Requires no step-up to preview. |
-| `apply` | `scope`, `checksum`, `step_up_assertion`, `Context` | `ApplyOperation` | 1. Authorize `apply` at scope. 2. Verify step-up via the resolved `StepUpVerifier` (the **step-up contract** below; `401/403` on failure) (`cpt-cf-settings-service-fr-authn-role-gating`). 3. Verify the previewed `checksum` against the current pending set; reject `409 ApplyChecksumMismatch` on drift. 4. Mark the scope's current pending changes `applying`, **pinning** the set step 3 verified (first reclaiming any `applying` rows left by an apply that died holding them — *Apply failure* below). 5. **Commit** each change — the applied value (secret-backed values written by reference via the Secret Manager, §4.2 *Secret Manager*), the change's own `applying → applied` transition, **and** its `success` `ApplyChangeResult` — all in **one transaction**, guarded on `status = 'applying'`. The result commits *with* the value so the two cannot diverge: no interruption can leave a live value that no result records. 6. A change that did **not** commit gets a `failure` `ApplyChangeResult` (with `detail`) written separately — its own transaction rolled back, so there is nothing to attach it to — and stays `pending`. 7. On partial/total failure, mark the **`apply_operation`** `failed`/`partial_failed` and audit; the unapplied changes stay `pending` for retry and never take a `failed` status of their own (§4.1 `PendingStatus`). Raise a durable `event_apply_failed` notification (§4.4); failures remain **durable and queryable** via `apply_status` (`cpt-cf-settings-service-nfr-reliability-fail-safe-staged`). 8. Invalidate the **local** cache for applied keys/scopes. 9. Hand the committed keys to the **Apply Publisher** ([Settings Activation](./DESIGN-activation.md)): **once per apply** it publishes a filtered **`apply_notification`** per subscriber (consumer activation) and a **`cache_invalidate`** broadcast to replicas (cross-instance cache coherence) — one outbox row per apply, drained after the apply settles. 10. Emit `apply_completed` and audit the apply. 11. On a fully `succeeded` operation, once the audit write is durable, **delete** the `apply_operation` row (its `apply_change_results` cascade) — it is a settled execution record, not the system of record; `failed`/`partial_failed` operations are retained for retry/query (§4.7 Row lifecycle, `cpt-cf-settings-service-nfr-reliability-fail-safe-staged`). |
+| `apply` | `scope`, `checksum`, `step_up_assertion`, `Context` | `ApplyOperation` | 1. Authorize `apply` at scope. 2. Verify step-up via the resolved `StepUpVerifier` (the **step-up contract** below; `401/403` on failure) (`cpt-cf-settings-service-fr-authn-role-gating`). 3. Verify the previewed `checksum` against the current pending set; reject `409 ApplyChecksumMismatch` on drift. **Re-resolve every `file-reference` value in the set** and reject (`422`) if a reference no longer resolves — a pre-flight check, so a broken reference never goes live (§3 *Files*). 4. Mark the scope's current pending changes `applying`, **pinning** the set step 3 verified (first reclaiming any `applying` rows left by an apply that died holding them — *Apply failure* below). 5. **Commit** each change — the applied value (secret-backed values written by reference via the Secret Manager, §4.2 *Secret Manager*), the change's own `applying → applied` transition, **and** its `success` `ApplyChangeResult` — all in **one transaction**, guarded on `status = 'applying'`. The result commits *with* the value so the two cannot diverge: no interruption can leave a live value that no result records. 6. A change that did **not** commit gets a `failure` `ApplyChangeResult` (with `detail`) written separately — its own transaction rolled back, so there is nothing to attach it to — and stays `pending`. 7. On partial/total failure, mark the **`apply_operation`** `failed`/`partial_failed` and audit; the unapplied changes stay `pending` for retry and never take a `failed` status of their own (§4.1 `PendingStatus`). Raise a durable `event_apply_failed` notification (§4.4); failures remain **durable and queryable** via `apply_status` (`cpt-cf-settings-service-nfr-reliability-fail-safe-staged`). 8. Invalidate the **local** cache for applied keys/scopes. 9. Hand the committed keys to the **Apply Publisher** ([Settings Activation](./DESIGN-activation.md)): **once per apply** it publishes a filtered **`apply_notification`** per subscriber (consumer activation) and a **`cache_invalidate`** broadcast to replicas (cross-instance cache coherence) — one outbox row per apply, drained after the apply settles. 10. Emit `apply_completed` and audit the apply. 11. On a fully `succeeded` operation, once the audit write is durable, **delete** the `apply_operation` row (its `apply_change_results` cascade) — it is a settled execution record, not the system of record; `failed`/`partial_failed` operations are retained for retry/query (§4.7 Row lifecycle, `cpt-cf-settings-service-nfr-reliability-fail-safe-staged`). |
 | `apply_status` | `apply_operation_id` | `ApplyOperation` + results | Per-change progress (pending → running → success/failure) for the UI. |
 
 **Step-up contract.** Step-up is a **re-authentication ceremony at the IdP**, not a credential prompt in the settings UI. The **expected admin experience is re-entering the password** — but that prompt is presented and verified by the **IdP**, not by this service. The frontend redirects the admin to the IdP (`prompt=login` / `acr_values` / `max_age=0`); the IdP re-challenges (password by default; it MAY substitute MFA/passkey for SSO/WebAuthn/passwordless admins who have no password) and returns a fresh assertion. **The Settings Service MUST NOT receive or verify raw credentials.** Verification is **local claims inspection** on the fresh token — no per-apply runtime call to the IdP — checking:
@@ -1029,6 +1075,7 @@ Handles `secret`-trait values, backed by the platform **Credential Store** (the 
 - **`secret`** — never indexed and never matched at all. A secret is not discoverable through match existence, result counts, snippets, or timing; searching secret content is **unsupported**, not merely masked in the response (`cpt-cf-settings-service-fr-search-discoverability`).
 - **`pii`** — matched only for a caller authorized for unmasked PII. For every other caller the PII value content is excluded from the corpus, so it is unreachable through a match, a count, or a snippet.
 - **`public`** — matched normally, under the usual scope, visibility, mode, and licence filters.
+- **`file-reference`** — neither the file id nor the pinned version is searchable content, and file **content** is never fetched, indexed, or matched. A file-valued setting stays discoverable by key, description, and category like any other (§3 *Files*).
 - **Structured values** — the text projection matches leaf values under the same rules; a `secret` leaf, or a `pii` leaf for an unauthorized caller, is excluded from the projection rather than masked after the fact.
 
 The corpus covers only Schema Defaults and overrides the caller may **already read** in the requested scope — it never matches a value the caller could not otherwise retrieve.
@@ -1319,6 +1366,7 @@ Event type identifiers follow `gts.<vendor>.<package>.<namespace>.<type>.v<MAJOR
 | `gts.cf.core.events.type.v1~cf.core.am.tenant_deleted.v1~` | Account Management (owns tenant lifecycle) | Clean up tenant-scoped overrides, pending changes, and secret refs for deleted tenant scopes, per the disposition policy in §6. **Not published by Account Management today** — no tenant-lifecycle event type is defined and the gear has no publish path; tracked as a dependency (§6). Until it exists, tenant-scoped rows outlive their tenant and cleanup is operational, not event-driven. Note that AM `delete_tenant` is a **scheduled deletion saga restricted to leaf tenants** (it rejects a tenant with children), so the event — once it exists — will arrive per tenant, never for a subtree. |
 | Subject-deleted signal, per registered subject type | The gear that owns that subject type | Clean up values scoped to a deleted subject — `WHERE subject_type = ? AND subject_id = ?` across every tenant — generalizing the `tenant_deleted` row above to the subject dimension (`cpt-cf-settings-service-fr-subject-scoped-values`, §4.7). One subscription per registered subject type rather than one universal event, because the owning gear differs per type and only that gear knows when its instance is gone. **Not consumed in v1**, which writes no subject-scoped rows; the subscription lands with the first subject type that does. Without it a subject's values would outlive the subject exactly as tenant-scoped rows outlive their tenant today. |
 | Hierarchy-change signal (e.g. `gts.cf.core.events.type.v1~cf.core.am.tenant_reparented.v1~`) | Account Management (owns tenant lifecycle) | Evict cached effective values for the affected subtree: a re-parent or a mid-chain tenant insert changes the ancestor chain, and therefore the correct `cascading` effective value, with **no** settings apply involved (§4.2 *Cache & Invalidation*). **Neither the event nor the underlying operation exists today** — AM maintains the hierarchy (`tenants.parent_id` + a `tenant_closure` table) but subtree reparenting is explicitly deferred post-v1, and `UpdateTenantRequest` carries no `parent_id`, so an established ancestor chain is immutable in v1. The staleness window this row guards against is therefore **not reachable in v1**; it becomes live only when AM ships `move_subtree`. Tracked as a dependency (§6); `cache_ttl_seconds` bounds the window if it lands before this service consumes the signal. |
+| File-deleted signal (`file.deleted`) | `file-storage` (owns file lifecycle) | Flag every value whose `file-reference` names the deleted file as `needs_review` — the reference no longer resolves, so the value is excluded from apply and surfaced to the administrator while reads fall through (§3 *Files*, §4.2 *Value Resolver*). Published through that gear's transactional outbox for administrative deletes and retention sweeps alike; the registered GTS type id is owned by `file-storage`. |
 
 #### Event-Driven Invalidation
 
@@ -1459,6 +1507,45 @@ sequenceDiagram
   R-->>C: value
  end
 ```
+
+#### Set and read a file-valued setting
+
+- [ ] `p2` - **ID**: `cpt-cf-settings-service-seq-file-valued-setting`
+
+The service never carries the bytes, so a file-valued setting is written in **two independent calls by the client**, not by this service: the file goes into `file-storage` first, then the reference is staged like any other value (§3 *Files*). The read side is symmetric — the consumer receives the reference and fetches the content itself.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Adm as Admin Console
+    participant FS as file-storage (control)
+    participant FSD as file-storage (data plane)
+    participant S as Settings Service
+    participant Con as Consumer (in-process)
+
+    Note over Adm,FSD: 1 — put the file where files live
+    Adm->>FS: POST /files (metadata, gts_type)
+    FS-->>Adm: file_id, version_id, upload_url
+    Adm->>FSD: PUT bytes (upload_url)
+    Adm->>FS: POST /files/{id}/bind
+
+    Note over Adm,S: 2 — point the setting at it: an ordinary staged change
+    Adm->>S: stage_set(key, {file_id, version_id})
+    S->>FS: does the file exist? (Type Validator)
+    S->>FS: may this caller use it? (Staging Manager)
+    FS-->>S: yes / no
+    S-->>Adm: PendingChange, else 422 (absent) / 403 (not allowed)
+    Adm->>S: preview + apply (step-up, audit, activation)
+
+    Note over Con,FSD: 3 — read: the service hands back the reference, nothing more
+    Con->>S: get_effective(key, scope)
+    S-->>Con: {file_id, version_id}
+    Con->>FS: GET /files/{id}/download-url
+    FS-->>Con: signed URL
+    Con->>FSD: GET bytes
+```
+
+An orphan is possible by construction: step 1 can succeed and step 2 never happen, leaving a file nothing references. That is `file-storage`'s retention concern, not this service's — see *The reference does not own the file* (§3 *Files*).
 
 ### 4.7 Database schemas & tables
 
@@ -1724,6 +1811,7 @@ The gear already knows which categories are restricted — it is a column in its
 | Feature/licence gating | Gated settings/categories excluded server-side across all REST read/browse/search paths via Policy Engine Decision Point entitlement checks (`PolicyDecisionClient`, fail-closed); the in-process `SettingsReaderClient` hot path is not licence-gated — services receive values regardless of UI entitlement (`cpt-cf-settings-service-fr-feature-license-gating`). |
 | Audit | Every mutation writes an immutable audit record (`cpt-cf-settings-service-fr-audit-mutations`). |
 | Secret confidentiality | `secret`-trait values are stored by reference in the Credential Store (the credstore backend); masked on every **administrative** read/search/list/audit path, with **no human reveal path**. Plaintext is returned only through the **machine-only** reader path (`resolve_secret`, §4.5), authorized per setting against the calling service and audited as a secret-use event; never cached in plaintext (§4.2 *Secret Manager*, *Cache & Invalidation*). |
+| File confidentiality | A `file-reference` value carries an id, never content, so nothing in this service masks or proxies a file. Access to the file itself is enforced by `file-storage` on its own control and data planes; this service only asks, at write time, whether the caller may use the file it is attaching (§3 *Files*). |
 | Data classification | Every setting value carries `public` / `pii` / `secret` (§4.1). `pii` is unmasked only for a caller authorized for unmasked PII, and masked in every other administrative read and in audit/report output; `secret` has no human path at all. Search enforces the classes **before matching**: the classification predicate in the query keeps withheld content out of every match, count and snippet, whatever plan the planner picks. **Timing is guaranteed for `secret` only** — its content is absent from the searchable column altogether — since the split index predicates are an access path, not a barrier (§4.2 *Search*, §4.6). Audit actor identities are classified the same way (§4.2 *Audit Emitter*). |
 | Input validation | GTS type + trait validation on every value; Scope Class / overridability checks; scope-path validation; namespaced-key check for contributed declarations. |
 | Contributed-declaration protection | Module-contributed declarations are immutable to admins (values only). |
@@ -1757,7 +1845,7 @@ The Settings Service is **supplied as a Constructor Fabric Gear** — a composab
 | Property | Value |
 |----------|-------|
 | Gear name | `settings-service` |
-| Dependencies | `types-registry`, `tenant-resolver`, `rbac` (PEP), `policy-engine` (DP — feature/licence entitlement), `credstore` (secret values, §4.2 *Secret Manager*), `event-broker` (apply/cache events + `tenant_deleted`, §4.4), `audit`. **No IdP gear dependency** — the step-up re-authentication happens **browser ↔ IdP** (the apply request arrives already bearing a fresh token); the gear only **validates that token's claims locally against the IdP's cached JWKS** (§4.2 *Apply Orchestrator*), so the IdP is not a per-apply runtime dependency — only its JWKS endpoint is configured (fetched/refreshed in the background). Step-up verification is a **ClientHub-resolved `StepUpVerifier`** trait — default binding = the OIDC/JWKS verifier (§4.2 *Apply Orchestrator*); a deployment may bind a non-OIDC or added-factor verifier **without gear code** — but never an always-satisfied one: the mechanism is pluggable, the requirement is not (§4.2 *Apply Orchestrator*). |
+| Dependencies | `types-registry`, `tenant-resolver`, `file-storage` (`file-reference` values, p2), `rbac` (PEP), `policy-engine` (DP — feature/licence entitlement), `credstore` (secret values, §4.2 *Secret Manager*), `event-broker` (apply/cache events + `tenant_deleted`, §4.4), `audit`. **No IdP gear dependency** — the step-up re-authentication happens **browser ↔ IdP** (the apply request arrives already bearing a fresh token); the gear only **validates that token's claims locally against the IdP's cached JWKS** (§4.2 *Apply Orchestrator*), so the IdP is not a per-apply runtime dependency — only its JWKS endpoint is configured (fetched/refreshed in the background). Step-up verification is a **ClientHub-resolved `StepUpVerifier`** trait — default binding = the OIDC/JWKS verifier (§4.2 *Apply Orchestrator*); a deployment may bind a non-OIDC or added-factor verifier **without gear code** — but never an always-satisfied one: the mechanism is pluggable, the requirement is not (§4.2 *Apply Orchestrator*). |
 | Capabilities | `db`, `rest` |
 
 > **Why not `system`.** The ToolKit runtime re-partitions gears at init into *all system gears first, then all non-system gears* (`registry::gears_by_system_priority`), preserving the dependency topo-order only *within* each group. A `system` `settings-service` would therefore init **before** its non-system dependencies (`rbac`, `credstore`, `event-broker`) and its fail-closed client resolution would break startup. `system` is intentionally **not** declared (the reference `rbac` gear omits it for the same reason). The reader's early availability is instead provided by dependency ordering — a gear that must read effective values during its own init declares `settings-service` in its `deps`.
@@ -1781,6 +1869,7 @@ The Settings Service is **supplied as a Constructor Fabric Gear** — a composab
 | In-process wiring | `ClientHub` | Resolves each dependency to a local implementation or a generated REST client per deployment profile |
 | Type validation | JSON Schema 2020-12 + `x-gts-traits` | Resolved from `types-registry`; validation only, never a second default |
 | Secret storage | `credstore` gear | Values held by opaque reference; plaintext never in this gear's database, cache, index, or audit |
+| File-reference storage | `file-storage` gear | A `file-reference` value names a file; bytes never in this gear's database, cache, search index, or audit trail, and the consumer fetches content over that gear's signed-URL data plane (§3 *Files*). |
 | Eventing | Event Broker | Apply lifecycle, declaration lifecycle, secret-use, and the two activation signals |
 | Search | `pg_trgm` GIN | Substring match over key, description, category name, and non-secret value projections |
 | Observability | Prometheus scrape targets | Metrics enumerated in §7 *Feature Metrics* |
@@ -1974,6 +2063,16 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | Category access — lists ask only about restricted categories | mixed open and restricted categories | Browse and search issue **one** batch covering the restricted ones only, and none at all when nothing is restricted; the count never grows with the number of settings |
 | Category access — restricted and not granted | `MockAuthZClient` denying the restricted category | Its settings are absent from browse and search and give the not-visible response on a single read, while open categories are unaffected |
 | Category access — narrows only | an open category holding a declaration with `tenant_visible = false` | Still not returned to a tenant caller: an open category grants nothing by itself, it only declines to add a check |
+| File-valued setting — stored by reference | a declaration whose type carries `file-reference` | The reference sits inline in `value`; no bytes in the database, cache, search index, or audit record |
+| File-valued setting — unusable file rejected on write | `MockFileStorageClient` denying existence, then denying authorization | `422` with a field-level error for the absent file, `403` for the one the caller may not use; nothing staged in either case |
+| File-valued setting — a `bind` under a pinned reference changes nothing | `bind` swaps the file's current version while a setting pins the old one | No value change, no pending change, no activation signal; consumers keep reading the pinned version until the setting is repointed |
+| File-valued setting — declared constraints | a trait permitting `image/png` up to 512 KiB; then a `text/html` file, then an oversized PNG | `422` with a field-level error in both cases, from version metadata alone — no content is fetched |
+| File-valued setting — apply re-resolves the reference | reference deleted between staging and apply | The apply is refused (`422`); nothing goes live |
+| File-valued setting — referenced file deleted | `file.deleted` for a file two scopes reference | Both values flagged `needs_review` and excluded from apply; the read falls through to the nearest valid ancestor or the Schema Default |
+| File-valued setting — secret exclusivity | a type carrying both `secret` and `file-reference` | Rejected at declaration (`422`) |
+| File-valued setting — PII reference is masked | a `pii`-classified file reference read by an unauthorized caller | Reference metadata masked on the administrative read; unmasked for a caller authorized for unmasked PII |
+| File-valued setting — a deleted *version* is not detected | `DELETE /files/{id}/versions/{version_id}` for a non-current version a setting pins | No `needs_review` flag and no settings-side error, by documented non-promise; the consumer's fetch fails at `file-storage` |
+| File-valued setting — never searchable by content | a file whose name and content match the query | Not matched on either; still matched by key, description, and category |
 | Machine secret-use — authorized vs. unauthorized consumer | `MockSecretManager` | `resolve_secret` returns plaintext for a consumer authorized to **that** setting and emits `event_secret_used` with the value masked; an unauthorized consumer gets `Unauthorized` and no plaintext (§4.2 *Secret Manager*) |
 | Machine secret-use — unconfigured secret | `MockSecretManager` | A `secret`-trait setting with no override anywhere: `get_effective` returns a `SecretHandle` like any other, with `source=schema_default`; `resolve_secret` on it returns `NotFound` — **not** `Unauthorized`, and never the placeholder default as plaintext (§4.5) |
 | Classification-aware masking | `MockSecretManager`, `MockAuthZ` | `public` passes through; `pii` masked for a caller without PII entitlement and unmasked for one with it; `secret` masked for every administrative caller regardless of entitlement (§4.2 *Secret Manager*) |
@@ -2027,6 +2126,7 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | IdP step-up | `MockStepUpVerifier` (pass/fail) | Exercise step-up gating on apply and on the behavior-affecting declaration actions retire/reactivate (§4.2 *Declaration Management*, *Apply Orchestrator*) |
 | Step-up verifier is a resolved binding | two `MockStepUpVerifier` instances standing in for different mechanisms | The verifier is ClientHub-resolved rather than hard-coded — swapping the binding changes **which** check runs, and apply is refused whenever the bound verifier rejects, whichever one is bound. No binding that always succeeds is exercised as a supported configuration: the requirement is not deployment-optional (§4.2 *Apply Orchestrator*) |
 | Credential Store | `MockSecretManager` | Deterministic store/mask/resolve without the credstore backend |
+| File Storage | `MockFileStorageClient` | Deterministic exists / authorized answers without the `file-storage` gear; no download path is mocked because this service never issues one |
 | Event Broker | `MockEventPublisher` | Capture emitted events without a broker |
 | Database / domain services | Real | API layer delegates to real logic |
 
