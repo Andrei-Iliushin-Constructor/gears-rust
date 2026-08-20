@@ -681,18 +681,18 @@ test-macros: install-tools
 ## Run SQLite integration tests
 test-sqlite: install-tools
 	$(call print_target_banner)
-	cargo nextest run -p cf-gears-toolkit-db --features sqlite,integration,preview-outbox
-	cargo build -p cf-gears-toolkit-db --examples --features sqlite,preview-outbox
+	cargo nextest run -p cf-gears-toolkit-db --features sqlite,integration
+	cargo build -p cf-gears-toolkit-db --examples --features sqlite
 
 ## Run PostgreSQL integration tests
 test-pg: install-tools
 	$(call print_target_banner)
-	cargo nextest run -p cf-gears-toolkit-db --features pg,integration,preview-outbox
+	cargo nextest run -p cf-gears-toolkit-db --features pg,integration
 
 ## Run MySQL integration tests
 test-mysql: install-tools
 	$(call print_target_banner)
-	cargo nextest run -p cf-gears-toolkit-db --features mysql,integration,preview-outbox
+	cargo nextest run -p cf-gears-toolkit-db --features mysql,integration
 
 # Run all database integration tests
 test-db: test-sqlite test-pg test-mysql
@@ -785,22 +785,22 @@ check-windows-fips:
 ## Run outbox throughput benchmarks against PostgreSQL
 bench-pg:
 	$(call print_target_banner)
-	cargo bench -p cf-gears-toolkit-db --features pg,preview-outbox --bench outbox_throughput -- postgres
+	cargo bench -p cf-gears-toolkit-db --features pg --bench outbox_throughput -- postgres
 
 ## Run outbox throughput benchmarks against MySQL
 bench-mysql:
 	$(call print_target_banner)
-	cargo bench -p cf-gears-toolkit-db --features mysql,preview-outbox --bench outbox_throughput -- mysql
+	cargo bench -p cf-gears-toolkit-db --features mysql --bench outbox_throughput -- mysql
 
 ## Run outbox throughput benchmarks against MariaDB
 bench-mariadb:
 	$(call print_target_banner)
-	cargo bench -p cf-gears-toolkit-db --features mysql,preview-outbox --bench outbox_throughput -- mariadb
+	cargo bench -p cf-gears-toolkit-db --features mysql --bench outbox_throughput -- mariadb
 
 # Run outbox throughput benchmarks against SQLite
 bench-sqlite:
 	$(call print_target_banner)
-	cargo bench -p cf-gears-toolkit-db --features sqlite,preview-outbox --bench outbox_throughput -- sqlite
+	cargo bench -p cf-gears-toolkit-db --features sqlite --bench outbox_throughput -- sqlite
 
 ## Run outbox throughput benchmarks against all database engines
 bench-db: bench-pg bench-mysql bench-mariadb bench-sqlite
@@ -809,22 +809,22 @@ bench-db: bench-pg bench-mysql bench-mariadb bench-sqlite
 ## Run long-haul (1M+10M) outbox benchmarks against PostgreSQL
 bench-pg-longhaul:
 	$(call print_target_banner)
-	cargo bench -p cf-gears-toolkit-db --features pg,preview-outbox --bench outbox_throughput -- postgres_longhaul
+	cargo bench -p cf-gears-toolkit-db --features pg --bench outbox_throughput -- postgres_longhaul
 
 ## Run long-haul (1M+10M) outbox benchmarks against MySQL
 bench-mysql-longhaul:
 	$(call print_target_banner)
-	cargo bench -p cf-gears-toolkit-db --features mysql,preview-outbox --bench outbox_throughput -- mysql_longhaul
+	cargo bench -p cf-gears-toolkit-db --features mysql --bench outbox_throughput -- mysql_longhaul
 
 ## Run long-haul (1M+10M) outbox benchmarks against MariaDB
 bench-mariadb-longhaul:
 	$(call print_target_banner)
-	cargo bench -p cf-gears-toolkit-db --features mysql,preview-outbox --bench outbox_throughput -- mariadb_longhaul
+	cargo bench -p cf-gears-toolkit-db --features mysql --bench outbox_throughput -- mariadb_longhaul
 
 ## Run long-haul (100K 1P) outbox benchmarks against SQLite
 bench-sqlite-longhaul:
 	$(call print_target_banner)
-	cargo bench -p cf-gears-toolkit-db --features sqlite,preview-outbox --bench outbox_throughput -- sqlite_longhaul
+	cargo bench -p cf-gears-toolkit-db --features sqlite --bench outbox_throughput -- sqlite_longhaul
 
 ## Run long-haul outbox benchmarks against all database engines
 bench-db-longhaul: bench-pg-longhaul bench-mysql-longhaul bench-mariadb-longhaul bench-sqlite-longhaul
