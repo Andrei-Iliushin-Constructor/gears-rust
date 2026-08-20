@@ -112,6 +112,8 @@ Concretely:
 - A cross-backend parity suite compares the three hop implementations directly rather than through the API, over multi-seed frontiers, edge-type filters, a second hop fed from each backend's own first-hop result, the cross-tenant trap, `deny_all` and a foreign scope. It is what caught the iterative hop returning its own frontier — a defect invisible at the API.
 - Traversal under a scope of one tenant plus an explicit list of authorized node identifiers is checked separately, because every other case uses a tenant-only scope and that is precisely the blind spot in which both of the defects above lived. The check asserts the authorized neighbours come back *and* that an unauthorized one does not, since a narrowing that returns nothing satisfies half of that on its own.
 - End-to-end timings for all three backends are reproduced by `dev/bench-hops.sh`, which also fails if the backends disagree, since a backend that is fast because it answers differently is not faster.
+- The whole design has since been exercised by a reference consumer: the gear was assembled into a real backend, pointed at a PostgreSQL 19 server, and driven through its API by an importer that walks a GitHub repository — 824 nodes and 823 edges (622 files, 178 directories, 23 contributors) in 2.4 s, with a re-run leaving the totals unchanged. Every traversal in that run was served by the pattern backend with no fallback. The single-statement hybrid query — vector similarity choosing the seeds, the graph expanding around them, a full-text predicate filtering what is reached — returned the expected node against real embeddings, which is the first time the capability ADR-0001 chose SQL/PGQ for has run outside a unit test.
+- That run also surfaced three places where the implementation contradicted `DESIGN` rather than the ADR: `ON CONFLICT DO NOTHING` reported as a failure when it skipped every row (so re-registering a type answered 500), a random `type_uuid` where the schema documents a deterministic `UUIDv5`, and an ingest path that was documented atomic and ran without a transaction with `graph_revision` returning a literal zero. All three are fixed and pinned by `tests/idempotency_stand.rs`; they are recorded here because a suite in which every test writes fresh keys cannot see any of them.
 
 ## Pros and Cons of the Options
 
@@ -150,6 +152,8 @@ The measurements behind every number here are in [SPIKE-pg19-sqlpgq.md](../SPIKE
 
 This ADR describes what a gear can build **today**, without any new platform capability. It works, and it ships. But three of its properties are compromises forced by what the secure ORM does not currently expose, and each has a cost that is paid on every request. They are listed here so the platform side of the conversation has a concrete list rather than a general wish, and in the order that would help most.
 
+**Status of these asks.** The conversation happened. The [platform property-graph policy](../../../../docs/arch/secure-orm/ADR/0002-secure-property-graph-policy.md) adopts asks 1 and 3 as platform policy, so both are answered in principle and each is annotated below with what remains. Asks 2 and 4 are untouched by it and still stand. A probe of that ADR against a live PostgreSQL 19 beta 2 server — branch `feature/pgq-adr0002-probe`, results under `dev/adr0002-probe/` — resolved its one open feasibility question and produced two findings that change what the asks cost; those are folded in below.
+
 ### 1. Scope rendered against a chosen alias
 
 **What we do instead.** A pattern carries only the caller's *tenant* bound, which the gear extracts from the `AccessScope` itself. Anything narrower — a resource-id list, a group subtree — is not expressed in the pattern at all, and a scope whose tenants cannot be enumerated is not served by this backend.
@@ -159,6 +163,13 @@ This ADR describes what a gear can build **today**, without any new platform cap
 **What it would change.** The pattern could carry the caller's whole scope, which removes the over-production this ADR accepts as a consequence, and removes the fallback in decision point 5 — `allow_all` and tenant-subtree scopes would be servable rather than deflected. This is the ask with the widest reach: the same primitive would scope a join, a lateral, or any other construct where the target is not a plain entity query, so it is not specific to SQL/PGQ or to this gear.
 
 It would also subsume ask 2 below, since a scope renderable against a chosen target is what a CTE body over a different table needs. They are listed separately because the smaller one is useful on its own and is a much smaller change.
+
+**Adopted.** The [platform property-graph policy](../../../../docs/arch/secure-orm/ADR/0002-secure-property-graph-policy.md) commits to exactly this primitive — a column-addressing parameter on `build_scope_condition`, `for_table()` alongside `for_graph_element(v)` — and rejects a second PGQ-specific compiler for the same reason this ask gives. Implemented and measured on the probe branch: table addressing reproduces the current compiler's SQL exactly, and the graph-addressed predicate executes verbatim inside an element pattern, returning the owner's rows and none for a foreign tenant.
+
+Two things about it are settled by measurement rather than by argument, and both bear on the signature:
+
+- **The function has to return a `Result`.** `InGroup`, `InGroupSubtree` and `InTenantSubtree` compile to `col IN (SELECT …)`, and PostgreSQL 19 accepts **no** subquery inside a pattern — `IN (SELECT)`, `= ANY(ARRAY(SELECT))` and `LATERAL` before `GRAPH_TABLE` are all rejected. In graph mode those arms must therefore fail loudly. Dropping them is fail-closed in the letter and wrong in effect: the constraint vanishes, the scope becomes `deny_all()` → `WHERE false`, and the caller gets a silent empty traversal.
+- **Subtree scopes are still servable.** A comma join with a correlated reference — an implicit lateral — does reach the pattern, against both a derived table and a plain table (0.337 ms on the probe). So the closure needs neither pre-resolving into a literal id list nor rejecting; what it needs is somewhere in the API to put that second `FROM` item.
 
 ### 2. A CTE body able to carry a scope projected onto its own table
 
@@ -197,6 +208,8 @@ this way.
 
 **What it would change.** The exception disappears. A `GRAPH_TABLE` table-source owned by `toolkit-db`, taking a typed pattern and returning something a scoped query can put in its `FROM`, would let the gear delete its builder and keep its callers unchanged. What the platform would have to decide is which level of its own CTE policy a table-valued dialect construct falls under — Level A's "scope inside the body" argument does not transfer directly, because a pattern's body is not a select over a scopable entity.
 
+**Answered.** The [platform property-graph policy](../../../../docs/arch/secure-orm/ADR/0002-secure-property-graph-policy.md) places it in two layers: a new `toolkit-sea-orm-pgq` crate owning the AST and renderer with no security types at all, and `toolkit-db::secure::pgq` owning `SecureGraphSelect`, the scope injection and execution through the sealed runner — with the whole surface behind a `pgq` Cargo feature that implies `pg`. It also answers the level question by transposing ADR-0001's principle directly: embed scope into every element pattern, vertices and edges alike, rather than filtering around the construct. That is the same conclusion this gear reached by measurement, so when the platform version lands this gear deletes its builder and its raw-SQL exception with it.
+
 ### 4. Statement rendering visible to a gear
 
 **What we do instead.** Shape assertions sit on helpers the gear builds itself, because a gear cannot see the statement a CTE or pattern query produces without executing it.
@@ -208,6 +221,8 @@ this way.
 ### Not asked for
 
 A recursive member able to join a second table, so node authorization rides along with a recursive walk, would let variable-depth traversal collapse into one statement. It is deliberately **not** on the list above: at the reference depth the iterative backend already runs an order of magnitude inside the latency budget, so the gain would be round trips rather than correctness, and the cost to the platform is not obviously worth it. Recorded so that it is visibly a considered omission rather than an oversight.
+
+**A primitive for the vector column is also not asked for**, and that is worth saying because the raw-SQL exception this ADR takes would otherwise look like it must extend to embeddings too. It does not: `sea-orm` 2.0 carries pgvector behind its `postgres-vector` feature and re-exports the type, so the `vector(384)` column is written through the ORM like any other — no cast assembled by hand, no dependency the workspace does not already resolve, since `pgvector` arrives as a dependency of `sea-orm` itself. The exception in this ADR is about `GRAPH_TABLE` and nothing else.
 
 ## Traceability
 
