@@ -545,7 +545,7 @@ endif
 ## Generate Markdown files map
 md-fabric: py-env
 	$(call print_target_banner)
-	$(PYTHON) ./tools/scripts/md-fabric.py --out docs/md-fabric/md-fabric.html
+	$(PYTHON) ./tools/scripts/md-fabric.py --inline-data --out docs/md-fabric/md-fabric.html
 
 ## Build the slides with Marp
 slides:
