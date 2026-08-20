@@ -3076,6 +3076,7 @@ dependencies = [
  "rustls",
  "rustls-cng-crypto",
  "sea-orm-migration",
+ "secrecy",
  "serde",
  "serde-saphyr 0.0.22",
  "serde_json",
