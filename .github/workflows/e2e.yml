@@ -33,6 +33,10 @@ env:
   RUST_BACKTRACE: full
   # Local dev enables incremental via [profile.dev]; CI does not want the churn.
   CARGO_INCREMENTAL: "0"
+  # Debug info is dead weight here — nothing in this job reads a backtrace
+  # symbol table, and it dominates both link time and cache size. Same value
+  # the compiling jobs in ci.yml use.
+  RUSTFLAGS: "-C debuginfo=0"
 
 jobs:
   e2e:
@@ -57,6 +61,34 @@ jobs:
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustup show
+
+      # This job compiles more than any other: `e2e-local` builds the release
+      # binary and the lane-specific targets below each build their own feature
+      # configuration. Without a cache every run started from zero, which is
+      # what put e2e runs at 29-41 minutes. Mirrors the `integration` job in
+      # ci.yml — same actions, same pinned SHAs, same cache-targets: false
+      # (rust-cache holds the registry; sccache holds the compiled objects).
+      - name: Cache Cargo/target
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          cache-bin: false
+          cache-targets: false
+          shared-key: pr-${{ runner.os }}-e2e-${{ hashFiles('rust-toolchain.toml') }}
+
+      # Install sccache (cross-platform)
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+
+      # Probe sccache; if startup fails, fall back to plain rustc (no hard CI failure).
+      - name: Probe sccache & set RUSTC_WRAPPER
+        shell: bash
+        run: |
+          if sccache --start-server >/dev/null 2>&1; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          else
+            echo "sccache failed, falling back to plain rustc"
+          fi
 
       - name: Install Python dependencies
         run: pip install -r testing/e2e/requirements.txt
