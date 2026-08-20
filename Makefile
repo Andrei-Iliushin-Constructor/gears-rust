@@ -73,10 +73,15 @@ CARGO_GEARS_MIN_VERSION := 0.0.6
 
 # check_tool_version(tool, requirement)
 # Verify a tool satisfies a semver requirement. Exits with an error if not.
+# Skipped in CI (GITHUB_ACTIONS is set) where tools are pinned by the workflow.
+ifndef GITHUB_ACTIONS
 define check_tool_version
     @cargo gears tools check-version $(1) '$(2)' >/dev/null 2>&1 \
 	|| (echo "ERROR: $(1) $(2) is required. Run 'cargo install $(1)' to install/upgrade." && exit 1)
 endef
+else
+check_tool_version = @true
+endif
 
 define check_rustup_component
     @command -v rustup >/dev/null || (echo "ERROR: rustup not installed. Install rustup or run 'make setup'." && exit 1)
