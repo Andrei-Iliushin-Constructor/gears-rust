@@ -69,7 +69,7 @@ endef
 # Minimum tool versions — checked via `cargo gears tools check-version`.
 DENY_MIN_VERSION := 0.20.0
 NEXTEST_MIN_VERSION := 0.9.130
-CARGO_GEARS_MIN_VERSION := 0.0.3
+CARGO_GEARS_MIN_VERSION := 0.0.6
 
 # check_tool_version(tool, requirement)
 # Verify a tool satisfies a semver requirement. Exits with an error if not.
@@ -377,9 +377,9 @@ gts-docs:
 		--exclude "**/helm/*/templates/*" \
 		docs gears libs examples
 
-install-tools: py-env
+install-tools:
 	$(call print_target_banner)
-	@cargo gears --check-version '>=$(CARGO_GEARS_MIN_VERSION)' >/dev/null 2>&1 \
+	@cargo gears tools check-version cargo-gears '>=$(CARGO_GEARS_MIN_VERSION)' >/dev/null 2>&1 \
 	|| (echo "Installing cargo-gears >= $(CARGO_GEARS_MIN_VERSION)..." && cargo install cargo-gears)
 	@cargo gears tools check-version cargo-nextest '>=$(NEXTEST_MIN_VERSION)' >/dev/null 2>&1 \
 	|| (echo "Installing cargo-nextest >= $(NEXTEST_MIN_VERSION)..." && cargo install --locked cargo-nextest)
@@ -584,7 +584,7 @@ dev: dev-fmt dev-clippy dev-test
 #
 # Package resolution uses `cargo gears ls packages` with a regex filter
 # on Cargo package names, so naming conventions (cf-gears-*, bss-*, bare)
-# are handled automatically.  Requires cargo-gears >= 0.0.3.
+# are handled automatically.
 #
 # Examples:
 #   make fmt GEAR=file-parser         -> cargo fmt -p cf-gears-file-parser -p cf-gears-file-parser-sdk --check
@@ -610,7 +610,7 @@ E2E_SIDECAR_ENV := $(if $(GEAR),$(if $(filter file-storage,$(GEAR)),FS_SIDECAR_B
 # Override with GEAR_NAME_REGEXP= for non-standard naming.
 GEAR_NAME_REGEXP ?= ^(?:(?:cf-gears-)?(?:[a-z]+-)?)?$(GEAR)(?:-sdk)?$$
 ifdef GEAR
-  GEAR_PKGS := $(shell cargo gears ls packages --scope-dirs gears,libs --filter '$(GEAR_NAME_REGEXP)' -f cargo-flags)
+  GEAR_PKGS := $(shell cargo gears ls packages --dirs gears,libs --filter '$(GEAR_NAME_REGEXP)' -f cargo-flags)
 endif
 
 # --- Derived variables ---
@@ -654,12 +654,12 @@ OPENAPI_BUILD_FEATURE_ARGS := $(if $(GEAR),$(GEAR_OPENAPI_FEATURE_ARGS),$(OPENAP
 # Run all tests, or a single gear when GEAR=<gear> is set.
 # When GEAR= is set, cargo gears ls packages finds matching crates + their
 # transitive reverse deps (every workspace crate that depends on them).
-test: install-tools py-env
+test: install-tools
 	$(call print_target_banner)
 ifeq ($(GEAR),)
 	cargo nextest run --workspace $(GEAR_FEATURE_ARGS) $(GEAR_TEST_ARGS)
 else
-	@GEAR_SCOPE=$$(cargo gears ls packages --scope-dirs gears,libs --filter '$(GEAR_NAME_REGEXP)' --include-rdeps -f cargo-flags) || exit 1; \
+	@GEAR_SCOPE=$$(cargo gears ls packages --dirs gears,libs --filter '$(GEAR_NAME_REGEXP)' --include-rdeps -f cargo-flags) || exit 1; \
 	echo "cargo nextest run $$GEAR_SCOPE $(GEAR_FEATURE_ARGS) $(GEAR_TEST_ARGS) $(GEAR_NO_TESTS_FLAG)"; \
 	cargo nextest run $$GEAR_SCOPE $(GEAR_FEATURE_ARGS) $(GEAR_TEST_ARGS) $(GEAR_NO_TESTS_FLAG)
 endif
