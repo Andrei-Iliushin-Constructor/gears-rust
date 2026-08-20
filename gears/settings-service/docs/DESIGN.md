@@ -1410,6 +1410,13 @@ The reader returns secret-trait values masked as an **opaque** `SecretHandle`; a
 - The reader SDK **MAY** serve a stale cached value within a bounded TTL (**`cache_ttl_seconds`**, default 30 s — this consumer cache owns the knob, symmetric with the replica cache §4.2 *Cache & Invalidation*) as a best-effort optimization on `Unavailable`; this is an implementation nicety, **not** a guarantee — consumers still MUST handle the error.
 - On a cold boot with an empty cache and an unreachable service, `get_effective` fails; the consumer's readiness reflects the degradation.
 
+**Anonymous rendering belongs to the presentation gateway, not here.** A surface drawn before anyone has logged in — a tenant-branded login page, a public catalogue page — needs per-tenant configuration, and this service needs nothing new to serve it. The `401` in §4.8 governs the **REST** surface; the in-process reader was never gated, authorizes nothing, and trusts its callers (§5, *Service-to-service authorization for the SDK traits*). A presentation gateway is therefore an ordinary trusted in-platform caller: it resolves the tenant from the request itself — per-tenant domain, provisioned subdomain, or a configured custom domain — calls `get_effective` at that tenant scope, and puts what it chooses into an unauthenticated response. Mapping a request origin to a tenant is likewise not this service's concern; it belongs to whoever owns tenant and branding resolution.
+
+Deciding **what is safe to expose** is that gateway's responsibility, and deliberately so: this service has no notion of an anonymous audience. `data_classification` (§4.1) describes sensitivity, not audience, and `tenant_visible` scopes to tenant administrators. Two consequences follow, and they differ:
+
+- a **`secret`** value cannot leak this way by construction — the reader returns an opaque `SecretHandle` and plaintext requires `resolve_secret`, which is per-setting authorized and audited as a secret-use event (§4.2 *Secret Manager*);
+- a **`pii`** value can. PII masking is defined for **administrative** reads (§4.1 `DataClassification`, §4.2 *Secret Manager* `mask`), while the reader hands a trusted caller the unmasked value on purpose — a consumer that needs an alerting contact address must receive it. Nothing here prevents a gateway from republishing a `pii`-classified setting anonymously; that restraint lives in the gateway.
+
 ### 4.6 Interactions & Sequences
 
 The two sequences below are the design's load-bearing interactions: the **administrator write path** (staged, previewed, step-up-gated, committed per change) and the **consumer read path** (in-process, cache-first, resolved along the scope chain). Component names in *italics* refer to §4.2.
