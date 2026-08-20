@@ -713,10 +713,14 @@ async fn build_oop_serve_options(
 /// Construct the inbound platform-plane authenticator from configuration.
 ///
 /// The `shared_secret` provider is built here directly (no external backend).
-/// The `kube` provider initializes the Kubernetes `TokenReview` authenticator
-/// and requires the `k8s-auth` feature; without it, `provider: kube` is an
-/// error rather than a silent enforcement downgrade. `Ok(None)` is returned
-/// only when no `internal_auth` is configured.
+/// The `kube` provider is built (with the default positive/negative
+/// validation cache) by the single shared
+/// `toolkit_k8s_auth::build_cached_k8s_authenticator` helper also used by
+/// `grpc-hub`, so the two never drift on what `provider: kube` means or how
+/// it is cached. The `kube` provider requires the `k8s-auth` feature; without
+/// it, `provider: kube` is an error rather than a silent enforcement
+/// downgrade, as is any other unrecognized provider value. `Ok(None)` is
+/// returned only when no `internal_auth` is configured at all (Profile 1).
 #[cfg_attr(not(feature = "k8s-auth"), allow(clippy::unused_async))]
 async fn build_internal_authenticator(
     cfg: Option<&toolkit_security::InternalAuthConfig>,
@@ -736,13 +740,13 @@ async fn build_internal_authenticator(
         if cfg.is_kube() {
             info!("Initializing Kubernetes TokenReview platform-plane authenticator");
             let audiences = cfg.kube_audiences().unwrap_or_default().to_vec();
-            let authenticator =
-                toolkit_k8s_auth::K8sTokenReviewAuthenticator::try_default(audiences)
-                    .await
-                    .context("failed to initialize Kubernetes TokenReview authenticator")?;
-            return Ok(Some(toolkit_security::DynInternalAuthenticator::new(
-                authenticator,
-            )));
+            let authenticator = toolkit_k8s_auth::build_cached_k8s_authenticator(
+                audiences,
+                Some(toolkit_security::DEFAULT_TOKEN_REVIEW_CACHE_TTL),
+            )
+            .await
+            .context("failed to initialize Kubernetes TokenReview authenticator")?;
+            return Ok(Some(authenticator));
         }
     }
     #[cfg(not(feature = "k8s-auth"))]
@@ -752,7 +756,9 @@ async fn build_internal_authenticator(
         }
     }
 
-    Ok(None)
+    anyhow::bail!(
+        "internal_auth is configured but no authenticator could be built for the selected provider"
+    )
 }
 
 /// Build the platform-plane credential material from config: the **outbound**

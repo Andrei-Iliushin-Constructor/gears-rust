@@ -2422,7 +2422,6 @@ dependencies = [
  "cf-gears-api-gateway",
  "cf-gears-system-sdks",
  "cf-gears-toolkit",
- "cf-gears-toolkit-k8s-auth",
  "cf-gears-toolkit-macros",
  "cf-gears-toolkit-security",
  "cf-gears-toolkit-transport-grpc",
@@ -2432,6 +2431,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tonic",
  "tower",
  "tracing",
@@ -2445,12 +2445,16 @@ version = "0.2.19"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
  "cf-gears-system-sdks",
  "cf-gears-toolkit",
+ "cf-gears-toolkit-k8s-auth",
+ "cf-gears-toolkit-security",
  "cf-gears-toolkit-transport-grpc",
  "http",
  "inventory",
  "parking_lot",
+ "secrecy",
  "serde",
  "serde_json",
  "tempfile",
@@ -3651,6 +3655,8 @@ dependencies = [
 name = "cf-gears-toolkit-security"
 version = "0.8.0"
 dependencies = [
+ "base64 0.22.1",
+ "parking_lot",
  "postcard",
  "secrecy",
  "serde",
@@ -3671,6 +3677,7 @@ version = "0.7.3"
 dependencies = [
  "anyhow",
  "cf-gears-toolkit-security",
+ "futures-util",
  "http",
  "parking_lot",
  "rand 0.10.1",
@@ -3683,6 +3690,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tonic",
+ "tower",
  "tracing",
 ]
 
