@@ -54,11 +54,12 @@ Resolve:
 
 ```bash
 BASE_BRANCH=main
-BRANCH_NAME=<branch-name argument, or `git rev-parse --abbrev-ref HEAD` if omitted>
+BRANCH_NAME=<branch-name argument, or `git symbolic-ref --quiet --short HEAD` if omitted>
 REPO_ROOT=$(git rev-parse --show-toplevel)
 HEAD_SHA=$(git rev-parse "$BRANCH_NAME")
 ```
 
+If no branch argument was given and `git symbolic-ref` fails, HEAD is detached — print the error and stop.
 Verify the branch exists (`git rev-parse --verify "$BRANCH_NAME"`) and that `main` exists locally
 (`git rev-parse --verify main`; if it does not, fall back to `origin/main` and use that as `BASE_BRANCH`).
 If neither resolves, print the error and stop.
