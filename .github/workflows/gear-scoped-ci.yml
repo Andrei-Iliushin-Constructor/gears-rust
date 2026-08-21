@@ -18,6 +18,8 @@ name: Gear Scoped CI
 on:
   pull_request:
     branches: [ main, develop ]
+    paths-ignore:
+      - '**/*.md'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
