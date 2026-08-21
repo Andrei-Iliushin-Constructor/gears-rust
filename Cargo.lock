@@ -3464,6 +3464,7 @@ dependencies = [
  "dirs",
  "figment",
  "futures-util",
+ "percent-encoding",
  "regex",
  "rust_decimal",
  "ryu",
