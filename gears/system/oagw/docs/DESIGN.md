@@ -75,6 +75,7 @@ This design satisfies the requirements for centralized outbound traffic manageme
 - `cpt-cf-oagw-adr-grpc-support` — HTTP/2 multiplexing with protocol detection
 - `cpt-cf-oagw-adr-rust-abi-client-library` — Rust ABI client for internal gear routing
 - `cpt-cf-oagw-adr-oauth2-client-credentials-auth-plugin` — OAuth2 Client Credentials auth plugin with internal token cache
+- `cpt-cf-oagw-adr-required-headers-guard-plugin` — Stateless builtin `GuardPlugin` enforcing required request/response headers, fail-open when unconfigured
 
 ### 1.3 Architecture Layers
 
