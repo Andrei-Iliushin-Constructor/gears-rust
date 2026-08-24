@@ -21,6 +21,8 @@
   - [Prototype Lineage](#prototype-lineage)
   - [Phantom Materialization Contract](#phantom-materialization-contract)
   - [Concurrent Ingest Protocol](#concurrent-ingest-protocol)
+  - [Soft Delete Contract](#soft-delete-contract)
+  - [Label Contract](#label-contract)
   - [Authorization Model](#authorization-model)
   - [Read Consistency Contract](#read-consistency-contract)
   - [Error Model](#error-model)
@@ -39,9 +41,9 @@
 
 ### 1.1 Architectural Vision
 
-Graph Storage is a stateless-above-PostgreSQL platform gear that stores one typed, multi-tenant knowledge graph and serves four query shapes over it: lexical/vector/hybrid search, depth-limited traversal, bounded projections, and whole-graph analytics. One relational store is the source of truth for everything — nodes, edges, chunks, types, vectors, and metric caches — so consistency, tenancy, and authorization are enforced in exactly one place.
+Graph Storage is a stateless-above-PostgreSQL platform gear that stores one typed, multi-tenant knowledge graph and serves three query shapes over it: lexical/vector/hybrid search, depth-limited traversal, and bounded projections. One relational store is the source of truth for everything — nodes, edges, chunks, types, vectors, labels, and the graph revision — so consistency, tenancy, and authorization are enforced in exactly one place. Whole-graph analytics reads that store through a topology-only role from its own gear (ADR-0007).
 
-The design generalizes the `studio-graph-storage` prototype: its data model (typed nodes and edges with GTS contracts, deterministic keys, phantom nodes, static/analysis edge split), its retrieval stack (tsvector + pgvector + RRF fusion, chunk folding), and its analytics surface are carried forward; its Python-only dependencies (Apache AGE, NetworkX, sentence-transformers) are replaced by decisions recorded in ADR-0001, ADR-0004, and ADR-0005; and platform obligations the prototype deliberately skipped — tenancy, access control, pagination, batched writes, observability — are designed in from the start.
+The design generalizes the `studio-graph-storage` prototype: its data model (typed nodes and edges with GTS contracts, deterministic keys, phantom nodes, static/analysis edge split), its retrieval stack (tsvector + pgvector + RRF fusion, chunk folding), and its analytics surface are carried forward (the last into a separate gear, ADR-0007); its Python-only dependencies (Apache AGE, NetworkX, sentence-transformers) are replaced by decisions recorded in ADR-0001, ADR-0004, and ADR-0005; and platform obligations the prototype deliberately skipped — tenancy, access control, pagination, batched writes, observability — are designed in from the start.
 
 The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a typed client trait and transport-agnostic models, an implementation crate with API/domain/infra layers, and two plugin surfaces — embedding providers (ADR-0005) and graph engines behind the `GraphQueryPort` (ADR-0001), with the built-in PostgreSQL engine as the default graph-engine plugin.
 
@@ -68,20 +70,23 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-fr-lexical-search` | Lexical arm: web-style tsquery over node and chunk tsvectors with ranked results, snippets, and chunk-to-node folding |
 | `p1` | `cpt-cf-graph-storage-fr-vector-search` | Vector arm: provider-embedded query against HNSW cosine indexes over node and chunk vectors, folded to nodes |
 | `p1` | `cpt-cf-graph-storage-fr-hybrid-search` | Search Service runs both arms independently and fuses with RRF, reporting per-arm ranks |
-| `p1` | `cpt-cf-graph-storage-fr-type-filtering` | GTS family patterns compiled to safe SQL patterns with literal-punctuation escaping, applied in every search arm |
+| `p1` | `cpt-cf-graph-storage-fr-type-filtering` | GTS family patterns resolved to a set of interned type ids through `GtsIdPattern` and applied as set membership in every search arm; never compiled to SQL text |
 | `p1` | `cpt-cf-graph-storage-fr-read-consistency` | Compound reads (hybrid search, traversal + hydration, projections) execute on one repeatable-read snapshot; responses report the observed graph revision; continuation tokens are revision-bound (Read Consistency Contract) |
 | `p1` | `cpt-cf-graph-storage-fr-graph-traversal` | Traversal Service expands breadth-first through the GraphQueryPort: SQL/PGQ `GRAPH_TABLE` hop patterns from v1 for fixed-depth shapes (direction-explicit, per-hop dedup), iterative scoped hops for variable depth until PG20-class quantifiers, per ADR-0001 |
 | `p1` | `cpt-cf-graph-storage-fr-neighborhood-projection` | Projection Service returns degree-ordered, budget-truncated neighborhoods with phantom toggle and metric annotations |
-| `p1` | `cpt-cf-graph-storage-fr-tabular-projection` | Projection Service serves OData-filtered, paginated node tables over annotated (indexed) payload attributes |
-| `p2` | `cpt-cf-graph-storage-fr-graph-metrics` | Graph Analytics Service computes degree, PageRank, components over a topology-only projection per ADR-0004 |
-| `p3` | `cpt-cf-graph-storage-fr-graph-analytics-extended` | Seeded sampled Brandes betweenness and seeded Louvain-family communities with stable ordering; no NetworkX parity |
-| `p2` | `cpt-cf-graph-storage-fr-metrics-cache` | Metric results cached by (tenant, graph revision, metric, parameters); cache/computed provenance reported |
-| `p1` | `cpt-cf-graph-storage-fr-tenant-isolation` | Every entity is tenant-scoped through SecureORM; traversal recursion, search arms, and analytics loading carry the tenant predicate |
-| `p1` | `cpt-cf-graph-storage-fr-access-control` | Shared PolicyEnforcer-backed application service for REST and ClientHub; PDP-checked permissions (ontology admin, ingest, query, whole-tenant analytics) declared as GTS instances; resource-level enforcement per the Authorization Model (induced authorized subgraph, arm-level scoping, anti-enumeration) |
+| `p1` | `cpt-cf-graph-storage-fr-tabular-projection` | Projection Service serves OData-filtered, paginated node tables over the payload paths a type declares in its `index` trait, plus labels; `CursorV1` extended with the observed revision |
+| `p1` | `cpt-cf-graph-storage-fr-soft-delete` | Tombstone on node and edge; incident edges follow the node in one transaction; every read path and every read-path index filters on it (Soft Delete Contract) |
+| `p2` | `cpt-cf-graph-storage-fr-labels` | Per-tenant label registry and assignment table; attach/detach as its own action; label filtering in search, projection and per-hop traversal (Label Contract) |
+| `p2` | `cpt-cf-graph-storage-fr-change-events` | `emit_events` trait per type, overridable per GTS pattern by configuration; published through the transactional outbox with the committing revision |
+| `p2` | `cpt-cf-graph-storage-fr-analytics-topology` | Read-only role over node keys, typed edge pairs and `gts_type`; payload, vectors and chunks not readable through it (ADR-0007) |
+| `p2` | `cpt-cf-graph-storage-fr-metric-annotation` | Projection Service annotates from the analytics gear's revision-keyed cache, or returns unannotated and says so |
+| `p1` | `cpt-cf-graph-storage-fr-revision-signal` | Graph revision incremented in the same transaction as any state change, and only then; exposed on both the topology surface and the API |
+| `p1` | `cpt-cf-graph-storage-fr-tenant-isolation` | Every entity is tenant-scoped through SecureORM; traversal recursion, search arms, and the analytics topology surface carry the tenant predicate |
+| `p1` | `cpt-cf-graph-storage-fr-access-control` | Shared PolicyEnforcer-backed application service for REST and ClientHub; PDP-checked permissions (ontology admin, ingest, query, delete, label attach/detach) declared as GTS instances; resource-level enforcement per the Authorization Model (induced authorized subgraph, arm-level scoping, anti-enumeration) |
 | `p1` | `cpt-cf-graph-storage-fr-rest-api` | Versioned REST under `/api/graph-storage/v1` with OpenAPI schemas, RFC-9457 problems, documented limits |
 | `p1` | `cpt-cf-graph-storage-fr-sdk-client` | SDK crate with `GraphStorageClientV1` trait registered in ClientHub; local client delegates to domain services |
 | `p2` | `cpt-cf-graph-storage-fr-observability` | Structural tracing spans (batch sizes, arm timings, frontier sizes, cache hits) and OTel metrics, including per-limit saturation counters from the Capacity and Admission Contract; payload content never logged |
-| `p1` | `cpt-cf-graph-storage-fr-readiness` | Per-capability readiness (DB and migrations, server major version, pgvector, property graph, registries, embedding provider and identity, engine plugins, dynamic indexes, analytics workers) reported as healthy/degraded/unhealthy with named problems; degraded capabilities reject only their own operations (Readiness Matrix) |
+| `p1` | `cpt-cf-graph-storage-fr-readiness` | Per-capability readiness (DB and migrations, server major version and SQL/PGQ availability on it, pgvector, property graph, registries, embedding provider and identity, engine plugins, dynamic indexes) reported as healthy/degraded/unhealthy with named problems; degraded capabilities reject only their own operations (Readiness Matrix) |
 
 #### NFR Allocation
 
@@ -90,7 +95,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-nfr-ingest-throughput` | 10k nodes + 20k edges <= 60 s | Ingest Pipeline, Storage Layer | Batched multi-row statements, single transaction, validation before writes, bounded per-batch memory | Ingest benchmark suite on reference profile |
 | `p1` | `cpt-cf-graph-storage-nfr-search-latency` | Hybrid p95 <= 500 ms at 100k nodes | Search Service, Storage Layer | Independent arm queries each using its index (GIN, HNSW), bounded arm limits, fusion in memory | Search benchmarks on seeded reference graph |
 | `p1` | `cpt-cf-graph-storage-nfr-traversal-latency` | Depth-3 p95 <= 1 s at 500k edges | Traversal Service, Storage Layer | Composite edge indexes (tenant, src), (tenant, dst); per-hop frontier bounding; node budgets | Traversal benchmarks on seeded reference graph |
-| `p2` | `cpt-cf-graph-storage-nfr-analytics-memory` | Topology-only, ceiling-enforced | Graph Analytics Service | Load node keys and typed edge pairs only; refuse graphs above any configured ceiling (nodes, edges, or estimated bytes — a node count alone does not bound memory on dense graphs) | Memory profiling tests |
+| `p2` | `cpt-cf-graph-storage-nfr-analytics-memory` | Topology-only read surface | Storage Layer (grant) | Expose node keys with interned type and typed edge pairs and nothing wider; the read-only role makes payload, `search_text`, embedding and chunk columns unreadable rather than merely unused. Computation ceilings move with the analytics gear (ADR-0007) | Grant tests: an attempted write and a payload/embedding `SELECT` both fail |
 | `p1` | `cpt-cf-graph-storage-nfr-tenant-zero-leak` | Zero cross-tenant results | Storage Layer, all query components | Tenant predicate injected by SecureORM scoping in every query, including every CTE body; no raw unscoped SQL | Adversarial multi-tenant integration tests |
 | `p1` | `cpt-cf-graph-storage-nfr-code-coverage` | >= 85% line coverage | All crates | Trait-based ports enable mock-driven unit tests; integration tests against real PostgreSQL | `cargo llvm-cov` in CI |
 
@@ -101,7 +106,8 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | [`cpt-cf-graph-storage-adr-single-postgres-store`](./ADR/0001-cpt-cf-graph-storage-adr-single-postgres-store.md) | Single PostgreSQL 19+ store (pgvector only); graph queries behind the GraphQueryPort with SQL/PGQ active from v1 (fixed-depth shapes) and iterative scoped hops for variable depth; pinned beta image until PG19 GA; Apache AGE not carried into the gear; dedicated traversal mirror as a measured-bottleneck contingency | `cpt-cf-graph-storage-principle-single-source-of-truth`, `cpt-cf-graph-storage-component-traversal-service`, `cpt-cf-graph-storage-component-storage-layer` |
 | [`cpt-cf-graph-storage-adr-unified-node-model`](./ADR/0002-cpt-cf-graph-storage-adr-unified-node-model.md) | One typed node model; owned vs. reference semantics via GTS base types; provenance-gated scope replacement | `cpt-cf-graph-storage-principle-reference-not-replica`, `cpt-cf-graph-storage-principle-provenance-survives-resync`, `cpt-cf-graph-storage-component-ontology-registry`, `cpt-cf-graph-storage-component-ingest-pipeline` |
 | [`cpt-cf-graph-storage-adr-metadata-partitioning`](./ADR/0003-cpt-cf-graph-storage-adr-metadata-partitioning.md) | Common columns + schema-declared indexed/vectorized attributes + payload ceiling with file-storage offload | `cpt-cf-graph-storage-principle-metadata-only-graph`, `cpt-cf-graph-storage-component-ontology-registry`, `cpt-cf-graph-storage-component-projection-service` |
-| [`cpt-cf-graph-storage-adr-analytics-in-rust`](./ADR/0004-cpt-cf-graph-storage-adr-analytics-in-rust.md) | In-process Rust analytics with per-metric determinism contracts; NetworkX parity waived | `cpt-cf-graph-storage-component-graph-analytics-service` |
+| [`cpt-cf-graph-storage-adr-analytics-in-rust`](./ADR/0004-cpt-cf-graph-storage-adr-analytics-in-rust.md) | Rust analytics with per-metric determinism contracts; NetworkX parity waived. Narrowed by ADR-0007 on where it runs | `graph-analytics` gear |
+| [`cpt-cf-graph-storage-adr-analytics-own-gear`](./ADR/0007-cpt-cf-graph-storage-adr-analytics-own-gear.md) | Analytics ships as its own gear with a read-only role on this schema; this gear owns DDL, the revision, and the topology grant | `cpt-cf-graph-storage-fr-analytics-topology`, `cpt-cf-graph-storage-fr-metric-annotation` |
 | [`cpt-cf-graph-storage-adr-embedding-provider`](./ADR/0005-cpt-cf-graph-storage-adr-embedding-provider.md) | Pluggable embedding provider; in-process ONNX default, remote plugin, deterministic fake for CI | `cpt-cf-graph-storage-component-embedding-coordinator`, `cpt-cf-graph-storage-constraint-single-embedding-space` |
 | [`cpt-cf-graph-storage-adr-sqlpgq-access`](./ADR/0006-cpt-cf-graph-storage-adr-sqlpgq-access.md) | SQL/PGQ is emitted from typed input through a function-call table reference (no `sea_query` fork, no hand-written SQL); every identifier comes from a closed vocabulary and every value is bound; a pattern carries the tenant bound and proposes candidates while an ordinary scoped query authorizes them; a scope whose tenants cannot be enumerated falls back to the two-query hop | `cpt-cf-graph-storage-component-traversal-service`, `cpt-cf-graph-storage-component-storage-layer` |
 
@@ -124,7 +130,6 @@ flowchart TD
             SRCH["Search Service"]
             TRAV["Traversal Service"]
             PROJ["Projection Service"]
-            ANA["Graph Analytics Service"]
             EMB["Embedding Coordinator"]
         end
         subgraph INFRA["infra"]
@@ -136,7 +141,7 @@ flowchart TD
         ONNX["onnx-embedding-plugin (default)"]
         REMOTE["remote-embedding-plugin"]
     end
-    PG[("PostgreSQL 19+ with pgvector")]
+    PG[("PostgreSQL 16+ with pgvector (19+ for SQL/PGQ)")]
 
     CLIENT -->|ClientHub local client| DOMAIN
     REST --> DOMAIN
@@ -209,7 +214,7 @@ The storage backend is PostgreSQL 19 or later with the pgvector extension; SQL/P
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-constraint-gts-draft07`
 
-Type schemas are JSON Schema draft-07 with the platform GTS identifier grammar and UUIDv5 derivation (interoperable with the platform Rust GTS implementation), plus the gear's registered extension keywords for abstractness, endpoint constraints, indexing, and vectorization. Unknown extension keywords are rejected.
+Type schemas are JSON Schema draft-07 with the platform GTS identifier grammar and UUIDv5 derivation (interoperable with the platform Rust GTS implementation). Abstractness and finality use the platform keywords `x-gts-abstract` and `x-gts-final`; family semantics, endpoint constraints, index/full-text/vector declarations and event emission are trait values under the gear's trait schemas (Base Ontology GTS Schemas). The gear registers no extension keyword of its own, and a schema carrying an unknown one is rejected.
 
 #### Gears Platform Integration
 
@@ -240,9 +245,7 @@ classDiagram
         type_id: GtsId
         kind: node | edge | attribute
         json_schema: JsonSchema
-        abstract: bool
-        source_types: GtsPattern[]
-        target_types: GtsPattern[]
+        effective_traits: JsonObject
     }
     class Node {
         node_key: String
@@ -272,9 +275,9 @@ classDiagram
         embedding: Vector?
     }
     class Provenance {
-        origin: static | analysis
-        created_by: ActorId
-        method: String
+        produced_by: ActorId
+        produced_at: Timestamp
+        method: String?
         model: String?
         confidence: f32?
     }
@@ -300,6 +303,345 @@ classDiagram
 
 Domain vocabulary follows the PRD glossary. The base ontology published by the gear (owned-node base, reference-node base, phantom type, provenance attribute type, static and analysis edge bases) is part of the domain model: producers derive from it, and the ingest pipeline reads family semantics (owned/reference, static/analysis) from the type hierarchy rather than from per-request flags.
 
+#### Base Ontology GTS Schemas
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-entity-base-ontology`
+
+The gear publishes three abstract bases (node, edge, attribute) and six concrete
+family types derived from them. Producers derive their own types from a family
+type, never from a base directly.
+
+**What the schema describes.** The validated instance is the node or edge as the
+gear materializes it, not the wire DTO: the GTS instance envelope (`id`, `type`)
+plus the producer-authored fields. Base fields map to columns and `payload` maps
+to the JSONB column, which is the platform's hybrid storage pattern
+(`guidelines/GTS.md` §5). Tenant, timestamps, creating actor and graph revision
+are gear-assigned and are deliberately **not** in the type: a producer cannot
+supply them, and a type that declared `tenant_id` would invite a producer to
+assert one.
+
+**Chain shape.** `base → family → producer type` is two derivations, which is the
+maximum `guidelines/GTS.md` §9 recommends. A vendor extending another vendor's
+producer type would be a third level; that is the reason the family layer carries
+no fields of its own beyond what the family genuinely requires.
+
+##### Node base
+
+```jsonc
+{
+  "$id": "gts://gts.cf.core.graph_storage.node.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "x-gts-abstract": true,
+  "x-gts-traits-schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "family":           { "type": "string", "enum": ["owned", "reference", "phantom"] },
+      "scope_managed":    { "type": "boolean", "default": true },
+      "emit_events":      { "type": "boolean", "default": false },
+      "index":            { "type": "array", "items": { "type": "string", "format": "json-pointer" }, "default": [] },
+      "full_text_search": { "type": "array", "items": { "type": "string", "format": "json-pointer" }, "default": [] },
+      "vector_search":    { "type": "array", "items": { "type": "string", "format": "json-pointer" }, "default": [] }
+    },
+    "required": ["family"]
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id":      { "type": "string", "minLength": 1, "maxLength": 512 },
+    "type":    { "type": "string", "format": "gts-type-id", "x-gts-ref": "gts.cf.core.graph_storage.node.v1~" },
+    "name":    { "type": "string", "maxLength": 1024 },
+    "payload": { "type": "object", "additionalProperties": true },
+    "content": { "type": "string" }
+  },
+  "required": ["id", "type"]
+}
+```
+
+`id` is the producer-supplied stable key — what the rest of this document calls
+`node_key` and what the `node.node_key` column stores. `content` is the
+long-form text that chunking consumes, bounded by `content_max_bytes`.
+
+| Node trait | Default | Meaning |
+|---|---|---|
+| `family` | required, no default | `owned` / `reference` / `phantom`. Drives which node model applies (ADR-0002). |
+| `scope_managed` | `true` | Whether rows of this type are deleted by producer-scoped replacement when absent from the submitted batch. |
+| `emit_events` | `false` | Whether CREATE/UPDATE/DELETE events are published for this type. |
+| `index` | `[]` | Payload paths backed by a JSONB index and therefore admissible in `$filter` (ADR-0003). |
+| `full_text_search` | `[]` | Paths composed into the node tsvector. |
+| `vector_search` | `[]` | Paths composed into the embedding input. |
+
+`full_text_search` and `vector_search` are separate lists on purpose: they are
+different indexes with different costs, and a field worth putting in the tsvector
+is frequently the wrong field to embed.
+
+##### Edge base
+
+```jsonc
+{
+  "$id": "gts://gts.cf.core.graph_storage.edge.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "x-gts-abstract": true,
+  "x-gts-traits-schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "family":      { "type": "string", "enum": ["static", "analysis"] },
+      "src_types":   { "type": "array", "minItems": 1,
+                       "items": { "type": "string", "x-gts-ref": "gts.cf.core.graph_storage.node.v1~" },
+                       "default": ["gts.cf.core.graph_storage.node.v1~"] },
+      "dst_types":   { "type": "array", "minItems": 1,
+                       "items": { "type": "string", "x-gts-ref": "gts.cf.core.graph_storage.node.v1~" },
+                       "default": ["gts.cf.core.graph_storage.node.v1~"] },
+      "emit_events": { "type": "boolean", "default": false }
+    },
+    "required": ["family", "src_types", "dst_types"]
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id":            { "type": "string", "minLength": 1 },
+    "type":          { "type": "string", "format": "gts-type-id", "x-gts-ref": "gts.cf.core.graph_storage.edge.v1~" },
+    "src_node_key":  { "type": "string", "minLength": 1, "maxLength": 512 },
+    "dst_node_key":  { "type": "string", "minLength": 1, "maxLength": 512 },
+    "discriminator": { "type": "string", "maxLength": 256 },
+    "payload":       { "type": "object", "additionalProperties": true }
+  },
+  "required": ["id", "type", "src_node_key", "dst_node_key"]
+}
+```
+
+**Endpoint constraints are traits, not JSON Schema.** `src_types` and `dst_types`
+hold GTS patterns, and JSON Schema cannot express "this string must name a type
+derived from that one". The gear resolves each pattern through `GtsIdPattern` and
+checks the endpoint's registered type inside the ingest transaction, under the
+endpoint locks the Concurrent Ingest Protocol already takes. The default value is
+the node base identifier itself: a zero-wildcard GTS pattern already covers
+everything derived from it (spec §3.6 implicit derived-type coverage), so
+`["gts.cf.core.graph_storage.node.v1~"]` reads as "any node type" without a
+wildcard token.
+
+##### Attribute base
+
+```jsonc
+{
+  "$id": "gts://gts.cf.core.graph_storage.attribute.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "x-gts-abstract": true,
+  "type": "object",
+  "additionalProperties": true
+}
+```
+
+An attribute type is a reusable payload fragment embedded by node and edge types,
+never a standalone instance — hence no envelope. It declares **no** traits schema:
+`index`, `full_text_search` and `vector_search` are JSON pointers rooted at the
+instance, so only the embedding node or edge type knows where the fragment sits
+and can therefore declare paths into it.
+
+##### Family types
+
+```jsonc
+// Owned node — the graph is the system of record. Adds no fields; fixes the family.
+{ "$id": "gts://gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~",
+  "x-gts-abstract": true,
+  "x-gts-traits": { "family": "owned", "scope_managed": true },
+  "type": "object",
+  "allOf": [{ "$ref": "gts://gts.cf.core.graph_storage.node.v1~" }] }
+
+// Reference node — projection of an object owned elsewhere. Requires canonical identity.
+{ "$id": "gts://gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.reference_node.v1~",
+  "x-gts-abstract": true,
+  "x-gts-traits": { "family": "reference", "scope_managed": true },
+  "type": "object",
+  "allOf": [
+    { "$ref": "gts://gts.cf.core.graph_storage.node.v1~" },
+    { "type": "object", "required": ["payload"], "properties": { "payload": {
+        "type": "object", "required": ["source"], "properties": { "source": {
+          "type": "object", "required": ["system", "kind", "native_id"],
+          "properties": {
+            "system":    { "type": "string", "minLength": 1 },
+            "kind":      { "type": "string", "minLength": 1 },
+            "native_id": { "type": "string", "minLength": 1 } } } } } } }
+  ] }
+
+// Phantom — created by the gear for an unresolved endpoint. Final: never derived from.
+{ "$id": "gts://gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.phantom_node.v1~",
+  "x-gts-final": true,
+  "x-gts-traits": { "family": "phantom", "scope_managed": false, "emit_events": false },
+  "type": "object",
+  "allOf": [
+    { "$ref": "gts://gts.cf.core.graph_storage.node.v1~" },
+    { "type": "object", "properties": { "payload": { "type": "object", "maxProperties": 0 } } }
+  ] }
+
+// Static edge — producer-asserted, replaced by scope re-sync.
+{ "$id": "gts://gts.cf.core.graph_storage.edge.v1~cf.core.graph_storage.static_edge.v1~",
+  "x-gts-abstract": true,
+  "x-gts-traits": { "family": "static" },
+  "type": "object",
+  "allOf": [{ "$ref": "gts://gts.cf.core.graph_storage.edge.v1~" }] }
+
+// Analysis edge — survives scope re-sync, and therefore must say what produced it.
+{ "$id": "gts://gts.cf.core.graph_storage.edge.v1~cf.core.graph_storage.analysis_edge.v1~",
+  "x-gts-abstract": true,
+  "x-gts-traits": { "family": "analysis" },
+  "type": "object",
+  "allOf": [
+    { "$ref": "gts://gts.cf.core.graph_storage.edge.v1~" },
+    { "type": "object", "required": ["payload"], "properties": { "payload": {
+        "type": "object", "required": ["provenance"], "properties": { "provenance": {
+          "$ref": "gts://gts.cf.core.graph_storage.attribute.v1~cf.core.graph_storage.provenance.v1~" } } } } }
+  ] }
+
+// Provenance attribute — embedded by every analysis edge, retained across re-sync.
+{ "$id": "gts://gts.cf.core.graph_storage.attribute.v1~cf.core.graph_storage.provenance.v1~",
+  "type": "object",
+  "allOf": [
+    { "$ref": "gts://gts.cf.core.graph_storage.attribute.v1~" },
+    { "type": "object", "required": ["produced_by", "produced_at"], "properties": {
+        "produced_by": { "type": "string", "minLength": 1 },
+        "method":      { "type": "string" },
+        "model":       { "type": "string" },
+        "produced_at": { "type": "string", "format": "date-time" },
+        "confidence":  { "type": "number", "minimum": 0, "maximum": 1 } } }
+  ] }
+```
+
+| Family | Identifier (chain after `gts.`) | Abstract / final | Traits it fixes |
+|---|---|---|---|
+| Owned node | `cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~` | abstract | `family: owned` |
+| Reference node | `…node.v1~cf.core.graph_storage.reference_node.v1~` | abstract | `family: reference` |
+| Phantom | `…node.v1~cf.core.graph_storage.phantom_node.v1~` | **final** | `family: phantom`, `scope_managed: false` |
+| Static edge | `cf.core.graph_storage.edge.v1~cf.core.graph_storage.static_edge.v1~` | abstract | `family: static` |
+| Analysis edge | `…edge.v1~cf.core.graph_storage.analysis_edge.v1~` | abstract | `family: analysis` |
+| Provenance attribute | `cf.core.graph_storage.attribute.v1~cf.core.graph_storage.provenance.v1~` | concrete | — |
+
+##### Worked producer example
+
+A Finding owned by the graph, a commit referenced from an SCM, and the analysis
+edge attributing one to the other:
+
+```jsonc
+// Finding: closes its payload, declares what is indexed, searchable and embedded.
+{ "$id": "gts://gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~acme.sec._.finding.v1~",
+  "x-gts-traits": {
+    "emit_events": true,
+    "index":            ["/payload/severity", "/payload/repository", "/payload/rule_id"],
+    "full_text_search": ["/name", "/payload/title", "/payload/description"],
+    "vector_search":    ["/payload/title", "/payload/description"]
+  },
+  "type": "object",
+  "allOf": [
+    { "$ref": "gts://gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~" },
+    { "type": "object", "required": ["payload"], "properties": { "payload": {
+        "type": "object", "additionalProperties": false,
+        "required": ["severity", "rule_id", "title"],
+        "properties": {
+          "severity":    { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+          "repository":  { "type": "string" },
+          "rule_id":     { "type": "string" },
+          "title":       { "type": "string" },
+          "description": { "type": "string" } } } } }
+  ] }
+
+// Commit: payload stays open -- see the additionalProperties rule below.
+{ "$id": "gts://gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.reference_node.v1~acme.scm._.commit.v1~",
+  "x-gts-traits": {
+    "index":            ["/payload/repository", "/payload/authored_at"],
+    "full_text_search": ["/payload/message"]
+  },
+  "type": "object",
+  "allOf": [
+    { "$ref": "gts://gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.reference_node.v1~" },
+    { "type": "object", "properties": { "payload": {
+        "type": "object", "required": ["repository"], "properties": {
+          "repository":  { "type": "string" },
+          "message":     { "type": "string" },
+          "authored_at": { "type": "string", "format": "date-time" } } } } }
+  ] }
+
+// introduced_by: narrows the inherited any-node endpoint default to one pair.
+{ "$id": "gts://gts.cf.core.graph_storage.edge.v1~cf.core.graph_storage.analysis_edge.v1~acme.sec._.introduced_by.v1~",
+  "x-gts-traits": {
+    "src_types": ["gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~acme.sec._.finding.v1~"],
+    "dst_types": ["gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.reference_node.v1~acme.scm._.commit.v1~"]
+  },
+  "type": "object",
+  "allOf": [{ "$ref": "gts://gts.cf.core.graph_storage.edge.v1~cf.core.graph_storage.analysis_edge.v1~" }] }
+```
+
+Effective traits the registry resolves for `…acme.sec._.finding.v1~`, merged
+right-to-left along the chain: `family: owned` and `scope_managed: true` from the
+owned-node layer, `emit_events: true` and the three path lists from the leaf, and
+nothing from the abstract base, which declares the trait schema but no values.
+
+##### Authoring rules
+
+These are constraints of the type system rather than gear policy; each one was
+reproduced against the reference implementation.
+
+1. **The envelope must be declared by the base.** `additionalProperties: false`
+   at the top level applies to the whole instance, so a base that closes itself
+   and omits `id` / `type` rejects every instance the platform constructs.
+2. **Derived types extend `payload`, nothing else.** The top level is closed by
+   the base, so a family or producer type that needs a new field puts it under
+   `payload`. This is why reference identity is `payload.source` and not a
+   sibling of `name`.
+3. **`allOf` branches evaluate independently, so `additionalProperties: false`
+   on `payload` is only safe when no ancestor contributes payload members.**
+   Finding may close its payload; a type derived from `reference_node` or
+   `analysis_edge` may not, because that branch does not see the inherited
+   `source` or `provenance` and rejects them. Such a type either leaves `payload`
+   open or restates the inherited members alongside its own.
+4. **`family` is required and has no default, and that is the enforcement.** A
+   producer deriving straight from an abstract base resolves no `family` and the
+   registration fails; deriving from a family type is the only way through.
+5. **Endpoint constraints, index declarations and event emission are trait
+   values, not extension keywords.** Their merge semantics along the chain are
+   the registry's, already specified and already implemented, so the gear
+   registers no extension keyword of its own — `x-gts-abstract` and `x-gts-final`
+   are platform keywords (`guidelines/GTS.md` §11).
+6. **A registered type stores its resolved traits.** The gear persists the
+   chain-resolved trait object next to the schema (`gts_type.effective_traits`)
+   so ingest validation, `$filter` admissibility and index provisioning read one
+   object per type instead of re-walking the chain per item.
+
+##### What the gear enforces beyond JSON Schema
+
+| Rule | Why not JSON Schema |
+|---|---|
+| Endpoint types admissible for an edge | Pattern-over-registered-type is not expressible; resolved via `GtsIdPattern` under the ingest endpoint locks |
+| Payload and item size ceilings | Byte budgets, not shape (Capacity and Admission Contract) |
+| A concrete node's type is immutable under upsert | A property of the transition, not of one document |
+| Phantom materialization | A state transition with incident-edge revalidation |
+| `$filter` restricted to `index` paths | Cross-checks a query against a type's traits |
+
+##### Files and verification
+
+The schemas above are kept as registrable files under
+[`schemas/`](./schemas/), with the worked producer types in
+[`schemas/examples/`](./schemas/examples/) under the fictional `acme` vendor.
+This section is the normative narrative; those files are the same content in the
+form the types-registry accepts, so the chain can be validated mechanically
+rather than read for correctness:
+
+```bash
+gts --path gears/graph-storage/docs/schemas \
+    validate-type-schema --type-id 'gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~'
+```
+
+All nine derived schemas pass OP#12 chain validation and the positive and
+negative instances behave as specified, checked against `gts-rust` 0.12.0 / GTS
+spec v0.13.1. The negative cases exercised, each rejected: a missing required
+payload member, an out-of-enum value, an undeclared top-level field, a reference
+node without `payload.source`, an analysis edge without `payload.provenance`, a
+phantom with a non-empty payload, a type resolving no `family`, a type declaring
+a `family` outside the enum, and an attempt to derive from the final phantom
+type. The last three are rejected by trait and finality validation rather than
+by shape, which is what makes rules 4 and 5 above enforcement rather than
+convention.
+
 ### 3.2 Component Model
 
 #### Ontology Registry
@@ -312,7 +654,7 @@ Independent producers can only share one graph if a single component owns type r
 
 ##### Responsibility scope
 
-GTS identifier parsing and UUIDv5 derivation; draft-07 schema validation including the gear's extension keywords (abstract, endpoint constraints, indexed, vectorized — ADR-0003); idempotent, conflict-rejecting, batch-atomic registration; type catalog reads; an in-memory validator cache per registered type chain.
+GTS identifier parsing and UUIDv5 derivation; draft-07 schema validation across the full derivation chain; resolution and persistence of the chain-effective trait object per registered type (family, scope management, endpoint constraints, index/full-text/vector paths, event emission — ADR-0003); rejection of a type that resolves no `family` or an out-of-enum trait value; idempotent, conflict-rejecting, batch-atomic registration; type catalog reads exposing effective traits; an in-memory validator cache per registered type chain.
 
 ##### Responsibility boundaries
 
@@ -397,7 +739,7 @@ Hybrid retrieval quality depends on running arms independently and fusing by ran
 
 ##### Responsibility scope
 
-Lexical arm (web-style tsquery, rank, snippets over nodes and chunks); vector arm (cosine ANN over node and chunk vectors, excluding vectors marked stale); chunk-to-node folding keeping best-chunk provenance; RRF fusion with per-arm rank reporting; GTS family-pattern filters with literal-punctuation escaping. The caller's resource scope is applied inside every arm before UNION, ranking, and LIMIT — chunks authorize through their parent node — and re-applied to folding, counts, snippets, fusion inputs, pagination, and hydration (Authorization Model); all arms of one request read the same snapshot (Read Consistency Contract).
+Lexical arm (web-style tsquery, rank, snippets over nodes and chunks); vector arm (cosine ANN over node and chunk vectors, excluding vectors marked stale); chunk-to-node folding keeping best-chunk provenance; RRF fusion with per-arm rank reporting; GTS family-pattern filters resolved to interned type ids. The caller's resource scope is applied inside every arm before UNION, ranking, and LIMIT — chunks authorize through their parent node — and re-applied to folding, counts, snippets, fusion inputs, pagination, and hydration (Authorization Model); all arms of one request read the same snapshot (Read Consistency Contract).
 
 ##### Responsibility boundaries
 
@@ -441,38 +783,46 @@ Consumers need bounded, renderable views — neighborhood subgraphs for UIs and 
 
 ##### Responsibility scope
 
-Neighborhood projection (depth-bounded expansion, degree-ordered retention within node budgets, phantom toggle, optional metric annotations); tabular projection (type-family selection, identifier lists, OData filters restricted to annotation-indexed attributes, ordering, pagination); rejection of filters on unindexed attributes with the documented error.
+Neighborhood projection (depth-bounded expansion, degree-ordered retention within node budgets, phantom toggle, optional metric annotations); tabular projection (type-family selection, identifier lists, OData filters restricted to the payload paths the type declares in its `index` trait, ordering, pagination, label filtering); rejection of filters on undeclared attributes with the documented error.
 
 ##### Responsibility boundaries
 
-Does not define which attributes are indexed (schema annotations do), does not compute metrics (annotates from the Graph Analytics Service cache).
+Does not define which paths are indexed (the type's `index` trait does), does not compute metrics (annotates from the analytics gear's revision-keyed cache, or returns unannotated and says so).
 
 ##### Related components (by ID)
 
 - `cpt-cf-graph-storage-component-traversal-service` — expansion primitive
-- `cpt-cf-graph-storage-component-graph-analytics-service` — metric annotations
+- `graph-analytics` gear (ADR-0007) — metric annotations
 - `cpt-cf-graph-storage-component-ontology-registry` — filter admissibility
 
-#### Graph Analytics Service
+#### Graph Analytics — moved out of this gear
 
-- [ ] `p2` - **ID**: `cpt-cf-graph-storage-component-graph-analytics-service`
+**Moved**: the former Graph Analytics Service component → the `graph-analytics` gear (ADR-0007), where it is redefined under that gear's own identifiers.
 
-##### Why this component exists
+Whole-graph metric computation is no longer a component of this gear. It has its
+own deployment unit, its own worker, memory and connection budget, and its own
+DESIGN; the algorithm set, canonical input ordering, determinism contracts and
+`algorithm_contract_version` defined by ADR-0004 move with it unchanged.
 
-Whole-graph metrics need an in-memory topology and per-algorithm determinism contracts, isolated from interactive query paths (ADR-0004).
+What stays here is the boundary:
 
-##### Responsibility scope
-
-Topology-only projection loading (keys and typed edge pairs) under the configured node/edge/byte ceilings, canonicalized before any seeded algorithm runs (nodes by key, edges by type/source/target/discriminator, adjacency sorted, key-based tie-breaks — determinism comes from ordered inputs plus the seed, per ADR-0004); degree, components, PageRank; seeded sampled betweenness and seeded community detection with stable ordering; edge-type exclusion; revision-and-topology reads from one snapshot with conditional, single-flight cache publication (Read Consistency Contract); execution under the global analytics scheduler and memory pool with the asynchronous job contract (Capacity and Admission Contract); whole-tenant analytics permission enforced, constrained scopes rejected (Authorization Model); cooperative cancellation.
-
-##### Responsibility boundaries
-
-Does not load payloads or vectors, refuses graphs above the ceiling, does not block request handling during computation.
-
-##### Related components (by ID)
-
-- `cpt-cf-graph-storage-component-storage-layer` — topology load and cache table
-- `cpt-cf-graph-storage-component-projection-service` — metric annotation consumer
+- **Topology read surface** — a database role granted `SELECT` on node keys with
+  their interned type, typed edge pairs with discriminator, and `gts_type`, all
+  excluding tombstoned rows. Payload, `search_text`, embeddings and chunks are
+  not readable through it, and it cannot write any graph table. The grant is what
+  enforces ADR-0004's topology-only rule; the reading code is not trusted with it.
+- **Schema version declaration** — the gear publishes the version its topology
+  surface conforms to, so a mismatch is an analytics-side readiness failure
+  rather than a runtime error on the first job.
+- **Graph revision** — owned here, incremented in the same transaction as any
+  change to stored state, read by analytics as its cache key.
+- **Metric annotation** — the Projection Service reads the analytics gear's
+  cache to annotate projections, only from an entry matching the revision the
+  read observed, and returns the projection unannotated (saying so) when the
+  gear is absent or holds nothing for that revision.
+- **Capability, not degradation** — analytics is unavailable when the graph is
+  served by an external graph-engine plugin, because there is no PostgreSQL
+  schema to read. That is reported, never approximated.
 
 #### Storage Layer
 
@@ -492,7 +842,7 @@ Contains no business rules; exposes typed ports consumed by domain services. Tra
 
 ##### Related components (by ID)
 
-- `cpt-cf-graph-storage-component-ingest-pipeline`, `cpt-cf-graph-storage-component-search-service`, `cpt-cf-graph-storage-component-traversal-service`, `cpt-cf-graph-storage-component-projection-service`, `cpt-cf-graph-storage-component-graph-analytics-service` — all data access
+- `cpt-cf-graph-storage-component-ingest-pipeline`, `cpt-cf-graph-storage-component-search-service`, `cpt-cf-graph-storage-component-traversal-service`, `cpt-cf-graph-storage-component-projection-service` — all data access
 
 #### REST API
 
@@ -504,7 +854,7 @@ The HTTP boundary: DTOs, OpenAPI documentation, authentication, permission enfor
 
 ##### Responsibility scope
 
-OperationBuilder route registration under `/api/graph-storage/v1`; DTO validation of all bounds (batch sizes, limits, depths) as the fast-fail projection of the admission contract; permission declaration per operation group (ontology admin, ingest, query, whole-tenant analytics) with decisions delegated to the shared PolicyEnforcer-backed application service (Authorization Model); problem-details mapping from domain errors; the asynchronous analytics job surface (202 Accepted, status/result endpoints); readiness endpoint.
+OperationBuilder route registration under `/api/graph-storage/v1`; DTO validation of all bounds (batch sizes, limits, depths) as the fast-fail projection of the admission contract; permission declaration per operation group (ontology admin, ingest, query, delete, label attach/detach) with decisions delegated to the shared PolicyEnforcer-backed application service (Authorization Model); problem-details mapping from domain errors; readiness endpoint.
 
 ##### Responsibility boundaries
 
@@ -541,17 +891,72 @@ The public surfaces are defined in the PRD as `cpt-cf-graph-storage-interface-re
 
 **REST surface** (`/api/graph-storage/v1`, all operations authenticated and permission-checked):
 
-| Group | Operations |
-|-------|-----------|
-| Types | register type batch; list types (by kind); get type |
-| Ingest | ingest batch (nodes, edges, options: skip-embedding, phantom control, replace scope) |
-| Nodes | get node by key (payload, chunk inventory, adjacency) |
-| Search | lexical, vector, hybrid (query, limits, type filters) |
-| Graph | traversal (seeds/query, depth, edge-type filters); neighborhood projection; tabular projection (OData) |
-| Metrics | compute/read metrics (selection, edge-type exclusion) |
-| Health | readiness with named problems |
+| Method | Path | Description | Priority |
+|---|---|---|---|
+| `POST` | `/api/graph-storage/v1/types` | Register a type batch, atomically | p1 |
+| `GET` | `/api/graph-storage/v1/types` | List types; `$filter` on kind and GTS pattern | p1 |
+| `GET` | `/api/graph-storage/v1/types/{gts_type_id}` | One type with its schema and effective traits | p1 |
+| `POST` | `/api/graph-storage/v1/ingest` | Nodes and edges in one transaction; options: skip-embedding, phantom control, replace scope | p1 |
+| `GET` | `/api/graph-storage/v1/nodes/{node_key}` | Node with payload, chunk inventory and bounded adjacency | p1 |
+| `GET` | `/api/graph-storage/v1/nodes` | Tabular projection (OData) | p1 |
+| `DELETE` | `/api/graph-storage/v1/nodes/{node_key}` | Soft-delete a node and its incident edges | p1 |
+| `DELETE` | `/api/graph-storage/v1/edges/{edge_key}` | Soft-delete one edge | p1 |
+| `POST` | `/api/graph-storage/v1/search` | Lexical, vector or hybrid search | p1 |
+| `POST` | `/api/graph-storage/v1/graph/traverse` | Seeded, depth-bounded traversal | p1 |
+| `POST` | `/api/graph-storage/v1/graph/neighborhood` | Bounded neighborhood projection | p1 |
+| `GET`/`POST` | `/api/graph-storage/v1/labels` | List / create tenant labels | p2 |
+| `PATCH`/`DELETE` | `/api/graph-storage/v1/labels/{label_id}` | Update / delete a label | p2 |
+| `POST`/`DELETE` | `/api/graph-storage/v1/nodes/{node_key}/labels` | Attach / detach labels on a node | p2 |
+| `POST`/`DELETE` | `/api/graph-storage/v1/edges/{edge_key}/labels` | Attach / detach labels on an edge | p2 |
+| `GET` | `/api/graph-storage/v1/health/ready` | Readiness with named problems | p1 |
 
-**SDK client** (`GraphStorageClientV1`): async trait mirroring the same operation groups with transport-agnostic models and canonical platform errors; registered in ClientHub.
+Metric computation and job status move to the analytics gear (ADR-0007); this
+surface exposes only the cached metric annotations that projections already
+carry.
+
+**Shape decisions.** These are the questions the table above settles, recorded
+because each was answerable more than one way:
+
+- **Ingest is one endpoint.** Batch atomicity and endpoint-constraint validation
+  under endpoint locks both require nodes and edges in one transaction, so
+  splitting them would turn a cross-reference into a two-phase problem.
+- **Idempotency travels in the `Idempotency-Key` header**, the platform constant
+  `toolkit_http::IDEMPOTENCY_KEY_HEADER`, which the platform retry layer also
+  reads to decide whether a request may be retried at all. The canonical request
+  hash is computed over the body; the SDK carries the same value as a field.
+- **Search and traversal are `POST` with a body; tabular projection is `GET`
+  with OData options.** Search is not an OData collection query — it carries
+  query text, per-arm limits, seed lists and type patterns — and seed lists
+  exceed practical URL length.
+- **Per-item outcomes on success are opt-in.** Errors always come back per item
+  (index, GTS type, JSON pointer, message); success returns aggregate counts
+  unless `options.report_per_item` is set, so a 10,000-item batch does not pay
+  for a response nobody reads while convergence stays observable when a producer
+  needs it.
+- **Adjacency on node read is bounded by a named parameter**, `adjacency_limit`,
+  defaulting to `limits.node_read_max_adjacency`, with a truncation flag in the
+  response.
+
+**OData binding.** Tabular projection binds all five system query options the
+platform accepts (`$filter`, `$orderby`, `$select`, `$top`, `$skiptoken`, with
+`cursor` as the alias for `$skiptoken`); type listing binds `$filter` and `$top`.
+Anything else is rejected rather than ignored. Payload attributes are addressed
+by the same path the type declares in its `index` trait, in OData path syntax
+(`payload/severity`, not `severity`), so one declaration governs the index and
+the filter surface together. Orderable: `name`, `created_at`, `updated_at`, and
+any path in the `index` trait. Deliberately not filterable in v1: `search_text`,
+embeddings, chunk contents, and metric annotations. Continuation tokens are the
+platform `CursorV1` extended with the observed graph revision — not a second
+token format; `CursorV1` already carries the filter hash the Read Consistency
+Contract needs to bind, and the platform already rejects `cursor` together with
+`$orderby`.
+
+**Versioning policy.** `/v1/` is additive-only: new optional fields, new
+endpoints and new enum variants ship without a major bump. Renames, removals,
+narrowed enum sets and semantic changes ship as `/v2/`, with `/v1/` retained for
+one platform release as the deprecation window.
+
+**SDK client** (`GraphStorageClientV1`): async trait mirroring the same operations with transport-agnostic models and canonical platform errors; registered in ClientHub.
 
 **Error contract**: RFC-9457 problem details; validation failures carry per-item error lists (item index, GTS type, JSON pointer, message).
 
@@ -563,9 +968,8 @@ The public surfaces are defined in the PRD as `cpt-cf-graph-storage-interface-re
 
 ### 3.5 External Dependencies
 
-- PostgreSQL 19+ with pgvector (storage; HNSW cosine indexes; SQL:2023 property graph queries in core, used from v1). Until PG19 GA: pinned beta image with pgvector built from a pinned source revision (upstream PG19 support landed July 2026).
+- PostgreSQL 16+ with pgvector (storage; HNSW cosine indexes). PostgreSQL 19+ additionally enables the SQL/PGQ backend (SQL:2023 property-graph queries in core); before PG19 GA that means a pinned beta image with pgvector built from a pinned source revision (upstream PG19 support landed July 2026), which is now a per-deployment choice rather than a gear requirement (ADR-0001).
 - ONNX Runtime and a MiniLM-class sentence-embedding model (default embedding plugin), or a remote inference endpoint (alternative plugin), per ADR-0005.
-- Rust graph and algorithm crates for the analytics component (petgraph-family), per ADR-0004.
 
 ### 3.6 Interactions & Sequences
 
@@ -631,49 +1035,73 @@ The public surfaces are defined in the PRD as `cpt-cf-graph-storage-interface-re
    (iterative scoped hops, tenant predicate, edge-type filters)
 3. Degree-ordered retention within node budget;         [Projection Service]
    phantoms excluded if requested; seeds always kept
-4. Optional metric annotations from cache               [Graph Analytics Service]
+4. Optional metric annotations, only from a cache entry   [Projection Service]
+   at the revision this read observed; unannotated and
+   flagged if the analytics gear is absent (ADR-0007)
 5. Subgraph + truncation status returned for rendering
 ```
 
-#### Metrics Computation and Caching
+#### Soft Delete of a Node
 
-**ID**: `cpt-cf-graph-storage-seq-metrics-refresh`
+**ID**: `cpt-cf-graph-storage-seq-soft-delete`
 
-**Actors**: `cpt-cf-graph-storage-actor-data-analyst`
+**Actors**: `cpt-cf-graph-storage-actor-producer-gear`, `cpt-cf-graph-storage-actor-platform-admin`
 
 ```
-1. Metrics requested (selection, edge-type exclusions)
-2. Cache lookup by (tenant, revision, metric, params)   [Graph Analytics Service]
-3. On miss: load topology projection under ceiling
-   (keys + typed edges only, tenant-scoped)
-4. Compute per determinism contracts (ADR-0004)
-5. Store in cache keyed by revision; report
-   cached vs. computed per metric
+1. DELETE node(node_key)
+2. Authorize delete on the node's scope               [PolicyEnforcer]
+3. In one transaction:                                [Ingest Pipeline]
+   a. tombstone the node
+   b. tombstone every incident edge, analysis included
+      (endpoint FKs are ON DELETE RESTRICT; provenance
+       rows stay with their edge)
+   c. increment the graph revision if anything changed
+4. Already-tombstoned -> no-op, revision untouched
+5. Vector and full-text entries are left in place;
+   the tombstone filter removes the row from every
+   result before ranking, reconciliation happens at purge
 ```
 
 ### 3.7 Database schemas & tables
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-db-schema`
 
-Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by migration and verified at readiness. Index plan: composite edge indexes (tenant, src) / (tenant, dst) / (tenant, type); GIN over generated tsvectors; expression/GIN indexes over annotation-declared payload attributes; HNSW cosine indexes over embeddings.
+Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by migration and verified at readiness. Index plan: composite edge indexes (tenant, src) / (tenant, dst) / (tenant, gts_edge_type_id); GIN over generated tsvectors; expression/GIN indexes over the payload paths a type declares in its `index` trait; HNSW cosine indexes over embeddings. Every read-path index is partial on `deleted_at IS NULL` (Soft Delete).
 
 The SQL/PGQ property graph is created by a gear migration alongside the tables, so every fresh database can serve `GRAPH_TABLE` queries without manual setup; the platform migration runner executes that DDL without special handling.
 
-`tenant_id` is the designated partition key and participates in every primary, unique, and foreign-key contract from day one (e.g., nodes are unique on `(tenant_id, node_key)` and edges reference `(tenant_id, node_id)`), so adopting PostgreSQL partitioning at scale is a physical reorganization, not an identity migration (ADR-0001 § scale envelope). `metrics_cache` growth is bounded by the retention limits in the Capacity and Admission Contract (entry size, per-tenant entries, retained revisions, parameter variants), enforced by publication checks and a race-safe background cleanup that never removes an in-flight publication.
+`tenant_id` is the designated partition key and participates in every primary, unique, and foreign-key contract from day one (e.g., nodes are unique on `(tenant_id, node_key)` and edges reference `(tenant_id, node_id)`), so adopting PostgreSQL partitioning at scale is a physical reorganization, not an identity migration (ADR-0001 § scale envelope). `metrics_cache` is written by the analytics gear and its growth is bounded by that gear's retention limits (ADR-0007); this gear reads it for annotation only.
 
-#### Table: graph_type
+#### Table: gts_type
 
-**ID**: `cpt-cf-graph-storage-dbtable-graph-type`
+**ID**: `cpt-cf-graph-storage-dbtable-gts-type`
+
+Per-tenant projection of the platform types-registry. It exists for two reasons,
+both measurable: interning, so every node and edge row carries a 4-byte reference
+instead of a 16-byte UUID or a GTS identifier of up to 1024 characters; and the
+chain-resolved schema and traits, so a 10,000-item batch validates without a
+types-registry round trip per item. The registry stays authoritative — this table
+is a cache with a foreign identity, never a second source of truth.
 
 | Column | Type | Description |
 |--------|------|-------------|
 | tenant_id | UUID | Tenant scope; part of every key |
-| id | SMALLINT | Interned type id; **PK (tenant_id, id)** |
-| type_uuid | UUID | Deterministic UUIDv5 of the GTS identifier; **UNIQUE (tenant_id, type_uuid)** |
-| type_id | TEXT | Human-readable GTS identifier; **UNIQUE (tenant_id, type_id)** |
+| id | INTEGER | Interned surrogate; **PK (tenant_id, id)** |
+| gts_type_uuid | UUID | Deterministic UUIDv5 of the GTS identifier; **UNIQUE (tenant_id, gts_type_uuid)** |
+| gts_type_id | TEXT | GTS identifier, for logs and API responses; **UNIQUE (tenant_id, gts_type_id)** |
 | kind | TEXT | node / edge / attribute |
-| json_schema | JSONB | Draft-07 schema with gear extension keywords |
+| type_schema | JSONB | The type's draft-07 JSON Schema |
+| effective_traits | JSONB | Trait values resolved across the derivation chain (Base Ontology GTS Schemas) |
 | created_at | TIMESTAMPTZ | Registration time |
+
+**Naming rule.** The interned surrogate is referenced as `gts_<entity>_type_id`
+(`node.gts_node_type_id`, `edge.gts_edge_type_id`); the GTS identifier and its
+UUID live only in this table and are always prefixed `gts_type_`. A value in a
+SQL log is then unambiguous on sight: `gts_node_type_id = 7` is an interned
+node-type reference, `gts_type_id = 'gts.cf.…'` is an identifier. `INTEGER`
+rather than `SMALLINT` because each registered minor version is its own row, and
+32,767 types per tenant is not a ceiling worth discovering in production; at
+PostgreSQL row alignment the two are the same size in these tables anyway.
 
 #### Table: node
 
@@ -684,7 +1112,7 @@ The SQL/PGQ property graph is created by a gear migration alongside the tables, 
 | tenant_id | UUID | Tenant scope; part of every key |
 | id | BIGINT | Internal id; **PK (tenant_id, id)** |
 | node_key | TEXT | Producer-supplied stable key; **UNIQUE (tenant_id, node_key)** |
-| type_id | SMALLINT | **FK (tenant_id, type_id) -> graph_type (tenant_id, id)** |
+| gts_node_type_id | INTEGER | **FK (tenant_id, gts_node_type_id) -> gts_type (tenant_id, id)** |
 | name | TEXT | Display name |
 | payload | JSONB | GTS-validated attributes (ceiling-bounded) |
 | search_text | TEXT | Composed vectorizable text |
@@ -693,6 +1121,7 @@ The SQL/PGQ property graph is created by a gear migration alongside the tables, 
 | embedding_epoch / embedding_input_hash | BIGINT / TEXT | Embedding-space epoch the vector belongs to and the canonical hash of its input (staleness detection) |
 | created_by | TEXT | Creating actor |
 | created_at / updated_at | TIMESTAMPTZ | Timestamps |
+| deleted_at | TIMESTAMPTZ | Soft-delete tombstone; `NULL` for live rows (Soft Delete Contract) |
 
 #### Table: edge
 
@@ -703,10 +1132,11 @@ The SQL/PGQ property graph is created by a gear migration alongside the tables, 
 | tenant_id | UUID | Tenant scope; part of every key |
 | id | BIGINT | Internal id; **PK (tenant_id, id)** |
 | edge_key | TEXT | Deterministic hash of type, src, dst, discriminator; **UNIQUE (tenant_id, edge_key)** |
-| type_id | SMALLINT | **FK (tenant_id, type_id) -> graph_type (tenant_id, id)** |
+| gts_edge_type_id | INTEGER | **FK (tenant_id, gts_edge_type_id) -> gts_type (tenant_id, id)** |
 | src_node_id / dst_node_id | BIGINT | Endpoints; **FK (tenant_id, src/dst_node_id) -> node (tenant_id, id) ON DELETE RESTRICT** — deletion never cascades into edges, so an analysis edge can never be destroyed as a side effect of removing a static node |
 | payload | JSONB | GTS-validated attributes incl. provenance |
 | created_at | TIMESTAMPTZ | Timestamp |
+| deleted_at | TIMESTAMPTZ | Soft-delete tombstone; `NULL` for live rows (Soft Delete Contract) |
 
 #### Table: chunk
 
@@ -724,6 +1154,40 @@ The SQL/PGQ property graph is created by a gear migration alongside the tables, 
 | search | TSVECTOR generated | Lexical index source |
 | embedding | VECTOR(dim) | Chunk embedding (nullable) |
 | embedding_epoch / embedding_input_hash | BIGINT / TEXT | Embedding-space epoch and canonical input hash (staleness detection) |
+
+#### Table: label
+
+**ID**: `cpt-cf-graph-storage-dbtable-label`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| tenant_id | UUID | Tenant scope; part of every key |
+| id | INTEGER | Interned surrogate; **PK (tenant_id, id)** |
+| name | TEXT | Label name; **UNIQUE (tenant_id, name)** |
+| description | TEXT | Free-form |
+| style | JSONB | Display hints (colour, icon) — rendered by clients, never interpreted by the gear |
+| applies_to | TEXT | node / edge / both |
+| created_at | TIMESTAMPTZ | Registration time |
+
+#### Table: label_assignment
+
+**ID**: `cpt-cf-graph-storage-dbtable-label-assignment`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| tenant_id | UUID | Tenant scope; part of every key |
+| label_id | INTEGER | **FK (tenant_id, label_id) -> label (tenant_id, id)** |
+| object_kind | TEXT | node / edge |
+| object_id | BIGINT | Internal id of the node or edge |
+| attached_at | TIMESTAMPTZ | Attachment time |
+| attached_by | TEXT | Attaching actor |
+
+**PK (tenant_id, object_kind, object_id, label_id)**, with a secondary index on
+`(tenant_id, label_id, object_kind, object_id)` so filtering by label is a range
+scan rather than a scan of assignments. The assignment table is deliberately
+relational rather than an array column on `node`: attach and detach must not
+rewrite the node row, which would churn its tsvector and embedding columns and
+make every label change look like a content change to the staleness detector.
 
 #### Table: graph_meta
 
@@ -799,28 +1263,21 @@ Payload-free by construction (Telemetry and Audit Contract); written in the inge
 
 This is the canonical durable location of the embedding-space identity. `node` and `chunk` carry an `embedding_epoch` column alongside `embedding` and the embedding-input hash: readiness compares the active provider's identity against the epoch its stored vectors reference, similarity search reads only vectors of the active epoch (never absent, stale, or previous-epoch ones), and the re-embedding lifecycle (ADR-0005) writes new-epoch vectors during backfill before an atomic cutover of `state`.
 
-#### Table: analytics_job
+#### Table: analytics_job — moved
 
-**ID**: `cpt-cf-graph-storage-dbtable-analytics-job`
+Owned by the `graph-analytics` gear (ADR-0007) along with the metrics cache
+table, the job state machine, lease recovery and the ownership tuple. This gear
+neither writes nor reads the job table; it reads only the metrics cache, and only
+for annotation.
 
-| Column | Type | Description |
-|--------|------|-------------|
-| tenant_id | UUID | Tenant scope; part of every key |
-| job_id | UUID | Opaque identifier; **PK (tenant_id, job_id)** |
-| principal | TEXT | Submitting principal (ownership tuple with tenant) |
-| dedup_key | TEXT | (revision, metric, params, scope identity, contract version); **UNIQUE (tenant_id, dedup_key)** while non-terminal |
-| state | TEXT | queued / running / succeeded / failed / cancelled / expired / superseded |
-| lease_owner / lease_epoch / lease_expires_at | TEXT / BIGINT / TIMESTAMPTZ | Worker lease with fencing epoch and heartbeat expiry |
-| graph_revision | BIGINT | Revision the job was admitted at |
-| error_category / error_reason / trace_id | TEXT / TEXT / TEXT | Persisted terminal error (payload-free) |
-| result_ref | TEXT | Reference to the published metric cache entry |
-| deadline_at / created_at / terminal_at | TIMESTAMPTZ | Job deadline and lifecycle timestamps |
-
-The state machine is durable: an accepted job identifier survives process restart, expired running leases are reclaimed (and their late attempts fenced by `lease_epoch`) before analytics workers report ready, and terminal transitions — including the cancellation-versus-publication race — are single atomic updates. Status, result, and cancel requests re-authorize the caller against the ownership tuple; unknown and unauthorized identifiers are indistinguishable.
-
-#### Table: metrics_cache
+#### Table: metrics_cache — owned by the analytics gear
 
 **ID**: `cpt-cf-graph-storage-dbtable-metrics-cache`
+
+Written only by the `graph-analytics` gear (ADR-0007) and read here for
+projection annotation. Its shape is recorded because this gear reads it and
+because the schema lives in one database; its retention, publication rules and
+`algorithm_contract_version` semantics belong to that gear.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -835,7 +1292,7 @@ The state machine is durable: an accepted job identifier survives process restar
 
 ### Prototype Lineage
 
-The `studio-graph-storage` prototype validates this design's data model and retrieval stack. Deliberate departures: Apache AGE removed (ADR-0001), NetworkX replaced (ADR-0004), sentence-transformers replaced by the provider contract (ADR-0005), whole-payload GIN indexing replaced by annotation-declared indexes (ADR-0003), and row-at-a-time writes replaced by batched statements (`cpt-cf-graph-storage-nfr-ingest-throughput`). Tenancy, access control, and pagination are new platform obligations the prototype did not carry.
+The `studio-graph-storage` prototype validates this design's data model and retrieval stack. Deliberate departures: Apache AGE removed (ADR-0001), NetworkX replaced (ADR-0004), sentence-transformers replaced by the provider contract (ADR-0005), whole-payload GIN indexing replaced by trait-declared indexes (ADR-0003), and row-at-a-time writes replaced by batched statements (`cpt-cf-graph-storage-nfr-ingest-throughput`). Tenancy, access control, and pagination are new platform obligations the prototype did not carry.
 
 ### Phantom Materialization Contract
 
@@ -863,6 +1320,68 @@ A single database transaction serializes rows, not intentions: batch-level valid
 
 Conflict and stale-generation rejections are canonical problem types distinct from validation errors and from resource exhaustion, so producers can implement the correct reaction (re-read and rebase, drop the stale run, or back off) mechanically.
 
+### Soft Delete Contract
+
+Deletion is a tombstone, not a row removal. `DELETE` sets `deleted_at`; the row,
+its chunks, its labels and its provenance stay in place.
+
+1. **Every read path filters on the tombstone.** Node read, all four search arms,
+   chunk folding, traversal frontiers, projections and the analytics topology
+   load exclude rows where `deleted_at` is set. This is a predicate on each path
+   rather than one place — the reason every read-path index is partial on
+   `deleted_at IS NULL`, so the filter costs nothing at scan time.
+2. **Deleting a node marks its incident edges deleted in the same transaction**,
+   analysis edges included. The endpoint foreign keys are `ON DELETE RESTRICT`,
+   so a node cannot leave while edges reference it; a node tombstoned without its
+   edges would be unreachable yet still referenced, which is worse than either
+   outcome. Provenance rows survive with the edge that carries them.
+3. **The revision moves if and only if state changed.** A delete increments the
+   tenant's graph revision; deleting an already-deleted row is a no-op that
+   leaves it untouched, exactly as a converging ingest replay does.
+4. **A tombstoned `node_key` is not reusable before purge.** Re-ingesting it is a
+   conflict, not a resurrection: consumers still hold that key, and letting it
+   come back with different content and a different type would break the
+   stable-identity contract silently.
+5. **Vector and full-text indexes are not reconciled at delete time.** The
+   tombstone filter removes the row from every result before ranking, so a stale
+   index entry can never surface; index maintenance happens at purge.
+
+Undelete and a retention job that hard-deletes past a configurable window are
+p2. They are separated deliberately: the tombstone is reversible and cheap,
+while purge has to decide cascade ordering, key reuse and index reconciliation,
+and none of those need to block v1.
+
+### Label Contract
+
+Labels are per-tenant, N:N, and independent of the type system: attaching one
+neither re-ingests the object nor changes its GTS type.
+
+- **Two operations, two authorizations.** Registry CRUD is tenant-level
+  administration and binds the ontology-administration permission. Attach and
+  detach are per-object mutations that are explicitly not ingest, so they bind
+  their own action on the object's ResourceType rather than borrowing the ingest
+  row of the authorization matrix.
+- **Labels are not payload attributes, and cannot be.** `$filter` is admissible
+  only over paths a type declares in its `index` trait; traits are type-declared
+  while a label is per-object runtime state, so a label modelled inside `payload`
+  would be unfilterable by construction. Hence its own table, its own index and
+  its own filter surface.
+- **Attach and detach bump the graph revision.** Otherwise two reads at the same
+  revision could observe different labels, and the Read Consistency Contract's
+  promise that a continued read never silently mixes revisions would not hold
+  for label-filtered pages.
+- **Scope replacement never drops labels.** A label attached out of band survives
+  re-sync the same way analysis edges and their provenance do; replacement
+  deletes rows absent from the batch, and an assignment is not one of them.
+- **Per-hop label restriction is expressible.** Traversal applies its edge-type
+  restriction inside hop expansion, so a label restriction joins in the same
+  statement — which the single-store rule of ADR-0001 guarantees. Labels
+  therefore cannot live in a side store.
+
+Grouping is deliberately not a first-class concept: it is 1:N, and the same node
+is routinely interesting in several cuts at once. Community detection stays an
+analytics output that clients may group by; anything user-driven is labels.
+
 ### Authorization Model
 
 Tenant scoping is the outer wall; the PDP-derived `AccessScope` is the inner, resource-level one, and it confines every path identically for REST and the in-process client.
@@ -875,13 +1394,20 @@ Tenant scoping is the outer wall; the PDP-derived `AccessScope` is the inner, re
 |---|---|---|---|
 | Types (admin) | graph ontology | administer | none (tenant-level) |
 | Ingest | graph node | write | edges authorize via both endpoints; chunks via parent node; scope replacement via owned scope |
-| Node read | graph node | read | chunks and adjacency via the node's scope; unauthorized key follows the anti-enumeration contract |
+| Node read | graph node | read | chunks, labels and adjacency via the node's scope; unauthorized key follows the anti-enumeration contract |
+| Delete | graph node (+ edge via endpoints) | delete | incident edges follow the node; a caller authorized for the node is authorized for the cascade |
+| Labels (registry) | graph ontology | administer | none (tenant-level) |
+| Labels (attach / detach) | graph node, graph edge | label | authorized on the target object, not on the label; distinct from ingest write |
 | Search | graph node | read | resource predicate inside all four arms before UNION/ranking/LIMIT; chunk rows authorize through their parent node; folding, counts, snippets, fusion inputs, pagination, and hydration re-apply the same scope |
 | Traversal / projections | graph node (+ edge via endpoints) | read | the caller-authorized induced subgraph, below |
-| Metrics | graph analytics | execute (whole-tenant) | dedicated permission; constrained scopes rejected |
-| Analytics jobs | analytics job | submit / read / cancel | ownership tuple (tenant, principal); every status, result, and cancel request re-authorizes; unknown and unauthorized identifiers are indistinguishable |
 
 A constraint that cannot be represented in SQL for the target entity fails closed — never degrades to tenant-only filtering. One entity type's compiled scope is never reused for another ResourceType.
+
+**GTS pattern resolution is shared, and never text matching.** Two pattern filters meet over the same type column on one request: the caller's type-family filter and the `resource_type` of the permission that authorized them, which may itself be a GTS wildcard pattern. Both resolve through `GtsIdPattern` — the platform's single definition of the semantics, including the implicit derived-type coverage a bare base identifier already carries — to a set of interned type ids, and the request's effective type set is the intersection of the two sets. No pattern is compiled into SQL text, so there is no `LIKE` escaping surface to get wrong and no second wildcard dialect to drift from the first (`guidelines/GTS.md` §5.1). Admission is the one deliberate exception and is enforced as such: a permission over a pattern must authorize registering a type that does not exist yet, so type registration and ingest match the pattern against the requested identifier directly rather than against the resolved set.
+
+**No path is exempt, and nothing is short-circuited by local state.** The decision for `(caller, ResourceType, action)` is resolved from the PDP on every request — `GET` as well as `POST`, the in-process ClientHub path as well as REST, and again when search or traversal rows are hydrated rather than only when the candidate set is produced. The caches the gear keeps hold schemas, effective traits and interned type ids; none of them holds an authorization decision, and a `(tenant, GTS type)` row already existing locally confers nothing on the caller who asks for it next.
+
+**Decision caching.** The gear caches no PDP decision across requests in v1. One decision is resolved per request per `(ResourceType, action)` and reused across that request's own stages — search arms, folding, hydration — so the staleness window is a single request and a revoked grant stops applying on the caller's next call. Cross-request caching is postponed on a dependency, not on effort: a TTL alone buys throughput at the price of a window in which a revoked permission still works, and the platform PEP publishes no invalidation signal to close it. When it is introduced it requires a revocation epoch or decision version from the authorization side, keyed per principal, and its window becomes part of this contract rather than an implementation detail.
 
 **Induced authorized subgraph.** For read paths the authorized graph is: nodes admitted by the caller's scope, and edges whose *both* endpoints are admitted. Traversal expands only within it — seeds (explicit or search-derived) are authorized before expansion, unauthorized nodes never enter frontiers or visited sets, degree ordering, budgets, and truncation are computed on authorized rows only, and hydration runs under the same scope and snapshot. Filtering only the returned nodes would be too late: a path through a hidden node already leaks connectivity.
 
@@ -889,7 +1415,7 @@ A constraint that cannot be represented in SQL for the target entity fails close
 
 **Plugins.** The gear remains the PEP for every engine. The selected graph-engine plugin receives a non-forgeable normalized authorization envelope; capability negotiation declares which authorization predicates the engine can enforce. An engine that cannot enforce the complete scope, holds stale authorization state, or cannot prove the requested revision is failed closed or bypassed for the built-in backend — never widened to tenant scope. The same resource-scoped adversarial suite runs against every backend.
 
-**Analytics.** v1 ships whole-tenant analytics only, behind the dedicated analytics permission; callers with constrained resource scopes are rejected, not widened. Resource-scoped analytics over the induced subgraph (with a normalized scope fingerprint in the cache identity) is the documented evolution path.
+**Analytics.** Whole-tenant analytics and its permission live in the `graph-analytics` gear (ADR-0007). What this gear owes it is the topology grant and the revision; metric annotation on a projection is authorized as part of the projection read, since an annotation reveals nothing the projection does not already show.
 
 ### Read Consistency Contract
 
@@ -928,13 +1454,13 @@ The category names above are exactly those the platform's `#[resource_error]` ma
 
 **Plugins.** Provider and engine failures are normalized by the gear before crossing the public boundary: unsupported capability → `unimplemented`; incompatible version or configuration → `failed_precondition`; timeout → `deadline_exceeded`; cancellation → `cancelled`; throttling or temporary outage → `unavailable` (with retry-after); stale or rebuilding projection → `failed_precondition` (`PROJECTION_STALE`); malformed plugin response or detected projection corruption → `unknown` / `data_loss`. Vendor messages, URLs, status codes, and response bodies are protected diagnostics kept in access-controlled logs with a trace identifier; public `detail`, reason, and context use only Graph Storage vocabulary.
 
-**Asynchronous analytics jobs** have three error surfaces: (1) submission errors before `202` — validation, authorization, admission, dependency — returned immediately as a Problem, no job created; (2) execution errors after `202` — the terminal category, stable reason, safe structured context, and trace identifier are persisted with the job and replayed by the result endpoint, while status returns a failed-job envelope; (3) job-request errors — unknown or unauthorized job (`not_found`, indistinguishable), result requested before completion (`failed_precondition`, `JOB_NOT_COMPLETE`), invalid cancellation (`failed_precondition`), expired result (`not_found`, `JOB_RESULT_EXPIRED`). The SDK exposes the same terminal category and context.
+**Asynchronous jobs** (owned by the `graph-analytics` gear, ADR-0007; the contract is recorded here because the two gears share the error model) have three error surfaces: (1) submission errors before `202` — validation, authorization, admission, dependency — returned immediately as a Problem, no job created; (2) execution errors after `202` — the terminal category, stable reason, safe structured context, and trace identifier are persisted with the job and replayed by the result endpoint, while status returns a failed-job envelope; (3) job-request errors — unknown or unauthorized job (`not_found`, indistinguishable), result requested before completion (`failed_precondition`, `JOB_NOT_COMPLETE`), invalid cancellation (`failed_precondition`), expired result (`not_found`, `JOB_RESULT_EXPIRED`). The SDK exposes the same terminal category and context.
 
-**Route registration.** Each route registers every Problem status its runtime can produce through OperationBuilder — `standard_errors` plus explicit additional responses for the canonical outcomes it can reach (for example `499` cancelled, `501` unsupported capability, `503` dependency unavailable, `504` deadline exceeded). Synchronous routes and the analytics submit/status/result/cancel routes are registered separately, so OpenAPI describes every failure a generated client or gateway can observe.
+**Route registration.** Each route registers every Problem status its runtime can produce through OperationBuilder — `standard_errors` plus explicit additional responses for the canonical outcomes it can reach (for example `499` cancelled, `501` unsupported capability, `503` dependency unavailable, `504` deadline exceeded). Every route registers its own set, so OpenAPI describes every failure a generated client or gateway can observe.
 
 ### Deadlines and Cancellation
 
-**One absolute deadline per logical operation.** A deadline is created at admission (from the request or the applicable configured default) and the *remaining* budget is passed to every subsequent step: queue residence, provider and plugin calls, transaction attempts, backoff waits, and publication. A retry never starts when the remaining budget cannot accommodate it, and each per-attempt timeout is bounded by the remaining total. Local backstops (`statement_timeout`, cancellation tokens) remain, but they are floors under the absolute budget, not independent allowances. An accepted `202` analytics job gets its own job deadline, distinct from the submit request's deadline; whether queue residence consumes it is stated in the job contract (it does), and the completed HTTP deadline is never reused or extended.
+**One absolute deadline per logical operation.** A deadline is created at admission (from the request or the applicable configured default) and the *remaining* budget is passed to every subsequent step: queue residence, provider and plugin calls, transaction attempts, backoff waits, and publication. A retry never starts when the remaining budget cannot accommodate it, and each per-attempt timeout is bounded by the remaining total. Local backstops (`statement_timeout`, cancellation tokens) remain, but they are floors under the absolute budget, not independent allowances. The same rule governs an accepted `202` job in the analytics gear: it gets its own job deadline, distinct from the submit request's, and the completed HTTP deadline is never reused or extended.
 
 **Cancellation is resolved per phase**, so a cancellation never hides durable work:
 
@@ -954,12 +1480,12 @@ Readiness is per capability, not one global boolean: a component is `Healthy`, `
 | Component | Degraded | Unhealthy | Aggregate effect |
 |---|---|---|---|
 | Database, migrations | — | Unreachable, migrations unapplied | Gear not ready |
-| Property graph (`kb_pgq`) | — | Missing on PostgreSQL 19+ | SQL/PGQ backend unavailable; CTE backend serves; gear ready-degraded |
-| AuthZ resolver / types-registry | Cached decisions in use | Unreachable with no cache | Unhealthy: gear not ready (fail closed) |
+| Server major / SQL/PGQ | Server below 19, or property graph absent on 19+ | Server below 19 while the SQL/PGQ backend is explicitly configured | Degraded: SQL/PGQ reported unavailable, CTE and two-query backends serve, gear ready. Unhealthy only when an operator asked for a backend the server cannot provide — naming the required major rather than substituting silently |
+| AuthZ resolver / types-registry | Elevated latency | Unreachable | Unhealthy: gear not ready; authenticated data paths fail closed |
 | Embedding provider | Unavailable (ingest may skip embedding) | Embedding-space identity mismatch | Vector and hybrid search rejected with `EMBEDDING_SPACE_MISMATCH`; lexical search, ingest, traversal, projections unaffected |
 | Graph-engine plugin | Stale projection or unprovable cursor | Incompatible version | Route to the built-in PostgreSQL engine; capabilities unique to the plugin rejected with `CAPABILITY_UNSUPPORTED` |
 | Dynamic indexes | Building or backfilling | Build failed | Filters on affected attributes rejected; everything else unaffected |
-| Analytics workers | Lease recovery in progress | Scheduler unavailable | Analytics submissions rejected with `unavailable`; recovery of expired running leases completes before workers report ready |
+| Metric annotation source | Analytics gear reachable, no entry at this revision | — | Projections served without annotations, saying so; never an error and never a stale-revision annotation. Never unhealthy: an optional gear's absence must not take the graph out of service |
 
 The readiness endpoint reports per-component state with named problems; the aggregate is ready only when no component is `Unhealthy`. Degraded components never silently widen behavior — the affected operations are rejected canonically instead.
 
@@ -982,7 +1508,7 @@ The `GraphQueryPort` is the graph-engine plugin surface (`cpt-cf-graph-storage-c
 
 Both rules are enforced by tests asserting on the emitted SQL, not left to review. End to end on the same fixture and seed set, in a debug build, the two-query hop served depth 1 / 2 / 3 at p95 4.7 / 8.0 / 50.5 ms and the single scoped CTE at p95 4.2 / 6.8 / 30.0 ms, with identical results across all 120 requests and the adversarial cross-tenant fixture held by both. The single statement is therefore worth taking for tail latency on wide frontiers, not for per-hop overhead — and not for correctness, which never depended on it.
 
-**SQL/PGQ backend** (target for fixed-depth shapes): a `CREATE PROPERTY GRAPH` definition over the node and edge tables (vertex label from `graph_type`, edge label with source/destination keys); fixed-depth neighborhood queries compile to `GRAPH_TABLE` pattern matches that join freely with pgvector KNN and tsvector predicates in the same statement and inherit indexes, `EXPLAIN`, RLS, and secure-ORM scoping.
+**SQL/PGQ backend** (target for fixed-depth shapes): a `CREATE PROPERTY GRAPH` definition over the node and edge tables (vertex label from `gts_type`, edge label with source/destination keys); fixed-depth neighborhood queries compile to `GRAPH_TABLE` pattern matches that join freely with pgvector KNN and tsvector predicates in the same statement and inherit indexes, `EXPLAIN`, RLS, and secure-ORM scoping.
 
 Four properties of the implementation are load-bearing rather than incidental, each established by measurement on the stand and each guarded by a test:
 
@@ -1013,7 +1539,7 @@ The full graph-engine evaluation behind this strategy (12-engine scoreboard, Fal
 
 The platform baseline (PluginV1, types-registry registration, scoped ClientHub clients) supplies the mechanics; this section owns the Graph Storage-specific contracts, defined separately for embedding providers and graph engines:
 
-- **GTS plugin schemas**: `gts.cf.kg.plugin.embedding_provider.v1~` and `gts.cf.kg.plugin.graph_engine.v1~` (derived from the platform plugin base), with validated properties — provider/engine identity, declared capabilities and authorization predicates, embedding-space identity or projection characteristics, priority.
+- **GTS plugin schemas**: two siblings off the platform plugin base — `gts.cf.toolkit.plugins.plugin.v1~cf.core.graph_storage.embedding_provider.v1~` and `gts.cf.toolkit.plugins.plugin.v1~cf.core.graph_storage.graph_engine.v1~`. A derived type carries its ancestry in the identifier, as every other gear's plugin does (`…~cf.core.credstore.plugin.v1~`, `…~cf.llmgw.provider.plugin.v1~`). Validated properties — provider/engine identity, declared capabilities and authorization predicates, embedding-space identity or projection characteristics, priority.
 - **Versioned SDK traits** (`EmbeddingProviderV1`, `GraphEngineV1`) with typed request/result/error models; the schema major maps one-to-one to the trait version, and a registered instance resolves to a scoped ClientHub client of the matching trait version — an incompatible version is a deterministic selection error, never a silent downgrade.
 - **Selection**: with no selector configured, the built-in default is used (in-process ONNX provider, built-in PostgreSQL engine); ties break deterministically on (priority, instance id). An **explicitly configured selector that matches nothing compatible never falls back** — it is a deterministic selection error and a readiness failure, because silently substituting a different embedding space or engine semantics would hide a deployment error.
 - **Readiness and churn**: a selected plugin participates in readiness; cached selections are invalidated on instance disappearance or re-registration, and re-selection follows the same deterministic rules.
@@ -1032,27 +1558,24 @@ Every bound the gear enforces is a named configuration key with a safe default a
 | REST request body | `rest_max_body_bytes` | 32 MiB | 1 – 128 MiB | REST edge |
 | Node payload size | `payload_max_bytes` | 64 KiB | 1 KiB – 1 MiB | Admission (ADR-0003 ceiling) |
 | Node content size | `content_max_bytes` | 2 MiB | 64 KiB – 16 MiB | Admission |
+| Total size of one node or edge (envelope + name + payload + content) | `item_max_bytes` | 256 KiB | 4 KiB – 4 MiB | Admission, per item |
+| Adjacency returned on node read | `node_read_max_adjacency` | 100 | 1 – 1,000 | Admission |
+| Labels attached to one node or edge | `labels_max_per_object` | 32 | 1 – 256 | Admission |
+| Labels in a tenant's registry | `labels_max_per_tenant` | 1,000 | 10 – 100,000 | Admission |
 | Traversal depth | `traversal_max_depth` | 5 | 1 – 8 | Admission |
 | Traversal node budget | `traversal_max_nodes` | 1,000 per request, 10,000 hard | 1 – 10,000 | Admission + per hop |
 | Traversal frontier per hop | `traversal_max_frontier` | 10,000 | 100 – 100,000 | Engine, per hop |
 | Traversal edges scanned | `traversal_max_edges_scanned` | 100,000 | 1,000 – 1,000,000 | Engine, cumulative |
 | Search arm limit | `search_max_arm_limit` | 50 | 1 – 500 | Admission |
 | Projection page size | `projection_max_page` | 200 | 1 – 1,000 | Admission |
-| Analytics node ceiling | `analytics_max_nodes` | 1,000,000 | 1,000 – 10,000,000 | Job admission |
-| Analytics edge ceiling | `analytics_max_edges` | 10,000,000 | 10,000 – 100,000,000 | Job admission |
-| Analytics memory budget | `analytics_max_bytes` | 2 GiB | 128 MiB – 32 GiB | Job admission (estimate from node/edge counts and key sizes) + allocation tracking |
 | Interactive statement deadline | `deadline_interactive` | 10 s | 1 – 60 s | DB `statement_timeout` + cancellation token |
-| Analytics job deadline | `deadline_analytics` | 300 s | 10 s – 3,600 s | Cancellation token |
-| Per-tenant concurrent analytics jobs | `tenant_max_analytics_jobs` | 1 | 1 – 8 | Job admission |
 | Per-tenant concurrent ingest batches | `tenant_max_ingest` | 4 | 1 – 64 | Admission |
 | Per-tenant concurrent queries | `tenant_max_queries` | 32 | 1 – 1,024 | Admission |
 | Idempotency record retention | `idempotency_retention` | 7 days | 1 – 90 days | Background cleanup |
-| Global analytics memory pool | `analytics_global_max_bytes` | 4 GiB | 512 MiB – 128 GiB | Global job admission |
-| Analytics queue depth | `analytics_queue_depth` | 16 | 1 – 256 | Global job admission |
-| Metric cache entry size | `metrics_max_entry_bytes` | 4 MiB | 64 KiB – 64 MiB | Publication |
-| Metric cache entries per tenant | `metrics_max_entries_per_tenant` | 200 | 10 – 10,000 | Background cleanup |
-| Metric cache retained revisions | `metrics_retained_revisions` | 3 | 1 – 50 | Background cleanup |
-| Metric parameter variants per metric | `metrics_max_param_variants` | 20 | 1 – 200 | Publication |
+
+The analytics ceilings, job deadline, global memory pool, queue depth and metric-cache retention bounds move to the `graph-analytics` gear with the computation (ADR-0007); they are configuration of a different deployment unit, which is the point of the split.
+
+`item_max_bytes` exists because the per-field ceilings do not compose: a producer can stay inside `payload_max_bytes` and `content_max_bytes` on every field and still push a multi-megabyte object by filling all of them at once, and `rest_max_body_bytes` only bounds the batch. It is part of the public API contract, not an internal guard, and is documented on the ingest endpoint alongside the batch bounds.
 
 Enforcement is layered, and the authoritative layer is shared:
 
@@ -1062,15 +1585,20 @@ Enforcement is layered, and the authoritative layer is shared:
 
 Rejections are classified by cause, not by the fact that a limit was involved: a value outside a documented hard range is `out_of_range` (backoff can never make it valid), a malformed or internally inconsistent combination of limits is `invalid_argument`, and only transient quota, concurrency, queue, or memory pressure is `resource_exhausted` (retryable, with a retry-after hint); termination by time or cancellation is `deadline_exceeded` or `cancelled`. The Error Model section defines the client disposition for each class.
 
-Analytics additionally runs under a **global scheduler**: per-tenant concurrency alone cannot bound the sum across tenants, so jobs pass through a bounded queue and a process-wide memory pool — each job's estimated peak (from node/edge counts and key sizes) is reserved at start and released on success, failure, or cancellation; per-tenant running/queued limits keep fairness. Jobs deduplicate on (tenant, graph revision, metric, parameters, authorization-scope identity); a job superseded by a newer revision is cancelled cooperatively. Because a job can outlive gateway timeouts, the REST surface answers long computations with `202 Accepted` plus a job identifier and status/result endpoints; the SDK path exposes the same job contract.
-
-Every rejection carries the limit name, the configured bound, and the requested value in structured context. Every limit exposes a saturation counter (rejections) and a high-watermark gauge, so capacity pressure is visible in telemetry before it becomes an incident (`cpt-cf-graph-storage-fr-observability`), including metric-cache retained-bytes and cleanup-lag gauges.
+Every rejection carries the limit name, the configured bound, and the requested value in structured context. Every limit exposes a saturation counter (rejections) and a high-watermark gauge, so capacity pressure is visible in telemetry before it becomes an incident (`cpt-cf-graph-storage-fr-observability`), including idempotency-record retention and cleanup-lag gauges.
 
 **Seed admission.** Because every seed survives truncation, the seed set is bounded before expansion begins: after authorization and deduplication, a request whose distinct authorized seeds exceed the effective node budget is rejected with `out_of_range` (naming the seed count and the budget) rather than silently exceeding the budget. Seeds are ordered deterministically by node key, and the response reports the admitted seed count alongside truncation metadata.
 
 ### Base Ontology Publication
 
-At startup the gear registers its GTS base types (owned-node base, reference-node base, phantom, provenance attribute, static/analysis edge bases) and its permission instances with the platform types-registry through the standard inventory mechanism, so producers can derive types and administrators can grant permissions before any runtime registration happens.
+At startup the gear registers the base ontology defined in § 3.1 (Base Ontology
+GTS Schemas) — the three abstract bases and the six family types — and its
+permission instances with the platform types-registry through the standard
+inventory mechanism, so producers can derive types and administrators can grant
+permissions before any runtime registration happens. Registration is idempotent
+for byte-identical schemas; a schema change to a base type is a new GTS version,
+never an in-place edit, because producer types are already derived from the
+existing one.
 
 ## 5. Traceability
 

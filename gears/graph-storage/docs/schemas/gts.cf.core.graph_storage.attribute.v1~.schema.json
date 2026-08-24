@@ -1,0 +1,8 @@
+{
+  "$id": "gts://gts.cf.core.graph_storage.attribute.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Base attribute type: a reusable payload fragment embedded by node and edge types. Declares no traits of its own -- index, full-text and vector paths are JSON pointers relative to the embedding object, so only that object can declare them.",
+  "x-gts-abstract": true,
+  "type": "object",
+  "additionalProperties": true
+}

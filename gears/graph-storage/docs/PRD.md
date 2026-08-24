@@ -89,7 +89,7 @@ Several platform initiatives need to persist and query relationships between het
 | Hybrid Search | Fusion of lexical and vector search results into a single ranked list |
 | RRF | Reciprocal Rank Fusion — a rank-based algorithm for merging result lists from multiple retrieval arms |
 | Projection | A bounded, filterable tabular or subgraph view over graph data |
-| Graph Revision | A monotonic counter bumped by every mutating ingest; used to invalidate analytics caches |
+| Graph Revision | A monotonic counter bumped by every change to stored state — ingest, delete, and label attach/detach alike; used to invalidate analytics caches |
 | Idempotency Key | A tenant- and producer-scoped identifier of one logical ingest request; its recorded outcome makes retries after lost responses safe |
 | Scope Generation | A monotonic source revision carried by every scope-replacement snapshot; stale generations are rejected (fencing) |
 | GTS | Global Type System — the platform's contract system of versioned, derivable JSON Schema types with `gts.` identifiers |
@@ -107,7 +107,7 @@ Several platform initiatives need to persist and query relationships between het
 **ID**: `cpt-cf-graph-storage-actor-graph-explorer`
 
 - **Role**: A user who opens an entity in a UI and explores its relationships — "show me everything connected to this object within 3 hops".
-- **Needs**: Fast bounded neighborhood queries, human-readable node names and types, stable visual grouping, and truncation that keeps the structurally important nodes.
+- **Needs**: Fast bounded neighborhood queries, human-readable node names and types, labels they can attach and group by, and truncation that keeps the structurally important nodes.
 
 #### Data Analyst
 
@@ -180,9 +180,9 @@ Several platform initiatives need to persist and query relationships between het
 
 ### 3.1 Gear-Specific Environment Constraints
 
-- Requires PostgreSQL 19 or later with the `pgvector` extension and permission to create extensions in the gear's database; SQL/PGQ graph queries are used from the first release (see ADR-0001). Until PostgreSQL 19 GA (expected September/October 2026) deployments run a pinned PG19 beta image with pgvector built from a pinned source revision; no other PostgreSQL extensions are required
+- Requires PostgreSQL 16 or later with the `pgvector` extension and permission to create extensions in the gear's database; no other PostgreSQL extension is required. The SQL/PGQ graph-query backend additionally requires PostgreSQL 19: on an earlier server the gear starts on its iterative-CTE and two-query backends and reports SQL/PGQ as an unavailable capability rather than failing readiness (see ADR-0001). A deployment that wants SQL/PGQ before PostgreSQL 19 GA (expected September/October 2026) runs a pinned PG19 beta image with pgvector built from a pinned source revision
 - Requires an embedding provider: either an in-process ONNX model runtime bundled with the gear or network access to a remote embedding inference endpoint, per deployment configuration
-- Graph analytics loads a bounded projection of the graph topology into memory; deployments must budget memory for the configured analytics node ceiling
+- Whole-graph analytics is a separate deployment unit (`graph-analytics`, ADR-0007) that reads this gear's schema over a read-only role; a deployment that installs it must budget memory for that gear's topology ceiling, and one that does not gets projections without metric annotations
 - Depends on the file-storage gear when heavy-content offloading is enabled; the graph gear itself never stores blobs
 
 ## 4. Scope
@@ -200,8 +200,11 @@ Several platform initiatives need to persist and query relationships between het
 - Lexical full-text search, vector similarity search, and hybrid search with reciprocal rank fusion; GTS type-family filtering on all search modes
 - Depth-limited graph traversal from seed nodes (explicit keys or search hits) with per-hop edge-type filtering
 - Bounded neighborhood projection for UI exploration with degree-ordered truncation
-- Tabular projection of nodes by criteria and identifier lists with OData-style filtering and pagination
-- Graph analytics: degree, PageRank, connected components (core); betweenness centrality and community detection (extended); revision-keyed caching
+- Tabular projection of nodes by criteria and identifier lists using the platform OData binding, with pagination
+- Annotation of projections with graph metrics read from the `graph-analytics` gear's revision-keyed cache
+- Soft deletion of nodes and edges, with incident edges following the node and every read path excluding tombstoned rows
+- A per-tenant label registry with runtime attach/detach on nodes and edges, label filtering in search, projection and traversal, and labels in read responses
+- Optional CREATE/UPDATE/DELETE change events, off by default, declared per type and overridable by deployment configuration
 - Multi-tenancy with tenant-scoped storage and queries, and platform access control on every operation
 - Versioned REST API and a typed Rust SDK client registered in ClientHub
 - Structured logging, metrics, and readiness reporting
@@ -214,7 +217,9 @@ Several platform initiatives need to persist and query relationships between het
 - Event-driven ingestion (subscribing to platform events to auto-sync managed objects) — ingest is push-only in v1; event-driven sync is a future consideration
 - Cross-tenant or cross-graph federation queries
 - A bundled visualization UI — consumers build UIs on the projection API
-- Bitemporal versioning, soft delete, and node-level history — the graph reflects the latest ingested state; history is a future consideration
+- Bitemporal versioning and node-level history — the graph reflects the latest ingested state; history is a future consideration
+- Undelete, and a retention job that hard-deletes tombstoned rows past a configurable window — both p2; hard delete additionally has to settle cascade ordering, key reuse after purge, and vector/full-text index reconciliation, none of which need to block v1
+- Whole-graph analytics computation — degree, PageRank, components, betweenness and community detection move to the `graph-analytics` gear (ADR-0007); this gear stores the graph they read and annotates projections from their cache
 - Embedding model training or fine-tuning
 
 ## 5. Functional Requirements
@@ -269,6 +274,8 @@ Convergence **MUST** hold under retries with unknown commit outcomes: every inge
 
 Nodes **MUST** be identified by a producer-supplied stable node key, unique per tenant; ingesting an existing key updates that node. Edge identity **MUST** be derived deterministically from edge type, source key, target key, and an optional producer-supplied discriminator, so that parallel edges of the same type between the same nodes are representable and re-ingest updates rather than duplicates.
 
+An upsert **replaces** the mutable state of the row wholesale: `payload`, `name` and the content field are set to exactly what the request carries, and a field the request omits is cleared rather than preserved. There is no merge on the ingest path, and therefore no attribute that a producer is unable to remove; a future `PATCH` is defined as the merge operation, which keeps the two cleanly distinguishable. Edge payloads follow the same rule. This is the same contract chunked content already states — supplied content is an exact replacement set.
+
 A concrete node's GTS type is immutable under ordinary upsert: a same-key ingest declaring a different type **MUST** be rejected as a conflict — the only permitted type transition is phantom materialization, which locks the node and revalidates incident edges atomically. Producers **MAY** pass an expected version with an update (compare-and-set); a mismatch **MUST** reject the batch. Endpoint-constraint validation **MUST** execute inside the ingest transaction under locks on the referenced endpoint nodes, so concurrently validated batches cannot commit edges against node types they never observed (see DESIGN § Concurrent Ingest Protocol).
 
 - **Rationale**: Deterministic identity is the foundation of idempotent re-sync and of cross-producer references to the same entities.
@@ -316,10 +323,41 @@ A scope **MUST** have a canonical identity (tenant, owning producer, scope attri
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-node-read`
 
-The system **MUST** return a single node by key with its type, payload, embedding presence, chunk inventory, and adjacent edges in both directions (with edge types and neighbor keys), bounded by request limits.
+The system **MUST** return a single node by key with its type, payload, labels, embedding presence, chunk inventory, and adjacent edges in both directions (with edge types and neighbor keys). Adjacency **MUST** be bounded by a named request parameter defaulting to a configured maximum, and a truncated response **MUST** say so.
 
 - **Rationale**: The entity detail view is the entry point of the UI exploration scenario.
 - **Actors**: `cpt-cf-graph-storage-actor-graph-explorer`, `cpt-cf-graph-storage-actor-consumer-gear`
+
+#### Soft Delete
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-soft-delete`
+
+The system **MUST** support deleting a node or an edge by setting a tombstone rather than removing the row. Node read, every search arm, chunk folding, traversal, projections and analytics topology loading **MUST** exclude tombstoned rows. Deleting a node **MUST** tombstone its incident edges in the same transaction, analysis edges included, because the endpoint foreign keys are `ON DELETE RESTRICT` and a node tombstoned without its edges would be unreachable yet still referenced; provenance is retained with the edge that carries it. A delete **MUST** increment the tenant's graph revision, and deleting an already-tombstoned row **MUST** be a no-op that leaves the revision untouched. A tombstoned node key **MUST NOT** be reusable before purge: re-ingesting it is a conflict, so an identifier consumers still hold cannot silently come back with different content.
+
+- **Rationale**: Garbage arrives on day one, not in year two — a producer run pointed at the wrong target, a bad ontology during bring-up, tests against a shared environment. Without deletion the only remedy is re-submitting an entire scope, and for an object that belongs to no scope there is none, so the graph stays permanently dirty and the garbage pollutes search results and analytics. A tombstone is reversible and cheap, and it defers cascade ordering, key reuse and index reconciliation to purge instead of blocking v1 on them.
+- **Actors**: `cpt-cf-graph-storage-actor-producer-gear`, `cpt-cf-graph-storage-actor-platform-admin`
+
+#### Labels
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-labels`
+
+The system **MUST** provide a per-tenant label registry — name, description, display style, and whether the label applies to nodes, edges or both — and **MUST** allow labels to be attached to and detached from existing nodes and edges at runtime, without re-ingesting the object and without any GTS type change. Labels **MUST** be filterable in search, in tabular projection, and as a per-hop restriction in traversal, and **MUST** be returned on nodes and edges in read and projection responses.
+
+Registry administration **MUST** require the ontology-administration permission. Attach and detach **MUST** be authorized as an action distinct from ingest write, on the target object rather than on the label. Attach and detach **MUST** increment the tenant's graph revision, so two reads at one revision can never observe different labels. Scope replacement **MUST NOT** drop labels attached out of band, the same way it preserves analysis edges and their provenance.
+
+- **Rationale**: Labelling is N:N and covers what grouping cannot — the same node is routinely interesting in several cuts at once — and it is the mechanism users already expect from issue trackers. Labels cannot be modelled as payload attributes: filters are admissible only over paths the type declares, types are authored ahead of time, and a label is per-object runtime state.
+- **Actors**: `cpt-cf-graph-storage-actor-graph-explorer`, `cpt-cf-graph-storage-actor-data-analyst`, `cpt-cf-graph-storage-actor-platform-admin`
+
+#### Change Events
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-change-events`
+
+The system **MUST** be able to publish CREATE, UPDATE and DELETE events for nodes and edges to the platform event-broker, and emission **MUST** be off by default. Whether a type emits **MUST** be declared by the `emit_events` trait on the gear's node and edge bases, so a base type sets the default and a derived type overrides only what it needs. Deployment configuration **MUST** be able to override the trait per GTS type pattern so that a vendor can enable or suppress emission without editing GTS type definitions in gear code; configuration wins over the trait, and the more specific pattern wins over the broader one.
+
+Events **MUST** be published through the transactional outbox in the same transaction as the change, so a committed change always produces its event and a rolled-back batch produces none. An ingest that converges without changing stored state **MUST NOT** emit — the predicate that governs the revision bump governs emission. Every event **MUST** carry the tenant, the object key, the GTS type, the operation and the graph revision it committed at, so consumers can order and deduplicate; payload contents **MUST NOT** be included beyond those identity fields.
+
+- **Rationale**: Consumers otherwise poll to notice change, and a per-type, configuration-overridable switch is what lets a deployment run the gear without provisioning a broker topic for types nobody subscribes to.
+- **Actors**: `cpt-cf-graph-storage-actor-consumer-gear`, `cpt-cf-graph-storage-actor-platform-admin`
 
 ### 5.3 Content Handling
 
@@ -434,39 +472,63 @@ The system **MUST** serve a UI-oriented neighborhood projection: given one entit
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-tabular-projection`
 
-The system **MUST** project nodes matching criteria into tabular results: selection by explicit node-key or identifier lists, by type family, and by filters over indexed payload attributes using the platform's OData-style filter, ordering, and pagination conventions. Responses **MUST** return stable pages suitable for table rendering.
+The system **MUST** project nodes matching criteria into tabular results: selection by explicit node-key or identifier lists, by type family, by label, and by filters over indexed payload attributes. Filtering, ordering and pagination **MUST** use the platform OData binding — exactly the five accepted system query options (`$filter`, `$orderby`, `$select`, `$top`, `$skiptoken`, with `cursor` as the alias for `$skiptoken`) — and any other option **MUST** be rejected rather than ignored. `$filter` **MUST** be admitted only over payload paths the type declares in its `index` trait, addressed by the same path in OData syntax (`payload/severity`), and a filter over an undeclared path **MUST** be rejected with an error naming the path and the declared alternatives. Responses **MUST** return stable pages suitable for table rendering, with continuation tokens carried in the platform `CursorV1` extended with the observed graph revision rather than in a second token format.
 
 - **Rationale**: "Show me all objects matching these criteria as a table" is a validated scenario and the standard list contract for platform UIs.
 - **Actors**: `cpt-cf-graph-storage-actor-data-analyst`, `cpt-cf-graph-storage-actor-consumer-gear`
 
 ### 5.7 Graph Analytics
 
-#### Core Graph Metrics
+Whole-graph analytics — degree, PageRank, connected components, betweenness
+centrality and community detection — is computed by the separate
+`graph-analytics` gear (ADR-0007), which reads this gear's topology over a
+read-only role and owns the revision-keyed metrics cache. The requirements below
+are what **this** gear owes that boundary; the algorithms, their determinism
+contracts and the asynchronous job surface belong to the analytics gear's own
+PRD and DESIGN.
 
-- [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-graph-metrics`
+#### Analytics Topology Surface
 
-The system **MUST** compute per-node graph metrics on demand: degree (total, in, out), PageRank, and connected components, with an option to exclude named edge types from the computation. Metric results **MUST** be deterministic for a given graph state. Whole-graph analytics executes under the dedicated whole-tenant analytics permission: callers with a constrained resource scope **MUST** be rejected rather than served tenant-wide results (resource-scoped analytics is a documented future evolution). Computations that exceed interactive deadlines run as asynchronous jobs with a status/result contract.
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-analytics-topology`
 
-- **Rationale**: Degree and centrality drive projection truncation and give analysts a structural ranking of entities; edge-type exclusion prevents hub types from dominating.
-- **Actors**: `cpt-cf-graph-storage-actor-data-analyst`
+The system **MUST** expose a topology-only read surface — node keys with their
+interned type, and typed edge pairs with discriminator, both excluding
+tombstoned rows — through a database role granted `SELECT` on those columns and
+nothing else. Payload, composed search text, embeddings and chunk contents
+**MUST NOT** be readable through that role, and it **MUST NOT** be able to write
+any graph table. The system **MUST** publish the schema version the surface
+conforms to, so a consumer can fail closed on a mismatch instead of on its first
+query.
 
-#### Extended Graph Analytics
-
-- [ ] `p3` - **ID**: `cpt-cf-graph-storage-fr-graph-analytics-extended`
-
-The system **MUST** additionally provide betweenness centrality (exact below a node-count threshold, sampled above it) and community detection with stable community ordering across recomputation. Numeric parity with the Python prototype's NetworkX results is explicitly not required; algorithm and determinism guarantees are defined per algorithm.
-
-- **Rationale**: Communities and brokerage metrics support visual grouping and deeper structural analysis, but are not required for the primary scenarios.
-- **Actors**: `cpt-cf-graph-storage-actor-data-analyst`
-
-#### Revision-Keyed Metrics Cache
-
-- [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-metrics-cache`
-
-The system **MUST** cache computed metrics keyed by graph revision and metric parameters, serve cached results while the revision is unchanged, and report per metric whether it was served from cache or computed.
-
-- **Rationale**: Whole-graph analytics is expensive; revision keying makes cache correctness trivial.
+- **Rationale**: The topology-only bound of `cpt-cf-graph-storage-nfr-analytics-memory` becomes a grant the database enforces rather than a rule the reading code is trusted to respect.
 - **Actors**: `cpt-cf-graph-storage-actor-data-analyst`, `cpt-cf-graph-storage-actor-platform-admin`
+
+#### Metric Annotation from Cache
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-metric-annotation`
+
+The system **MUST** be able to annotate neighborhood and tabular projections with
+per-node metrics read from the analytics gear's revision-keyed cache, and
+**MUST** annotate only from an entry matching the graph revision the read
+observed. When the analytics gear is absent, or holds no entry for that revision,
+the system **MUST** return the projection without annotations rather than
+failing, and **MUST** say in the response that annotations were unavailable.
+
+- **Rationale**: Degree ordering already drives projection truncation, and a projection that fails because an optional gear is not deployed would make analytics a hard dependency of the UI path.
+- **Actors**: `cpt-cf-graph-storage-actor-graph-explorer`, `cpt-cf-graph-storage-actor-data-analyst`
+
+#### Revision Signal for Cache Invalidation
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-revision-signal`
+
+The system **MUST** expose the tenant's current graph revision and **MUST**
+increment it in the same transaction as any change to stored state — ingest that
+actually changed a row, delete, and label attach or detach — and only then. The
+revision **MUST** be readable both through the topology surface and through the
+API, so cache keying and staleness detection need no second mechanism.
+
+- **Rationale**: The revision is the entire coupling between the two gears; if it moves when nothing changed, every cached metric is discarded needlessly, and if it fails to move when something did, a stale metric is served as current.
+- **Actors**: `cpt-cf-graph-storage-actor-data-analyst`
 
 ### 5.8 Multi-Tenancy and Access Control
 
@@ -483,7 +545,7 @@ All graph data — types registered per tenant scope, nodes, edges, chunks, revi
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-access-control`
 
-Every API operation **MUST** be authenticated and authorized through the platform policy decision point, with separate permissions for ontology administration, ingest, query, and whole-tenant analytics, declared as GTS permission instances. Authorization is resource-level, not tenant-level only: the PDP-derived access scope **MUST** confine every read path — search arms before ranking, traversal expansion (the caller-authorized induced subgraph), projections, and hydration — per the authorization matrix in DESIGN, with identical enforcement for the REST and in-process paths through a shared policy-enforcement layer. Denied resources **MUST** be indistinguishable from nonexistent ones in results, counts, truncation flags, and budget consumption.
+Every API operation **MUST** be authenticated and authorized through the platform policy decision point, with separate permissions for ontology administration, ingest, query, delete, and label attach/detach, declared as GTS permission instances. Authorization is resource-level, not tenant-level only: the PDP-derived access scope **MUST** confine every read path — search arms before ranking, traversal expansion (the caller-authorized induced subgraph), projections, and hydration — per the authorization matrix in DESIGN, with identical enforcement for the REST and in-process paths through a shared policy-enforcement layer. Denied resources **MUST** be indistinguishable from nonexistent ones in results, counts, truncation flags, and budget consumption.
 
 - **Rationale**: Producers, consumers, and administrators have different privileges; write access to a shared graph must be explicitly granted.
 - **Actors**: `cpt-cf-graph-storage-actor-authz-resolver`, `cpt-cf-graph-storage-actor-platform-admin`
@@ -523,7 +585,7 @@ The system **MUST** emit structured tracing for ingest, search, traversal, and a
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-readiness`
 
-The system **MUST** report readiness per capability — database and migrations, policy and type registries, embedding provider and embedding-space identity, property graph and graph-engine plugins, dynamic indexes, and analytics workers — each as healthy, degraded, or unhealthy with named problems. Aggregate readiness **MUST** fail only when a component is unhealthy; a degraded capability **MUST** reject exactly the affected operations with canonical errors (or fall back where a fallback exists) while unrelated operations continue, and **MUST NOT** silently widen behavior. The readiness matrix in DESIGN is normative.
+The system **MUST** report readiness per capability — database and migrations, server major version and the SQL/PGQ backend's availability on it, policy and type registries, embedding provider and embedding-space identity, property graph and graph-engine plugins, and dynamic indexes — each as healthy, degraded, or unhealthy with named problems. Aggregate readiness **MUST** fail only when a component is unhealthy; a degraded capability **MUST** reject exactly the affected operations with canonical errors (or fall back where a fallback exists) while unrelated operations continue, and **MUST NOT** silently widen behavior. The readiness matrix in DESIGN is normative.
 
 - **Rationale**: A single global boolean either takes healthy lexical and ingest paths offline for an unrelated fault, or keeps admitting a capability already known to be unsafe.
 - **Actors**: `cpt-cf-graph-storage-actor-platform-admin`
@@ -566,14 +628,14 @@ Depth-3 neighborhood projection **MUST** answer within 1 second at p95 on a tena
 - **Rationale**: The UI neighborhood scenario is interactive and hits dense regions of the graph.
 - **Architecture Allocation**: See DESIGN.md § NFR Allocation
 
-#### Analytics Memory Bound
+#### Analytics Topology Bound
 
 - [ ] `p2` - **ID**: `cpt-cf-graph-storage-nfr-analytics-memory`
 
-Whole-graph analytics **MUST** operate within configurable node, edge, and memory-budget ceilings and refuse computation with a clear error beyond any of them (a node count alone does not bound memory on dense graphs), and **MUST** hold at most the graph topology (keys and edges, not payloads) in memory.
+The topology read surface **MUST** expose at most node keys with their interned type and typed edge pairs — never payloads, composed search text, embeddings or chunk contents — and the grant backing it **MUST** make the wider columns unreadable rather than merely unused. The ceilings that bound a computation's memory move with the computation to the `graph-analytics` gear (ADR-0007).
 
 - **Threshold**: Configurable ceilings, defaults 1,000,000 nodes / 10,000,000 edges / 2 GiB estimated topology budget; topology-only memory footprint verified by profiling tests
-- **Rationale**: In-memory analytics on unbounded tenant graphs is the main memory risk of the gear.
+- **Rationale**: Keeping analytics topology-only is what makes reading a million-node graph affordable at all; expressing it as a database grant means a future change to the reading code cannot quietly widen it.
 - **Architecture Allocation**: See DESIGN.md § NFR Allocation
 
 #### Zero Cross-Tenant Leakage
@@ -610,7 +672,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 
 - **Type**: REST API
 - **Stability**: unstable (v1 during incubation)
-- **Description**: Versioned HTTP surface covering type management, ingest, node reads, search (lexical, vector, hybrid), traversal, projections, metrics, and readiness.
+- **Description**: Versioned HTTP surface covering type management, ingest, node reads, soft delete, labels, search (lexical, vector, hybrid), traversal, projections, and readiness. The endpoint table, OData binding and versioning policy are normative in DESIGN § 3.3.
 - **Breaking Change Policy**: Path-versioned; breaking changes require a new version prefix.
 
 #### Graph Storage SDK Client
@@ -619,7 +681,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 
 - **Type**: Rust trait (ClientHub client) in the SDK crate
 - **Stability**: unstable (v1 during incubation)
-- **Description**: Typed async client trait mirroring the REST capabilities for in-process gear-to-gear calls, with transport-agnostic models and canonical errors.
+- **Description**: Typed async client trait mirroring the REST capabilities for in-process gear-to-gear calls, with transport-agnostic models and canonical errors. Behavioural parity with REST is a contract requirement, not a convention: identical permission checks and identical admission limits, both enforced in the shared domain layer.
 - **Breaking Change Policy**: Versioned trait names (`...ClientV1`); breaking changes introduce a new trait version.
 
 ### 7.2 External Integration Contracts
@@ -630,7 +692,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 
 - **Direction**: provided by library
 - **Protocol/Format**: GTS type identifiers with draft-07 JSON Schemas
-- **Compatibility**: Base node, edge, and provenance types are versioned GTS types; producers derive domain types from them; new majors are additive, existing majors immutable.
+- **Compatibility**: The three abstract bases (node, edge, attribute) and six family types are versioned GTS types, fully specified in DESIGN § 3.1 (Base Ontology GTS Schemas). Producers derive domain types from a family type, never from a base directly; the required `family` trait is what enforces this. New majors are additive, existing majors immutable, and the phantom type is `x-gts-final` so nothing derives from it.
 
 #### Embedding Provider Contract
 
@@ -777,7 +839,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 - Producers can express their entities as typed nodes and edges and are responsible for parsing source material; the gear never crawls upstream systems
 - Managed-object producers (e.g., a mirror gear) push reference-node projections; the graph does not subscribe to upstream change feeds in v1
 - One embedding provider configuration (model and dimension) is active per deployment at a time; changing it implies re-embedding
-- Tenant graphs fit the configured analytics ceiling; graphs beyond it forgo whole-graph analytics but keep all other capabilities
+- Tenant graphs fit the analytics gear's configured ceiling; graphs beyond it forgo whole-graph analytics but keep all other capabilities
 - The platform provides tenant resolution and authentication in front of the gear's API
 
 ## 12. Risks
@@ -788,7 +850,8 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 | JSONB attribute indexing degrades as payloads grow | Filter queries slow down; index bloat | Payload size ceiling, indexable-attribute discipline in ontology design, heavy-content offloading |
 | Embedding model change invalidates stored vectors | Vector search quality silently degrades | Provider identity and dimension pinned in configuration; readiness identity guard blocks vector search on mismatch; operator-triggered resumable re-embedding lifecycle with checkpoints and atomic identity cutover (ADR-0005) |
 | Community detection and sampled betweenness differ from prototype outputs | Consumers expecting NetworkX-identical numbers are surprised | PRD explicitly waives numeric parity; determinism and ordering guarantees are documented per algorithm |
-| A single tenant's ingest or analytics load starves others | Platform-wide latency degradation | Batch size limits, analytics ceiling and cache, operation-level permissions, observability of per-tenant load |
+| A single tenant's ingest load starves others | Platform-wide latency degradation | Batch size limits, per-tenant concurrency gates, operation-level permissions, observability of per-tenant load |
+| Analytics load starves the interactive path | Ingest and search miss latency targets | Analytics runs as its own gear with its own CPU, memory and connection budget (ADR-0007), so the two cannot share a pool |
 | Shared ontologies evolve incompatibly across producers | Ingest failures or semantic drift between producers | Immutable schemas per GTS version, conflict-rejecting registration, family patterns that keep older derived types valid |
 | PostgreSQL 19 GA slips, or a PG19 beta regression hits the pinned stack | The gear ships on a beta database longer than planned | The stack is pinned (beta image + pgvector revision) and validated by the PG19 spike and the prototype's full test suite; the iterative-CTE backend can serve the whole fixed-depth API if a PGQ-specific regression appears; re-pin to stock at GA |
 | SQL/PGQ variable-length paths arrive later than PG20 | The CTE backend carries variable-depth expansion longer | The traversal port isolates the split; consumers see no API difference; a dedicated traversal mirror remains the measured-bottleneck contingency (ADR-0001) |
@@ -796,13 +859,15 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 
 ## 13. Open Questions
 
-- Who decides which payload attributes are indexed and which are vectorized — the ontology author via schema annotations, the platform administrator via deployment configuration, or both with an approval step? Owner: platform steering committee; deadline: before the v1 ontology-registration API freeze. Until resolved, the binding interim policy from ADR-0003 applies: annotations are declared by the ontology author, and index-affecting registrations require the ontology-administration permission.
+- Who decides which payload paths a type declares in its `index`, `full_text_search` and `vector_search` traits — the ontology author, the platform administrator via deployment configuration, or both with an approval step? Owner: platform steering committee; deadline: before the v1 ontology-registration API freeze. Until resolved, the binding interim policy from ADR-0003 applies: the declarations are authored by the ontology author, and index-affecting registrations require the ontology-administration permission.
 - Which embedding model does the platform standardize on, who owns model upgrades, and is re-embedding on model change automatic or operator-triggered?
 - Do managed-object reference nodes eventually sync through platform events (event-broker) instead of producer pushes, and if so, which component owns the subscription?
 - Are edge payload attributes worth indexing in v1, or do edge filters remain type-only until a concrete consumer needs attribute-level edge filtering?
 - What is the retention policy for phantom nodes that are never replaced by real nodes, or whose last referencing edge is removed by scope replacement — permanent visibility, TTL-based cleanup, or producer-triggered pruning? (See DESIGN § Phantom Materialization Contract for the transition rules that stop at this question.)
 - Does the gear expose a graph export format (such as the prototype's cfs-map document) in v1, and who are its consumers?
 - Does the gear expose a consumer-facing bounded graph-pattern query endpoint (a declarative graph-query DSL, e.g., derived from SQL/PGQ patterns) in a later version? Raw query languages cannot be exposed in a multi-tenant platform, so the shape and bounds of such a DSL — and which consumers need it — remain to be defined.
+- Should a write-side `GraphStoreV1` plugin ship in v1 rather than v2? ADR-0001 § Decision Outcome point 5 records the obligations it would have to carry — the Concurrency and Ordering Contract is currently expressed in PostgreSQL transactions, and search runs tsvector, pgvector KNN and RRF fusion in the same statements, so a store plugin is the whole data plane rather than the write path alone. The question is whether the platform wants that contract defined now, with the built-in PostgreSQL implementation as its only implementer plus a conformance suite and a fake, or after v1 with one shipped implementation to generalize from. Owner: platform architecture review.
+- When does cross-request PDP decision caching become necessary, and what invalidation signal backs it? DESIGN § Authorization Model records why v1 has none: the platform PEP publishes no revocation signal, so a TTL-only cache buys throughput at the price of a window in which a revoked permission still works. Resolving this needs a revocation epoch or decision version from the authorization side. Owner: authz-resolver.
 - Should an external graph engine be validated as the first third-party graph-engine plugin? The candidate experiment is an ArcadeDB plugin serving shortest-path queries over a rebuildable projection of the edge table (PG stays the system of record) — it would exercise the plugin contract end to end and feed the engine re-evaluation scheduled for Q1 2027 (ADR-0001) with first-hand data.
 
 ## 14. Traceability

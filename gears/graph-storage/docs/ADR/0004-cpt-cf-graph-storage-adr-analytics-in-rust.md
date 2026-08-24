@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-08-13
+superseded-in-part-by: ADR-0007
 decision-makers: Graph Storage design review
 ---
 
@@ -25,18 +26,31 @@ decision-makers: Graph Storage design review
 
 **ID**: `cpt-cf-graph-storage-adr-analytics-in-rust`
 
+> **Narrowed 2026-08-24 by [ADR-0007](./0007-cpt-cf-graph-storage-adr-analytics-own-gear.md).**
+> Everything this ADR decides about *what* analytics is — the algorithm set, the
+> canonical input ordering, the per-metric determinism contracts, the
+> `algorithm_contract_version`, the topology-only memory bound and the waived
+> NetworkX parity — stands unchanged. What it decided about *where* it runs does
+> not: analytics ships as its own gear reading this schema over a read-only role,
+> so the requirement below that computation "must not starve request handling" is
+> now a deployment boundary rather than an obligation on the code. The
+> requirements it references (`…-fr-graph-metrics`,
+> `…-fr-graph-analytics-extended`, `…-fr-metrics-cache`) move to that gear's PRD;
+> what graph-storage retains is `…-fr-analytics-topology`,
+> `…-fr-metric-annotation` and `…-fr-revision-signal`.
+
 ## Context and Problem Statement
 
 The prototype computed whole-graph metrics — degree, PageRank, betweenness centrality, Louvain communities, connected components — with NetworkX, loading the full graph into a Python in-memory structure. NetworkX has no Rust equivalent with identical algorithms, RNG behavior, and tie-breaking. The gear must decide how to deliver graph analytics in Rust: which library strategy, which parity promises, and where computation runs.
 
 ## Decision Drivers
 
-- `cpt-cf-graph-storage-fr-graph-metrics` (degree, PageRank, components) and `cpt-cf-graph-storage-fr-graph-analytics-extended` (betweenness, communities) define the required algorithm set with different priorities.
-- `cpt-cf-graph-storage-nfr-analytics-memory` bounds analytics to a topology-only in-memory projection under a configurable node ceiling.
+- The core metric requirement (degree, PageRank, components) and the extended one (betweenness, communities) define the required algorithm set with different priorities. Both moved to the analytics gear's PRD with ADR-0007 and take new identifiers there.
+- The analytics memory NFR bounds analytics to a topology-only in-memory projection under a configurable node ceiling; since ADR-0007 the graph-storage half of it is the read-only topology grant (`cpt-cf-graph-storage-nfr-analytics-memory`) and the computation ceilings live with the analytics gear.
 - NetworkX-exact outputs are unattainable for sampled betweenness (RNG-dependent sampling) and Louvain communities (RNG- and tie-break-dependent); any design promising parity would be dishonest.
 - The prototype's consumers depend on stable community ordering (size, then smallest member) for stable UI coloring — an ordering convention, not a numeric parity requirement.
 - Degree and components are trivially computable; PageRank is a short, well-specified iteration; Brandes betweenness (exact and sampled) is well documented; Louvain has Rust implementations but with different tie-breaking.
-- Metrics are cached by graph revision (`cpt-cf-graph-storage-fr-metrics-cache`), so computation cost is paid once per graph change, not per read.
+- Metrics are cached by graph revision, so computation cost is paid once per graph change, not per read; graph-storage guarantees the revision moves exactly when state changes (`cpt-cf-graph-storage-fr-revision-signal`).
 
 ## Considered Options
 
@@ -66,7 +80,7 @@ All metrics support edge-type exclusion, load only node keys and typed edges (ne
 - Migrating data from the prototype means community assignments and sampled betweenness values will change once; consumers of the prototype must be told explicitly.
 - The analytics component owns the node-ceiling enforcement and refuses oversized graphs with a clear error rather than degrading the whole gear.
 - Choosing or replacing a Louvain crate (or implementing Leiden later) is contained inside the analytics component behind its own interface; the API contract names guarantees, not libraries.
-- Analytics runs on the gear's runtime; long computations must be cooperatively cancellable and must not starve request handling.
+- Analytics runs in a Rust runtime; long computations must be cooperatively cancellable. Since ADR-0007 that runtime is a separate gear, so "must not starve request handling" is enforced by not sharing a process, connection pool or memory budget with the interactive path.
 
 ### Confirmation
 
@@ -117,7 +131,7 @@ The prototype's metric surface, its `exclude_edge_types` option (added because r
 
 This decision directly addresses:
 
-- `cpt-cf-graph-storage-fr-graph-metrics` — algorithm and determinism choices for the core metric set
-- `cpt-cf-graph-storage-fr-graph-analytics-extended` — betweenness and community strategy, parity waiver
-- `cpt-cf-graph-storage-fr-metrics-cache` — revision-keyed caching amortizes in-process computation
+- Core metrics, extended metrics and revision-keyed caching — moved to the `graph-analytics` gear's PRD by ADR-0007, where they take `cpt-cf-graph-analytics-*` identifiers
+- `cpt-cf-graph-storage-fr-analytics-topology` — the topology-only read surface those metrics consume
+- `cpt-cf-graph-storage-fr-revision-signal` — the revision that keys the cache
 - `cpt-cf-graph-storage-nfr-analytics-memory` — topology-only projection and node ceiling

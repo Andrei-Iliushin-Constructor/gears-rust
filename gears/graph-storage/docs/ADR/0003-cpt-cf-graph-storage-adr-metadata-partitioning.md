@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-08-13
+amended: 2026-08-24
 decision-makers: Graph Storage design review
 ---
 
@@ -24,6 +25,15 @@ decision-makers: Graph Storage design review
 <!-- /toc -->
 
 **ID**: `cpt-cf-graph-storage-adr-metadata-partitioning`
+
+> **Amendment 2026-08-24.** The partitioning decision is unchanged. What changed is
+> the carrier: indexing and vectorization declarations were specified as
+> per-property extension keywords (`x-gts-indexed`, `x-gts-vectorized`) and are now
+> GTS trait values on the gear's node base. The two reasons are recorded in the
+> Decision Outcome and Consequences below — the inheritance model already exists,
+> and the effective set becomes enumerable in one lookup. The change also splits
+> "vectorizable" into `full_text_search` and `vector_search`, which the single
+> annotation had conflated.
 
 ## Context and Problem Statement
 
@@ -51,26 +61,27 @@ This ADR is `accepted` for the partitioning mechanism, which DESIGN builds on no
 Chosen option: "C. Schema-declared partitioning", because the ontology author knows attribute semantics, the declaration lives in the same versioned, reviewable contract as the type itself, and the gear can enforce it mechanically. The layout:
 
 1. **Common columns** (every node, gear-defined): tenant, node key, GTS type, display name, created/updated timestamps, creating actor, embedding, search vector.
-2. **Indexed JSONB attributes**: payload attributes annotated in the GTS schema (e.g., an `x-gts-indexed` extension keyword) are queryable in tabular projections and scope filters; the gear maintains the supporting JSONB indexes.
-3. **Vectorizable attributes**: string attributes annotated (e.g., `x-gts-vectorized`) join the node's composed search text for embedding and full-text indexing.
+2. **Indexed, full-text and vectorized paths are declared as GTS trait values**, not as per-property extension keywords. The type carries three independent JSON-pointer lists — `index`, `full_text_search`, `vector_search` — under the gear's trait schema on the node base (DESIGN § Base Ontology GTS Schemas). Paths in `index` are queryable in tabular projections and scope filters and the gear maintains the supporting JSONB indexes; paths in `full_text_search` compose the node's tsvector; paths in `vector_search` compose the embedding input.
+3. **Full-text and vector declarations are separate lists.** They are different indexes with different costs, and a field worth putting in the tsvector is frequently the wrong field to embed — a single "vectorizable" annotation forced the two together.
 4. **Heavy content**: payloads above the configured ceiling are rejected; long-form content goes to the file-storage gear, referenced from the payload by file identifier (and may still contribute a bounded excerpt to search text via the content field).
 
 Until the steering committee resolves the governance question, the following **interim policy is binding**: annotations are authored by the ontology author and reviewed like any GTS contract change, and any type registration that provisions indexes or changes vectorization requires the ontology-administration permission (`cpt-cf-graph-storage-fr-access-control`), which keeps index-affecting registrations administratively gated. The steering-committee decision (owner of the open question; deadline: before the v1 ontology-registration API freeze) may replace this policy without reopening this ADR — the partitioning mechanism is unaffected by who approves declarations.
 
 ### Consequences
 
-- The GTS extension keywords for indexing and vectorization must be specified, versioned, and validated at type registration; unknown extension keywords remain rejected.
+- The declarations are trait values, so their inheritance and merge semantics along the derivation chain are the GTS registry's, already specified and already implemented. The gear registers no extension keyword of its own, and a schema carrying an unknown one is still rejected.
 - Filters over unannotated attributes are rejected with an error naming the indexed alternatives, keeping query performance honest (`cpt-cf-graph-storage-usecase-criteria-table` alternative flow).
 - Changing annotations is a type-version change with a **durable index activation lifecycle**: `requested -> building/backfilling -> active` (or `failed`), and `retiring -> removed` for the old version. Type registration commits the index *intent* atomically; the privileged DDL runs afterwards in the gear's background lifecycle worker using `CREATE INDEX CONCURRENTLY` (which cannot participate in the registration transaction) with idempotent index naming, retries, and cleanup of failed/invalid builds. Filters over an annotated attribute are admitted **only while its index is `active`** — before that they are rejected exactly like filters on unannotated attributes, so accepting a type version never silently enables full-table scans. Readiness reports in-flight and failed builds; old-version indexes are retained until the version retires.
-- The gear's GTS extension keywords are a **normative, versioned annotation vocabulary**, published as a meta-schema next to the base ontology: canonical keyword names, allowed schema locations and value shapes, supported JSON Schema value types and path restrictions, propagation to nested properties, inheritance through the GTS derivation chain, duplicate/narrowing/override and ancestor-vs-leaf conflict rules (the effective declaration is deterministic), which changes require a new type version, coexistence of old and new versions, and stable validation errors for unsupported declarations. Registration validates against this meta-schema and rejects unknown or malformed extensions.
+- The **annotation meta-schema this ADR previously owed is no longer needed**, and that is the main reason for the trait form. Canonical names, value shapes, allowed locations, inheritance along the chain and ancestor-versus-leaf override are all properties of `x-gts-traits-schema` / `x-gts-traits`: the schema is declared once on the base, the registry resolves the effective values right-to-left across the chain, and a value outside the declared shape is rejected by trait validation rather than by a gear-specific validator. What remains gear-specific is which paths are legal targets (they must resolve within `payload`, or be `/name` for full-text) and which changes require a new type version.
+- The effective declaration set for a type is **enumerable in one lookup** rather than by walking a schema tree. The ontology catalog, `$filter` admissibility checking and the index-provisioning lifecycle all need exactly that, and the gear persists it as `gts_type.effective_traits`.
 - The payload ceiling makes producer-side offloading mandatory for document-like content from day one, preventing the graph from becoming the platform's accidental blob store.
 - Until the governance question closes, deployments must treat index-affecting type registrations as administratively reviewed operations (the permission model in `cpt-cf-graph-storage-fr-access-control` already separates ontology administration from ingest).
 
 ### Confirmation
 
-- Type-registration tests validate the extension keywords and reject malformed annotations.
-- Projection tests confirm annotated attributes filter correctly and unannotated attribute filters are rejected with the documented error.
-- Ingest benchmarks confirm the payload ceiling and annotation-bounded indexing hold `cpt-cf-graph-storage-nfr-ingest-throughput`.
+- Type-registration tests confirm that a type resolving no `family` trait is rejected, that a trait value outside its declared shape is rejected, and that a leaf's declarations override an ancestor's for the same key — all through the platform's trait validation, verified against `gts-rust` 0.12.0 / GTS spec v0.13.1.
+- Projection tests confirm that paths declared in the `index` trait filter correctly and that filters over undeclared paths are rejected with the documented error naming the declared alternatives.
+- Ingest benchmarks confirm the payload ceiling and trait-bounded indexing hold `cpt-cf-graph-storage-nfr-ingest-throughput`.
 - The governance decision is confirmed when the approval flow is ratified by the platform steering committee (owner; blocking for the v1 ontology-registration API freeze) and recorded against the PRD open question; the interim permission-gated policy applies until then and its enforcement is covered by access-control tests.
 
 ## Pros and Cons of the Options
