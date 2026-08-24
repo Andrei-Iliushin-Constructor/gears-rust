@@ -964,6 +964,221 @@ one platform release as the deprecation window.
 
 **Error contract**: RFC-9457 problem details; validation failures carry per-item error lists (item index, GTS type, JSON pointer, message).
 
+#### Plugin trait surfaces
+
+The three plugin contracts live in `graph-storage-sdk/src/plugin_api.rs` and are
+what an external team implements against, so they are given here as signatures
+rather than only as responsibilities. Models are transport-agnostic and errors
+are canonical; each trait is `#[async_trait]` and `Send + Sync + 'static`,
+following the platform plugin pattern.
+
+One shared type carries what every store and engine call needs, and its shape is
+the load-bearing part of these contracts:
+
+```rust
+/// Per-call context. The compiled scope is mandatory, not optional:
+/// authorization has to reach inside the statements (a search arm applies it
+/// before ranking and LIMIT), so it cannot be a filter the gear applies to
+/// whatever the plugin returns.
+pub struct StoreCtx<'a> {
+    pub tenant: TenantId,
+    pub scope: &'a AccessScope,
+    /// Present when the call participates in a compound read that must observe
+    /// one graph state (Read Consistency Contract).
+    pub snapshot: Option<&'a ReadSnapshot>,
+    /// What is left of the operation's absolute deadline — never a fresh
+    /// timeout, so a slow earlier step shortens this one rather than extending
+    /// the total.
+    pub budget: RemainingBudget,
+    pub cancel: CancellationToken,
+}
+```
+
+##### `GraphStoreV1`
+
+```rust
+#[async_trait]
+pub trait GraphStoreV1: Send + Sync + 'static {
+    /// What this store provides. Anything absent here is answered
+    /// `Unsupported` by the methods below, never approximated.
+    fn capabilities(&self) -> StoreCapabilities;
+
+    // --- ontology -------------------------------------------------------
+    async fn register_types(&self, ctx: &StoreCtx<'_>, batch: Vec<TypeRegistration>)
+        -> Result<Vec<TypeRecord>, GraphStoreError>;
+    async fn get_type(&self, ctx: &StoreCtx<'_>, id: &GtsTypeId)
+        -> Result<TypeRecord, GraphStoreError>;
+    async fn list_types(&self, ctx: &StoreCtx<'_>, query: TypeQuery)
+        -> Result<Page<TypeRecord>, GraphStoreError>;
+    /// Resolve GTS patterns to the set of registered types they cover, so a
+    /// caller's type filter and an authorizing permission's pattern can be
+    /// intersected on one representation.
+    async fn resolve_type_set(&self, ctx: &StoreCtx<'_>, patterns: &[GtsIdPattern])
+        -> Result<TypeIdSet, GraphStoreError>;
+
+    // --- write ----------------------------------------------------------
+    /// Nodes, edges, chunks and the idempotency record commit together or not
+    /// at all. A replay of a recorded key returns `IngestOutcome::replayed`
+    /// without touching state.
+    async fn ingest(&self, ctx: &StoreCtx<'_>, req: IngestRequest)
+        -> Result<IngestOutcome, GraphStoreError>;
+    /// Tombstone a node with its incident edges, or a single edge.
+    async fn soft_delete(&self, ctx: &StoreCtx<'_>, req: DeleteRequest)
+        -> Result<DeleteOutcome, GraphStoreError>;
+
+    // --- labels ---------------------------------------------------------
+    async fn upsert_label(&self, ctx: &StoreCtx<'_>, label: LabelSpec)
+        -> Result<LabelRecord, GraphStoreError>;
+    async fn delete_label(&self, ctx: &StoreCtx<'_>, id: LabelId)
+        -> Result<RevisionOutcome, GraphStoreError>;
+    async fn list_labels(&self, ctx: &StoreCtx<'_>)
+        -> Result<Vec<LabelRecord>, GraphStoreError>;
+    async fn assign_labels(&self, ctx: &StoreCtx<'_>, req: LabelAssignment)
+        -> Result<RevisionOutcome, GraphStoreError>;
+
+    // --- read -----------------------------------------------------------
+    /// Open a snapshot for a compound read. Every subsequent call carrying it
+    /// in `StoreCtx` observes one graph state.
+    async fn begin_read(&self, ctx: &StoreCtx<'_>)
+        -> Result<ReadSnapshot, GraphStoreError>;
+    async fn revision(&self, ctx: &StoreCtx<'_>)
+        -> Result<GraphRevision, GraphStoreError>;
+    async fn get_node(&self, ctx: &StoreCtx<'_>, key: &NodeKey, adjacency_limit: u32)
+        -> Result<NodeView, GraphStoreError>;
+    async fn hydrate_nodes(&self, ctx: &StoreCtx<'_>, ids: &[NodeId])
+        -> Result<Vec<NodeView>, GraphStoreError>;
+    /// One call, not one per arm: the scope must apply inside each arm before
+    /// UNION, ranking and LIMIT, and RRF needs each arm's ranks. Exposing the
+    /// arms separately would let a caller assemble them in an order that
+    /// authorizes correctly and ranks wrongly, or the reverse.
+    async fn search(&self, ctx: &StoreCtx<'_>, req: SearchRequest)
+        -> Result<SearchResponse, GraphStoreError>;
+    async fn project_table(&self, ctx: &StoreCtx<'_>, req: ProjectionRequest)
+        -> Result<Page<NodeRow>, GraphStoreError>;
+    /// Node keys with their type and typed edge pairs, tombstoned rows
+    /// excluded, paged. This is the *capability*; how it is exposed depends on
+    /// the store. The built-in PostgreSQL store materializes it as the
+    /// read-only role the analytics gear queries directly, because serializing
+    /// a million-node topology across an API on every recomputation is the cost
+    /// ADR-0004 rejected. A store that cannot expose it declares the capability
+    /// absent, and analytics is then unavailable in that deployment (ADR-0007)
+    /// rather than served over this method at that cost.
+    async fn load_topology(&self, ctx: &StoreCtx<'_>, req: TopologyRequest)
+        -> Result<TopologyPage, GraphStoreError>;
+}
+```
+
+The five obligations of `cpt-cf-graph-storage-contract-graph-store-plugin` are
+carried by specific methods, and each is asserted by the conformance suite
+against both the built-in store and the fake:
+
+| Obligation | Carried by | What the suite asserts |
+|---|---|---|
+| Batch atomicity across nodes, edges and the idempotency record | `ingest` | A batch failing partway leaves no node, edge or idempotency record |
+| Single-writer serialization per scope identity, held until durable | `ingest` with `req.replace_scope` | Two concurrent replacements of one scope serialize rather than union |
+| Monotonic generation fencing under that serialization | `ingest` with `req.replace_scope.generation` | An older generation is rejected; an equal one with different content conflicts |
+| A node with a live incident edge cannot be removed | `soft_delete` | A node delete tombstones its incident edges, or the call fails; never a node without them |
+| One snapshot across every arm of one read | `begin_read` + `StoreCtx::snapshot` | Two arms of one search, and a hydration after it, observe one revision |
+
+An implementation that cannot provide an obligation declares the corresponding
+capability absent in `StoreCapabilities` and returns
+`GraphStoreError::Unsupported` from the affected method. It does not implement a
+weaker version — a silently weakened guarantee is worse than an absent
+capability, because the gear can route around the second and not the first.
+
+##### `GraphEngineV1`
+
+```rust
+#[async_trait]
+pub trait GraphEngineV1: Send + Sync + 'static {
+    fn capabilities(&self) -> EngineCapabilities;
+
+    /// The (source epoch, graph revision) this engine has applied. The epoch is
+    /// a non-reusable timeline identifier, so a projection that survived a
+    /// point-in-time restore of the source database is detected rather than
+    /// served.
+    async fn cursor(&self, ctx: &StoreCtx<'_>) -> Result<EngineCursor, GraphEngineError>;
+
+    /// Directed one-hop expansion of an authorized frontier. Chained by the
+    /// caller with per-hop dedup; the engine never expands beyond one hop, so
+    /// budgets and authorization are re-evaluated between hops rather than
+    /// inside an opaque traversal.
+    async fn expand(&self, ctx: &StoreCtx<'_>, req: ExpandRequest)
+        -> Result<ExpandResponse, GraphEngineError>;
+
+    /// Declared capabilities only; otherwise `GraphEngineError::Unsupported`.
+    async fn shortest_path(&self, ctx: &StoreCtx<'_>, req: ShortestPathRequest)
+        -> Result<PathResponse, GraphEngineError>;
+    async fn match_pattern(&self, ctx: &StoreCtx<'_>, req: PatternRequest)
+        -> Result<PatternResponse, GraphEngineError>;
+}
+
+pub struct ExpandRequest {
+    pub frontier: Vec<NodeId>,
+    pub direction: Direction,          // explicit; there is no "undirected" shorthand
+    pub edge_types: Option<TypeIdSet>, // per-hop restriction
+    pub labels: Option<LabelFilter>,   // per-hop restriction
+    pub budget: HopBudget,             // frontier cap and cumulative edges scanned
+}
+
+pub struct ExpandResponse {
+    pub reached: Vec<NodeId>,
+    pub edges: Vec<EdgeRef>,
+    pub truncated: Option<TruncationReason>, // never silent
+}
+```
+
+Two shapes here are consequences of the PG19 spike rather than preference: the
+direction is explicit because the undirected shorthand plans as an all-vertex
+probe, and expansion is a one-hop primitive because multi-hop chain patterns
+enumerate paths and explode on hubs.
+
+When an engine cannot enforce a scope property it returns
+`GraphEngineError::ScopeNotEnforceable` rather than executing with a weaker
+predicate. The port then serves the request on the two-query hop and logs the
+reason — which is the whole point of making it a typed error instead of a
+best-effort filter.
+
+##### `EmbeddingProviderV1`
+
+```rust
+#[async_trait]
+pub trait EmbeddingProviderV1: Send + Sync + 'static {
+    /// Model artifact and version or hash, tokenizer artifact, preprocessing
+    /// and pooling configuration — not just a dimension. Two providers with the
+    /// same dimension and different identities produce incomparable vectors,
+    /// which is invisible at write time and wrong at query time.
+    fn embedding_space(&self) -> &EmbeddingSpaceId;
+    fn dimension(&self) -> u32;
+
+    /// Batched, not per item: the batch is where a remote provider's round trip
+    /// is amortized, and per-item calls would multiply the deadline problem by
+    /// the batch size.
+    async fn embed(&self, req: EmbedRequest) -> Result<EmbedResponse, EmbeddingProviderError>;
+
+    async fn health(&self) -> Result<(), EmbeddingProviderError>;
+}
+
+pub struct EmbedRequest {
+    pub inputs: Vec<String>,
+    pub budget: RemainingBudget,
+    pub cancel: CancellationToken,
+}
+
+pub struct EmbedResponse {
+    /// Aligned with `inputs` by index; a provider that cannot return one vector
+    /// per input fails the call rather than returning a short vector.
+    pub vectors: Vec<Vec<f32>>,
+    /// Echoed so a mismatch is caught at use, not only at configuration.
+    pub space: EmbeddingSpaceId,
+}
+```
+
+A provider failure maps to `unavailable` and fails the ingest batch. It is never
+downgraded to an unembedded write, because a node that exists without its vector
+is invisible to vector search while looking present on every other path.
+
+
 ### 3.4 Internal Dependencies
 
 - `toolkit` (gear macro, lifecycle, OperationBuilder, ClientHub), `toolkit-db`/SecureORM (Scopable entities, DBRunner, SecureTx), `toolkit-gts` (identifier grammar, UUIDv5, schema/instance registration), `toolkit-odata` (tabular projection filtering), `toolkit-canonical-errors` (SDK error surface).
