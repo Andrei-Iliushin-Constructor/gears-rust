@@ -164,7 +164,7 @@ flowchart TD
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-principle-single-source-of-truth`
 
-All graph state — nodes, edges, chunks, types, vectors, revisions, metric caches — lives in one PostgreSQL schema. No mirrors, no dual writes, no derived stores that can drift. ADR: [`cpt-cf-graph-storage-adr-single-postgres-store`](./ADR/0001-cpt-cf-graph-storage-adr-single-postgres-store.md).
+All graph state — nodes, edges, chunks, types, vectors, labels, revisions — lives in one store, reached through one port (`GraphStoreV1`). No mirrors, no dual writes, no derived stores that can drift; a graph engine or an analytics projection is always a rebuildable view of that one source of truth, never a second one. The built-in store is a single PostgreSQL schema and is what every deployment gets by default; the principle is the singularity, not the vendor. ADR: [`cpt-cf-graph-storage-adr-single-postgres-store`](./ADR/0001-cpt-cf-graph-storage-adr-single-postgres-store.md).
 
 #### Everything Is Typed
 
@@ -830,15 +830,19 @@ What stays here is the boundary:
 
 ##### Why this component exists
 
-One infra component owns entities, tenancy scoping, migrations, and the hand-written traversal SQL so that tenant isolation is enforceable and auditable in one place.
+One infra component owns entities, tenancy scoping, migrations, and the hand-written traversal SQL so that tenant isolation is enforceable and auditable in one place. Since ADR-0001 it is also the built-in implementation of `GraphStoreV1` (`cpt-cf-graph-storage-contract-graph-store-plugin`) rather than the only way to reach data.
 
 ##### Responsibility scope
 
-SeaORM entities with `Scopable` tenancy; repositories generic over `DBRunner`; batched insert/upsert statements; the traversal queries with injected tenant predicates; index definitions (composite edge indexes, tsvector GIN, payload-annotation indexes, HNSW vector indexes); migrations including vector dimension; readiness probes.
+SeaORM entities with `Scopable` tenancy; repositories generic over `DBRunner`; batched insert/upsert statements; the traversal queries with injected tenant predicates; index definitions (composite edge indexes, tsvector GIN, trait-declared payload indexes, HNSW vector indexes, all partial on `deleted_at IS NULL`); migrations including vector dimension; the read-only topology role (ADR-0007); readiness probes.
+
+It implements `GraphStoreV1` and is registered as the default store plugin exactly like an external one. The trait spans ingest, node and edge reads, tombstoning, the four search arms with their fusion inputs, tabular projection, label assignment and the topology surface — search is inside it because a store that could not answer the search API would not be a store for this gear. The obligations the trait states are behavioural, not mechanical: batch atomicity across nodes, edges and the idempotency record; single-writer serialization per scope identity held until durable; generation fencing under that serialization; refusal to remove a node a live edge references; one snapshot across every arm of a read. This implementation satisfies them with transactions, an exclusive scope-registry row lock, a compare-and-set under it, `ON DELETE RESTRICT`, and a repeatable-read snapshot; another implementation may satisfy them differently, and one that cannot satisfy an obligation declares the capability unsupported rather than approximating it.
 
 ##### Responsibility boundaries
 
-Contains no business rules; exposes typed ports consumed by domain services. Traversal statements are built exclusively through the secure ORM — entity queries today, and the safe-CTE builder (`with_ctes` / `cte` / `join_cte`, scope embedded in every CTE body) once it lands. The gear never holds a raw executor and never assembles SQL from strings, so the platform's no-raw-SQL policy is preserved by construction rather than by review. Covered by adversarial tenancy and resource-scope tests.
+Contains no business rules; exposes typed ports consumed by domain services. Traversal statements are built exclusively through the secure ORM — entity queries today, and the safe-CTE builder (`with_ctes` / `cte` / `join_cte`, scope embedded in every CTE body) once it lands. The gear never holds a raw executor and never assembles SQL from strings, so the platform's no-raw-SQL policy is preserved by construction rather than by review.
+
+No domain service reaches an entity or a statement except through `GraphStoreV1`: anything that bypasses the port is behaviour no other store can reproduce, so the architecture lint that forbids raw SQL in gear code extends to entity access outside this component. Conformance is demonstrated rather than reviewed — the shared suite runs against this implementation and against an in-memory fake, covering every obligation above plus the resource-scoped adversarial authorization cases, the anti-enumeration cases and the tombstone visibility rules. A change to the trait that only this implementation can satisfy fails on the fake, which is why the fake exists.
 
 ##### Related components (by ID)
 
@@ -887,7 +891,7 @@ No behavior differences from REST beyond transport; identical permission checks 
 
 ### 3.3 API Contracts
 
-The public surfaces are defined in the PRD as `cpt-cf-graph-storage-interface-rest-api` and `cpt-cf-graph-storage-interface-sdk-client`, with external contracts `cpt-cf-graph-storage-contract-gts-ontology`, `cpt-cf-graph-storage-contract-embedding-provider`, and `cpt-cf-graph-storage-contract-graph-engine-plugin` (the two plugin contracts follow the platform pattern: plugin trait + GTS-registered plugin instances discovered via types-registry and resolved through ClientHub scoped clients).
+The public surfaces are defined in the PRD as `cpt-cf-graph-storage-interface-rest-api` and `cpt-cf-graph-storage-interface-sdk-client`, with external contracts `cpt-cf-graph-storage-contract-gts-ontology`, `cpt-cf-graph-storage-contract-embedding-provider`, `cpt-cf-graph-storage-contract-graph-engine-plugin`, and `cpt-cf-graph-storage-contract-graph-store-plugin` (the three plugin contracts follow the platform pattern: plugin trait + GTS-registered plugin instances discovered via types-registry and resolved through ClientHub scoped clients). Because the store is pluggable, no PostgreSQL concept appears anywhere in the REST or SDK surface below.
 
 **REST surface** (`/api/graph-storage/v1`, all operations authenticated and permission-checked):
 
@@ -1539,7 +1543,7 @@ The full graph-engine evaluation behind this strategy (12-engine scoreboard, Fal
 
 The platform baseline (PluginV1, types-registry registration, scoped ClientHub clients) supplies the mechanics; this section owns the Graph Storage-specific contracts, defined separately for embedding providers and graph engines:
 
-- **GTS plugin schemas**: two siblings off the platform plugin base — `gts.cf.toolkit.plugins.plugin.v1~cf.core.graph_storage.embedding_provider.v1~` and `gts.cf.toolkit.plugins.plugin.v1~cf.core.graph_storage.graph_engine.v1~`. A derived type carries its ancestry in the identifier, as every other gear's plugin does (`…~cf.core.credstore.plugin.v1~`, `…~cf.llmgw.provider.plugin.v1~`). Validated properties — provider/engine identity, declared capabilities and authorization predicates, embedding-space identity or projection characteristics, priority.
+- **GTS plugin schemas**: three siblings off the platform plugin base — `gts.cf.toolkit.plugins.plugin.v1~cf.core.graph_storage.embedding_provider.v1~`, `gts.cf.toolkit.plugins.plugin.v1~cf.core.graph_storage.graph_engine.v1~` and `gts.cf.toolkit.plugins.plugin.v1~cf.core.graph_storage.graph_store.v1~`. A derived type carries its ancestry in the identifier, as every other gear's plugin does (`…~cf.core.credstore.plugin.v1~`, `…~cf.llmgw.provider.plugin.v1~`). Validated properties — provider/engine identity, declared capabilities and authorization predicates, embedding-space identity or projection characteristics, priority.
 - **Versioned SDK traits** (`EmbeddingProviderV1`, `GraphEngineV1`) with typed request/result/error models; the schema major maps one-to-one to the trait version, and a registered instance resolves to a scoped ClientHub client of the matching trait version — an incompatible version is a deterministic selection error, never a silent downgrade.
 - **Selection**: with no selector configured, the built-in default is used (in-process ONNX provider, built-in PostgreSQL engine); ties break deterministically on (priority, instance id). An **explicitly configured selector that matches nothing compatible never falls back** — it is a deterministic selection error and a readiness failure, because silently substituting a different embedding space or engine semantics would hide a deployment error.
 - **Readiness and churn**: a selected plugin participates in readiness; cached selections are invalidated on instance disappearance or re-registration, and re-selection follows the same deterministic rules.
