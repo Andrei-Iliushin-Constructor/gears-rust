@@ -1010,6 +1010,178 @@ one platform release as the deprecation window.
 7. Return per-item results, phantom list, revision
 ```
 
+
+#### Worked Example: One Ingest, End to End
+
+**ID**: `cpt-cf-graph-storage-seq-ingest-worked-example`
+
+The table above says which operations exist; this traces one of them all the way
+through, because the questions that decide an implementation — where the
+idempotency key lives, which permission is checked, where the scope reaches the
+data, what a partial failure looks like — are not answerable from an endpoint
+list. Ingest is the richest operation, so it is the one worked out here. Types
+are from § 3.1's worked producer example.
+
+**1. The request.** The idempotency key is a header, the platform's
+`Idempotency-Key`, so the platform retry layer can see it and decide whether the
+request is safely retryable at all; the canonical request hash is computed over
+the body. Everything else is body, including scope replacement and its
+generation:
+
+```http
+POST /api/graph-storage/v1/ingest
+Authorization: Bearer <token>
+Idempotency-Key: 2f8a1c04-6d13-4a5b-9e77-c0a1b2d3e4f5
+Content-Type: application/json
+```
+```jsonc
+{
+  "options": {
+    "embed": true,               // false skips embedding; existing vectors are kept, not cleared
+    "materialize_phantoms": true,
+    "report_per_item": false     // aggregate counts on success; errors are always per item
+  },
+  "replace_scope": {             // omit entirely for an additive ingest
+    "attribute": "repository",
+    "value": "acme/infra",
+    "generation": 4711           // monotonic per scope; an older one is rejected as stale
+  },
+  "nodes": [
+    {
+      "node_key": "finding:acme:SEC-014:a1b2c3",
+      "type": "gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~acme.sec._.finding.v1~",
+      "name": "Hardcoded credential in deploy script",
+      "expected_version": 3,     // optional compare-and-set; a mismatch rejects the batch
+      "payload": {
+        "severity": "high",
+        "rule_id": "SEC-014",
+        "repository": "acme/infra",
+        "title": "Hardcoded credential",
+        "description": "A long-lived token is written into deploy.sh ..."
+      }
+    }
+  ],
+  "edges": [
+    {
+      "type": "gts.cf.core.graph_storage.edge.v1~cf.core.graph_storage.analysis_edge.v1~acme.sec._.introduced_by.v1~",
+      "src_node_key": "finding:acme:SEC-014:a1b2c3",
+      "dst_node_key": "commit:github:acme/infra:a1b2c3",
+      "payload": {
+        "provenance": {
+          "produced_by": "acme-blame-analyzer",
+          "method": "git-blame",
+          "produced_at": "2026-08-24T09:14:02Z",
+          "confidence": 0.82
+        }
+      }
+    }
+  ]
+}
+```
+
+The edge carries no `id`: it is derived by the gear from type, endpoints and
+discriminator. The commit node is not in this batch — if it has not been
+ingested yet it materializes as a phantom, which is why endpoint constraints are
+checked against the *materialized* type and not against the request.
+
+**2. Security.** The permission is `ingest` on ResourceType *graph node*, and
+edges authorize through both endpoints (Authorization Model). The decision is
+resolved once, from the PDP, for this request — never reused from a previous one
+and never skipped because the `(tenant, type)` pair already exists locally.
+
+The PolicyEnforcer-backed application service sits **below** both adapters, not
+inside either: the REST handler and the ClientHub local client each build a
+SecurityContext and call the same service, so neither owns a permission check.
+Nothing differs on the in-process path — same decision, same admission limits,
+same error mapping — and REST/ClientHub parity is asserted in the contract
+suite rather than assumed. A caller whose PDP decision is, say, *write on
+findings in repositories the caller owns* gets a compiled `AccessScope`
+expressing that constraint; a constraint that cannot be represented in SQL for
+the target entity fails closed rather than degrading to tenant-only filtering.
+
+**3. Where the scope reaches the data.** Not at the edge and not as a
+post-filter. The compiled scope is a mandatory input to `GraphStoreV1`, so it is
+present in the statements themselves: the endpoint-existence and
+endpoint-constraint checks run under it, so an unauthorized endpoint is
+indistinguishable from a missing one; the upsert is scoped, so writing outside
+the scope is not a rejected statement but an impossible one; and scope
+replacement can only delete rows the caller could have written.
+
+**4. Plugins.** Three are involved, and their failure modes differ:
+
+- The **embedding provider** is called once per batch, not per node, with the
+  *remaining* deadline budget rather than a fresh timeout — the absolute
+  deadline created at admission is what every subsequent step spends from. A
+  provider failure maps to `unavailable` (`DEPENDENCY_UNAVAILABLE`) and fails the
+  batch; it is never silently downgraded to an unembedded write, because a node
+  that exists without its vector is invisible to vector search while looking
+  present everywhere else.
+- The **store** is `GraphStoreV1`, resolved at gear init through the plugin
+  selector; the built-in PostgreSQL store is the default instance and is
+  registered exactly like an external one.
+- The **graph engine** is not involved in ingest at all. It is selected the same
+  way and used by traversal.
+
+**5. Traversal path.** Not exercised by ingest — recorded here because the
+question was asked against this example. A read that does traverse picks its
+path by configuration, and when the configured path cannot serve the request the
+port serves it on the two-query hop and logs the reason rather than substituting
+quietly: a `GRAPH_TABLE` pattern has to be bounded to an enumerable set of
+tenants, which `allow_all` and tenant-subtree scopes are not. All three paths
+return identical results for the same seeds and scope, which is what makes the
+choice a configuration detail rather than a semantic one.
+
+**6. The response.** Success, with `report_per_item` unset:
+
+```jsonc
+{
+  "graph_revision": 90412,        // unchanged if the batch converged without writing
+  "nodes":  { "created": 0, "updated": 1, "unchanged": 0 },
+  "edges":  { "created": 1, "updated": 0, "unchanged": 0 },
+  "chunks": { "created": 0, "deleted": 0 },
+  "phantoms_materialized": ["commit:github:acme/infra:a1b2c3"],
+  "scope_replacement": { "deleted_nodes": 2, "deleted_edges": 5, "generation": 4711 },
+  "idempotency": "committed"      // "replayed" when a recorded outcome was returned
+}
+```
+
+And a validation failure, RFC 9457 with the per-item list:
+
+```jsonc
+{
+  "type": "gts.cf.core.graph_storage.err.v1~cf.core.graph_storage.validation_failed.v1~",
+  "title": "Ingest batch rejected",
+  "status": 422,
+  "detail": "2 of 1 nodes and 1 edges failed validation; no part of the batch was applied",
+  "instance": "/api/graph-storage/v1/ingest",
+  "trace_id": "0af7651916cd43dd8448eb211c80319c",
+  "errors": [
+    {
+      "kind": "node",
+      "index": 0,
+      "key": "finding:acme:SEC-014:a1b2c3",
+      "gts_type": "gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~acme.sec._.finding.v1~",
+      "pointer": "/payload/severity",
+      "message": "\"critical-ish\" is not one of \"low\", \"medium\", \"high\", \"critical\""
+    },
+    {
+      "kind": "edge",
+      "index": 0,
+      "gts_type": "gts.cf.core.graph_storage.edge.v1~cf.core.graph_storage.analysis_edge.v1~acme.sec._.introduced_by.v1~",
+      "pointer": "/payload/provenance/produced_at",
+      "message": "required property missing"
+    }
+  ]
+}
+```
+
+The batch is atomic, so a per-item error list describes what was rejected, never
+what was partially applied. Conflicts are a different problem type from
+validation — a node upserted with a different type, an expected version that no
+longer matches, an idempotency key reused with a different body, a stale scope
+generation — so a producer can react mechanically (rebase, drop the stale run,
+back off) instead of parsing prose.
+
 #### Hybrid Search
 
 **ID**: `cpt-cf-graph-storage-seq-hybrid-search`
