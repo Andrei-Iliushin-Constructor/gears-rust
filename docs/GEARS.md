@@ -805,8 +805,9 @@ Supply the Billing Ledger with live foreign-exchange reference rates from config
 #### High Level Scenarios
 - [x] p1 - fetch and compose rates from configured source plugins (ECB primary)
 - [x] p1 - register composite rate provider via types-registry plugin pattern
-- [ ] p2 - additional source plugins (http-json, external-FX)
-- [ ] p3 - rate audit trail with provider attribution and publication timestamps
+- [x] p1 - return per-rate provider provenance and original publication
+- [x] p2 - onboard plain REST feeds via the http-json source plugin
+- [ ] p3 - additional external-FX source plugins (bank/PSP and other provider families)
 #### More details
 - [PRD](../gears/bss/rate-provider/docs/PRD.md)
 - [Design](../gears/bss/rate-provider/docs/DESIGN.md)
