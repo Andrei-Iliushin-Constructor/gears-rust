@@ -1189,7 +1189,7 @@ is invisible to vector search while looking present on every other path.
 ### 3.4 Internal Dependencies
 
 - `toolkit` (gear macro, lifecycle, OperationBuilder, ClientHub), `toolkit-db`/SecureORM (Scopable entities, DBRunner, SecureTx), `toolkit-gts` (identifier grammar, UUIDv5, schema/instance registration), `toolkit-odata` (tabular projection filtering), `toolkit-canonical-errors` (SDK error surface).
-- **Platform enabler, not a blocker**: safe CTE support in the secure ORM, so a gear can scope a CTE body and compose a multi-table statement without raw SQL. Raised with the ToolKit owners as a scoped custom-query primitive and delivered as `toolkit-db` PR #4584, which implements Level A of the platform CTE policy: a scoped query gains `with_ctes()` / `cte()` / `join_cte()`, with the scope embedded in every CTE body and seeded from the outer query's own `AccessScope`, so a differently-scoped CTE is unrepresentable. The stand established that bounded traversal ships without it (two scoped queries per hop); what it unlocks is the single-statement path and, with it, composing vector KNN, graph expansion and full-text in one statement. The gear's hop was rebuilt against that branch and renders as one scoped statement, so the dependency is confirmed satisfiable rather than assumed (see PRD Dependencies/Risks).
+- **Platform enabler, not a blocker**: safe CTE support in the secure ORM, so a gear can scope a CTE body and compose a multi-table statement without raw SQL. Raised with the ToolKit owners as a scoped custom-query primitive and delivered in two halves — `toolkit-db` PR #4584 (merged, ADR-0001) for CTEs and PR #4639 (in review, ADR-0002) for SQL/PGQ. The CTE half implements Level A of the platform CTE policy: a scoped query gains `with_ctes()` / `cte()` / `join_cte()`, with the scope embedded in every CTE body and seeded from the outer query's own `AccessScope`, so a differently-scoped CTE is unrepresentable. The stand established that bounded traversal ships without it (two scoped queries per hop); what it unlocks is the single-statement path and, with it, composing vector KNN, graph expansion and full-text in one statement. The gear's hop was rebuilt against that branch and renders as one scoped statement, so the dependency is confirmed satisfiable rather than assumed (see PRD Dependencies/Risks).
 - Platform gears: authz-resolver (PDP), types-registry (base ontology and permission instances), file-storage (heavy-content references only — the gear stores identifiers, consumers resolve them).
 
 ### 3.5 External Dependencies
@@ -2094,7 +2094,37 @@ The `GraphQueryPort` is the graph-engine plugin surface (`cpt-cf-graph-storage-c
 
 **The path that needs nothing from the platform.** A development stand built against PostgreSQL 19 established that as the secure ORM stood, neither single-statement path was reachable from gear code: the scope-condition builder is not exported, so a gear can scope a whole entity query but cannot obtain the scope predicate for a subquery, a join, or a CTE body. The **two-query scoped hop** — one scoped query over the edge table for incident edges, then one scoped query over the endpoints, whose authorised result becomes the next frontier — requires no new platform capability, keeps the walk inside the caller-authorised subgraph by construction, and measured p95 0.37 ms per hop on 200k nodes / 600k edges. It remains the fallback whenever a request's scope defeats the others.
 
-**What the platform is adding.** `toolkit-db` PR #4584 implements Level A of the platform CTE policy, giving a scoped query `with_ctes()` / `cte()` / `join_cte()` with the scope embedded in every CTE body. The gear's hop was rebuilt against that branch and renders as one scoped statement, so the single-statement path is confirmed reachable rather than assumed; the port hides the change from callers. Two query-shape rules bind that implementation, both measured on the stand and both invisible in the SQL's logical meaning:
+**What the platform has added.** Both single-statement paths now have a secure
+execution route inside `toolkit-db`, and neither requires raw SQL or a raw
+executor in the gear:
+
+- **CTE** — `toolkit-db` PR #4584 (merged), Level A of the platform CTE policy:
+  a scoped query gains `with_ctes()` / `cte()` / `join_cte()` with the scope
+  embedded in every CTE body and seeded from the outer query's own
+  `AccessScope`, so a differently-scoped body is unrepresentable. `RecursiveCte`
+  additionally requires an explicit `max_depth`, emitted as a predicate on the
+  recursive member — the depth bound this gear's traversal contract needs is
+  enforced by the primitive rather than by convention.
+- **SQL/PGQ** — `toolkit-db` PR #4639 (in review), ADR-0002:
+  `SecureGraphSelect`, reachable only from `SecureSelect<E, Scoped>`, injecting
+  the scope into every element pattern, vertices and edges alike. Elements are
+  addressed by entity type rather than by label, and the `PROPERTIES` list is
+  derived from the entity's own scope columns, so an element that resolves no
+  scope column is a build error rather than a silent deny-all.
+
+Two constraints of the SQL/PGQ shape are load-bearing for this gear's traversal
+and are designed around rather than discovered later. A pattern accepts no
+subquery in any form, so `InGroup`, `InGroupSubtree` and `InTenantSubtree`
+compile to a correlated sibling `FROM` item placed once and referenced by every
+element; a caller with nowhere to put that item declares `SiblingSupport::Rejected`
+and gets an error rather than a dropped filter. And two OR-ed constraints that
+each need such an item are refused, because comma-joined siblings from different
+alternatives would either zero or multiply the result — a scope of that shape
+falls back to the two-query hop, which the port already owns.
+
+The gear's hop was rebuilt against both and renders as one scoped statement, so
+the single-statement path is confirmed reachable rather than assumed; the port
+hides the choice from callers. Two query-shape rules bind that implementation, both measured on the stand and both invisible in the SQL's logical meaning:
 
 - Membership in "either endpoint of an incident edge" must be **one semi-join over the union of the endpoint columns**. The equivalent `id IN (src) OR id IN (dst)` cannot drive an index off two hashed subplans and degrades to a sequential scan of the node table — 15.2 ms against 0.30 ms for the same rows.
 - Both the CTE body and the outer query must be **projected to the columns actually read**. A CTE referenced twice is materialized, so an unprojected body drags the edge payload through memory; an unprojected outer query loses the index-only scan and visits the heap for every row — 0.371 ms against 0.079 ms.
