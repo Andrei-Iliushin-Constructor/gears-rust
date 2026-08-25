@@ -3,5 +3,5 @@ name = "LLM Gateway"
 description = "Unified LLM access with multimodal support, tool calling, and governance controls."
 category = "gen-ai"
 is_plugin = false
-has_plugins = false
-has_extension_point = false
+has_plugins = true
+has_extension_point = true

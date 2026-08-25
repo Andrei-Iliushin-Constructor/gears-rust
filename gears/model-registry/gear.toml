@@ -3,5 +3,5 @@ name = "Models Registry"
 description = "Catalog of available models with tenant-level availability and approval workflows."
 category = "gen-ai"
 is_plugin = false
-has_plugins = false
+has_plugins = true
 has_extension_point = true
