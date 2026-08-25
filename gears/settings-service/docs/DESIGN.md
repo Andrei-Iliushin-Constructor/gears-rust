@@ -289,7 +289,7 @@ Three things R1 supplies itself rather than waiting on the platform:
 
 | Need | R1 answer |
 |------|-----------|
-| Audit, which every mutation fails closed on (§4.2 *Audit Emitter*) | A **gear-local sink** writing the record in the mutation's own transaction. The external Audit Subsystem becomes an adapter swap in R2 with no contract change |
+| Audit, which every mutation fails closed on (§4.2 *Audit Emitter*) | A **gear-local sink** writing the record in the mutation's own transaction, and the store of record for the online window. R2 adds a shipper that drains onward to the platform subsystem — an addition behind the same port, not a replacement |
 | Step-up verification, without which Apply refuses (§4.2 *Apply Orchestrator*) | The **default OIDC/JWKS binding**, built here: the bearer token is already carried in `SecurityContext` and the JWKS machinery already exists in the platform's auth library |
 | A verified machine caller identity, which the reader and contribution traits assume (§5) | **Not supplied — scoped out.** R1 is **Embedded-only**: the SDK traits are bound in-process, which is the one configuration where the trusted-caller model holds (§4.8 *Trusted-Caller Boundary*) |
 
@@ -451,7 +451,7 @@ Visibility gating by `licence_feature` uses the the License Resolver via `Licens
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-constraint-audit-and-events`
 
-Mutations write to the platform audit subsystem (unlike RBAC v1, audit is **not** deferred here — it is a PRD show-stopper). Apply-lifecycle, declaration, and secret-use events are published, and `tenant_deleted` is consumed, through the platform **Event Broker** (§4.4); local cache invalidation is in-process, while cross-instance coherence (`cache_invalidate`) and the consumer signal (`apply_notification`) are owned by the Settings Activation (separate design).
+Mutations write an audit record in their own transaction, to the gear's `audit_records` store in R1 and shipped onward once the platform subsystem exists (§4.2 *Audit Emitter*); unlike RBAC v1, audit is **not** deferred here — it is a PRD show-stopper. Apply-lifecycle, declaration, and secret-use events are published, and `tenant_deleted` is consumed, through the platform **Event Broker** (§4.4); local cache invalidation is in-process, while cross-instance coherence (`cache_invalidate`) and the consumer signal (`apply_notification`) are owned by the Settings Activation (separate design).
 
 #### Optimistic concurrency
 
@@ -1039,7 +1039,7 @@ Order matters when closing this, and it is an order of **binding**, not of autho
 
 **With no `StepUpVerifier` bound, the gear starts, serves reads, and refuses Apply** (`401`, the challenge above). This is the **floor under an unbound trait, not a phase to plan around**: the binding is this design's own to ship, so a deployment sitting in this state has an unfinished gear rather than an interim mode. Refusing to start is the wrong failure: settings reads are a **boot-time dependency** for the platform (§4.5 *Reader degradation contract*), so a gear that will not boot takes down every consumer that reads configuration at startup — a far larger outage than the loss of the administrative write path. Apply is the dangerous operation and is the one that fails closed. There is deliberately **no development or sandbox bypass** — no config flag that proceeds without verification — because such a flag is exactly the always-satisfied binding this contract rejects, and "non-production only" has never kept one out of production. The sanctioned non-verifying binding is `MockStepUpVerifier`, bound by the test harness and reachable no other way (§7 *Testing Architecture*).
 
-**Apply atomicity model.** Apply **commits per change** — each pending change is applied in its own transaction (value write; the change's own `applying → applied` transition, step 5; for `secret`-trait changes its Credential Store reference, §4.2 *Secret Manager*; the synchronous audit write, §4.2 *Audit Emitter*). **The value write and the status transition share that transaction** — both are writes to the local DB, so unlike the Credential Store and Audit legs they *can* be committed together, and committing them apart would leave a window where the value is live while its change still looks unapplied. A whole-bundle single transaction is not available: applying a change may span the local DB, the Credential Store, and the Audit Subsystem, which cannot be committed atomically together (§4.2 *Audit Emitter*). A change that fails to commit — and every change not yet reached — stays `pending`; already-committed changes stay committed (`partial_failed`). Intermediate state is not observable to readers — a value becomes effective only after its own commit, and pending changes are never read (`cpt-cf-settings-service-fr-staged-change-pending`, `cpt-cf-settings-service-nfr-reliability-fail-safe-staged`).
+**Apply atomicity model.** Apply **commits per change** — each pending change is applied in its own transaction (value write; the change's own `applying → applied` transition, step 5; for `secret`-trait changes its Credential Store reference, §4.2 *Secret Manager*; the audit record, §4.2 *Audit Emitter*). **The value write, the status transition and the audit record share that transaction** — all three are writes to the local DB, so unlike the Credential Store leg they *can* be committed together, and committing them apart would leave a window where the value is live while its change still looks unapplied. A whole-bundle single transaction is not available: applying a change may span the local DB, the Credential Store, and the Audit Subsystem, which cannot be committed atomically together (§4.2 *Audit Emitter*). A change that fails to commit — and every change not yet reached — stays `pending`; already-committed changes stay committed (`partial_failed`). Intermediate state is not observable to readers — a value becomes effective only after its own commit, and pending changes are never read (`cpt-cf-settings-service-fr-staged-change-pending`, `cpt-cf-settings-service-nfr-reliability-fail-safe-staged`).
 
 **Apply is not idempotent, and the `checksum` is not what would make it so.** The two are often conflated because both concern a repeated `POST`, so the contract is stated explicitly. A success **removes** its change from the pending set (step 5) and the `checksum` is a hash **over that set** (§4.3), so re-submitting the original `checksum` presents a set that no longer exists — a strictly smaller one after a partial failure, an empty one after a full success — and step 3 answers `409 ApplyChecksumMismatch`. That is the `checksum` doing its job, not failing at another: it is **optimistic concurrency**, the guarantee that the admin commits exactly the change set the preview showed them. It is **not** an idempotency key, and no `Idempotency-Key` store exists here — the same stance §4.3 *Create idempotency* takes for the creating `POST`s.
 
@@ -1057,7 +1057,7 @@ Order matters when closing this, and it is an order of **binding**, not of autho
 - **the failure path itself fails** — step 7 records the failure in the same database the apply was writing to, so the outage that failed the apply also takes out the record of it;
 - **the process dies** — OOM-kill, node loss, a rollout draining faster than the apply runs, or a panic surfaced as a `500` without unwinding through step 7.
 
-The exposure is wide rather than a millisecond gap: the audit write is **synchronous, inside each change's transaction**, against an external subsystem (§4.2 *Audit Emitter*), and a batch may carry up to 500 changes (§6), each also touching the Credential Store.
+The window is narrower than it was: the audit write is local and inside the same transaction (§4.2 *Audit Emitter*), so it no longer contributes an external round trip per change. What remains is the batch itself — up to 500 changes (§6), each `secret`-trait one also touching the Credential Store.
 
 Those rows would otherwise be stranded: `preview` lists `pending` changes, so they are invisible to it and therefore absent from the next `checksum` — never retried and never cleared — and they still occupy `uq_pending_active`, so the setting cannot be re-staged either. **The rule:** an `apply_operations` row still `running` past the **apply deadline** (`apply_deadline_seconds`, default 300 s — §6) is treated as abandoned; reclaiming it sets the operation `failed` with a `failure_detail` naming the timeout and returns its scope's `applying` rows to `pending`, where the ordinary retry path (above) picks them up. Reclamation runs **lazily at the head of `preview` and `apply` for that scope** — no background reaper is introduced.
 
@@ -1144,7 +1144,7 @@ The corpus covers only Schema Defaults and overrides the caller may **already re
 
 Unlike RBAC v1, audit is a **show-stopper** here and is always active.
 
-**Dependencies:** Audit Subsystem, Event Broker
+**Dependencies:** PostgreSQL (the audit store, below), Event Broker. **Not** the platform Audit Subsystem — see *The sink is a port with two bindings*.
 
 **Operations:**
 
@@ -1166,13 +1166,24 @@ cf.settings:{key}@platform # platform scope (tenant_id IS NULL)
 
 **The actor identity is itself classified.** An audit record's actor is an administrator identity, which is PII. Actor identity MUST carry a `public`/`pii` classification and, when `pii`, be unmasked only for a caller authorized for unmasked PII — masked in every other administrative audit read and in audit/report output — remaining governed by the platform retention/anonymization policy. Because per-(setting, scope) history is a **read-through** to the platform Audit Subsystem (§4.3), the masking is applied by that subsystem's redaction on the read side; this service's obligation is to **carry the classification on the record it writes**, not to re-implement redaction. The lawful basis and retention terms for processing administrator identities are set by the platform's approved privacy policy, which this service defers to rather than asserting one of its own.
 
-**Fail-closed audit.** Every mutation MUST be audited: the `audit` call writes to the external Audit Subsystem **synchronously, inside the mutation's database transaction, as the last step before commit**. If the audit write fails or times out, the mutation MUST be rolled back and rejected (`503`); a mutation MUST NOT take effect unless its audit record was accepted. The audit write has a hard timeout of `AUDIT_WRITE_TIMEOUT` (default 2 s); a timeout is treated as failure → the mutation is rejected. This closes the "changed but unlogged" gap: the platform never applies a change it could not record.
+**Fail-closed audit, without an external call in an open transaction.** Every mutation MUST be audited, and the record is written **inside the mutation's own database transaction, as the last step before commit**. If the write fails the mutation is rolled back and rejected (`503`); a mutation MUST NOT take effect unless its record was persisted. This closes the "changed but unlogged" gap: the platform never applies a change it could not record.
 
-**Accepted limitations** (deliberate: the platform's external Audit Subsystem is reused as-is; no local audit table and no async outbox are introduced, to keep the service small):
+What it no longer does is call another service to get there. Calling an external system synchronously inside an open Postgres transaction is the pattern ToolKit's transactional outbox exists to prevent, and it bought three accepted limitations that all followed from the one choice: a record that commits while the mutation rolls back, an ambiguous timeout where neither side knows whether the record landed, and every mutation in this gear blocked whenever the audit endpoint is down. Writing to a local table in the same transaction removes all three by construction — the record and the change are one commit, so they cannot diverge, there is nothing to time out, and no third party's availability gates a write here.
 
-- **Phantom on commit failure.** Because an external audit write and a local DB commit cannot be made atomic, a crash between a *successful* audit write and the *commit* leaves an audit record for a mutation that did not take effect. Placing the audit write immediately before commit narrows this window to the commit itself but does not eliminate it. Consequence: **audit is authoritative for mutation *attempts*, not for applied state**; reconciling phantom records against applied state is out of scope.
-- **Timeout ambiguity.** An audit-write timeout is indistinguishable from a lost success, so the rejected mutation MAY still have produced an audit record (a phantom, per above).
-- **Availability coupling.** Mutation availability depends on Audit Subsystem availability *by design* — this is the fail-closed contract. A misconfigured or unreachable audit endpoint blocks **all** mutations (read paths, §4.9, are unaffected). The hard timeout bounds per-request latency and, with a bounded DB connection pool, prevents a stalled audit endpoint from exhausting connections; operators MUST monitor audit-write failure rate and latency.
+**The sink is a port with two bindings.** The domain calls `AuditSink::append(txn, scope, record)` — taking the **transaction** is what makes atomicity a property of the signature rather than a convention, and taking the **`AccessScope`** keeps the audit write on the same row-scoped data path as everything else. The shape follows the platform precedent (`bss/ledger`'s `SecuredAuditSink`, whose implementors "persist one append-only audit record *in the supplied posting transaction*, so the record commits atomically with the disposition it audits, or rolls back with it").
+
+- **R1 binds a gear-local store** (§4.7 `audit_records`), which is the system of record for the online retention window (§7 *Scale Model*).
+- **R2 adds a shipper**, not a replacement: a background worker drains unshipped records to the platform Audit Subsystem for cross-gear query and long-term retention. The port does not change, no call site moves, and a shipping failure can never affect a mutation — by then the record is already committed.
+
+**Retention travels with the record.** Each record carries `retain_until`; absent one, the store's configured default applies. Masking is unchanged and happens before the record is built: a `secret`-classified value is never written in plaintext, and the actor identity carries its own `public`/`pii` classification (below). The interim store therefore meets the same masking and retention guarantees as the platform subsystem it precedes, which is what makes it an approved interim mechanism rather than a shortcut.
+
+**What the local store gives up, and what it does not.** The three limitations this design previously accepted all followed from the one choice of calling an external service inside the transaction, and all three go away with it.
+
+- **No phantom records.** A record could previously commit for a mutation that never took effect, because an external write and a local commit cannot be made atomic. They are now one commit: the record exists exactly when the change does.
+- **No timeout ambiguity.** There is no external call left to time out, so "rejected" no longer maybe-means "recorded".
+- **No availability coupling.** A mutation no longer depends on another service being reachable. Fail-closed now means the local write must succeed, which fails only when the database itself is unavailable — in which case the mutation could not have committed anyway.
+
+What remains is smaller and is a consequence of holding the store here rather than there. The online window lives in this gear's database and counts against its storage budget (§7 *Scale Model*); until the shipper exists (R2), records are not queryable alongside other gears' audit, so a platform-wide investigation spanning several gears cannot be served from one place; and long-term retention beyond the online window has no destination yet, which is why `retain_until` is carried on the record from the start rather than added later.
 
 ### 4.3 API Contracts
 
@@ -1348,13 +1359,17 @@ The parent **`GET /v1/applies/{apply_id}`** is a thin summary linking both, livi
 | Method | Endpoint | Description | Idempotency |
 |--------|----------|-------------|-------------|
 | `GET` | `/v1/search?q={query}&scope={path}&mode={mode}` | Cross-field search (flat list, breadcrumbs, matched-field), mode-filtered | Yes |
-| `GET` | `/v1/settings/{key}/history?scope={path}` | Per-(setting, scope) audit history — read-through to the Audit Subsystem query API (see below) | Yes |
+| `GET` | `/v1/settings/{key}/history?scope={path}` | Per-(setting, scope) audit history — served from the gear's own `audit_records` store (see below) | Yes |
 | `GET` | `/v1/me/preferences` | Read the caller's per-user mode preference | Yes |
 | `PUT` | `/v1/me/preferences` | Persist the caller's per-user mode preference (per user, not per session; `cpt-cf-settings-service-fr-standard-advanced-mode`) | Yes |
 
 `GET /v1/declarations` and `GET /v1/settings` (§4.3/§4.3) accept a `mode` filter. Standard mode excludes Advanced-only declarations and Advanced-only categories; a category containing hidden Advanced settings returns `hidden_advanced_count` so the UI indicates the count rather than silently omitting (`cpt-cf-settings-service-fr-standard-advanced-mode`).
 
-**History has no local backing store — it is a read-through to the audit trail.** This service only *writes* audit (§4.2 *Audit Emitter*); it keeps no history table of its own. `GET /v1/settings/{key}/history` resolves the `(key, scope)` to the canonical audit resource id (`cf.settings:{key}@{tenant_id}`, §4.2 *Audit Emitter*) and issues a `resource`-filtered, paginated query against the platform **Audit Subsystem query API**, which the platform audit subsystem mandates as a first-class capability: *"Audit search — Authorized user with filters → Paginated results returned with redaction"* (`cpt-cf-settings-service-fr-standard-advanced-mode`) and the HIGH capability *"Audit query API (via Events Archive) — Tenant-safe search with filters, pagination, redaction"*; its documented filter dimensions include **`resource`** (Audit search story). Redaction (secrets masked, no reveal path) is applied by the audit query API, satisfying `cpt-cf-settings-service-fr-audit-mutations` on the read side without a second masking implementation here. Tenant scoping and access control on the query are the audit API's (`cpt-cf-settings-service-fr-settings-category-model`, `cpt-cf-settings-service-fr-apply-preview-stepup`); this endpoint forwards the caller's identity. **Cross-team dependency:** correctness relies only on the audit `resource` filter supporting **exact match** on this instance-level identifier (no prefix/wildcard needed — the requirement is per-(setting, scope), one id per query); the Audit Subsystem design does not yet exist and its target release is TBD, so this exact-match contract MUST be confirmed with the Audit team (tracked as a dependency, not an in-service gap).
+**History reads the gear's own audit store.** `GET /v1/settings/{key}/history` resolves the `(key, scope)` to the canonical audit resource id (`cf.settings:{key}@{tenant_id}`, §4.2 *Audit Emitter*) and queries `audit_records` (§4.7) on `(declaration_key, tenant_id)`, paginated and newest first. The **same formatter** produces the id on the write side and resolves it here, so the two cannot drift. Masking is already in the stored record — a `secret`-classified value was never written in plaintext — so the read applies no second masking implementation, and there is no reveal path to open. Tenant scoping is the ordinary row-scoped path, not a forwarded concern.
+
+This also makes the scoped-query target (§7, p95 ≤ 2 s over the online window) a local index lookup on `idx_audit_scoped` rather than a synchronous call into another service — a target that was optimistic when it depended on a cross-service read-through.
+
+> **R2: read-through as well, not instead.** Once the platform Audit Subsystem exists and the shipper drains to it (§4.2 *Audit Emitter*), long-term and cross-gear queries belong there; this endpoint keeps serving the online window locally. If a deployment ever chooses to serve history from the subsystem instead, correctness relies only on its `resource` filter supporting **exact match** on this instance-level identifier — no prefix or wildcard is needed, since the requirement is per-(setting, scope), one id per query. That contract is worth confirming with the Audit team when the subsystem is designed; it is no longer a dependency this gear's first release carries.
 
 #### Error Response Format (REST APIs)
 
@@ -1734,6 +1749,31 @@ Per-user Standard/Advanced mode preference — persisted per user, not per sessi
 | `mode` | text | No | `'standard'` | Check: `standard`, `advanced` |
 | `updated_at` | `timestamptz` | No | current timestamp | |
 
+#### Table: `audit_records`
+
+The gear-local audit store (§4.2 *Audit Emitter*). Append-only: no `UPDATE`, no `DELETE` outside retention pruning.
+
+| Column | Type | Nullable | Default | Constraints |
+|--------|------|----------|---------|-------------|
+| `id` | UUID | No | UUIDv7 | **PK** |
+| `resource` | text | No | — | The canonical audit resource id, `cf.settings:{key}@{tenant_id}` (§4.2 *Audit Emitter*) — one formatter, shared with the history read |
+| `declaration_key` | text | No | — | Denormalized from `resource` so the scoped query is an index lookup rather than a string match |
+| `tenant_id` | UUID | Yes | — | Scope as an id; `NULL` ⇒ platform scope, matching `setting_values` (§4.1) |
+| `operation` | text | No | — | Check: `create`, `change`, `revert`, `remove`, `apply`, `clone`, `secret_use` |
+| `actor` | text | No | — | Acting subject |
+| `actor_classification` | `DataClassification` | No | — | The actor identity is itself classified (§4.2 *Audit Emitter*) |
+| `pre_value` / `post_value` | JSONB | Yes | — | Masked before the record is built; a `secret`-classified value is never written in plaintext |
+| `outcome` | text | No | — | Check: `success`, `failure` |
+| `request_id` | text | No | — | Correlates the record with the request that produced it |
+| `apply_id` | UUID | Yes | — | Set for records produced under an apply, so one apply's records are retrievable together |
+| `occurred_at` | `timestamptz` | No | current timestamp | |
+| `retain_until` | `timestamptz` | Yes | — | Retention horizon; `NULL` ⇒ the store's configured default (§4.2 *Audit Emitter*) |
+| `shipped_at` | `timestamptz` | Yes | — | When the record was drained to the platform Audit Subsystem. Always `NULL` in R1, where no shipper exists (§2.3) |
+
+**Indexes:** `idx_audit_scoped` (`declaration_key`, `tenant_id`, `occurred_at DESC`) — serves the per-(setting, scope) history read directly, which is what makes its p95 a local index lookup rather than a cross-service call (§7); `idx_audit_unshipped` — **partial** on (`occurred_at`) `WHERE shipped_at IS NULL`, the R2 shipper's work queue, costing nothing in R1 where it covers every row but is never scanned; `idx_audit_retention` (`retain_until`) `WHERE retain_until IS NOT NULL`, for pruning.
+
+**Invariants:** append-only in the mutation's own transaction — the record and the change it audits share one commit and cannot diverge (§4.2 *Audit Emitter*). Rows are written through the same `AccessScope`-scoped path as every other write, so an audit row is never visible outside its tenant.
+
 #### GTS Type & Schema Identifiers
 
 Settings domain entities have canonical JSON Schemas with GTS-compliant `$id` identifiers, registered during gear init via `TypesRegistryClient.register(...)`. Naming follows the four-segment shape `gts.cf.toolkit.settings.<type>.v1~`: `<type>` encodes the category — entities (`category`, `declaration`, `value`, `pending_change`, `apply_operation`, `effective_value`), errors (`error_<name>`), events (`event_<name>`, §4.4).
@@ -2028,7 +2068,7 @@ All metrics exposed as Prometheus scrape targets.
 | Availability | 99.95% over rolling 30-day window | `cpt-cf-settings-service-nfr-reliability-fail-safe-staged` | Aggregated `settings_service_up`; PostgreSQL HA + service replicas |
 | Apply-failure alerting | A platform-wide Apply-failure condition raises an alert | `cpt-cf-settings-service-nfr-reliability-fail-safe-staged` | `settings_apply_failure_ratio` on the shared platform dashboards + an alert-routing rule (§7 *Feature Metrics*) — aggregate, not per-administrator |
 | Audit volume | ≥ 50,000,000 audit events per **platform instance** per year (aggregate) | `cpt-cf-settings-service-fr-audit-mutations` | `settings_audit_events_total`; capacity per §7 *NFR Mapping & Scale Model*. **Requirement on the platform Audit Subsystem**, which owns the store — this service emits and must not be throttled by it |
-| Audit online retention | ≥ 12 months, configurable | `cpt-cf-settings-service-fr-audit-mutations` | Platform Audit Subsystem retention policy; older records archived or purged per the platform retention/anonymization policy (§4.2 *Audit Emitter*) |
+| Audit online retention | ≥ 12 months, configurable | `cpt-cf-settings-service-fr-audit-mutations` | Enforced by this gear over `audit_records` (§4.7): each record carries `retain_until`, absent one the configured default applies, and pruning runs over `idx_audit_retention`. Once records are shipped (R2) the platform's own retention and anonymization policy governs the copy held there (§4.2 *Audit Emitter*) |
 | Scoped audit query (p95) | ≤ 2 s over the online window | `cpt-cf-settings-service-fr-audit-mutations` | `GET /v1/settings/{key}/history` (§4.3) — a read-through, so the bound is a **requirement on the Audit Subsystem query API**, confirmed with the Audit team alongside the exact-match `resource` filter |
 | Scope isolation | Zero cross-tenant / cross-scope leaks | `cpt-cf-settings-service-fr-tenant-scope-enforcement`, `cpt-cf-settings-service-nfr-scope-isolation` | Server-side scope enforcement; verified by integration + E2E isolation tests (§7 *Testing Architecture*) |
 | Secret confidentiality | Zero plaintext on any administrative/human path (read/search/list/audit); plaintext only via the machine-only reader path | `cpt-cf-settings-service-fr-typed-value-validation`, `cpt-cf-settings-service-nfr-performance-read-cache` | Masking on every administrative path; credential-store storage; **100%** of machine plaintext resolutions audited as secret-use (§4.2 *Secret Manager*); verified by API/E2E secret tests (§7 *Testing Architecture*) |
@@ -2050,7 +2090,7 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | Pending changes per apply batch | ≤ 500 | Bounds `checksum` computation and per-change `ApplyChangeResult` writes (§4.2 *Apply Orchestrator*). |
 | Apply deadline (`apply_deadline_seconds`) | 300 s (configurable) | An `apply_operations` row still `running` past this is treated as **abandoned**, and its scope's `applying` rows are reclaimed to `pending` (§4.2 *Apply Orchestrator*). Sized to exceed the **longest plausible apply**, not to match a proxy timeout: a 500-change batch commits per change against the local DB, the Credential Store, and a **synchronous** external audit write, so tens of seconds is ordinary. It deliberately sits well above the usual ~60 s gateway idle-timeout, because that timeout is a *cause* of abandonment (the cancelled request, §4.2) — a deadline equal to it would begin reclaiming exactly when a still-running apply first looks abandoned. Too short reclaims a live apply's rows mid-flight: survivable, since its guarded writes then roll back, but a spurious failure the admin must redo. |
 | Audit events (per platform instance, per year) | ≤ 50,000,000 | Aggregate across all tenants — mutations, applies, and machine secret-use combined (under ~2 events/s average with peak headroom; ≈ 500/tenant/year over 100,000 tenants). Settings mutations are infrequent administrative actions, so the bound is stated **per platform instance**, never per tenant — a per-tenant figure would imply an unrealistic platform-wide total. |
-| Audit online retention window | ≥ 12 months (configurable) | Sizes the online audit store that the history read-through queries (§4.3) and bounds the scoped-query p95; older records archived or purged per the platform retention/anonymization policy. |
+| Audit online retention window | ≥ 12 months (configurable) | Sizes the gear-local `audit_records` store the history read queries (§4.3, §4.7) and bounds the scoped-query p95; older records archived or purged per the platform retention/anonymization policy. |
 | JSONB value size per override | ≤ **64 KiB**, a single hard cap | Structured settings are config, not blobs. An unbounded value would break cache sizing and the search text-projection. Not a soft/hard pair: a larger value is rejected outright at staging by the Type Validator (`413`/`422 ValueTooLarge`, §4.2 *Type Validator*, §4.3), so nothing above the cap exists to plan capacity for. |
 
 **Resolve latency is O(depth), not O(tenant-count).** The 100k-tenant bound sizes the cache and search index; a single `resolve` only walks ancestors (≤ 10, §4.2 *Value Resolver*), so read latency is insulated from tenant growth. The cache-miss/resolve p95 ≤ 15 ms target holds independent of tenant count.
@@ -2221,7 +2261,7 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 
 #### Level 4: E2E Tests (Python / pytest)
 
-**Infrastructure:** running service (Docker/local), `pytest` + `httpx`, real audit subsystem.
+**Infrastructure:** running service (Docker/local), `pytest` + `httpx`; audit asserted against the gear's own `audit_records` store.
 
 **Planned location:** `testing/e2e/modules/settings-service/`
 
