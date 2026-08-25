@@ -24,7 +24,8 @@ use crate::infra::storage::sea_orm_repo::{
     SeaOrmPullRequestCommitRepository, SeaOrmPullRequestFileRepository,
     SeaOrmPullRequestRepository, SeaOrmReleaseRepository, SeaOrmRepoRepository,
     SeaOrmReviewCommentRepository, SeaOrmReviewRepository, SeaOrmReviewThreadRepository,
-    SeaOrmTagRepository, SeaOrmWorkflowJobRepository, SeaOrmWorkflowRunRepository,
+    SeaOrmSyncSessionRepository, SeaOrmTagRepository, SeaOrmWorkflowJobRepository,
+    SeaOrmWorkflowRunRepository,
 };
 
 type ConcreteService = Service<
@@ -54,6 +55,7 @@ type ConcreteService = Service<
     SeaOrmIssueReactionRepository,
     SeaOrmCheckRunRepository,
     SeaOrmIssueTimelineRepository,
+    SeaOrmSyncSessionRepository,
 >;
 
 #[toolkit::gear(
@@ -113,6 +115,7 @@ impl Gear for GithubMirrorGear {
         let issue_reactions = Arc::new(SeaOrmIssueReactionRepository::new());
         let check_runs = Arc::new(SeaOrmCheckRunRepository::new());
         let issue_timeline = Arc::new(SeaOrmIssueTimelineRepository::new());
+        let sync_sessions = Arc::new(SeaOrmSyncSessionRepository::new());
         let github: Arc<dyn GithubPort> = Arc::new(GithubClient::new(
             cfg.api_base_url.clone(),
             cfg.resolved_token()?,
@@ -152,6 +155,7 @@ impl Gear for GithubMirrorGear {
             issue_reactions,
             check_runs,
             issue_timeline,
+            sync_sessions,
             github,
             policy_enforcer,
             ServiceConfig {

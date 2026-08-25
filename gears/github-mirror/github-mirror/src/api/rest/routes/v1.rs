@@ -63,7 +63,46 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .json_response_with_schema::<dto::SyncSummaryDto>(
             openapi,
             StatusCode::OK,
-            "Repo synced into the mirror",
+            "Repo synced into the mirror; the body carries the session id",
+        )
+        .error_400(openapi)
+        .error_401(openapi)
+        .error_403(openapi)
+        .error_404(openapi)
+        .error_500(openapi)
+        .register(router, openapi);
+
+    router = OperationBuilder::get("/github-mirror/v1/sessions")
+        .operation_id("github_mirror.list_sync_sessions")
+        .summary("List sync sessions, newest first")
+        .tag(API_TAG)
+        .authenticated()
+        .require_license_features::<License>([])
+        .query_param("limit", false, "Maximum number of sessions to return")
+        .handler(handlers::list_sync_sessions)
+        .json_response_with_schema::<dto::SyncSessionDto>(
+            openapi,
+            StatusCode::OK,
+            "Paginated list of sync sessions",
+        )
+        .error_400(openapi)
+        .error_401(openapi)
+        .error_403(openapi)
+        .error_500(openapi)
+        .register(router, openapi);
+
+    router = OperationBuilder::get("/github-mirror/v1/sessions/{id}")
+        .operation_id("github_mirror.get_sync_session")
+        .summary("One sync session by id")
+        .tag(API_TAG)
+        .authenticated()
+        .require_license_features::<License>([])
+        .path_param("id", "Session id, as returned by the sync endpoint")
+        .handler(handlers::get_sync_session)
+        .json_response_with_schema::<dto::SyncSessionDto>(
+            openapi,
+            StatusCode::OK,
+            "The session's current state",
         )
         .error_400(openapi)
         .error_401(openapi)

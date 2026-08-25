@@ -1,0 +1,214 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+mod common;
+
+use std::sync::Arc;
+
+use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::http::{Method, Request, StatusCode};
+use github_mirror::api::rest::routes::{ConcreteService, register_routes};
+use github_mirror::domain::ports::github::FetchedRepository;
+use github_mirror::domain::repo::RepoRecord;
+use toolkit::api::OpenApiRegistryImpl;
+use toolkit_security::SecurityContext;
+use tower::ServiceExt;
+use uuid::Uuid;
+
+/// The smallest fetch result the sync accepts: one repository, nothing else.
+fn fetched() -> FetchedRepository {
+    FetchedRepository {
+        repository: RepoRecord {
+            id: 42,
+            owner: "acme".to_owned(),
+            name: "widget".to_owned(),
+            full_name: "acme/widget".to_owned(),
+            default_branch: "main".to_owned(),
+            private: false,
+            pushed_at: None,
+            stars: 0,
+            forks: 0,
+            description: None,
+            clone_url: None,
+        },
+        issues: vec![],
+        pull_requests: vec![],
+        commits: vec![],
+        comments: vec![],
+        review_comments: vec![],
+        reviews: vec![],
+        labels: vec![],
+        milestones: vec![],
+        releases: vec![],
+        branches: vec![],
+        contributors: vec![],
+        workflow_runs: vec![],
+        pull_request_files: vec![],
+        tags: vec![],
+        commit_files: vec![],
+        review_threads: vec![],
+        commit_comments: vec![],
+        issue_events: vec![],
+        deployments: vec![],
+        pull_request_commits: vec![],
+        commit_statuses: vec![],
+        workflow_jobs: vec![],
+        issue_reactions: vec![],
+        check_runs: vec![],
+        issue_timeline: vec![],
+    }
+}
+
+fn router_for(service: Arc<ConcreteService>, ctx: SecurityContext) -> Router {
+    let openapi = OpenApiRegistryImpl::new();
+    register_routes(Router::new(), &openapi, service).layer(axum::Extension(ctx))
+}
+
+async fn body_json(response: axum::http::Response<Body>) -> serde_json::Value {
+    let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+async fn send(router: Router, method: Method, uri: &str) -> axum::http::Response<Body> {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap();
+    router.oneshot(request).await.unwrap()
+}
+
+#[tokio::test]
+async fn a_sync_returns_a_session_id_and_the_session_records_the_run() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let db = common::inmem_db().await;
+    let service = common::service_with_github(
+        db,
+        "https://api.github.com",
+        Arc::new(common::FakeGithub {
+            result: Some(fetched()),
+        }),
+    );
+
+    let router = router_for(service, ctx);
+    let response = send(
+        router.clone(),
+        Method::POST,
+        "/github-mirror/v1/repos/acme/widget/sync",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let summary = body_json(response).await;
+    let session_id = summary["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_owned();
+    assert_eq!(summary["repository"], "acme/widget");
+
+    let session = body_json(
+        send(
+            router.clone(),
+            Method::GET,
+            &format!("/github-mirror/v1/sessions/{session_id}"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(session["id"], session_id.as_str());
+    assert_eq!(session["repository"], "acme/widget");
+    assert_eq!(session["state"], "succeeded");
+    assert!(session["error"].is_null());
+    assert_eq!(session["summary"]["repository"], "acme/widget");
+    assert!(session["finished_at"].is_string());
+
+    let listed = body_json(send(router, Method::GET, "/github-mirror/v1/sessions").await).await;
+    assert_eq!(listed["items"].as_array().expect("items").len(), 1);
+    assert_eq!(listed["items"][0]["id"], session_id.as_str());
+}
+
+#[tokio::test]
+async fn a_failed_sync_leaves_a_failed_session_behind() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let service = common::service("https://api.github.com").await;
+
+    let router = router_for(service, ctx);
+    let response = send(
+        router.clone(),
+        Method::POST,
+        "/github-mirror/v1/repos/acme/nope/sync",
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "the FakeGithub with no result answers NotFound"
+    );
+
+    let listed = body_json(send(router, Method::GET, "/github-mirror/v1/sessions").await).await;
+    let items = listed["items"].as_array().expect("items");
+    assert_eq!(items.len(), 1, "the failed run must still be recorded");
+    assert_eq!(items[0]["state"], "failed");
+    assert_eq!(items[0]["repository"], "acme/nope");
+    assert!(items[0]["error"].is_string());
+    assert!(items[0]["summary"].is_null());
+}
+
+#[tokio::test]
+async fn an_unknown_session_id_is_404() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let service = common::service("https://api.github.com").await;
+
+    let router = router_for(service, ctx);
+    let response = send(
+        router,
+        Method::GET,
+        &format!("/github-mirror/v1/sessions/{}", Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn sessions_are_tenant_scoped() {
+    let db = common::inmem_db().await;
+    let service = common::service_with_github(
+        db,
+        "https://api.github.com",
+        Arc::new(common::FakeGithub {
+            result: Some(fetched()),
+        }),
+    );
+
+    let owner = common::caller_in(Uuid::new_v4());
+    let owner_router = router_for(service.clone(), owner);
+    let summary = body_json(
+        send(
+            owner_router,
+            Method::POST,
+            "/github-mirror/v1/repos/acme/widget/sync",
+        )
+        .await,
+    )
+    .await;
+    let session_id = summary["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_owned();
+
+    let stranger = common::caller_in(Uuid::new_v4());
+    let stranger_router = router_for(service, stranger);
+    let response = send(
+        stranger_router.clone(),
+        Method::GET,
+        &format!("/github-mirror/v1/sessions/{session_id}"),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "another tenant must not even learn the session exists"
+    );
+    let listed =
+        body_json(send(stranger_router, Method::GET, "/github-mirror/v1/sessions").await).await;
+    assert!(listed["items"].as_array().expect("items").is_empty());
+}

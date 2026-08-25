@@ -13,6 +13,7 @@ use github_mirror_sdk::{
     ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
 
+use crate::domain::repo::SyncSessionRecord;
 use crate::domain::service::{MirrorStatus, SyncSummary};
 
 #[derive(Debug)]
@@ -599,6 +600,9 @@ impl From<Contributor> for ContributorDto {
 #[derive(Debug)]
 #[toolkit_macros::api_dto(response)]
 pub struct SyncSummaryDto {
+    /// Id of the `gm_sync_sessions` row this run wrote; poll it via
+    /// `GET /github-mirror/v1/sessions/{id}`.
+    pub session_id: String,
     pub repository: String,
     pub issues_synced: u64,
     pub pull_requests_synced: u64,
@@ -627,9 +631,11 @@ pub struct SyncSummaryDto {
     pub issue_timeline_synced: u64,
 }
 
-impl From<SyncSummary> for SyncSummaryDto {
-    fn from(s: SyncSummary) -> Self {
+impl SyncSummaryDto {
+    #[must_use]
+    pub fn from_run(session_id: uuid::Uuid, s: SyncSummary) -> Self {
         Self {
+            session_id: session_id.to_string(),
             repository: s.repository,
             issues_synced: s.issues_synced,
             pull_requests_synced: s.pull_requests_synced,
@@ -1067,4 +1073,43 @@ pub struct AuthenticatedUserDto {
     pub name: Option<String>,
     #[serde(rename = "type")]
     pub user_type: String,
+}
+
+/// One sync session, as served by `/github-mirror/v1/sessions`.
+#[derive(Debug)]
+#[toolkit_macros::api_dto(response)]
+pub struct SyncSessionDto {
+    pub id: String,
+    /// `owner/name` slug the session synced.
+    pub repository: String,
+    /// `queued`, `running`, `succeeded`, `failed`, or `interrupted`.
+    pub state: String,
+    /// Failure detail when `state = failed`.
+    pub error: Option<String>,
+    /// The run's counters, replayed from the stored JSON; absent until the
+    /// session succeeds.
+    pub summary: Option<serde_json::Value>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+impl From<SyncSessionRecord> for SyncSessionDto {
+    fn from(s: SyncSessionRecord) -> Self {
+        let summary = s
+            .summary_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+
+        Self {
+            id: s.id.to_string(),
+            repository: s.repo_full_name,
+            state: s.state,
+            error: s.error,
+            summary,
+            created_at: s.created_at,
+            started_at: s.started_at,
+            finished_at: s.finished_at,
+        }
+    }
 }

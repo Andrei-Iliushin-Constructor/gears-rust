@@ -21,7 +21,8 @@ use github_mirror::infra::storage::sea_orm_repo::{
     SeaOrmPullRequestCommitRepository, SeaOrmPullRequestFileRepository,
     SeaOrmPullRequestRepository, SeaOrmReleaseRepository, SeaOrmRepoRepository,
     SeaOrmReviewCommentRepository, SeaOrmReviewRepository, SeaOrmReviewThreadRepository,
-    SeaOrmTagRepository, SeaOrmWorkflowJobRepository, SeaOrmWorkflowRunRepository,
+    SeaOrmSyncSessionRepository, SeaOrmTagRepository, SeaOrmWorkflowJobRepository,
+    SeaOrmWorkflowRunRepository,
 };
 use toolkit::{ClientHub, ConfigProvider, GearCtx};
 use toolkit_db::migration_runner::run_migrations_for_testing;
@@ -56,6 +57,7 @@ pub type ConcreteService = Service<
     SeaOrmIssueReactionRepository,
     SeaOrmCheckRunRepository,
     SeaOrmIssueTimelineRepository,
+    SeaOrmSyncSessionRepository,
 >;
 
 /// PDP fake: allows everything, constrained to the caller's tenant.
@@ -170,6 +172,7 @@ pub fn service_with_github(
         Arc::new(SeaOrmIssueReactionRepository::new()),
         Arc::new(SeaOrmCheckRunRepository::new()),
         Arc::new(SeaOrmIssueTimelineRepository::new()),
+        Arc::new(SeaOrmSyncSessionRepository::new()),
         github,
         enforcer(),
         ServiceConfig {

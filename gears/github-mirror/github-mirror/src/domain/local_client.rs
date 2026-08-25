@@ -14,8 +14,8 @@ use crate::domain::repo::{
     DeploymentRepository, IssueEventRepository, IssueReactionRepository, IssueRepository,
     IssueTimelineRepository, LabelRepository, MilestoneRepository, PullRequestCommitRepository,
     PullRequestFileRepository, PullRequestRepository, ReleaseRepository, RepoRepository,
-    ReviewCommentRepository, ReviewRepository, ReviewThreadRepository, TagRepository,
-    WorkflowJobRepository, WorkflowRunRepository,
+    ReviewCommentRepository, ReviewRepository, ReviewThreadRepository, SyncSessionRepository,
+    TagRepository, WorkflowJobRepository, WorkflowRunRepository,
 };
 use crate::domain::service::Service;
 
@@ -53,8 +53,35 @@ impl From<DomainError> for CanonicalError {
     }
 }
 
-type SharedService<R, I, P, C, M, V, W, L, N, E, B, O, F, G, T, D, H, K, X, Y, Z, S, J, Q, U, A> =
-    Arc<Service<R, I, P, C, M, V, W, L, N, E, B, O, F, G, T, D, H, K, X, Y, Z, S, J, Q, U, A>>;
+type SharedService<
+    R,
+    I,
+    P,
+    C,
+    M,
+    V,
+    W,
+    L,
+    N,
+    E,
+    B,
+    O,
+    F,
+    G,
+    T,
+    D,
+    H,
+    K,
+    X,
+    Y,
+    Z,
+    S,
+    J,
+    Q,
+    U,
+    A,
+    SS,
+> = Arc<Service<R, I, P, C, M, V, W, L, N, E, B, O, F, G, T, D, H, K, X, Y, Z, S, J, Q, U, A, SS>>;
 
 // One generic parameter per aggregate repository; the alias is as small
 // as the type gets.
@@ -87,9 +114,37 @@ pub struct LocalClient<
     Q: IssueReactionRepository + 'static,
     U: CheckRunRepository + 'static,
     A: IssueTimelineRepository + 'static,
+    SS: SyncSessionRepository + 'static,
 > {
-    service:
-        SharedService<R, I, P, C, M, V, W, L, N, E, B, O, F, G, T, D, H, K, X, Y, Z, S, J, Q, U, A>,
+    service: SharedService<
+        R,
+        I,
+        P,
+        C,
+        M,
+        V,
+        W,
+        L,
+        N,
+        E,
+        B,
+        O,
+        F,
+        G,
+        T,
+        D,
+        H,
+        K,
+        X,
+        Y,
+        Z,
+        S,
+        J,
+        Q,
+        U,
+        A,
+        SS,
+    >,
 }
 
 impl<
@@ -119,7 +174,8 @@ impl<
     Q: IssueReactionRepository + 'static,
     U: CheckRunRepository + 'static,
     A: IssueTimelineRepository + 'static,
-> LocalClient<R, I, P, C, M, V, W, L, N, E, B, O, F, G, T, D, H, K, X, Y, Z, S, J, Q, U, A>
+    SS: SyncSessionRepository + 'static,
+> LocalClient<R, I, P, C, M, V, W, L, N, E, B, O, F, G, T, D, H, K, X, Y, Z, S, J, Q, U, A, SS>
 {
     #[must_use]
     #[allow(clippy::type_complexity)]
@@ -151,6 +207,7 @@ impl<
             Q,
             U,
             A,
+            SS,
         >,
     ) -> Self {
         Self { service }
@@ -185,8 +242,37 @@ impl<
     Q: IssueReactionRepository + 'static,
     U: CheckRunRepository + 'static,
     A: IssueTimelineRepository + 'static,
+    SS: SyncSessionRepository + 'static,
 > GithubMirrorClientV1
-    for LocalClient<R, I, P, C, M, V, W, L, N, E, B, O, F, G, T, D, H, K, X, Y, Z, S, J, Q, U, A>
+    for LocalClient<
+        R,
+        I,
+        P,
+        C,
+        M,
+        V,
+        W,
+        L,
+        N,
+        E,
+        B,
+        O,
+        F,
+        G,
+        T,
+        D,
+        H,
+        K,
+        X,
+        Y,
+        Z,
+        S,
+        J,
+        Q,
+        U,
+        A,
+        SS,
+    >
 {
     async fn status(&self, _ctx: &SecurityContext) -> Result<MirrorStatus, CanonicalError> {
         let status = self.service.status();

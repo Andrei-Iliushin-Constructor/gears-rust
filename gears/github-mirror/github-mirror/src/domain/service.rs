@@ -11,6 +11,7 @@ use github_mirror_sdk::{
 use toolkit_macros::domain_model;
 use toolkit_odata::{ODataQuery, Page, PageInfo};
 use toolkit_security::{SecurityContext, pep_properties};
+use uuid::Uuid;
 
 use super::error::DomainError;
 use super::ports::github::GithubPort;
@@ -25,9 +26,9 @@ use super::repo::{
     PullRequestCommitRecord, PullRequestCommitRepository, PullRequestFileRecord,
     PullRequestFileRepository, PullRequestRecord, PullRequestRepository, ReleaseRecord,
     ReleaseRepository, RepoRecord, RepoRepository, ReviewCommentRecord, ReviewCommentRepository,
-    ReviewRecord, ReviewRepository, ReviewThreadRecord, ReviewThreadRepository, TagRecord,
-    TagRepository, WorkflowJobRecord, WorkflowJobRepository, WorkflowRunRecord,
-    WorkflowRunRepository,
+    ReviewRecord, ReviewRepository, ReviewThreadRecord, ReviewThreadRepository, SyncSessionRecord,
+    SyncSessionRepository, TagRecord, TagRepository, WorkflowJobRecord, WorkflowJobRepository,
+    WorkflowRunRecord, WorkflowRunRepository,
 };
 
 pub const GEAR_NAME: &str = "github-mirror";
@@ -179,6 +180,26 @@ pub(crate) const ISSUE_TIMELINE_RESOURCE: ResourceType = ResourceType::from_stat
     &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
 );
 
+/// The current instant as RFC3339 text, matching how every other timestamp
+/// in the mirror is stored.
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
+}
+
+/// Session lifecycle vocabulary, written into `gm_sync_sessions.state`.
+pub(crate) mod session_states {
+    pub const RUNNING: &str = "running";
+    pub const SUCCEEDED: &str = "succeeded";
+    pub const FAILED: &str = "failed";
+}
+
+pub(crate) const SYNC_SESSION_RESOURCE: ResourceType = ResourceType::from_static(
+    "github_mirror.sync_session",
+    &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
+);
+
 pub(crate) const SYNC_RESOURCE: ResourceType =
     ResourceType::from_static("github_mirror.sync", &[pep_properties::OWNER_TENANT_ID]);
 
@@ -186,6 +207,7 @@ pub(crate) mod actions {
     pub const LIST: &str = "list";
     pub const UPSERT: &str = "upsert";
     pub const SYNC: &str = "sync";
+    pub const GET: &str = "get";
 }
 
 #[domain_model]
@@ -204,7 +226,7 @@ pub struct MirrorStatus {
 
 /// What one sync pass wrote, returned to the caller.
 #[domain_model]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SyncSummary {
     pub repository: String,
     pub issues_synced: u64,
@@ -262,6 +284,7 @@ pub struct Service<
     Q: IssueReactionRepository,
     U: CheckRunRepository,
     A: IssueTimelineRepository,
+    SS: SyncSessionRepository,
 > {
     db: Arc<DbProvider>,
     repo: Arc<R>,
@@ -290,6 +313,7 @@ pub struct Service<
     issue_reactions: Arc<Q>,
     check_runs: Arc<U>,
     issue_timeline: Arc<A>,
+    sync_sessions: Arc<SS>,
     github: Arc<dyn GithubPort>,
     policy_enforcer: PolicyEnforcer,
     config: ServiceConfig,
@@ -322,7 +346,8 @@ impl<
     Q: IssueReactionRepository,
     U: CheckRunRepository,
     A: IssueTimelineRepository,
-> Service<R, I, P, C, M, V, W, L, N, E, B, O, F, G, T, D, H, K, X, Y, Z, S, J, Q, U, A>
+    SS: SyncSessionRepository,
+> Service<R, I, P, C, M, V, W, L, N, E, B, O, F, G, T, D, H, K, X, Y, Z, S, J, Q, U, A, SS>
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -353,6 +378,7 @@ impl<
         issue_reactions: Arc<Q>,
         check_runs: Arc<U>,
         issue_timeline: Arc<A>,
+        sync_sessions: Arc<SS>,
         github: Arc<dyn GithubPort>,
         policy_enforcer: PolicyEnforcer,
         config: ServiceConfig,
@@ -385,6 +411,7 @@ impl<
             issue_reactions,
             check_runs,
             issue_timeline,
+            sync_sessions,
             github,
             policy_enforcer,
             config,
@@ -2881,6 +2908,136 @@ impl<
         self.issue_timeline
             .upsert(&conn, &scope, tenant_id, record)
             .await
+    }
+
+    /// Run one sync of `owner/name` and record it as a session: a durable
+    /// `gm_sync_sessions` row that survives the request and is readable via
+    /// [`Self::get_session`]. The sync itself still runs inline — slice 3 of
+    /// gears-rust#4632 moves it to a background task and this method starts
+    /// answering before the work finishes.
+    ///
+    /// # Errors
+    /// Whatever [`Self::sync_repository`] returns; the session row records
+    /// the failure before the error propagates.
+    pub async fn start_sync(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name: &str,
+    ) -> Result<(Uuid, SyncSummary), DomainError> {
+        let tenant_id = ctx.subject_tenant_id();
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &SYNC_SESSION_RESOURCE,
+                actions::UPSERT,
+                None,
+                &AccessRequest::new().resource_property(pep_properties::OWNER_TENANT_ID, tenant_id),
+            )
+            .await?;
+        let conn = self.db.conn()?;
+
+        let id = Uuid::new_v4();
+        let now = now_rfc3339();
+        let mut session = SyncSessionRecord {
+            id,
+            repo_full_name: format!("{owner}/{name}"),
+            repo_id: None,
+            state: session_states::RUNNING.to_owned(),
+            error: None,
+            summary_json: None,
+            created_at: now.clone(),
+            started_at: Some(now),
+            finished_at: None,
+        };
+        self.sync_sessions
+            .upsert(&conn, &scope, tenant_id, session.clone())
+            .await?;
+
+        match self.sync_repository(ctx, owner, name).await {
+            Ok(summary) => {
+                session_states::SUCCEEDED.clone_into(&mut session.state);
+                session.finished_at = Some(now_rfc3339());
+                session.summary_json = serde_json::to_string(&summary).ok();
+                self.sync_sessions
+                    .upsert(&conn, &scope, tenant_id, session)
+                    .await?;
+                Ok((id, summary))
+            }
+            Err(e) => {
+                session_states::FAILED.clone_into(&mut session.state);
+                session.finished_at = Some(now_rfc3339());
+                session.error = Some(e.to_string());
+                self.sync_sessions
+                    .upsert(&conn, &scope, tenant_id, session)
+                    .await?;
+                Err(e)
+            }
+        }
+    }
+
+    /// One sync session by id, tenant-scoped.
+    ///
+    /// # Errors
+    /// `DomainError::NotFound` when the session does not exist for this
+    /// tenant; `Forbidden`/`Database`/`Internal` as usual.
+    pub async fn get_session(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+    ) -> Result<SyncSessionRecord, DomainError> {
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &SYNC_SESSION_RESOURCE,
+                actions::GET,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await?;
+        let conn = self.db.conn()?;
+        self.sync_sessions
+            .find_by_id(&conn, &scope, id)
+            .await?
+            .ok_or(DomainError::NotFound)
+    }
+
+    /// The tenant's sync sessions, newest first.
+    ///
+    /// # Errors
+    /// `Forbidden`/`Database`/`Internal` as usual.
+    pub async fn list_sessions(
+        &self,
+        ctx: &SecurityContext,
+        query: &ODataQuery,
+    ) -> Result<Page<SyncSessionRecord>, DomainError> {
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &SYNC_SESSION_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await?;
+        let conn = self.db.conn()?;
+
+        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
+        let items = self.sync_sessions.list_recent(&conn, &scope, limit).await?;
+
+        Ok(Page::new(
+            items,
+            PageInfo {
+                next_cursor: None,
+                prev_cursor: None,
+                limit,
+            },
+        ))
     }
 
     /// Fetch one repository from GitHub (first slice: repo + first page of

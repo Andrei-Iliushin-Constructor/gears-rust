@@ -21,8 +21,8 @@ use super::dto::{
     CommitDto, CommitFileDto, CommitStatsDto, CommitStatusDto, ContributorDto, DeploymentDto,
     GithubMirrorHealthDto, IssueDto, IssueEventDto, IssueReactionDto, IssueTimelineEventDto,
     LabelDto, MilestoneDto, PullRequestDto, PullRequestFileDto, ReleaseDto, RepoDto,
-    ReviewCommentDto, ReviewDto, ReviewThreadDto, SyncSummaryDto, TagDto, WorkflowJobDto,
-    WorkflowJobsPageDto, WorkflowRunDto, WorkflowRunsPageDto,
+    ReviewCommentDto, ReviewDto, ReviewThreadDto, SyncSessionDto, SyncSummaryDto, TagDto,
+    WorkflowJobDto, WorkflowJobsPageDto, WorkflowRunDto, WorkflowRunsPageDto,
 };
 
 const DEFAULT_PER_PAGE: u64 = 30;
@@ -132,8 +132,8 @@ pub async fn sync_repository(
     Extension(svc): Extension<Arc<ConcreteService>>,
     Path((owner, name)): Path<(String, String)>,
 ) -> ApiResult<JsonBody<SyncSummaryDto>> {
-    let summary = svc.sync_repository(&ctx, &owner, &name).await?;
-    Ok(Json(summary.into()))
+    let (session_id, summary) = svc.start_sync(&ctx, &owner, &name).await?;
+    Ok(Json(SyncSummaryDto::from_run(session_id, summary)))
 }
 
 pub async fn list_issues(
@@ -599,4 +599,22 @@ pub async fn list_user_repos(
     let page = query.normalized();
     let items = svc.list_repos(&ctx, &page.odata()).await?.items;
     Ok(respond(&page, "/user/repos", page.slice(items)))
+}
+
+pub async fn get_sync_session(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(svc): Extension<Arc<ConcreteService>>,
+    Path(id): Path<uuid::Uuid>,
+) -> ApiResult<JsonBody<SyncSessionDto>> {
+    let session = svc.get_session(&ctx, id).await?;
+    Ok(Json(SyncSessionDto::from(session)))
+}
+
+pub async fn list_sync_sessions(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(svc): Extension<Arc<ConcreteService>>,
+    OData(query): OData,
+) -> ApiResult<JsonPage<SyncSessionDto>> {
+    let page: Page<_> = svc.list_sessions(&ctx, &query).await?;
+    Ok(Json(page.map_items(SyncSessionDto::from)))
 }
