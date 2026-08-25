@@ -223,7 +223,7 @@ C4Container
  Container_Ext(authz, "AuthZ Resolver", "ClientHub", "Fail-closed access gating via AuthZResolverClient")
  Container_Ext(tenant_resolver, "Tenant Resolver", "ClientHub", "Org-hierarchy ancestry")
  Container_Ext(idp, "IdP / AuthN Resolver", "JWKS", "Step-up token validation (local, no per-apply call)")
- Container_Ext(audit, "Audit Subsystem", "Audit API", "Mutation records — R2 destination for the shipper")
+ Container_Ext(audit, "Audit Subsystem", "Audit API", "Mutation records — R2, reached through the ToolKit outbox")
  Container_Ext(license_resolver, "License Resolver", "ClientHub", "Feature/licence entitlement gating")
  Container_Ext(credstore, "Credential Store", "credstore API", "the credstore backend secret-value storage")
  Container_Ext(event_broker, "Event Broker", "Event Broker", "Publish/consume + cross-instance cache invalidation")
@@ -289,7 +289,7 @@ Three things R1 supplies itself rather than waiting on the platform:
 
 | Need | R1 answer |
 |------|-----------|
-| Audit, which every mutation fails closed on (§4.2 *Audit Emitter*) | A **gear-local sink** writing the record in the mutation's own transaction, and the store of record for the online window. R2 adds a shipper that drains onward to the platform subsystem — an addition behind the same port, not a replacement |
+| Audit, which every mutation fails closed on (§4.2 *Audit Emitter*) | A **gear-local sink** writing the record in the mutation's own transaction, and the store of record for the online window. R2 enqueues the same record into ToolKit's transactional outbox, whose handler posts it onward to the platform subsystem — an addition behind the same port, not a replacement |
 | Step-up verification, without which Apply refuses (§4.2 *Apply Orchestrator*) | The **default OIDC/JWKS binding**, built here: the bearer token is already carried in `SecurityContext` and the JWKS machinery already exists in the platform's auth library |
 | A verified machine caller identity, which the reader and contribution traits assume (§5) | **Not supplied — scoped out.** R1 is **Embedded-only**: the SDK traits are bound in-process, which is the one configuration where the trusted-caller model holds (§4.8 *Trusted-Caller Boundary*) |
 
@@ -762,7 +762,7 @@ graph TD
  authz[/"AuthZ Resolver<br/><small>ClientHub · AuthZResolverClient</small>"/]
  tenant[("Tenant Resolver<br/><small>ClientHub</small>")]
  idp[/"IdP / AuthN Resolver<br/><small>step-up token (JWKS)</small>"/]
- audit[/"Audit Subsystem<br/><small>R2 — shipper destination</small>"/]
+ audit[/"Audit Subsystem<br/><small>R2 — via ToolKit outbox</small>"/]
  licence[/"License Resolver<br/><small>ClientHub · entitlement</small>"/]
  credstore[("Credential Store<br/><small>the credstore backend</small>")]
  broker[/"Event Broker<br/><small>publish/consume</small>"/]
@@ -1185,7 +1185,9 @@ What it no longer does is call another service to get there. Calling an external
 **The sink is a port with two bindings.** The domain calls `AuditSink::append(txn, scope, record)` — taking the **transaction** is what makes atomicity a property of the signature rather than a convention, and taking the **`AccessScope`** keeps the audit write on the same row-scoped data path as everything else. The shape follows the platform precedent (`bss/ledger`'s `SecuredAuditSink`, whose implementors "persist one append-only audit record *in the supplied posting transaction*, so the record commits atomically with the disposition it audits, or rolls back with it").
 
 - **R1 binds a gear-local store** (§4.7 `audit_records`), which is the system of record for the online retention window (§7 *Scale Model*).
-- **R2 adds a shipper**, not a replacement: a background worker drains unshipped records to the platform Audit Subsystem for cross-gear query and long-term retention. The port does not change, no call site moves, and a shipping failure can never affect a mutation — by then the record is already committed.
+- **R2 adds shipping**, not a replacement: the same transaction that writes the record also enqueues it into ToolKit's **transactional outbox** (`toolkit-db`), whose handler posts it to the platform Audit Subsystem for cross-gear query and long-term retention. The port does not change, no call site moves, and a shipping failure can never affect a mutation — by then the record is already committed.
+
+  Delivery state stays in the outbox rather than in `audit_records`: an earlier draft carried a `shipped_at` column with a partial index over unshipped rows, which is a hand-rolled work queue with the defect such queues have — nothing says which replica drains it, and a nullable timestamp read-then-written is a race between replicas. The outbox already answers that with per-partition locking or leases, and brings a dead-letter lifecycle and retry policy this design would otherwise have had to invent. R1 enqueues nothing, there being no subsystem to post to; its records live in the local store for the online window.
 
 **Retention travels with the record.** Each record carries `retain_until`; absent one, the store's configured default applies. Masking is unchanged and happens before the record is built: a `secret`-classified value is never written in plaintext, and the actor identity carries its own `public`/`pii` classification (below). The interim store therefore meets the same masking and retention guarantees as the platform subsystem it precedes, which is what makes it an approved interim mechanism rather than a shortcut.
 
@@ -1195,7 +1197,7 @@ What it no longer does is call another service to get there. Calling an external
 - **No timeout ambiguity.** There is no external call left to time out, so "rejected" no longer maybe-means "recorded".
 - **No availability coupling.** A mutation no longer depends on another service being reachable. Fail-closed now means the local write must succeed, which fails only when the database itself is unavailable — in which case the mutation could not have committed anyway.
 
-What remains is smaller and is a consequence of holding the store here rather than there. The online window lives in this gear's database and counts against its storage budget (§7 *Scale Model*); until the shipper exists (R2), records are not queryable alongside other gears' audit, so a platform-wide investigation spanning several gears cannot be served from one place; and long-term retention beyond the online window has no destination yet, which is why `retain_until` is carried on the record from the start rather than added later.
+What remains is smaller and is a consequence of holding the store here rather than there. The online window lives in this gear's database and counts against its storage budget (§7 *Scale Model*); until shipping exists (R2), records are not queryable alongside other gears' audit, so a platform-wide investigation spanning several gears cannot be served from one place; and long-term retention beyond the online window has no destination yet, which is why `retain_until` is carried on the record from the start rather than added later.
 
 ### 4.3 API Contracts
 
@@ -1381,7 +1383,7 @@ The parent **`GET /v1/applies/{apply_id}`** is a thin summary linking both, livi
 
 This also makes the scoped-query target (§7, p95 ≤ 2 s over the online window) a local index lookup on `idx_audit_scoped` rather than a synchronous call into another service — a target that was optimistic when it depended on a cross-service read-through.
 
-> **R2: read-through as well, not instead.** Once the platform Audit Subsystem exists and the shipper drains to it (§4.2 *Audit Emitter*), long-term and cross-gear queries belong there; this endpoint keeps serving the online window locally. If a deployment ever chooses to serve history from the subsystem instead, correctness relies only on its `resource` filter supporting **exact match** on this instance-level identifier — no prefix or wildcard is needed, since the requirement is per-(setting, scope), one id per query. That contract is worth confirming with the Audit team when the subsystem is designed; it is no longer a dependency this gear's first release carries.
+> **R2: read-through as well, not instead.** Once the platform Audit Subsystem exists and the outbox handler posts to it (§4.2 *Audit Emitter*), long-term and cross-gear queries belong there; this endpoint keeps serving the online window locally. If a deployment ever chooses to serve history from the subsystem instead, correctness relies only on its `resource` filter supporting **exact match** on this instance-level identifier — no prefix or wildcard is needed, since the requirement is per-(setting, scope), one id per query. That contract is worth confirming with the Audit team when the subsystem is designed; it is no longer a dependency this gear's first release carries.
 
 #### Error Response Format (REST APIs)
 
@@ -1780,9 +1782,8 @@ The gear-local audit store (§4.2 *Audit Emitter*). Append-only: no `UPDATE`, no
 | `apply_id` | UUID | Yes | — | Set for records produced under an apply, so one apply's records are retrievable together |
 | `occurred_at` | `timestamptz` | No | current timestamp | |
 | `retain_until` | `timestamptz` | Yes | — | Retention horizon; `NULL` ⇒ the store's configured default (§4.2 *Audit Emitter*) |
-| `shipped_at` | `timestamptz` | Yes | — | When the record was drained to the platform Audit Subsystem. Always `NULL` in R1, where no shipper exists (§2.3) |
 
-**Indexes:** `idx_audit_scoped` (`declaration_key`, `tenant_id`, `occurred_at DESC`) — serves the per-(setting, scope) history read directly, which is what makes its p95 a local index lookup rather than a cross-service call (§7); `idx_audit_unshipped` — **partial** on (`occurred_at`) `WHERE shipped_at IS NULL`, the R2 shipper's work queue, costing nothing in R1 where it covers every row but is never scanned; `idx_audit_retention` (`retain_until`) `WHERE retain_until IS NOT NULL`, for pruning.
+**Indexes:** `idx_audit_scoped` (`declaration_key`, `tenant_id`, `occurred_at DESC`) — serves the per-(setting, scope) history read directly, which is what makes its p95 a local index lookup rather than a cross-service call (§7); `idx_audit_retention` (`retain_until`) `WHERE retain_until IS NOT NULL`, for pruning.
 
 **Invariants:** append-only in the mutation's own transaction — the record and the change it audits share one commit and cannot diverge (§4.2 *Audit Emitter*). Rows are written through the same `AccessScope`-scoped path as every other write, so an audit row is never visible outside its tenant.
 
