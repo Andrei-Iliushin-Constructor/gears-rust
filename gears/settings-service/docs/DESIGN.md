@@ -108,7 +108,7 @@ The service is delivered as a **Constructor Fabric Gear** — the platform's uni
 | `cpt-cf-settings-service-fr-apply-effect-resolution` | Commit-per-change, then local eviction, then signal publish; per-change `ApplyChangeResult`; consumers self-react on `apply_notification` |
 | `cpt-cf-settings-service-fr-tenant-overrides` | `stage_set` / `clone_override` at any tenant inside the caller's subtree; the override row is created at the target tenant |
 | `cpt-cf-settings-service-fr-cascading-inheritance` | Ancestor-id walk via the Tenant Resolver, nearest-match wins; `inheritance_trail` on the read; bounded `cascading_impact` report |
-| `cpt-cf-settings-service-fr-tenant-scope-enforcement` | Server-side subtree check on every operation; reads gated by `tenant_visible`, writes by `tenant_overridable` |
+| `cpt-cf-settings-service-fr-tenant-scope-enforcement` | Enforced by the platform data path, not by hand-written predicates: `PolicyEnforcer` compiles the decision into an `AccessScope` and `SecureConn` applies it as automatic `WHERE` clauses (§4.8 *The Data Path*). Reads are further gated by `tenant_visible`, writes by `tenant_overridable` |
 | `cpt-cf-settings-service-fr-authn-role-gating` | Bearer token via the AuthN Resolver, then a fail-closed `PolicyEnforcer` decision; step-up on apply and on behavior-affecting declaration actions |
 | `cpt-cf-settings-service-fr-category-access` | `categories.access_restricted` (`false` by default) decides whether a category needs a grant at all: open categories are reached on the ordinary settings right with no authorization question, restricted ones additionally require a grant naming that category — type `gts.cf.toolkit.settings.category.v1~` and id `categories.key`, the slug. Lists ask about the restricted categories only, in one batch, and filter on `NOT access_restricted OR key = ANY(granted_slugs)` (§4.8 *Category access*, §4.7) |
 | `cpt-cf-settings-service-fr-file-valued-settings` | §3 *Files*: a `file-reference`-trait value is an inline reference (`value`, §4.1) to a file in the `file-storage` gear, never the bytes. **Validated for shape only** — the two-field object `{ file_id, version_id }`, both required — with existence, content type, size and caller entitlement deliberately unchecked, so this service takes no dependency on `file-storage` (decision on record, §3 *Files*). The reference is always pinned to a version, so a `bind` under it changes nothing until the setting is repointed; content is never indexed (§4.2 *Search*); `secret` + `file-reference` is rejected (`422`) while `pii` is carried. |
@@ -167,7 +167,7 @@ The service is delivered as a **Constructor Fabric Gear** — the platform's uni
 | Domain | Effective-value resolution, Scope Class behaviour, staging/apply state machine, type validation, secret handling | In-process Rust modules |
 | Infrastructure | Hot-path effective-value cache with signal-driven invalidation; fail-closed audit emission | In-memory cache, Event Broker client |
 | External | Type and trait resolution, tenant ancestry, authentication and authorization decisions, secret storage, event transport, entitlement | `types-registry`, `tenant-resolver`, `authn-resolver`, `authz-resolver`, `credstore`, `event-broker`, `license-resolver`. Audit is **not** external in R1 — the store is gear-local (§4.2 *Audit Emitter*) |
-| Storage | Declarations, categories, values, pending changes, apply records | PostgreSQL via `toolkit-db` |
+| Storage | Declarations, categories, values, pending changes, apply records, audit records | PostgreSQL via `toolkit-db`, reached through `SecureConn` (§4.8 *The Data Path*) |
 
 #### Context View
 
@@ -365,7 +365,7 @@ Authorization, entitlement, type validation, and audit all fail closed. A mutati
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-constraint-postgres-primary-storage`
 
-Declarations, categories, values, pending changes, and apply records stored in PostgreSQL via the `toolkit-db`.
+Declarations, categories, values, pending changes, apply records and audit records stored in PostgreSQL via `toolkit-db`, reached through `SecureConn` so that every query carries an `AccessScope` (§4.8 *The Data Path*).
 
 #### Constructor Fabric Gear
 
@@ -1877,7 +1877,7 @@ A category is either **open** or **restricted** — `categories.access_restricte
 **Reading a list.** Return settings whose category is open, plus those whose category is restricted and granted:
 
 ```sql
-... AND (NOT c.access_restricted OR c.key = ANY($granted_slugs))
+... AND (NOT c.access_restricted OR c.key = ANY($granted_slugs))   -- a query predicate on this design's own columns, not an AccessScope (§4.8 *The Data Path*)
 ```
 
 The gear already knows which categories are restricted — it is a column in its own table — so it asks about those only, in one batch, and asks nothing at all when none is restricted.
@@ -1889,6 +1889,28 @@ The gear already knows which categories are restricted — it is a column in its
 **Limits.** One setting cannot be restricted on its own, only its whole category. A category nobody restricted is reachable by every settings administrator — which is what happens today, where the right on the type is the only gate.
 
 > Grants live in the deployment's policy manager, not here: this gear asks and enforces, stores no roles, and cannot assign anything. It owes the platform a published list of what can be granted — its actions as permission entries of `gts.cf.toolkit.authz.permission.v1~` — and that is not done yet.
+
+#### The Data Path: What Is Scoped, and the One Read That Is Not
+
+Every query this gear issues goes through `SecureConn`, which takes an `AccessScope` and compiles it into automatic `WHERE` clauses; the platform states plainly that there is no unscoped shortcut, and a lint rejects raw SQL outside migrations. Authorization therefore does not end at a yes/no: `PolicyEnforcer`, built over `AuthZResolverClient`, compiles the decision into the `AccessScope` that narrows the query. This section maps every access this design performs onto that path, and names the one that steps outside it — which is what makes the exception reviewable rather than incidental.
+
+| Access | Entity | Scope | |
+|--------|--------|-------|---|
+| Read or write a value at the caller's own scope | `setting_values` | the constraints the PDP returns for the caller | ordinary |
+| An administrator writing a descendant's value | `setting_values` | the same — a tenant's closure runs **downward**, so descendants are already inside it | ordinary |
+| Staging, apply records, per-user mode, audit | `pending_changes`, `apply_operations`, `apply_change_results`, `user_mode_preferences`, `audit_records` | the caller's constraints; the audit sink takes the scope explicitly (§4.2 *Audit Emitter*) | ordinary |
+| Reading or listing definitions | `categories`, `setting_declarations` | **unconstrained — these entities have no tenant dimension** | not an exception, see below |
+| **Resolving an effective value** | `setting_values` | **elevated to the caller's ancestor chain** | the one exception |
+
+**Definitions carry no tenant, so there is nothing to scope.** A category or a declaration is a platform-wide definition: neither table has a `tenant_id`, and a scope filtering on `owner_tenant_id` would reference a property that does not resolve — which the platform treats as a failed constraint, denying every row (rule 9: an unknown property makes its constraint false). An unconstrained scope here is not a boundary being crossed but the accurate statement that this table has no boundary. What governs access is the authorization *decision* — may this caller read declarations at all — together with two ordinary predicates of this design's own: `access_restricted` with the granted category set (§4.8 *Category access*), and `tenant_visible`, licence and mode filtering. Those are business rules on our columns, not row-level scoping, and they are applied as query predicates exactly as they are today.
+
+**The ancestor walk is a real elevation, and it is the only one.** Resolving a `cascading` value reads rows belonging to the caller's ancestors, and an ancestor is never inside the caller's closure — a closure runs downward. So this read cannot be expressed with the caller's own scope, and it should not be: **receiving a value inherited from an ancestor is not the same as being entitled to read that ancestor's settings.** A tenant administrator must not be able to enumerate a parent's overrides or see what the parent set for a sibling. The walk is therefore the service deriving a result on the caller's behalf, not the caller exercising authority — the case the platform's trust elevation exists for, and the shape Account Management already uses for its own hierarchy reads (`AccessScope::allow_all()` behind a single named call site).
+
+Three rules keep it reviewable:
+
+- **One call site.** The elevation lives in the Value Resolver's ancestor read and nowhere else. Every other access in the table above uses the caller's scope.
+- **The chain is not chosen by the caller.** It comes from `TenantResolverClient.get_ancestors` for the requested scope (§4.2 *Value Resolver*), so the elevated read is bounded by the platform's own view of ancestry, not by anything the request supplies.
+- **Only the resolved value leaves.** The caller receives the effective value for its own scope and the `inheritance_trail`, which is limited to its own ancestor chain (§4.1). No ancestor row, and no sibling's value, is ever returned.
 
 #### Security Controls
 
@@ -1986,7 +2008,7 @@ The Settings Service is **supplied as a Constructor Fabric Gear** — a composab
 |---------|--------|-------|
 | Language / runtime | Rust, ToolKit gear (`#[toolkit::gear]`) | SDK crate plus gear implementation crate, per the gear packaging model |
 | HTTP surface | Axum, OpenAPI-documented REST | RFC 9457 problem details; OData on collection lists via `toolkit_odata` |
-| Persistence | PostgreSQL via `toolkit-db` | Partial and trigram GIN indexes; UUIDv7 keys |
+| Persistence | PostgreSQL via `toolkit-db`, reached through `SecureConn` with a `PolicyEnforcer`-compiled `AccessScope` (§4.8 *The Data Path*) | Partial and trigram GIN indexes; UUIDv7 keys |
 | In-process wiring | `ClientHub` | Resolves each dependency to a local implementation or a generated REST client per deployment profile |
 | Type validation | JSON Schema 2020-12 + `x-gts-traits` | Resolved from `types-registry`; validation only, never a second default |
 | Secret storage | `credstore` gear | Values held by opaque reference; plaintext never in this gear's database, cache, index, or audit |
@@ -2306,9 +2328,9 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 
 | Component | Why |
 |---|---|
-| Ancestor-id cascade resolution queries (integration + API) | Inheritance correctness depends on real `WHERE tenant_id IN (ancestor ids)` generation against seeded rows, with ancestry supplied by the Tenant Resolver |
+| Ancestor-id cascade resolution queries (integration + API) | Inheritance correctness depends on real `WHERE tenant_id IN (ancestor ids)` generation against seeded rows, with ancestry supplied by the Tenant Resolver. This is also the only elevated read in the design (§4.8 *The Data Path*), so its bounds — the chain comes from the Tenant Resolver, and no ancestor row leaves — are worth asserting here rather than trusting |
 | DB constraints (uniqueness, global check) | At-most-one and invariant enforcement are DB-level |
-| Tenant isolation scoping | Must verify real `WHERE` generation, not application filtering |
+| Tenant isolation scoping | Must verify the `WHERE` clauses `SecureConn` generates from a real `AccessScope`, not application-level filtering. The domain doubles above substitute the repository port and never reach `SecureConn`, so scope enforcement is exercised **only** from the persistence level upward — a unit test passing says nothing about isolation (§4.8 *The Data Path*) |
 | FK `ON DELETE RESTRICT`/`CASCADE` (categories, values) | No-orphan and cleanup invariants are DB-level |
 | Partial unique pending index | At-most-one active pending per setting+scope is DB-enforced |
 | Staged value representation | A `set`/`clone` with both or neither of `staged_value`/`staged_secret_ref` is rejected by the `CHECK`, as is a `revert`/`remove` carrying either; a `set` on a secret-trait declaration that stages `staged_value` instead of `staged_secret_ref` is rejected by the staging transaction (§4.6, §4.2 *Staging Manager*) |
