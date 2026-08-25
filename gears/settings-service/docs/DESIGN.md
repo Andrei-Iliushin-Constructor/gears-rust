@@ -166,7 +166,7 @@ The service is delivered as a **Constructor Fabric Gear** — the platform's uni
 | Gear | REST surface, authorization, declaration lifecycle, staging and apply, resolution, search | Rust crate (`settings-service`), ToolKit gear, Axum |
 | Domain | Effective-value resolution, Scope Class behaviour, staging/apply state machine, type validation, secret handling | In-process Rust modules |
 | Infrastructure | Hot-path effective-value cache with signal-driven invalidation; fail-closed audit emission | In-memory cache, Event Broker client |
-| External | Type and trait resolution, tenant ancestry, authentication and authorization decisions, secret storage, event transport, audit, entitlement | `types-registry`, `tenant-resolver`, `authn-resolver`, `authz-resolver`, `credstore`, `event-broker`, audit, `license-resolver` |
+| External | Type and trait resolution, tenant ancestry, authentication and authorization decisions, secret storage, event transport, entitlement | `types-registry`, `tenant-resolver`, `authn-resolver`, `authz-resolver`, `credstore`, `event-broker`, `license-resolver`. Audit is **not** external in R1 — the store is gear-local (§4.2 *Audit Emitter*) |
 | Storage | Declarations, categories, values, pending changes, apply records | PostgreSQL via `toolkit-db` |
 
 #### Context View
@@ -184,7 +184,7 @@ C4Context
  System(authz, "AuthZ Resolver", "Access gating for read/mutate/apply")
  System(tenant_resolver, "Tenant Resolver (the Tenant Resolver)", "Org-hierarchy ancestry for cascade")
  System(idp, "IdP / AuthN Resolver", "Authentication; issues step-up (re-auth) tokens")
- System(audit, "Audit Subsystem", "Immutable change history")
+ System(audit, "Audit Subsystem", "Immutable change history — R2; R1 records locally")
  System(license_resolver, "License Resolver", "Feature/licence entitlement gating")
  System(credstore, "Credential Store", "the credstore backend: secret-trait value storage")
  System(event_broker, "Event Broker", "Apply-lifecycle events; tenant_deleted consumption")
@@ -201,7 +201,7 @@ C4Context
  Rel(settings_service, authz, "authorize read/mutate/apply (fail-closed)", "in-process (PEP)")
  Rel(settings_service, tenant_resolver, "resolve scope ancestry", "in-process (ClientHub)")
  Rel(settings_service, idp, "validate step-up token claims (local)", "JWKS")
- Rel(settings_service, audit, "emit audit records", "audit API")
+ Rel(settings_service, audit, "ship audit records (R2; R1 writes locally)", "audit API")
  Rel(settings_service, license_resolver, "check feature/licence entitlement (read paths)", "in-process (ClientHub)")
  Rel(settings_service, credstore, "store/resolve secret values (machine path)", "credstore API")
  Rel(settings_service, event_broker, "publish apply/lifecycle events + activation signals (apply_notification per subscriber, cache_invalidate broadcast); consume tenant_deleted", "Event Broker")
@@ -223,7 +223,7 @@ C4Container
  Container_Ext(authz, "AuthZ Resolver", "ClientHub", "Fail-closed access gating via AuthZResolverClient")
  Container_Ext(tenant_resolver, "Tenant Resolver", "ClientHub", "Org-hierarchy ancestry")
  Container_Ext(idp, "IdP / AuthN Resolver", "JWKS", "Step-up token validation (local, no per-apply call)")
- Container_Ext(audit, "Audit Subsystem", "Audit API", "Mutation records")
+ Container_Ext(audit, "Audit Subsystem", "Audit API", "Mutation records — R2 destination for the shipper")
  Container_Ext(license_resolver, "License Resolver", "ClientHub", "Feature/licence entitlement gating")
  Container_Ext(credstore, "Credential Store", "credstore API", "the credstore backend secret-value storage")
  Container_Ext(event_broker, "Event Broker", "Event Broker", "Publish/consume + cross-instance cache invalidation")
@@ -237,7 +237,7 @@ C4Container
  Rel(domain, authz, "authorize (fail-closed)", "ClientHub")
  Rel(domain, tenant_resolver, "ancestry", "ClientHub")
  Rel(domain, idp, "validate step-up token claims (local)", "JWKS")
- Rel(domain, audit, "emit", "audit API")
+ Rel(domain, audit, "ship (R2)", "audit API")
  Rel(domain, license_resolver, "feature/licence entitlement", "ClientHub")
  Rel(domain, credstore, "store/resolve secret values (machine path)", "credstore API")
  Rel(domain, event_broker, "publish/consume; cross-instance invalidation", "Event Broker")
@@ -762,7 +762,7 @@ graph TD
  authz[/"AuthZ Resolver<br/><small>ClientHub · AuthZResolverClient</small>"/]
  tenant[("Tenant Resolver<br/><small>ClientHub</small>")]
  idp[/"IdP / AuthN Resolver<br/><small>step-up token (JWKS)</small>"/]
- audit[/"Audit Subsystem"/]
+ audit[/"Audit Subsystem<br/><small>R2 — shipper destination</small>"/]
  licence[/"License Resolver<br/><small>ClientHub · entitlement</small>"/]
  credstore[("Credential Store<br/><small>the credstore backend</small>")]
  broker[/"Event Broker<br/><small>publish/consume</small>"/]
@@ -1945,16 +1945,24 @@ The Settings Service is **supplied as a Constructor Fabric Gear** — a composab
 | Property | Value |
 |----------|-------|
 | Gear name | `settings-service` |
-| Dependencies | Each is marked with whether the gear exists in the workspace today, because an unknown dependency name is not a documentation defect — `GearRegistry::discover_and_build()` topologically sorts on these and fails startup on a name it cannot resolve. **Exists:** `types-registry` (`TypesRegistryClient`), `tenant-resolver` (`TenantResolverClient`), `authz-resolver` (`AuthZResolverClient`, with the SDK's `PolicyEnforcer` built over it), `credstore` (`CredStoreClientV1`), `event-broker` (`EventBrokerApi`). **Must be built first:** `license-resolver` (feature/licence entitlement, §4.2) — the gear is documentation only, there is no crate to depend on and the platform implements licence validation at base-licence level with per-feature entitlement still pending; and a platform **audit** gear, which does not exist under any name. R1 does not wait on either (§2.3): licence gating ships in R2, and audit is a gear-local sink writing inside the mutation's own transaction, with the external subsystem arriving in R2 as an adapter swap. **No IdP gear dependency** — the step-up re-authentication happens **browser ↔ IdP** (the apply request arrives already bearing a fresh token); the gear only **validates that token's claims locally against the IdP's cached JWKS** (§4.2 *Apply Orchestrator*), so the IdP is not a per-apply runtime dependency — only its JWKS endpoint is configured (fetched/refreshed in the background). Step-up verification is a **ClientHub-resolved `StepUpVerifier`** trait — default binding = the OIDC/JWKS verifier (§4.2 *Apply Orchestrator*); a deployment may bind a non-OIDC or added-factor verifier **without gear code** — but never an always-satisfied one: the mechanism is pluggable, the requirement is not (§4.2 *Apply Orchestrator*). |
+| Dependencies | Declared two ways, because the distinction decides what this gear forces on the rest of the platform. `GearRegistry::discover_and_build()` topologically sorts on `deps` and fails startup on a name it cannot resolve, so a `deps` entry is an **ordering** claim — *this gear must be initialised before me* — not a statement that we call it.
+
+**`deps = [types_registry]`.** The one gear this service calls during its **own** init: registering the settings GTS schemas (Bootstrap, §4.8) is a real call, so types-registry must already be up. R2 adds `event_broker`, when the `tenant_deleted` subscription is taken out at init.
+
+**Everything else via `#[toolkit::consumes]`** — `authz-resolver` (`AuthZResolverClient`, with the SDK's `PolicyEnforcer` built over it), `tenant-resolver` (`TenantResolverClient`), `credstore` (`CredStoreClientV1`), `event-broker` (`EventBrokerApi`) in R1, and `license-resolver` from R2. All are used on the **request** path, never during our init, so the client is resolved when first needed rather than eagerly. `consumes` wires it without an ordering edge, and — unlike simply omitting the name — keeps the dependency's `inventory::submit!` registration linked and registers a directory-resolving proxy in the out-of-process profiles. In R1, which is Embedded-only (§2.3), the wiring short-circuits to the co-located implementation and readiness flips immediately.
+
+**Must be built first:** `license-resolver` — the gear is documentation only, there is no crate to depend on, and the platform implements licence validation at base-licence level with per-feature entitlement still pending. A platform **audit** gear exists under no name at all. R1 waits on neither (§2.3): licence gating ships in R2, and audit is a gear-local store written inside the mutation's own transaction (§4.2 *Audit Emitter*). **No IdP gear dependency** — the step-up re-authentication happens **browser ↔ IdP** (the apply request arrives already bearing a fresh token); the gear only **validates that token's claims locally against the IdP's cached JWKS** (§4.2 *Apply Orchestrator*), so the IdP is not a per-apply runtime dependency — only its JWKS endpoint is configured (fetched/refreshed in the background). Step-up verification is a **ClientHub-resolved `StepUpVerifier`** trait — default binding = the OIDC/JWKS verifier (§4.2 *Apply Orchestrator*); a deployment may bind a non-OIDC or added-factor verifier **without gear code** — but never an always-satisfied one: the mechanism is pluggable, the requirement is not (§4.2 *Apply Orchestrator*). |
 | Capabilities | `db`, `rest` |
 
-> **Why not `system`.** The ToolKit runtime re-partitions gears at init into *all system gears first, then all non-system gears* (`registry::gears_by_system_priority`), preserving the dependency topo-order only *within* each group. A `system` `settings-service` would therefore init **before** its non-system dependencies (`rbac`, `credstore`, `event-broker`) and its fail-closed client resolution would break startup. `system` is intentionally **not** declared (the reference `rbac` gear omits it for the same reason). The reader's early availability is instead provided by dependency ordering — a gear that must read effective values during its own init declares `settings-service` in its `deps`.
+> **Why not `system`.** The ToolKit runtime re-partitions gears at init into *all system gears first, then all non-system gears* (`registry::gears_by_system_priority`), preserving the dependency topo-order only *within* each group. A `system` `settings-service` would therefore init **before** `types-registry`, and registering the settings GTS schemas (§4.8 *Bootstrap*) would fail. `system` is intentionally **not** declared (the reference `authz-resolver` gear omits it for the same reason). The reader's early availability is instead provided by dependency ordering — a gear that must read effective values during its own init declares `settings-service` in its `deps`.
+
+> **The constraint that follows, and who it binds.** That last sentence is one half of a cycle: a gear reading settings at init declares `settings-service` and initialises **after** us, while anything in our own `deps` initialises **before** us. A gear in both positions makes the graph unsortable and the **host does not start** — not this gear, the host. Keeping `deps` to what we actually call during our init is what shrinks that exposure to a single name: **`types-registry` must not read a setting during its own init**, and from R2 the same holds for `event-broker`. Every other gear is free, because we consume rather than depend on it. The rule is worth a lint: discovering it as a topo-sort failure during a rollout is the expensive way to learn it.
 
 **Lifecycle hooks:**
 
 | Hook | Responsibility |
 |------|----------------|
-| Gear init | Load config (incl. the IdP **JWKS endpoint** + step-up **freshness window** for local step-up token validation, §4.2 *Apply Orchestrator*); resolve `TypesRegistryClient`, `TenantResolverClient`, `PolicyEnforcer`, `LicenseResolverClient`, the `StepUpVerifier` (default: OIDC/JWKS), credstore client, Event Broker publisher/consumer, audit client; construct services/repos; register `SettingsReaderClient` + `SettingsContributionClient` in `ClientHub`; register settings GTS schemas (incl. event schemas, §4.7) in types-registry; subscribe to `tenant_deleted`. |
+| Gear init | Load config (incl. the IdP **JWKS endpoint** + step-up **freshness window** for local step-up token validation, §4.2 *Apply Orchestrator*); resolve `TypesRegistryClient` (called here) and construct the `StepUpVerifier` (default: OIDC/JWKS, a gear-owned port — §4.2 *Apply Orchestrator*); construct services/repos. The consumed clients — authz, tenant-resolver, credstore, event-broker — are **not** resolved here: they are wired by the proxy-wiring phase and fetched at first use, which is what keeps them off this gear's `deps` (above); register `SettingsReaderClient` + `SettingsContributionClient` in `ClientHub`; register settings GTS schemas (incl. event schemas, §4.7) in types-registry; subscribe to `tenant_deleted`. |
 | Database migrations | Apply settings schema migrations (§4.7). |
 | REST registration | Register versioned REST routes + OpenAPI docs (§4.3). There are **no** internal token-only routes — activation commits in-process and cache coherence is the `cache_invalidate` broadcast (§4.4). |
 | Reader availability | The in-process reader is available to any gear that declares `settings-service` in its own `deps` — dependency ordering runs `settings-service` init first. (`system` is intentionally not declared — see the capabilities note above.) |
