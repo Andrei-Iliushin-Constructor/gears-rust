@@ -42,11 +42,11 @@
 
 ### 1.1 Architectural Vision
 
-Graph Storage is a stateless-above-PostgreSQL platform gear that stores one typed, multi-tenant knowledge graph and serves three query shapes over it: lexical/vector/hybrid search, depth-limited traversal, and bounded projections. One relational store is the source of truth for everything — nodes, edges, chunks, types, vectors, labels, and the graph revision — so consistency, tenancy, and authorization are enforced in exactly one place. Whole-graph analytics reads that store through a topology-only role from its own gear (ADR-0007).
+Graph Storage is a **stateless gateway** over a pluggable store: it holds no graph state of its own, and every byte it serves comes from a `GraphStoreV1` implementation behind the port. It stores one typed, multi-tenant knowledge graph and serves three query shapes over it: lexical/vector/hybrid search, depth-limited traversal, and bounded projections. One store is the source of truth for everything — nodes, edges, chunks, types, vectors, labels, and the graph revision — so consistency, tenancy, and authorization are enforced in exactly one place. The built-in implementation is a single PostgreSQL schema, registered through the same plugin path an external store would use; nothing in the API surface, the authorization model or the error contract depends on it being PostgreSQL. Whole-graph analytics reads that store through a topology-only role from its own gear (ADR-0007).
 
 The design generalizes the `studio-graph-storage` prototype: its data model (typed nodes and edges with GTS contracts, deterministic keys, phantom nodes, static/analysis edge split), its retrieval stack (tsvector + pgvector + RRF fusion, chunk folding), and its analytics surface are carried forward (the last into a separate gear, ADR-0007); its Python-only dependencies (Apache AGE, NetworkX, sentence-transformers) are replaced by decisions recorded in ADR-0001, ADR-0004, and ADR-0005; and platform obligations the prototype deliberately skipped — tenancy, access control, pagination, batched writes, observability — are designed in from the start.
 
-The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a typed client trait and transport-agnostic models, an implementation crate with API/domain/infra layers, and two plugin surfaces — embedding providers (ADR-0005) and graph engines behind the `GraphQueryPort` (ADR-0001), with the built-in PostgreSQL engine as the default graph-engine plugin.
+The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a typed client trait and transport-agnostic models, an implementation crate with API/domain/infra layers, and **three** plugin surfaces — graph stores behind `GraphStoreV1` (ADR-0001), graph engines behind `GraphEngineV1` for traversal (ADR-0001), and embedding providers (ADR-0005). The built-in PostgreSQL store and engine are the defaults for the first two and are registered exactly as an external plugin is.
 
 ### 1.2 Architecture Drivers
 
@@ -140,28 +140,40 @@ flowchart TD
             EMB["Embedding Coordinator"]
         end
         subgraph INFRA["infra"]
-            STORE["Storage Layer: SeaORM entities, SecureORM scoping, migrations"]
+            STORE["Built-in PostgreSQL store: GraphStoreV1 + GraphEngineV1 impl"]
             FS["file-storage reference handling"]
         end
     end
-    subgraph PLUGINS["plugins"]
+    PORT{{"GraphStoreV1 / GraphEngineV1 port"}}
+    subgraph PLUGINS["plugins (GTS instances, scoped ClientHub clients)"]
         ONNX["onnx-embedding-plugin (default)"]
         REMOTE["remote-embedding-plugin"]
+        EXTSTORE["external graph-store plugin"]
+        EXTENG["external graph-engine plugin"]
     end
     PG[("PostgreSQL 16+ with pgvector (19+ for SQL/PGQ)")]
 
     CLIENT -->|ClientHub local client| DOMAIN
     REST --> DOMAIN
-    DOMAIN --> STORE
-    EMB --> PLUGINS
+    DOMAIN --> PORT
+    PORT --> STORE
+    PORT --> EXTSTORE
+    PORT --> EXTENG
+    EMB --> ONNX
+    EMB --> REMOTE
     STORE --> PG
 ```
+
+The arrow that matters is `DOMAIN --> PORT`. No domain service reaches an entity,
+a statement or a connection; the built-in PostgreSQL store sits behind the same
+port an external store does, and lives in `infra` only because co-locating the
+default avoids a crate boundary — not because it is privileged.
 
 - **SDK crate** (`graph-storage-sdk`): client trait, transport-agnostic models, GTS identifier constants for the base ontology. No serde/HTTP/DB dependencies.
 - **API layer**: REST DTOs and handlers only; every route registered through OperationBuilder with authentication and permissions.
 - **Domain layer**: the seven services above, expressed over storage ports; no infra types in domain signatures.
-- **Infra layer**: SeaORM entities with `Scopable` tenancy, repositories generic over `DBRunner`, migrations, traversal SQL, and the file-storage reference adapter.
-- **Plugins**: embedding providers behind the plugin contract, discovered via GTS plugin instances.
+- **Infra layer**: the built-in `GraphStoreV1` / `GraphEngineV1` implementation — SeaORM entities with `Scopable` tenancy, repositories generic over `DBRunner`, migrations, traversal SQL — plus the file-storage reference adapter.
+- **Plugins**: graph stores, graph engines and embedding providers, each behind its versioned trait and discovered via GTS plugin instances. The built-in store and engine are registered through that same path, so an external implementation replaces them by registration rather than by a code change.
 
 ## 2. Principles & Constraints
 
@@ -1000,6 +1012,14 @@ pub struct StoreCtx<'a> {
     pub cancel: CancellationToken,
 }
 ```
+
+`scope` being in *this* struct rather than in a per-method argument is what makes
+the request-level decline possible: an implementation inspects the compiled scope
+it is about to serve and may answer `ScopeUnservable` instead of a result, which
+the gateway resolves by falling back (§ Plugin Selection and Lifecycle). Every
+method below may return it; it is a routing signal, not a failure, and it never
+reaches the caller — the caller sees the fallback's answer, or a fail-closed
+error if no implementation can serve the scope.
 
 ##### `GraphStoreV1`
 
@@ -1977,6 +1997,7 @@ One authoritative chain classifies every failure: `DomainError -> CanonicalError
 | Operation exceeded its absolute deadline | `deadline_exceeded` | `DEADLINE` | Retry with a smaller request or later |
 | Caller or shutdown cancellation | `cancelled` | `CANCELLED` | Resubmit if still needed |
 | Capability not supported by the selected engine | `unimplemented` | `CAPABILITY_UNSUPPORTED` | Do not retry; use another capability |
+| No registered implementation can serve the caller's scope shape | `failed_precondition` | `SCOPE_UNSERVABLE` | Never retry unchanged; narrow the scope or query per alternative. Reached only when the fallback chain is exhausted — an ordinary decline is invisible to the caller |
 | Dependency unavailable (PDP, types-registry, provider, engine) | `unavailable` | `DEPENDENCY_UNAVAILABLE` | Wait and retry |
 | Vector search blocked by embedding-identity mismatch | `failed_precondition` | `EMBEDDING_SPACE_MISMATCH` | Operator action; other operations unaffected |
 | Filter on an attribute whose index is not `active` | `failed_precondition` | `INDEX_NOT_ACTIVE` | Drop the filter or wait for the build; never retry unchanged in a loop |
@@ -2160,15 +2181,51 @@ The full graph-engine evaluation behind this strategy (12-engine scoreboard, Fal
 
 ### Plugin Selection and Lifecycle
 
-The platform baseline (PluginV1, types-registry registration, scoped ClientHub clients) supplies the mechanics; this section owns the Graph Storage-specific contracts, defined separately for embedding providers and graph engines:
+The platform baseline (PluginV1, types-registry registration, scoped ClientHub clients) supplies the mechanics; this section owns the Graph Storage-specific contracts, defined separately for graph stores, graph engines and embedding providers:
 
 - **GTS plugin schemas**: three siblings off the platform plugin base — `gts.cf.toolkit.plugins.plugin.v1~cf.core.graph_storage.embedding_provider.v1~`, `gts.cf.toolkit.plugins.plugin.v1~cf.core.graph_storage.graph_engine.v1~` and `gts.cf.toolkit.plugins.plugin.v1~cf.core.graph_storage.graph_store.v1~`. A derived type carries its ancestry in the identifier, as every other gear's plugin does (`…~cf.core.credstore.plugin.v1~`, `…~cf.llmgw.provider.plugin.v1~`). Validated properties — provider/engine identity, declared capabilities and authorization predicates, embedding-space identity or projection characteristics, priority.
-- **Versioned SDK traits** (`EmbeddingProviderV1`, `GraphEngineV1`) with typed request/result/error models; the schema major maps one-to-one to the trait version, and a registered instance resolves to a scoped ClientHub client of the matching trait version — an incompatible version is a deterministic selection error, never a silent downgrade.
-- **Selection**: with no selector configured, the built-in default is used (in-process ONNX provider, built-in PostgreSQL engine); ties break deterministically on (priority, instance id). An **explicitly configured selector that matches nothing compatible never falls back** — it is a deterministic selection error and a readiness failure, because silently substituting a different embedding space or engine semantics would hide a deployment error.
+- **Versioned SDK traits** (`GraphStoreV1`, `GraphEngineV1`, `EmbeddingProviderV1`) with typed request/result/error models; the schema major maps one-to-one to the trait version, and a registered instance resolves to a scoped ClientHub client of the matching trait version — an incompatible version is a deterministic selection error, never a silent downgrade.
+- **Selection**: with no selector configured, the built-in default is used (built-in PostgreSQL store, built-in PostgreSQL engine, in-process ONNX provider); ties break deterministically on (priority, instance id). An **explicitly configured selector that matches nothing compatible never falls back** — it is a deterministic selection error and a readiness failure, because silently substituting a different embedding space or engine semantics would hide a deployment error.
 - **Readiness and churn**: a selected plugin participates in readiness; cached selections are invalidated on instance disappearance or re-registration, and re-selection follows the same deterministic rules.
 - **Source epoch fencing (graph engines)**: the gear owns a non-reusable source epoch (timeline identifier) paired with the graph revision; a point-in-time restore of PostgreSQL starts a new epoch. Every engine reports its applied (epoch, revision) cursor; on epoch mismatch, revision rewind, or an unprovable cursor the gear fails closed or routes to the built-in backend until the plugin acknowledges a rebuild from the current epoch. The plugin owns projection reset/rebuild mechanics; the gear owns the epoch, the rebuild handoff, the activation gate, and the routing decision.
 - **Built-in PostgreSQL engine routing**: the Traversal Service always calls `GraphEngineV1` through the port — never a backend directly — and the gear registers its own PostgreSQL adapter as the built-in `GraphEngineV1` implementation with a GTS instance and a scoped ClientHub client, exactly like an external plugin. The adapter itself stays in `graph-storage/src/infra` (no separate crate); what the plugin path adds is uniform registration, selection, capability negotiation, and fallback routing.
-- **Conformance**: every implementation — real and fake — runs the same contract suite, including the resource-scoped adversarial authorization tests.
+- **Built-in PostgreSQL store routing**: identical to the engine rule and stated separately because it is the one most easily assumed away. Domain services call `GraphStoreV1` through the port only; the gear registers its own PostgreSQL implementation as the built-in store with a GTS instance and a scoped ClientHub client, exactly as an external store would be registered. It lives in `graph-storage/src/infra` for packaging convenience, not as a privilege — replacing it is a registration change, not a code change.
+- **Conformance**: every implementation — real and fake — runs the same contract suite, including the resource-scoped adversarial authorization tests. The suite plus the in-memory fake ship in v1 (ADR-0001 § Decision Outcome point 5), so a trait change only PostgreSQL can satisfy fails on the fake rather than on the first external vendor.
+
+**Two kinds of "cannot serve this", and they resolve differently.** Conflating
+them is what makes a pluggable data plane fail confusingly, so they are named
+apart:
+
+| | Deployment-level | Request-level |
+|---|---|---|
+| Question | Can this implementation do X at all? | Can it do X *for this caller's scope*? |
+| Declared by | `StoreCapabilities` / `EngineCapabilities` at registration | The implementation, per call |
+| Answer | `Unsupported` from the affected method, capability absent from readiness | The request is **declined**, not failed |
+| Gateway behavior | An explicitly configured selector that matches nothing **never** silently substitutes — deterministic selection error and a readiness failure | Route to another implementation that can serve it, or to the built-in store; log the declining implementation and the reason |
+
+The request-level case is not hypothetical, and it is why capability could not be
+a startup-only property. A `GRAPH_TABLE` pattern accepts no subquery, so a scope
+carrying `InGroupSubtree` compiles to a correlated sibling `FROM` item — and two
+OR-ed constraints that each need one cannot be comma-joined without zeroing or
+multiplying the result, so that shape is refused. A CTE body cannot express a
+scope whose filters reach beyond tenant at all. Both are properties of *the
+caller's `AccessScope`*, unknowable at startup: the same deployment, the same
+configuration, serves one caller through `GRAPH_TABLE` and the next through the
+two-query hop.
+
+A decline is therefore a first-class outcome, distinct from an error:
+`GraphStoreError::ScopeUnservable` / `GraphEngineError::ScopeUnservable`, carrying
+the reason and nothing about the caller. The gateway owns what happens next — it
+falls back along a documented order ending at the built-in store, records which
+implementation declined and why, and exposes a counter per (implementation,
+reason) so a deployment silently running on its fallback is visible rather than
+merely slow. A decline never changes the answer: the fallback serves the same
+rows under the same scope, or the request fails closed.
+
+What a decline may **not** do is weaken a guarantee. An implementation that
+cannot meet an ordering obligation declares the capability unsupported at
+registration; it does not decline per request and hope the caller does not
+notice, and it never approximates.
 
 ### Capacity and Admission Contract
 
