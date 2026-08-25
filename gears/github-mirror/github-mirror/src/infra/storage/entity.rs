@@ -621,6 +621,78 @@ pub mod pull_request_files {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod sync_sessions {
+    use super::{DeriveEntityModel, DerivePrimaryKey, DeriveRelation, EnumIter, Scopable, Uuid};
+    use sea_orm::entity::prelude::*;
+
+    /// One sync run of one repository, tenant-scoped. The row is the durable
+    /// face of a session: what was asked, where it stands, how it ended.
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Scopable)]
+    #[sea_orm(table_name = "gm_sync_sessions")]
+    #[secure(tenant_col = "tenant_id", resource_col = "id", no_owner, no_type)]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub tenant_id: Uuid,
+        /// Session id, minted by the gear (not by GitHub).
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        /// `owner/name` slug the session was asked to sync.
+        pub repo_full_name: String,
+        /// GitHub repository id, filled once the repository row exists.
+        pub repo_id: Option<i64>,
+        /// `queued`, `running`, `succeeded`, `failed`, or `interrupted`.
+        pub state: String,
+        /// Failure detail when `state = failed`.
+        pub error: Option<String>,
+        /// The run's `SyncSummary` as raw JSON, when it succeeded.
+        pub summary_json: Option<String>,
+        /// RFC3339 timestamps kept as text (engine-agnostic), as elsewhere.
+        pub created_at: String,
+        pub started_at: Option<String>,
+        pub finished_at: Option<String>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod sync_watermarks {
+    use super::{DeriveEntityModel, DerivePrimaryKey, DeriveRelation, EnumIter, Scopable, Uuid};
+    use sea_orm::entity::prelude::*;
+
+    /// Incremental-sweep watermark for one `(repository, endpoint family)`
+    /// pair: the promoted high-water mark plus the staged candidate, so an
+    /// interrupted sweep never advances the mark it did not finish earning.
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Scopable)]
+    #[sea_orm(table_name = "gm_sync_watermarks")]
+    #[secure(tenant_col = "tenant_id", resource_col = "repo_id", no_owner, no_type)]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub tenant_id: Uuid,
+        /// Owning repository's GitHub id.
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repo_id: i64,
+        /// Endpoint family (`issues`, `pull_requests`, ...).
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub family: String,
+        /// RFC3339 last promoted high-water mark; absent on first run.
+        pub last_seen_updated_at: Option<String>,
+        /// `ETag` of page 1 from the last successful sweep (short-circuit).
+        pub page1_etag: Option<String>,
+        /// Crash-safety flag: a sweep is currently running.
+        pub sweep_in_progress: bool,
+        /// RFC3339 staged high-water, promoted on sweep success.
+        pub candidate_high_water: Option<String>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod tags {
     use super::{DeriveEntityModel, DerivePrimaryKey, DeriveRelation, EnumIter, Scopable, Uuid};
     use sea_orm::entity::prelude::*;
@@ -755,6 +827,48 @@ pub mod commit_comments {
         pub created_at: String,
         pub updated_at: String,
         pub html_url: Option<String>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod entity_fingerprints {
+    use super::{DeriveEntityModel, DerivePrimaryKey, DeriveRelation, EnumIter, Scopable, Uuid};
+    use sea_orm::entity::prelude::*;
+
+    /// Durable change-detection state for one mirrored entity: what the sync
+    /// last saw of it in a list response, so the next sweep can skip
+    /// unchanged rows without fetching their detail (GAPS.md #19).
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Scopable)]
+    #[sea_orm(table_name = "gm_entity_fingerprints")]
+    #[secure(tenant_col = "tenant_id", resource_col = "repo_id", no_owner, no_type)]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub tenant_id: Uuid,
+        /// Owning repository's GitHub id.
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repo_id: i64,
+        /// Endpoint family the entity came from (`issues`, `pull_requests`, ...).
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub family: String,
+        /// The entity's id within its family, as GitHub prints it.
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub entity_id: String,
+        /// Hex fingerprint of the list-visible fields.
+        pub fingerprint: String,
+        /// RFC3339 `updated_at` from the list row, if the family carries one.
+        pub updated_at: Option<String>,
+        /// GraphQL node id, when a GraphQL leg reported it.
+        pub node_id: Option<String>,
+        /// Hash over child-collection counts (comments/reviews/commits/files).
+        pub child_counts_hash: Option<String>,
+        /// RFC3339 completion time of the last refinement pass.
+        pub last_refined_at: Option<String>,
+        /// `pending` until refinement finishes, then `complete`.
+        pub refinement_status: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

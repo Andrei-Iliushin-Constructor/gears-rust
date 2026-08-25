@@ -961,3 +961,113 @@ pub trait IssueTimelineRepository: Send + Sync {
         limit: u64,
     ) -> Result<Vec<IssueTimelineEvent>, DomainError>;
 }
+
+/// Durable face of one sync run. Unlike the mirrored records above, this is
+/// the gear's own vocabulary — GitHub knows nothing about sessions.
+///
+/// `state` holds one of `queued`, `running`, `succeeded`, `failed`,
+/// `interrupted`; the sync engine owns the transitions (gears-rust#4632).
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncSessionRecord {
+    pub id: Uuid,
+    pub repo_full_name: String,
+    pub repo_id: Option<i64>,
+    pub state: String,
+    pub error: Option<String>,
+    pub summary_json: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+#[async_trait]
+pub trait SyncSessionRepository: Send + Sync {
+    async fn upsert<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        record: SyncSessionRecord,
+    ) -> Result<SyncSessionRecord, DomainError>;
+
+    async fn find_by_id<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<SyncSessionRecord>, DomainError>;
+
+    async fn list_recent<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        limit: u64,
+    ) -> Result<Vec<SyncSessionRecord>, DomainError>;
+}
+
+/// Incremental-sweep watermark for one `(repository, endpoint family)` pair.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncWatermarkRecord {
+    pub repo_id: i64,
+    pub family: String,
+    pub last_seen_updated_at: Option<String>,
+    pub page1_etag: Option<String>,
+    pub sweep_in_progress: bool,
+    pub candidate_high_water: Option<String>,
+}
+
+#[async_trait]
+pub trait SyncWatermarkRepository: Send + Sync {
+    async fn upsert<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        record: SyncWatermarkRecord,
+    ) -> Result<SyncWatermarkRecord, DomainError>;
+
+    async fn find<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        family: &str,
+    ) -> Result<Option<SyncWatermarkRecord>, DomainError>;
+}
+
+/// Change-detection fingerprint of one mirrored entity, per family.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityFingerprintRecord {
+    pub repo_id: i64,
+    pub family: String,
+    pub entity_id: String,
+    pub fingerprint: String,
+    pub updated_at: Option<String>,
+    pub node_id: Option<String>,
+    pub child_counts_hash: Option<String>,
+    pub last_refined_at: Option<String>,
+    pub refinement_status: String,
+}
+
+#[async_trait]
+pub trait EntityFingerprintRepository: Send + Sync {
+    async fn upsert<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        record: EntityFingerprintRecord,
+    ) -> Result<EntityFingerprintRecord, DomainError>;
+
+    async fn find<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        family: &str,
+        entity_id: &str,
+    ) -> Result<Option<EntityFingerprintRecord>, DomainError>;
+}

@@ -28,6 +28,10 @@ use crate::domain::repo::{
     TagRepository, WorkflowJobRecord, WorkflowJobRepository, WorkflowRunRecord,
     WorkflowRunRepository,
 };
+use crate::domain::repo::{
+    EntityFingerprintRecord, EntityFingerprintRepository, SyncSessionRecord, SyncSessionRepository,
+    SyncWatermarkRecord, SyncWatermarkRepository,
+};
 
 use super::entity::branches::{self, Entity as BranchEntity};
 use super::entity::check_runs::{self, Entity as CheckRunEntity};
@@ -38,6 +42,7 @@ use super::entity::commit_statuses::{self, Entity as CommitStatusEntity};
 use super::entity::commits::{self, Entity as CommitEntity};
 use super::entity::contributors::{self, Entity as ContributorEntity};
 use super::entity::deployments::{self, Entity as DeploymentEntity};
+use super::entity::entity_fingerprints::{self, Entity as EntityFingerprintEntity};
 use super::entity::issue_events::{self, Entity as IssueEventEntity};
 use super::entity::issue_reactions::{self, Entity as IssueReactionEntity};
 use super::entity::issue_timeline::{self, Entity as IssueTimelineEntity};
@@ -52,6 +57,8 @@ use super::entity::repositories::{self, Entity as RepoEntity};
 use super::entity::review_comments::{self, Entity as ReviewCommentEntity};
 use super::entity::review_threads::{self, Entity as ReviewThreadEntity};
 use super::entity::reviews::{self, Entity as ReviewEntity};
+use super::entity::sync_sessions::{self, Entity as SyncSessionEntity};
+use super::entity::sync_watermarks::{self, Entity as SyncWatermarkEntity};
 use super::entity::tags::{self, Entity as TagEntity};
 use super::entity::workflow_jobs::{self, Entity as WorkflowJobEntity};
 use super::entity::workflow_runs::{self, Entity as WorkflowRunEntity};
@@ -2842,5 +2849,335 @@ impl IssueTimelineRepository for SeaOrmIssueTimelineRepository {
             .map_err(map_scope_error)?;
 
         Ok(rows.into_iter().map(Into::into).collect())
+    }
+}
+
+pub struct SeaOrmSyncSessionRepository;
+
+impl SeaOrmSyncSessionRepository {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for SeaOrmSyncSessionRepository {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn sync_session_active_model(tenant_id: Uuid, r: &SyncSessionRecord) -> sync_sessions::ActiveModel {
+    sync_sessions::ActiveModel {
+        tenant_id: ActiveValue::Set(tenant_id),
+        id: ActiveValue::Set(r.id),
+        repo_full_name: ActiveValue::Set(r.repo_full_name.clone()),
+        repo_id: ActiveValue::Set(r.repo_id),
+        state: ActiveValue::Set(r.state.clone()),
+        error: ActiveValue::Set(r.error.clone()),
+        summary_json: ActiveValue::Set(r.summary_json.clone()),
+        created_at: ActiveValue::Set(r.created_at.clone()),
+        started_at: ActiveValue::Set(r.started_at.clone()),
+        finished_at: ActiveValue::Set(r.finished_at.clone()),
+    }
+}
+
+impl From<sync_sessions::Model> for SyncSessionRecord {
+    fn from(m: sync_sessions::Model) -> Self {
+        Self {
+            id: m.id,
+            repo_full_name: m.repo_full_name,
+            repo_id: m.repo_id,
+            state: m.state,
+            error: m.error,
+            summary_json: m.summary_json,
+            created_at: m.created_at,
+            started_at: m.started_at,
+            finished_at: m.finished_at,
+        }
+    }
+}
+
+#[async_trait]
+impl SyncSessionRepository for SeaOrmSyncSessionRepository {
+    async fn upsert<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        record: SyncSessionRecord,
+    ) -> Result<SyncSessionRecord, DomainError> {
+        let on_conflict = SecureOnConflict::<SyncSessionEntity>::columns([
+            sync_sessions::Column::TenantId,
+            sync_sessions::Column::Id,
+        ])
+        .update_columns([
+            sync_sessions::Column::RepoFullName,
+            sync_sessions::Column::RepoId,
+            sync_sessions::Column::State,
+            sync_sessions::Column::Error,
+            sync_sessions::Column::SummaryJson,
+            sync_sessions::Column::CreatedAt,
+            sync_sessions::Column::StartedAt,
+            sync_sessions::Column::FinishedAt,
+        ])
+        .map_err(map_scope_error)?;
+
+        SyncSessionEntity::insert(sync_session_active_model(tenant_id, &record))
+            .secure()
+            .scope_with_model(scope, &sync_session_active_model(tenant_id, &record))
+            .map_err(map_scope_error)?
+            .on_conflict(on_conflict)
+            .exec(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(record)
+    }
+
+    async fn find_by_id<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<SyncSessionRecord>, DomainError> {
+        let row = SyncSessionEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(sea_orm::Condition::all().add(sync_sessions::Column::Id.eq(id)))
+            .one(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(row.map(Into::into))
+    }
+
+    async fn list_recent<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        limit: u64,
+    ) -> Result<Vec<SyncSessionRecord>, DomainError> {
+        let rows = SyncSessionEntity::find()
+            .secure()
+            .scope_with(scope)
+            .order_by(sync_sessions::Column::CreatedAt, Order::Desc)
+            .limit(limit)
+            .all(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+}
+
+pub struct SeaOrmSyncWatermarkRepository;
+
+impl SeaOrmSyncWatermarkRepository {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for SeaOrmSyncWatermarkRepository {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn sync_watermark_active_model(
+    tenant_id: Uuid,
+    r: &SyncWatermarkRecord,
+) -> sync_watermarks::ActiveModel {
+    sync_watermarks::ActiveModel {
+        tenant_id: ActiveValue::Set(tenant_id),
+        repo_id: ActiveValue::Set(r.repo_id),
+        family: ActiveValue::Set(r.family.clone()),
+        last_seen_updated_at: ActiveValue::Set(r.last_seen_updated_at.clone()),
+        page1_etag: ActiveValue::Set(r.page1_etag.clone()),
+        sweep_in_progress: ActiveValue::Set(r.sweep_in_progress),
+        candidate_high_water: ActiveValue::Set(r.candidate_high_water.clone()),
+    }
+}
+
+impl From<sync_watermarks::Model> for SyncWatermarkRecord {
+    fn from(m: sync_watermarks::Model) -> Self {
+        Self {
+            repo_id: m.repo_id,
+            family: m.family,
+            last_seen_updated_at: m.last_seen_updated_at,
+            page1_etag: m.page1_etag,
+            sweep_in_progress: m.sweep_in_progress,
+            candidate_high_water: m.candidate_high_water,
+        }
+    }
+}
+
+#[async_trait]
+impl SyncWatermarkRepository for SeaOrmSyncWatermarkRepository {
+    async fn upsert<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        record: SyncWatermarkRecord,
+    ) -> Result<SyncWatermarkRecord, DomainError> {
+        let on_conflict = SecureOnConflict::<SyncWatermarkEntity>::columns([
+            sync_watermarks::Column::TenantId,
+            sync_watermarks::Column::RepoId,
+            sync_watermarks::Column::Family,
+        ])
+        .update_columns([
+            sync_watermarks::Column::LastSeenUpdatedAt,
+            sync_watermarks::Column::Page1Etag,
+            sync_watermarks::Column::SweepInProgress,
+            sync_watermarks::Column::CandidateHighWater,
+        ])
+        .map_err(map_scope_error)?;
+
+        SyncWatermarkEntity::insert(sync_watermark_active_model(tenant_id, &record))
+            .secure()
+            .scope_with_model(scope, &sync_watermark_active_model(tenant_id, &record))
+            .map_err(map_scope_error)?
+            .on_conflict(on_conflict)
+            .exec(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(record)
+    }
+
+    async fn find<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        family: &str,
+    ) -> Result<Option<SyncWatermarkRecord>, DomainError> {
+        let row = SyncWatermarkEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(sync_watermarks::Column::RepoId.eq(repo_id))
+                    .add(sync_watermarks::Column::Family.eq(family)),
+            )
+            .one(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(row.map(Into::into))
+    }
+}
+
+pub struct SeaOrmEntityFingerprintRepository;
+
+impl SeaOrmEntityFingerprintRepository {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for SeaOrmEntityFingerprintRepository {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn entity_fingerprint_active_model(
+    tenant_id: Uuid,
+    r: &EntityFingerprintRecord,
+) -> entity_fingerprints::ActiveModel {
+    entity_fingerprints::ActiveModel {
+        tenant_id: ActiveValue::Set(tenant_id),
+        repo_id: ActiveValue::Set(r.repo_id),
+        family: ActiveValue::Set(r.family.clone()),
+        entity_id: ActiveValue::Set(r.entity_id.clone()),
+        fingerprint: ActiveValue::Set(r.fingerprint.clone()),
+        updated_at: ActiveValue::Set(r.updated_at.clone()),
+        node_id: ActiveValue::Set(r.node_id.clone()),
+        child_counts_hash: ActiveValue::Set(r.child_counts_hash.clone()),
+        last_refined_at: ActiveValue::Set(r.last_refined_at.clone()),
+        refinement_status: ActiveValue::Set(r.refinement_status.clone()),
+    }
+}
+
+impl From<entity_fingerprints::Model> for EntityFingerprintRecord {
+    fn from(m: entity_fingerprints::Model) -> Self {
+        Self {
+            repo_id: m.repo_id,
+            family: m.family,
+            entity_id: m.entity_id,
+            fingerprint: m.fingerprint,
+            updated_at: m.updated_at,
+            node_id: m.node_id,
+            child_counts_hash: m.child_counts_hash,
+            last_refined_at: m.last_refined_at,
+            refinement_status: m.refinement_status,
+        }
+    }
+}
+
+#[async_trait]
+impl EntityFingerprintRepository for SeaOrmEntityFingerprintRepository {
+    async fn upsert<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        record: EntityFingerprintRecord,
+    ) -> Result<EntityFingerprintRecord, DomainError> {
+        let on_conflict = SecureOnConflict::<EntityFingerprintEntity>::columns([
+            entity_fingerprints::Column::TenantId,
+            entity_fingerprints::Column::RepoId,
+            entity_fingerprints::Column::Family,
+            entity_fingerprints::Column::EntityId,
+        ])
+        .update_columns([
+            entity_fingerprints::Column::Fingerprint,
+            entity_fingerprints::Column::UpdatedAt,
+            entity_fingerprints::Column::NodeId,
+            entity_fingerprints::Column::ChildCountsHash,
+            entity_fingerprints::Column::LastRefinedAt,
+            entity_fingerprints::Column::RefinementStatus,
+        ])
+        .map_err(map_scope_error)?;
+
+        EntityFingerprintEntity::insert(entity_fingerprint_active_model(tenant_id, &record))
+            .secure()
+            .scope_with_model(scope, &entity_fingerprint_active_model(tenant_id, &record))
+            .map_err(map_scope_error)?
+            .on_conflict(on_conflict)
+            .exec(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(record)
+    }
+
+    async fn find<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        family: &str,
+        entity_id: &str,
+    ) -> Result<Option<EntityFingerprintRecord>, DomainError> {
+        let row = EntityFingerprintEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(entity_fingerprints::Column::RepoId.eq(repo_id))
+                    .add(entity_fingerprints::Column::Family.eq(family))
+                    .add(entity_fingerprints::Column::EntityId.eq(entity_id)),
+            )
+            .one(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(row.map(Into::into))
     }
 }
