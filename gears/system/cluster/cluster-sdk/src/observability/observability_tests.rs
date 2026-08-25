@@ -1,4 +1,3 @@
-// Created: 2026-06-11 by Constructor Tech
 use super::{METRIC_LABEL_ALLOWLIST, fields, logs, metrics, spans};
 
 const ALL_SPANS: &[&str] = &[
@@ -34,7 +33,6 @@ const ALL_HIGH_CARDINALITY_FIELDS: &[&str] = &[
     fields::attr::NAME,
     fields::attr::LOCK,
     fields::attr::ELECTION,
-    fields::attr::PROFILE,
 ];
 
 #[test]

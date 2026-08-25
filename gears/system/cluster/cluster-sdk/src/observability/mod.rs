@@ -1,4 +1,3 @@
-// Created: 2026-06-10 by Constructor Tech
 //! Versioned observability naming contract for the cluster SDK (ADR-004).
 //!
 //! Observability signals are part of the cluster contract, on par with Rust
@@ -116,6 +115,15 @@ pub mod fields {
         pub const KIND: &str = "kind";
         /// The primitive (e.g. `cache`, `lock`, `leader`).
         pub const PRIMITIVE: &str = "primitive";
+        /// The cluster profile.
+        ///
+        /// Bounded: a profile name comes from the operator's configured profile
+        /// set, which is fixed at `start` and changes only by an explicit reload
+        /// (DESIGN.md). It sat under [`attr`] until item
+        /// `S2` needed it as a gauge label, which contradicted both section 5.4
+        /// ("`profile` and `provider` are bounded and allowed as labels") and
+        /// invariant I15; the design won.
+        pub const PROFILE: &str = "profile";
     }
 
     /// High-cardinality keys that carry user-supplied or unbounded values.
@@ -130,8 +138,6 @@ pub mod fields {
         pub const LOCK: &str = "lock";
         /// An election name.
         pub const ELECTION: &str = "election";
-        /// The cluster profile.
-        pub const PROFILE: &str = "profile";
     }
 }
 
@@ -145,6 +151,7 @@ pub const METRIC_LABEL_ALLOWLIST: &[&str] = &[
     fields::label::TRANSITION,
     fields::label::KIND,
     fields::label::PRIMITIVE,
+    fields::label::PROFILE,
 ];
 
 /// Bounded, enum-like `result` label values (see [`fields::label::RESULT`]).
@@ -404,5 +411,4 @@ pub use instrumented_cache::InstrumentedCache;
 pub mod otel;
 
 #[cfg(test)]
-#[path = "observability_tests.rs"]
 mod observability_tests;
