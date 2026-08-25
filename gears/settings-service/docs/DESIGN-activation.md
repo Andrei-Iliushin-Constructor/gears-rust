@@ -749,7 +749,7 @@ The load-bearing per-`(apply_id, subscriber, key)` state. Created at publish for
 
 #### Authorization model
 
-Mirrors the Settings Service model (design DESIGN.md §4.8); enforced server-side via the RBAC `PolicyEnforcer` (fail-closed). Activation is part of the Settings Service, so its control-plane resources sit under `gts.cf.toolkit.settings.*`.
+Mirrors the Settings Service model (design DESIGN.md §4.8); enforced server-side via `PolicyEnforcer` over the AuthZ Resolver (fail-closed). Activation is part of the Settings Service, so its control-plane resources sit under `gts.cf.toolkit.settings.*`.
 
 | Operation | Required permission | Scope | Unauthorized |
 |-----------|---------------------|-------|--------------|
@@ -839,7 +839,7 @@ All metrics exposed as Prometheus scrape targets.
 
 | Level | Database | Network | What is real | What is mocked |
 |---|---|---|---|---|
-| **Unit** | No DB — in-memory trait mocks | No network | Publisher await-record co-commit + delivery-loop logic, per-subscriber notification filtering, per-record outcome aggregation, wait-for-all status computation, subscription matching | `InMemoryNotificationRepo`, `MockEventBrokerClient` |
+| **Unit** | No DB — in-memory trait mocks | No network | Publisher await-record co-commit + delivery-loop logic, per-subscriber notification filtering, per-record outcome aggregation, wait-for-all status computation, subscription matching | `InMemoryNotificationRepo`, `MockEventBrokerApi` |
 | **Integration** | Real PostgreSQL (testcontainers, per-test tx) | No network — direct calls; Event Broker client mocked | Await-record co-commit, delivery from awaiting records, subscriptions, tracking | — |
 | **API** | Real PostgreSQL | In-process HTTP (`Router::oneshot`) | Activation-facet REST, domain services, DB | `PolicyEnforcer` (Allow/Deny), Event Broker |
 | **E2E** | Real PostgreSQL + running broker | Real HTTP + real pub/sub | Full publish→deliver→react→outcome loop across two processes, incl. filtered delivery, cache_invalidate broadcast, restart re-publish | Nothing (broker + a sample consumer gear are real) |
@@ -851,13 +851,13 @@ All metrics exposed as Prometheus scrape targets.
 | Mock | Purpose | Pattern |
 |------|---------|---------|
 | `InMemoryNotificationRepo` | HashMap-backed subscriptions/await-records/responses | `with_subscriptions(vec![...])` |
-| `MockEventBrokerClient` | Capture published notifications + broadcasts; inject delivery + back-responses | `.published`, `.broadcast`, `.deliver(event)` |
+| `MockEventBrokerApi` | Capture published notifications + broadcasts; inject delivery + back-responses | `.published`, `.broadcast`, `.deliver(event)` |
 
 | What to test | What is mocked | Verification target |
 |---|---|---|
-| Publish builds identifier-only payloads | `MockEventBrokerClient` | No value/secret in `apply_notification` or `cache_invalidate`; idempotent per `apply_id` |
+| Publish builds identifier-only payloads | `MockEventBrokerApi` | No value/secret in `apply_notification` or `cache_invalidate`; idempotent per `apply_id` |
 | Per-subscriber filtering | `InMemoryNotificationRepo` | A subscriber's `apply_notification` contains **only** its subscribed changed keys; no other keys/tenants leak |
-| cache_invalidate carries full set | `MockEventBrokerClient` | Broadcast contains all changed keys; one broadcast per apply |
+| cache_invalidate carries full set | `MockEventBrokerApi` | Broadcast contains all changed keys; one broadcast per apply |
 | Publish creates one await-record per (apply, subscription) | `InMemoryNotificationRepo` | `expected_records` == record count (changed keys × their subscribers), each with its expected value |
 | Outcome status — wait-for-all | `InMemoryNotificationRepo` | `awaiting` until every record terminal (even if some already failed/superseded); then `failed`/`superseded`/`success` |
 | Outcome status — value-mismatch success ack | repo | `success`-status ack with non-matching value → record `failed` → bundle `failed` |
@@ -868,7 +868,7 @@ All metrics exposed as Prometheus scrape targets.
 | Outcome status — secret hash compare | repo | Hash built per §4.1 *Secret-value hash* (SHA-256 over the canonical array, lowercase hex); applied vs expected → match `succeeded`, mismatch `failed`; the **same** value under a different `key` or `tenant` hashes differently, while the same value under the same `(key, tenant)` hashes equal across applies |
 | Canonical encoding — number domain | repo | `9007199254740993` and `0.10000000000000001` are rejected at staging (`422 ValueNotCanonical`, DESIGN.md §4.2) rather than canonicalized to `9007199254740992` and `0.1`; `9007199254740992`, `0.1` and `1.10` are accepted — `1.10` because it denotes the same number as `1.1` |
 | Canonical encoding — serialization-independent match | repo | A structured value re-serialized with different member order, whitespace, number formatting or Unicode escaping canonicalizes to the same bytes and matches its snapshot (§4.1 *Canonical value encoding*); service-side and SDK-side canonicalizers agree on the same corpus |
-| Delivery loop re-publish | `MockEventBrokerClient` | The delivery loop re-publishes `awaiting` records (respecting `last_notified_at` / `redeliver_interval_seconds` backoff); terminal records are not re-sent |
+| Delivery loop re-publish | `MockEventBrokerApi` | The delivery loop re-publishes `awaiting` records (respecting `last_notified_at` / `redeliver_interval_seconds` backoff); terminal records are not re-sent |
 | Subscription exact-key matching | repo | Correct subscribers resolved for a key; non-subscribed keys excluded |
 | Error mapping — all domain → API variants | none | 100% variant coverage |
 

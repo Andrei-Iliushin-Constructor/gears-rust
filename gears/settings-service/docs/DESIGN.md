@@ -181,11 +181,11 @@ C4Context
  Enterprise_Boundary(vhp, "the platform OSS") {
  System(settings_service, "Settings Service", "Declarative, centralized platform configuration; includes Settings Activation — publishes apply_notification + cache_invalidate on apply")
  System(types_registry, "GTS Schema Registry", "Type + trait validation for values")
- System(rbac, "RBAC Service / AuthZ Resolver", "Access gating for read/mutate/apply")
+ System(authz, "AuthZ Resolver", "Access gating for read/mutate/apply")
  System(tenant_resolver, "Tenant Resolver (the Tenant Resolver)", "Org-hierarchy ancestry for cascade")
  System(idp, "IdP / AuthN Resolver", "Authentication; issues step-up (re-auth) tokens")
  System(audit, "Audit Subsystem", "Immutable change history")
- System(policy_engine, "Policy Engine", "Feature/licence entitlement gating")
+ System(license_resolver, "License Resolver", "Feature/licence entitlement gating")
  System(credstore, "Credential Store", "the credstore backend: secret-trait value storage")
  System(event_broker, "Event Broker", "Apply-lifecycle events; tenant_deleted consumption")
  SystemDb(settings_db, "Settings Database", "PostgreSQL: declarations, values, pending, apply")
@@ -198,11 +198,11 @@ C4Context
  Rel(modules, settings_service, "register/retire declarations; read values", "in-process (ClientHub)")
  Rel(settings_service, settings_db, "reads/writes", "SQL")
  Rel(settings_service, types_registry, "validate value vs type+traits", "in-process (ClientHub)")
- Rel(settings_service, rbac, "authorize read/mutate/apply (fail-closed)", "in-process (PEP)")
+ Rel(settings_service, authz, "authorize read/mutate/apply (fail-closed)", "in-process (PEP)")
  Rel(settings_service, tenant_resolver, "resolve scope ancestry", "in-process (ClientHub)")
  Rel(settings_service, idp, "validate step-up token claims (local)", "JWKS")
  Rel(settings_service, audit, "emit audit records", "audit API")
- Rel(settings_service, policy_engine, "check feature/licence entitlement (read paths)", "in-process (ClientHub)")
+ Rel(settings_service, license_resolver, "check feature/licence entitlement (read paths)", "in-process (ClientHub)")
  Rel(settings_service, credstore, "store/resolve secret values (machine path)", "credstore API")
  Rel(settings_service, event_broker, "publish apply/lifecycle events + activation signals (apply_notification per subscriber, cache_invalidate broadcast); consume tenant_deleted", "Event Broker")
  Rel(modules, event_broker, "subscribe to apply_notification; ack activation", "Event Broker")
@@ -220,11 +220,11 @@ C4Container
  ContainerDb(postgres, "PostgreSQL", "Database", "Declarations, categories, values, pending, apply")
  Container(cache, "Effective-Value Cache", "In-memory + local invalidation", "Hot-path read cache keyed by (key, scope)")
  Container_Ext(types_registry, "GTS Schema Registry", "ClientHub", "Type + trait validation")
- Container_Ext(rbac, "AuthZ (PolicyEnforcer)", "ClientHub", "Fail-closed access gating")
+ Container_Ext(authz, "AuthZ Resolver", "ClientHub", "Fail-closed access gating via AuthZResolverClient")
  Container_Ext(tenant_resolver, "Tenant Resolver", "ClientHub", "Org-hierarchy ancestry")
  Container_Ext(idp, "IdP / AuthN Resolver", "JWKS", "Step-up token validation (local, no per-apply call)")
  Container_Ext(audit, "Audit Subsystem", "Audit API", "Mutation records")
- Container_Ext(policy_engine, "Policy Engine", "ClientHub", "Feature/licence entitlement gating")
+ Container_Ext(license_resolver, "License Resolver", "ClientHub", "Feature/licence entitlement gating")
  Container_Ext(credstore, "Credential Store", "credstore API", "the credstore backend secret-value storage")
  Container_Ext(event_broker, "Event Broker", "Event Broker", "Publish/consume + cross-instance cache invalidation")
 
@@ -234,11 +234,11 @@ C4Container
  Rel(domain, postgres, "reads/writes", "SQL")
  Rel(domain, cache, "populate / invalidate (local + event-driven)", "in-process")
  Rel(domain, types_registry, "validate", "ClientHub")
- Rel(domain, rbac, "authorize (fail-closed)", "ClientHub")
+ Rel(domain, authz, "authorize (fail-closed)", "ClientHub")
  Rel(domain, tenant_resolver, "ancestry", "ClientHub")
  Rel(domain, idp, "validate step-up token claims (local)", "JWKS")
  Rel(domain, audit, "emit", "audit API")
- Rel(domain, policy_engine, "feature/licence entitlement", "ClientHub")
+ Rel(domain, license_resolver, "feature/licence entitlement", "ClientHub")
  Rel(domain, credstore, "store/resolve secret values (machine path)", "credstore API")
  Rel(domain, event_broker, "publish/consume; cross-instance invalidation", "Event Broker")
 ```
@@ -439,13 +439,13 @@ OIDC bearer via the AuthN Resolver / IdP. Apply requires **step-up = re-authenti
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-constraint-rbac-policy-enforcer`
 
-RBAC `PolicyEnforcer` gates read/mutate/apply against `gts.cf.toolkit.settings.*` resources. A category may additionally be **restricted**, and then reaching its settings needs a grant on that category (§4.8 *Category access*).
+The AuthZ Resolver gates read/mutate/apply against `gts.cf.toolkit.settings.*` resources. The gear resolves `AuthZResolverClient` through `ClientHub` and builds the SDK's `PolicyEnforcer` over it — the enforcer is a struct from that SDK, not a separately resolvable trait — then adapts it behind a gear-local port so the domain layer never imports infra. A category may additionally be **restricted**, and then reaching its settings needs a grant on that category (§4.8 *Category access*).
 
 #### Feature/licence entitlement
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-constraint-licence-entitlement-fail-closed`
 
-Visibility gating by `licence_feature` uses the Policy Engine Decision Point via `PolicyDecisionClient` (in-process ClientHub): given the caller `Context` and a `licence_feature`, it returns allow/deny, **fail-closed** (deny on error). Applied on REST read/browse/search paths only — not the in-process Settings Reader hot path.
+Visibility gating by `licence_feature` uses the the License Resolver via `LicenseResolverClient` (in-process ClientHub): given the caller `Context` and a `licence_feature`, it returns allow/deny, **fail-closed** (deny on error). Applied on REST read/browse/search paths only — not the in-process Settings Reader hot path.
 
 #### Audit & events
 
@@ -524,7 +524,7 @@ The *definition* of a setting — distinct from its runtime value(s). Authored b
 | `data_classification` | `DataClassification` | Yes | Sensitivity class of the setting's **value**: `public` / `pii` / `secret`. `secret` is *derived* from the value type's `secret` trait (it always accompanies `has_secret_trait = true`); `pii` is *declared* by the author, because a PII-bearing value — an alerting contact address, an operator name — need not carry the `secret` trait yet must not reach a caller unauthorized for unmasked PII. Default `public`. Drives masking (§4.2 *Secret Manager*) and the search corpus (§4.2 *Search*). |
 | `source` | `DeclarationSource` | Yes | `admin_authored` or `module_contributed`. |
 | `owner_module` | string | No | Owning module namespace; required when `source = module_contributed`. |
-| `licence_feature` | string | No | Feature/licence flag gating visibility; enforced server-side on the REST read paths via the Policy Engine Decision Point (`PolicyDecisionClient`; see §4.2 *Category Management* / *Declaration Management*/§4.2 *Search* and §4.8). |
+| `licence_feature` | string | No | Feature/licence flag gating visibility; enforced server-side on the REST read paths via the License Resolver (`LicenseResolverClient`; see §4.2 *Category Management* / *Declaration Management*/§4.2 *Search* and §4.8). |
 | `status` | `DeclarationStatus` | Yes | `active` or `retired`. |
 | `description` | string (0..4096) | No | Human-readable description. |
 | `last_change_at` | `timestamptz` | Yes | When the **declaration's definition** (metadata/type/default) last changed — **definition only, NOT a max over its values** (a value-aggregating field would leak cross-tenant activity). This is the *declaration arm* of the effective-value recency `max` computed on the admin read (§4.3); the *value arm* is `SettingValue.last_change_at`. |
@@ -759,11 +759,11 @@ graph TD
 
  subgraph External["External Dependencies"]
  types[("GTS Registry<br/><small>ClientHub</small>")]
- authz[/"AuthZ PolicyEnforcer<br/><small>ClientHub</small>"/]
+ authz[/"AuthZ Resolver<br/><small>ClientHub · AuthZResolverClient</small>"/]
  tenant[("Tenant Resolver<br/><small>ClientHub</small>")]
  idp[/"IdP / AuthN Resolver<br/><small>step-up token (JWKS)</small>"/]
  audit[/"Audit Subsystem"/]
- policy[/"Policy Engine<br/><small>ClientHub · entitlement</small>"/]
+ licence[/"License Resolver<br/><small>ClientHub · entitlement</small>"/]
  credstore[("Credential Store<br/><small>the credstore backend</small>")]
  broker[/"Event Broker<br/><small>publish/consume</small>"/]
  pg[("PostgreSQL")]
@@ -804,9 +804,9 @@ graph TD
  decl -->|authorize| authz
  staging -->|authorize| authz
 
- cat -->|entitlement| policy
- decl -->|entitlement| policy
- search -->|entitlement| policy
+ cat -->|entitlement| licence
+ decl -->|entitlement| licence
+ search -->|entitlement| licence
 
  apply -->|audit| emitter
  staging -->|audit| emitter
@@ -820,7 +820,7 @@ graph TD
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-component-category-management`
 
-**Dependencies:** PostgreSQL, `PolicyEnforcer`, `PolicyDecisionClient` (Policy Engine — feature/licence entitlement), Audit Emitter
+**Dependencies:** PostgreSQL, `AuthZResolverClient` (with `PolicyEnforcer` built over it), `LicenseResolverClient` (License Resolver — feature/licence entitlement), Audit Emitter
 
 **Operations:**
 
@@ -837,7 +837,7 @@ graph TD
 
 Manages **admin-authored** declarations and serves reads for both authored and contributed declarations. Contributed declarations are written only via the Reconciler (§4.2 *Contribution Reconciler*).
 
-**Dependencies:** `TypeValidator`, `ScopeClassEngine`, Category Management, PostgreSQL, `PolicyDecisionClient` (Policy Engine — feature/licence entitlement), Audit Emitter
+**Dependencies:** `TypeValidator`, `ScopeClassEngine`, Category Management, PostgreSQL, `LicenseResolverClient` (License Resolver — feature/licence entitlement), Audit Emitter
 
 **Operations:**
 
@@ -1004,7 +1004,7 @@ Implements the **staged-then-apply** model for all value mutations (`cpt-cf-sett
 
 The explicit, credential-verified activation of pending changes (`cpt-cf-settings-service-fr-apply-preview-stepup`, `cpt-cf-settings-service-fr-apply-effect-resolution`, `cpt-cf-settings-service-nfr-reliability-fail-safe-staged`).
 
-**Dependencies:** Staging Manager, `PolicyEnforcer`, IdP (step-up), Cache, Apply Publisher (Settings Activation), Secret Manager, Audit Emitter, PostgreSQL
+**Dependencies:** Staging Manager, `AuthZResolverClient` (with `PolicyEnforcer` built over it), IdP (step-up), Cache, Apply Publisher (Settings Activation), Secret Manager, Audit Emitter, PostgreSQL
 
 **Operations:**
 
@@ -1023,7 +1023,7 @@ The explicit, credential-verified activation of pending changes (`cpt-cf-setting
 
 The `step_up_assertion` input carries this fresh token. Because the token itself is the assertion (RFC 9470: a `401` challenge with `error="insufficient_user_authentication"`, `acr_values`, `max_age` drives the re-auth), the parameter MAY be folded into the bearer token in implementation. **The step-up contract itself is owned by the `authn-resolver` gear** — this service references it rather than defining its own. **IdP integration prerequisites** (record against IAM): the IdP MUST be configured to emit `auth_time`/`acr`/`amr` in tokens (often off by default), and the freshness window MUST be agreed. No IdP runtime dependency is added to the gear (§4.9) — only the IdP's JWKS is needed, fetched and cached — so there is **no per-apply IdP-outage failure mode**; the C4 IdP relationship (§1.3) denotes token/JWKS trust, not a synchronous call at apply.
 
-**Step-up verification is a swappable `StepUpVerifier` plugin.** The local-claims check above is the **default binding** — an OIDC/JWKS `StepUpVerifier` resolved through `ClientHub` (§4.9), exactly as the gear resolves `PolicyEnforcer` / `TenantResolverClient` / the AuthN Resolver. Because verification is a resolved trait, not hard-coded gear logic, a deployment can — **without editing the gear** — bind a **non-OIDC** verifier (SAML/LDAP/…) or an **added-factor** verifier. What a deployment may **not** bind is a verifier that does not verify: `cpt-cf-settings-service-fr-apply-preview-stepup` requires credential re-verification before **every** Apply and carries no environment carve-out, so an always-satisfied binding does not implement this contract — it removes it, and a deployment running one is non-conformant however convenient it is in a sandbox. The default OIDC/JWKS binding is exactly what this contract specifies; the trait makes the *mechanism* pluggable, **never the requirement** — every binding must be capable of failing. The one sanctioned non-verifying binding is `MockStepUpVerifier`, and it exists only inside the test harness (§7 *Testing Architecture*). Tests bind a `MockStepUpVerifier` (§7 *Testing Architecture*).
+**Step-up verification is a swappable `StepUpVerifier` plugin.** The local-claims check above is the **default binding** — an OIDC/JWKS `StepUpVerifier`. Unlike `TenantResolverClient` or `AuthZResolverClient` this trait is **defined by this gear**, not consumed from another — it exists so the domain layer states the rule (*Apply requires a fresh re-authentication*) without importing JWT and JWKS handling, which the layering lint forbids. Its shape follows the platform precedent for such ports: declared in the domain, adapted in infra, injected at construction. Because verification is a resolved trait, not hard-coded gear logic, a deployment can — **without editing the gear** — bind a **non-OIDC** verifier (SAML/LDAP/…) or an **added-factor** verifier. What a deployment may **not** bind is a verifier that does not verify: `cpt-cf-settings-service-fr-apply-preview-stepup` requires credential re-verification before **every** Apply and carries no environment carve-out, so an always-satisfied binding does not implement this contract — it removes it, and a deployment running one is non-conformant however convenient it is in a sandbox. The default OIDC/JWKS binding is exactly what this contract specifies; the trait makes the *mechanism* pluggable, **never the requirement** — every binding must be capable of failing. The one sanctioned non-verifying binding is `MockStepUpVerifier`, and it exists only inside the test harness (§7 *Testing Architecture*).
 
 **No `StepUpVerifier` binding exists in the workspace today — and what is missing is smaller than it looks.** Apply and the behavior-affecting declaration actions (retire/reactivate) are gated on this verification, so a reader should know its implementation status without inferring it. Three things are needed, none of them a new platform primitive:
 
@@ -1096,7 +1096,7 @@ Handles `secret`-trait values, backed by the platform **Credential Store** (the 
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-component-search`
 
-**Dependencies:** PostgreSQL, `PolicyEnforcer`, `PolicyDecisionClient` (Policy Engine — feature/licence entitlement)
+**Dependencies:** PostgreSQL, `AuthZResolverClient` (with `PolicyEnforcer` built over it), `LicenseResolverClient` (License Resolver — feature/licence entitlement)
 
 **Operations:**
 
@@ -1772,7 +1772,7 @@ We pin `backward` (not `forward` or `full`) for value types because the reader t
 
 #### Authorization Model
 
-Authorization is enforced server-side via the RBAC `PolicyEnforcer` (fail-closed); reads are gated by **visibility**, mutations/apply by **role**.
+Authorization is enforced server-side via `PolicyEnforcer` over the AuthZ Resolver (fail-closed); reads are gated by **visibility**, mutations/apply by **role**.
 
 **Action vocabulary** — the permitted actions on the settings resource types:
 - **`read`** — resolve / browse / search effective values; list declarations, categories, and pending changes.
@@ -1845,10 +1845,10 @@ The gear already knows which categories are restricted — it is a column in its
 | Data at rest | PostgreSQL TDE for the settings DB. Secret-trait values are **never** stored in the settings DB — plaintext lives only in the Credential Store (the credstore backend); the settings row holds an opaque `secret_ref` (§4.2 *Secret Manager*). |
 | Data in transit | TLS 1.3 for REST; in-process `ClientHub` calls have no network boundary. |
 | API authentication | OIDC bearer via AuthN Resolver; Apply requires IdP credential step-up. |
-| API authorization | RBAC `PolicyEnforcer`, fail-closed; tenant scope forced server-side. |
+| API authorization | `PolicyEnforcer` over the AuthZ Resolver, fail-closed; tenant scope forced server-side. |
 | Tenant subtree isolation | Every read/search/list/mutate is constrained to the caller's own subtree server-side (own tenant or a descendant); a target outside the subtree is rejected; never relies on client-side filtering (`cpt-cf-settings-service-fr-tenant-scope-enforcement`, `cpt-cf-settings-service-nfr-scope-isolation`). |
 | Visibility vs Scope Class | Reads gated by `tenant_visible` (a `global` setting may be tenant-visible read-only); overrides gated by Scope Class + `tenant_overridable`. |
-| Feature/licence gating | Gated settings/categories excluded server-side across all REST read/browse/search paths via Policy Engine Decision Point entitlement checks (`PolicyDecisionClient`, fail-closed); the in-process `SettingsReaderClient` hot path is not licence-gated — services receive values regardless of UI entitlement (`cpt-cf-settings-service-fr-feature-license-gating`). |
+| Feature/licence gating | Gated settings/categories excluded server-side across all REST read/browse/search paths via License Resolver entitlement checks (`LicenseResolverClient`, fail-closed); the in-process `SettingsReaderClient` hot path is not licence-gated — services receive values regardless of UI entitlement (`cpt-cf-settings-service-fr-feature-license-gating`). |
 | Audit | Every mutation writes an immutable audit record (`cpt-cf-settings-service-fr-audit-mutations`). |
 | Secret confidentiality | `secret`-trait values are stored by reference in the Credential Store (the credstore backend); masked on every **administrative** read/search/list/audit path, with **no human reveal path**. Plaintext is returned only through the **machine-only** reader path (`resolve_secret`, §4.5), authorized per setting against the calling service and audited as a secret-use event; never cached in plaintext (§4.2 *Secret Manager*, *Cache & Invalidation*). |
 | File confidentiality | A `file-reference` value carries an id, never content, so nothing in this service masks or proxies a file — and nothing here checks it either. Access to the file is enforced entirely by `file-storage` on its own control and data planes, for every reader including the one that wrote the reference (§3 *Files*). |
@@ -1905,7 +1905,7 @@ The Settings Service is **supplied as a Constructor Fabric Gear** — a composab
 | Property | Value |
 |----------|-------|
 | Gear name | `settings-service` |
-| Dependencies | `types-registry`, `tenant-resolver`, `rbac` (PEP), `policy-engine` (DP — feature/licence entitlement), `credstore` (secret values, §4.2 *Secret Manager*), `event-broker` (apply/cache events + `tenant_deleted`, §4.4), `audit`. **No IdP gear dependency** — the step-up re-authentication happens **browser ↔ IdP** (the apply request arrives already bearing a fresh token); the gear only **validates that token's claims locally against the IdP's cached JWKS** (§4.2 *Apply Orchestrator*), so the IdP is not a per-apply runtime dependency — only its JWKS endpoint is configured (fetched/refreshed in the background). Step-up verification is a **ClientHub-resolved `StepUpVerifier`** trait — default binding = the OIDC/JWKS verifier (§4.2 *Apply Orchestrator*); a deployment may bind a non-OIDC or added-factor verifier **without gear code** — but never an always-satisfied one: the mechanism is pluggable, the requirement is not (§4.2 *Apply Orchestrator*). |
+| Dependencies | Each is marked with whether the gear exists in the workspace today, because an unknown dependency name is not a documentation defect — `GearRegistry::discover_and_build()` topologically sorts on these and fails startup on a name it cannot resolve. **Exists:** `types-registry` (`TypesRegistryClient`), `tenant-resolver` (`TenantResolverClient`), `authz-resolver` (`AuthZResolverClient`, with the SDK's `PolicyEnforcer` built over it), `credstore` (`CredStoreClientV1`), `event-broker` (`EventBrokerApi`). **Must be built first:** `license-resolver` (feature/licence entitlement, §4.2) — the gear is documentation only, there is no crate to depend on and the platform implements licence validation at base-licence level with per-feature entitlement still pending; and a platform **audit** gear, which does not exist under any name. R1 does not wait on either (§2.3): licence gating ships in R2, and audit is a gear-local sink writing inside the mutation's own transaction, with the external subsystem arriving in R2 as an adapter swap. **No IdP gear dependency** — the step-up re-authentication happens **browser ↔ IdP** (the apply request arrives already bearing a fresh token); the gear only **validates that token's claims locally against the IdP's cached JWKS** (§4.2 *Apply Orchestrator*), so the IdP is not a per-apply runtime dependency — only its JWKS endpoint is configured (fetched/refreshed in the background). Step-up verification is a **ClientHub-resolved `StepUpVerifier`** trait — default binding = the OIDC/JWKS verifier (§4.2 *Apply Orchestrator*); a deployment may bind a non-OIDC or added-factor verifier **without gear code** — but never an always-satisfied one: the mechanism is pluggable, the requirement is not (§4.2 *Apply Orchestrator*). |
 | Capabilities | `db`, `rest` |
 
 > **Why not `system`.** The ToolKit runtime re-partitions gears at init into *all system gears first, then all non-system gears* (`registry::gears_by_system_priority`), preserving the dependency topo-order only *within* each group. A `system` `settings-service` would therefore init **before** its non-system dependencies (`rbac`, `credstore`, `event-broker`) and its fail-closed client resolution would break startup. `system` is intentionally **not** declared (the reference `rbac` gear omits it for the same reason). The reader's early availability is instead provided by dependency ordering — a gear that must read effective values during its own init declares `settings-service` in its `deps`.
@@ -1914,7 +1914,7 @@ The Settings Service is **supplied as a Constructor Fabric Gear** — a composab
 
 | Hook | Responsibility |
 |------|----------------|
-| Gear init | Load config (incl. the IdP **JWKS endpoint** + step-up **freshness window** for local step-up token validation, §4.2 *Apply Orchestrator*); resolve `TypesRegistryClient`, `TenantResolverClient`, `PolicyEnforcer`, `PolicyDecisionClient`, the `StepUpVerifier` (default: OIDC/JWKS), credstore client, Event Broker publisher/consumer, audit client; construct services/repos; register `SettingsReaderClient` + `SettingsContributionClient` in `ClientHub`; register settings GTS schemas (incl. event schemas, §4.7) in types-registry; subscribe to `tenant_deleted`. |
+| Gear init | Load config (incl. the IdP **JWKS endpoint** + step-up **freshness window** for local step-up token validation, §4.2 *Apply Orchestrator*); resolve `TypesRegistryClient`, `TenantResolverClient`, `PolicyEnforcer`, `LicenseResolverClient`, the `StepUpVerifier` (default: OIDC/JWKS), credstore client, Event Broker publisher/consumer, audit client; construct services/repos; register `SettingsReaderClient` + `SettingsContributionClient` in `ClientHub`; register settings GTS schemas (incl. event schemas, §4.7) in types-registry; subscribe to `tenant_deleted`. |
 | Database migrations | Apply settings schema migrations (§4.7). |
 | REST registration | Register versioned REST routes + OpenAPI docs (§4.3). There are **no** internal token-only routes — activation commits in-process and cache coherence is the `cache_invalidate` broadcast (§4.4). |
 | Reader availability | The in-process reader is available to any gear that declares `settings-service` in its own `deps` — dependency ordering runs `settings-service` init first. (`system` is intentionally not declared — see the capabilities note above.) |
@@ -2082,7 +2082,7 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | `MockGtsValidator` | Configurable validate/resolve-traits result | `.with_validate_result(Ok/Err)`, `.with_traits(...)` |
 | `MockTenantResolver` | Ancestry/subtree responses | `.with_ancestors(scope, vec![...])`, `.with_subtree(...)` |
 | `MockApplyPublisher` | Capture published `apply_notification` / `cache_invalidate` signals | assert on captured signals |
-| `MockPolicyDecisionClient` | feature/licence entitlement allow/deny (fail-closed) | `.with_decision(feature, Allow/Deny)`, `.with_error(...)` |
+| `MockLicenseResolverClient` | feature/licence entitlement allow/deny (fail-closed) | `.with_decision(feature, Allow/Deny)`, `.with_error(...)` |
 | `MockSecretManager` | store/mask/resolve secret values | `.with_ref(...)`, `.with_resolve(Ok/Err)` |
 | `MockEventPublisher` | Capture published events | assert on captured events |
 | `MockAuditSink` | Capture audit records | assert on captured records |
@@ -2140,7 +2140,7 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | Module contribution — compatible upgrade preserves values | repos | Declaration updated; admin values preserved (`cpt-cf-settings-service-fr-contributed-lifecycle`) |
 | Module contribution — breaking change flags values | repos | Affected overrides `needs-review`, excluded from apply |
 | Cascading impact — descendants listed | resolver subtree, capped (default 5,000 scanned; `limit` default 100/max 500) | Affected descendants with current vs new; bounded + `truncated` flag; non-blocking (`cpt-cf-settings-service-fr-cascading-inheritance`, §4.2 *Staging Manager*) |
-| Licence/feature gating — entitled vs not | `MockPolicyDecisionClient` (allow/deny/error) | Gated declaration excluded when denied; **fail-closed** on error (hidden); ungated visible (`cpt-cf-settings-service-fr-feature-license-gating`) |
+| Licence/feature gating — entitled vs not | `MockLicenseResolverClient` (allow/deny/error) | Gated declaration excluded when denied; **fail-closed** on error (hidden); ungated visible (`cpt-cf-settings-service-fr-feature-license-gating`) |
 | Domain-affinity filtering | repos | Categories/settings filtered to the current domain; cross-domain hidden; declaration `domain_affinity` overrides category default |
 | Error mapping — domain → API variants | none | Every variant has a `From` impl, 100% coverage |
 
@@ -2173,8 +2173,8 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 
 | Dependency | Mock | Why |
 |---|---|---|
-| `PolicyEnforcer` | `MockAuthZClient` (Allow) / `DenyingAuthZClient` | Isolate from AuthZ infra |
-| Policy Engine (licence/feature) | `MockPolicyDecisionClient` (allow/deny, fail-closed) | Deterministic entitlement gating without the Policy Engine |
+| `AuthZResolverClient` (under `PolicyEnforcer`) | `MockAuthZClient` (Allow) / `DenyingAuthZClient` | Isolate from AuthZ infra — the enforcer is a struct, so the substitution point is the client beneath it |
+| License Resolver (licence/feature) | `MockLicenseResolverClient` (allow/deny, fail-closed) | Deterministic entitlement gating without the License Resolver |
 | Audit sink | `MockAuditSink` | Capture audit records to assert mutations are audited |
 | GTS Registry | `MockGtsValidator` | Deterministic type validation |
 | Tenant Resolver | `MockTenantResolver` | Deterministic ancestry |
@@ -2211,7 +2211,7 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | Apply with stale checksum | `POST /v1/applies` (pending changed after preview) | `409 ApplyChecksumMismatch` |
 | Apply partial failure | `POST /v1/applies` (bridge fails one) | Per-change results (`207` mixed / `200` all-applied); failed items remain `pending`/`failed`, queryable via `GET /v1/applies/{apply_id}/commit`; `event_apply_failed` emitted |
 | Search respects filters | `GET /v1/search` | Scope/visibility/mode honored (`cpt-cf-settings-service-fr-search-discoverability`) |
-| Licence/feature gating across read paths | `GET /v1/settings/{key}`, `GET /v1/search`, `GET /v1/categories`, `GET /v1/declarations` | Un-entitled caller (`MockPolicyDecisionClient` deny) gets gated setting/category excluded on every read/search/list path; fail-closed on decision error (`cpt-cf-settings-service-fr-feature-license-gating`) |
+| Licence/feature gating across read paths | `GET /v1/settings/{key}`, `GET /v1/search`, `GET /v1/categories`, `GET /v1/declarations` | Un-entitled caller (`MockLicenseResolverClient` deny) gets gated setting/category excluded on every read/search/list path; fail-closed on decision error (`cpt-cf-settings-service-fr-feature-license-gating`) |
 | Domain-affinity filtering | `GET /v1/categories`, `GET /v1/declarations` | Results filtered to the admin's current domain; cross-domain hidden; platform-admin "All domains" view returns all |
 | Audit written on every mutation | `POST`/`PATCH`/`PUT`/`DELETE` + `POST /v1/applies` | Each mutating call writes an audit record (actor, target, pre/post masked, request id) captured via `MockAuditSink` (`cpt-cf-settings-service-fr-audit-mutations`) |
 | Mode preferences round-trip | `GET`/`PUT /v1/me/preferences` | Persisted per user; mode filter applied to browse/search (`cpt-cf-settings-service-fr-standard-advanced-mode`) |
