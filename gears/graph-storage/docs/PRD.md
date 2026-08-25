@@ -256,6 +256,15 @@ The system **MUST** expose the registered ontology for inspection: list types fi
 - **Rationale**: Ontology authors and operators need to see what is registered to evolve it safely.
 - **Actors**: `cpt-cf-graph-storage-actor-ontology-author`, `cpt-cf-graph-storage-actor-platform-admin`
 
+#### Index Capacity Admission
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-index-admission`
+
+Type registrations whose declared `index`, `full_text_search` or `vector_search` traits create index work **MUST** pass capacity admission before index intent is committed: per-tenant and deployment-wide caps on registered types and indexed paths, an estimated build footprint reserved before the intent row commits, bounded retention of old-version indexes, and a bounded tenant-fair queue for pending and running DDL and backfill work. Exhausted budget **MUST** produce a retryable rejection naming the bound rather than an unbounded backlog, and index builds **MUST** run below a reserved share of capacity kept for interactive requests.
+
+- **Rationale**: Authorization bounds who may declare an index, not how much shared PostgreSQL work the declaration creates; an administrator acting within permission can otherwise starve every tenant on the instance.
+- **Actors**: `cpt-cf-graph-storage-actor-platform-admin`, `cpt-cf-graph-storage-actor-producer-gear`
+
 ### 5.2 Node and Edge Ingest
 
 #### Bulk Idempotent Ingest
@@ -553,6 +562,24 @@ Every API operation **MUST** be authenticated and authorized through the platfor
 - **Rationale**: Producers, consumers, and administrators have different privileges; write access to a shared graph must be explicitly granted.
 - **Actors**: `cpt-cf-graph-storage-actor-authz-resolver`, `cpt-cf-graph-storage-actor-platform-admin`
 
+#### Source Namespace Ownership
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-source-ownership`
+
+Source namespaces for reference nodes **MUST** be an enforced ownership boundary: a namespace is bound to authenticated producer principals within a tenant, owner provenance is recorded immutably when a node is first created under it, and every subsequent update or phantom materialization **MUST** be authorized against that owner in addition to the tenant. An unclaimed namespace is claimed by its first writer; ownership transfer and reconciliation **MUST** be an explicit administrative flow under the ontology-administration permission and **MUST** be audited. A `source` value appearing in a validly typed payload **MUST NOT** by itself authorize writing under that namespace.
+
+- **Rationale**: The identity triple that makes two producers converge on the same upstream object would otherwise let a generic write permission overwrite another source's searchable projection.
+- **Actors**: `cpt-cf-graph-storage-actor-producer-gear`, `cpt-cf-graph-storage-actor-authz-resolver`
+
+#### Tenant Offboarding
+
+- [ ] `p2` - **ID**: `cpt-cf-graph-storage-fr-tenant-offboarding`
+
+The system **MUST** implement its part of the platform tenant-offboarding protocol: accept an authoritative tenant deletion generation, fence new tenant work before removing anything, cancel that tenant's in-flight ingest, index builds, backfills, re-embedding and analytics jobs, delete all tenant-keyed local and derived state, and acknowledge completion to the lifecycle owner. Before reporting ready — and unconditionally after a source-epoch rotation — the system **MUST** reconcile each tenant's applied deletion generation against the authoritative ledger and **MUST** quarantine any tenant whose local generation is behind rather than serving its data.
+
+- **Rationale**: All state lives in one PostgreSQL database, so restoring a backup taken before offboarding resurrects a deleted tenant's data; deletion must be monotonic across restore, and the authority must live outside the restored database.
+- **Actors**: `cpt-cf-graph-storage-actor-platform-admin`
+
 ### 5.9 API Surfaces
 
 #### Versioned REST API
@@ -583,6 +610,15 @@ The system **MUST** emit structured tracing for ingest, search, traversal, and a
 
 - **Rationale**: Query-shape problems (dense hubs, oversized batches) are diagnosable only with structural telemetry; payloads may hold sensitive content.
 - **Actors**: `cpt-cf-graph-storage-actor-platform-admin`
+
+#### Snapshot Identity Across Restore
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-snapshot-identity`
+
+Every revision-bound identity — pagination and continuation tokens, metric-cache keys and result provenance, analytics job and single-flight identity, graph-engine plugin cursors, and idempotency receipts — **MUST** carry a non-reusable source epoch alongside the graph revision. The epoch **MUST** be rotated by operator action before the gear reports ready after any point-in-time restore or store replacement, and identities minted under an earlier epoch **MUST** be rejected, invalidated or quarantined rather than served. A retry whose idempotency receipt is absent because a restore removed it **MUST** be treated as outcome-unknown and **MUST NOT** be executed automatically.
+
+- **Rationale**: The graph revision is a counter and a restore rewinds it, so revision numbers are reissued to describe a different graph; a revision-only comparison accepts tokens, caches and cursors minted on an abandoned timeline.
+- **Actors**: `cpt-cf-graph-storage-actor-platform-admin`, `cpt-cf-graph-storage-actor-consumer-gear`
 
 #### Readiness Reporting
 
@@ -640,6 +676,24 @@ The topology read surface **MUST** expose at most node keys with their interned 
 - **Threshold**: Configurable ceilings, defaults 1,000,000 nodes / 10,000,000 edges / 2 GiB estimated topology budget; topology-only memory footprint verified by profiling tests
 - **Rationale**: Keeping analytics topology-only is what makes reading a million-node graph affordable at all; expressing it as a database grant means a future change to the reading code cannot quietly widen it.
 - **Architecture Allocation**: See DESIGN.md § NFR Allocation
+
+#### Bounded Response Size
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-nfr-response-bound`
+
+Every response **MUST** be bounded in aggregate, not only per item: cumulative hydrated payload bytes, returned edge count, snippet/chunk-provenance/annotation bytes, and total serialized bytes each have a configured ceiling enforced in the domain layer **before** hydration, with deterministic truncation or pagination at the ordering the query already established and explicit truncation metadata in the response. REST and the in-process client are bound by the same values.
+
+- **Rationale**: Per-item ceilings do not compose — ten thousand individually valid nodes are hundreds of megabytes before adjacency, snippets and annotations are counted, and discovering the limit while serializing is already too late.
+- **Verification**: Benchmarks at the maximum admissible cardinality assert the response stays under the configured ceilings and reports truncation.
+
+#### Tenant Fairness Under Load
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-nfr-tenant-fairness`
+
+Sustained load from one tenant **MUST NOT** indefinitely block another. Admission **MUST** hold global caps alongside per-tenant caps, queue per tenant with bounded depth and tenant-fair dispatch, and reserve a configured share of connection capacity for interactive requests so background work — index builds, backfills, re-embedding, cleanup — cannot starve user-facing reads.
+
+- **Rationale**: Per-tenant limits bound what a tenant may start, not what it may hold; admitted work from every tenant competes again in the same shared database, provider and worker pools.
+- **Verification**: A saturation test with one heavy tenant and one light tenant asserts the light tenant's p95 latency stays within its uncontended budget by a documented factor.
 
 #### Zero Cross-Tenant Leakage
 
@@ -837,7 +891,9 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 
 | Dependency | Description | Criticality |
 |------------|-------------|-------------|
-| PostgreSQL 19+ with pgvector (pinned beta image until GA) | Single storage backend: relational source of truth, full-text, JSONB, vector indexes, and SQL/PGQ graph queries | p1 |
+| PostgreSQL 16+ with pgvector | Single storage backend: relational source of truth, full-text, JSONB and vector indexes | p1 |
+| PostgreSQL 19+ with the property graph (pinned beta image until GA) | Optional: enables the SQL/PGQ traversal backend; traversal is served by the CTE backends without it | p2 |
+| Platform tenant-deletion ledger | Authoritative, restore-independent tenant deletion generations for offboarding reconciliation (`cpt-cf-graph-storage-fr-tenant-offboarding`) | p2 |
 | ToolKit framework | Gear lifecycle, REST OperationBuilder, SecureORM, ClientHub, canonical errors | p1 |
 | AuthZ Resolver gear | Policy decisions and access scopes for every operation | p1 |
 | Types Registry gear | Platform registration of the gear's GTS base types and permission instances | p1 |

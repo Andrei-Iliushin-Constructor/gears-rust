@@ -20,6 +20,7 @@
 - [4. Additional context](#4-additional-context)
   - [Execution and Concurrency Contract](#execution-and-concurrency-contract)
   - [Capacity and Admission Contract](#capacity-and-admission-contract)
+  - [Publication Atomicity and Retention](#publication-atomicity-and-retention)
   - [Determinism Contract](#determinism-contract)
   - [Authorization Model](#authorization-model)
   - [Error Model](#error-model)
@@ -605,9 +606,10 @@ and verifies at readiness.
 | tenant_id | UUID | Tenant scope; part of every key |
 | job_id | UUID | Opaque identifier; **PK (tenant_id, job_id)** |
 | principal | TEXT | Submitting principal; with tenant, the ownership tuple |
-| dedup_key | TEXT | (revision, metric, params, scope identity, contract version); **UNIQUE (tenant_id, dedup_key)** while non-terminal |
+| dedup_key | TEXT | (source epoch, revision, metric, params, scope identity, contract version); **UNIQUE (tenant_id, dedup_key)** while non-terminal |
 | state | TEXT | queued / running / succeeded / failed / cancelled / expired / superseded |
 | lease_owner / lease_epoch / lease_expires_at | TEXT / BIGINT / TIMESTAMPTZ | Worker lease with fencing epoch and heartbeat expiry |
+| source_epoch | BIGINT | Source timeline the job was admitted on (graph-storage § Read Consistency Contract) |
 | graph_revision | BIGINT | Revision the job was admitted at |
 | contract_version | INTEGER | Algorithm contract version the job runs under |
 | reserved_bytes | BIGINT | Memory reserved from the process pool; released on every terminal path |
@@ -626,14 +628,22 @@ a contract-version bump, and after a cache entry is evicted by retention.
 | Column | Type | Description |
 |--------|------|-------------|
 | tenant_id | UUID | Tenant scope; part of every key |
+| source_epoch | BIGINT | Source timeline the result was computed on |
 | graph_revision | BIGINT | Revision the result was computed at |
 | metric | TEXT | Metric name plus canonicalized parameters |
-| contract_version | INTEGER | Immutable algorithm contract version; **PK (tenant_id, graph_revision, metric, contract_version)** |
+| contract_version | INTEGER | Immutable algorithm contract version; **PK (tenant_id, source_epoch, graph_revision, metric, contract_version)** |
 | payload | JSONB | Per-node metric values |
 | computed_at | TIMESTAMPTZ | Computation time |
 
 graph-storage reads this table to annotate projections and never writes it, so
 single-writer holds per table across the two gears.
+
+`source_epoch` is in the key because `graph_revision` alone can be rewound by a
+point-in-time restore of the graph store: after a restore the same revision
+number describes a different graph, and an entry keyed on the revision alone
+would be served against topology it never saw. Entries whose epoch is not the
+current one are never served and are eligible for immediate cleanup; jobs
+carrying a stale epoch are quarantined rather than resumed.
 
 ## 4. Additional context
 
@@ -716,6 +726,48 @@ pressure is `resource_exhausted` (retryable, with a retry-after hint).
 Termination by time or cancellation is `deadline_exceeded` or `cancelled`. Every
 rejection carries the limit name, the configured bound and the requested value;
 every limit exposes a saturation counter and a high-watermark gauge.
+
+### Publication Atomicity and Retention
+
+**One transaction publishes a result.** A succeeding job produces three durable
+effects — the `metrics_cache` row, `analytics_job.result_ref` pointing at it, and
+the `queued|running -> succeeded` terminal transition — and they commit together
+or not at all. Any split leaves an observable lie: a cache row nothing references
+(invisible, uncleanable, and counted against retention), a `succeeded` job whose
+`result_ref` resolves to nothing, or a result served under a job the scheduler
+still believes is running and may reclaim. The conditional revision re-check and
+the single-flight uniqueness guard are evaluated inside that same transaction, so
+a job superseded between computation and publication commits neither the row nor
+the terminal state — it transitions to `superseded` instead, in one update.
+
+Cancellation competes with publication through that single transition, so exactly
+one of `succeeded` and `cancelled` wins and the loser writes nothing.
+
+**Retention is ordered, not merely bounded.** Two independent windows govern the
+same job, and the order between them is part of the contract:
+
+| What | Key | Window | On expiry |
+|---|---|---|---|
+| Metric result | `metrics_cache` row | `metrics_retained_revisions`, `metrics_max_entries_per_tenant`, `metrics_max_param_variants` | Row deleted; the referencing job stays `succeeded` with `result_ref` marked evicted |
+| Job record | `analytics_job` row | `job_retention` (7 days default) | Row deleted; the job id becomes unknown |
+
+`job_retention` is required to be at least as long as the result windows can
+keep an entry alive, so a live result never outlives the job row that describes
+it — an entry whose provenance cannot be recovered is exactly what the
+determinism contract exists to prevent. Configuration violating that ordering is
+rejected at startup, alongside the other hard-range checks.
+
+The two resulting client outcomes are distinct and both defined: a known job
+whose result was evicted answers `not_found` / `JOB_RESULT_EXPIRED` (resubmit —
+`dedup_key` uniqueness is scoped to non-terminal rows precisely so this
+resubmission is admissible); an unknown or unauthorized job id answers
+`not_found` / `NOT_FOUND`, indistinguishable by contract.
+
+**Cleanup never races publication.** The background cleaner deletes only entries
+that no non-terminal job references and whose epoch/revision is outside the
+retained window, and it takes the same single-flight guard the publisher takes,
+so an in-flight publication is never removed between its conditional check and
+its commit.
 
 ### Determinism Contract
 

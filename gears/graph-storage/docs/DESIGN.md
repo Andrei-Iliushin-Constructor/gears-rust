@@ -25,6 +25,7 @@
   - [Label Contract](#label-contract)
   - [Authorization Model](#authorization-model)
   - [Read Consistency Contract](#read-consistency-contract)
+  - [Tenant Offboarding and Deletion Monotonicity](#tenant-offboarding-and-deletion-monotonicity)
   - [Error Model](#error-model)
   - [Deadlines and Cancellation](#deadlines-and-cancellation)
   - [Readiness Matrix](#readiness-matrix)
@@ -56,6 +57,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-fr-type-registration` | Ontology Registry component validates draft-07 schemas, derives UUIDv5 identifiers via platform GTS, applies batches atomically, rejects conflicting re-registration |
 | `p1` | `cpt-cf-graph-storage-fr-type-constraints` | Registry enforces abstractness and edge endpoint patterns; Ingest Pipeline validates payloads across the full GTS derivation chain with JSON-pointer error reporting |
 | `p2` | `cpt-cf-graph-storage-fr-type-catalog` | Registry read endpoints list and fetch registered types with schemas, constraints, and derived UUIDs |
+| `p1` | `cpt-cf-graph-storage-fr-index-admission` | Type registration reserves estimated index footprint and passes per-tenant/global path caps before intent commits; accepted intents run through a bounded tenant-fair DDL queue at background priority (§ Capacity and Admission Contract, ADR-0003) |
 | `p1` | `cpt-cf-graph-storage-fr-bulk-ingest` | Ingest Pipeline validates whole batches, writes nodes/edges/chunks with batched statements in one transaction, bumps the tenant graph revision; durable idempotency keys with recorded outcomes make retries after unknown commit results safe (Concurrent Ingest Protocol) |
 | `p1` | `cpt-cf-graph-storage-fr-stable-identity` | Producer-supplied node keys unique per tenant; edge keys derived as a hash of type, endpoints, and discriminator; concrete node types immutable under upsert with optional expected-version CAS, endpoint validation under row locks (Concurrent Ingest Protocol) |
 | `p1` | `cpt-cf-graph-storage-fr-reference-nodes` | Unified node table; owned/reference semantics carried by GTS base types per ADR-0002; all query components type-agnostic |
@@ -83,6 +85,9 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-fr-revision-signal` | Graph revision incremented in the same transaction as any state change, and only then; exposed on both the topology surface and the API |
 | `p1` | `cpt-cf-graph-storage-fr-tenant-isolation` | Every entity is tenant-scoped through SecureORM; traversal recursion, search arms, and the analytics topology surface carry the tenant predicate |
 | `p1` | `cpt-cf-graph-storage-fr-access-control` | Shared PolicyEnforcer-backed application service for REST and ClientHub; PDP-checked permissions (ontology admin, ingest, query, delete, label attach/detach) declared as GTS instances; resource-level enforcement per the Authorization Model (induced authorized subgraph, arm-level scoping, anti-enumeration) |
+| `p1` | `cpt-cf-graph-storage-fr-source-ownership` | Source namespaces bound to producer principals in a tenant-scoped registry; `node.source_namespace` / `node.owner_principal` written once and compared on every upsert; transfer is an audited administrative flow (§ Authorization Model) |
+| `p2` | `cpt-cf-graph-storage-fr-tenant-offboarding` | Deletion generation from the control-plane ledger; fence, cancel, delete tenant-keyed state, acknowledge; unreconciled tenants quarantined and readiness withheld (§ Tenant Offboarding and Deletion Monotonicity) |
+| `p1` | `cpt-cf-graph-storage-fr-snapshot-identity` | `(source_epoch, graph_revision)` is the snapshot identity in continuation tokens, cache keys, job identity and plugin cursors; epoch rotated before readiness after restore (§ Read Consistency Contract) |
 | `p1` | `cpt-cf-graph-storage-fr-rest-api` | Versioned REST under `/api/graph-storage/v1` with OpenAPI schemas, RFC-9457 problems, documented limits |
 | `p1` | `cpt-cf-graph-storage-fr-sdk-client` | SDK crate with `GraphStorageClientV1` trait registered in ClientHub; local client delegates to domain services |
 | `p2` | `cpt-cf-graph-storage-fr-observability` | Structural tracing spans (batch sizes, arm timings, frontier sizes, cache hits) and OTel metrics, including per-limit saturation counters from the Capacity and Admission Contract; payload content never logged |
@@ -96,6 +101,8 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-nfr-search-latency` | Hybrid p95 <= 500 ms at 100k nodes | Search Service, Storage Layer | Independent arm queries each using its index (GIN, HNSW), bounded arm limits, fusion in memory | Search benchmarks on seeded reference graph |
 | `p1` | `cpt-cf-graph-storage-nfr-traversal-latency` | Depth-3 p95 <= 1 s at 500k edges | Traversal Service, Storage Layer | Composite edge indexes (tenant, src), (tenant, dst); per-hop frontier bounding; node budgets | Traversal benchmarks on seeded reference graph |
 | `p2` | `cpt-cf-graph-storage-nfr-analytics-memory` | Topology-only read surface | Storage Layer (grant) | Expose node keys with interned type and typed edge pairs and nothing wider; the read-only role makes payload, `search_text`, embedding and chunk columns unreadable rather than merely unused. Computation ceilings move with the analytics gear (ADR-0007) | Grant tests: an attempted write and a payload/embedding `SELECT` both fail |
+| `p1` | `cpt-cf-graph-storage-nfr-response-bound` | Aggregate response ceilings | Domain admission, all read components | Cumulative payload bytes, edge count, annotation bytes and total serialized bytes bounded before hydration; deterministic truncation at the established ordering, reported in the response | Benchmark at maximum admissible cardinality asserts the ceilings hold |
+| `p1` | `cpt-cf-graph-storage-nfr-tenant-fairness` | One tenant cannot starve another | Domain admission, Storage Layer | Global caps alongside per-tenant caps, bounded per-tenant queues with round-robin dispatch, reserved interactive connection share above background work | Saturation test with one heavy and one light tenant asserts the light tenant's p95 stays within a documented factor |
 | `p1` | `cpt-cf-graph-storage-nfr-tenant-zero-leak` | Zero cross-tenant results | Storage Layer, all query components | Tenant predicate injected by SecureORM scoping in every query, including every CTE body; no raw unscoped SQL | Adversarial multi-tenant integration tests |
 | `p1` | `cpt-cf-graph-storage-nfr-code-coverage` | >= 85% line coverage | All crates | Trait-based ports enable mock-driven unit tests; integration tests against real PostgreSQL | `cargo llvm-cov` in CI |
 
@@ -103,7 +110,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 
 | ADR ID | Decision | Materialized By |
 |--------|----------|-----------------|
-| [`cpt-cf-graph-storage-adr-single-postgres-store`](./ADR/0001-cpt-cf-graph-storage-adr-single-postgres-store.md) | Single PostgreSQL 19+ store (pgvector only); graph queries behind the GraphQueryPort with SQL/PGQ active from v1 (fixed-depth shapes) and iterative scoped hops for variable depth; pinned beta image until PG19 GA; Apache AGE not carried into the gear; dedicated traversal mirror as a measured-bottleneck contingency | `cpt-cf-graph-storage-principle-single-source-of-truth`, `cpt-cf-graph-storage-component-traversal-service`, `cpt-cf-graph-storage-component-storage-layer` |
+| [`cpt-cf-graph-storage-adr-single-postgres-store`](./ADR/0001-cpt-cf-graph-storage-adr-single-postgres-store.md) | Single PostgreSQL 16+ store (pgvector only; SQL/PGQ a probed capability on 19+); graph queries behind the GraphQueryPort with SQL/PGQ active from v1 (fixed-depth shapes) and iterative scoped hops for variable depth; pinned beta image until PG19 GA; Apache AGE not carried into the gear; dedicated traversal mirror as a measured-bottleneck contingency | `cpt-cf-graph-storage-principle-single-source-of-truth`, `cpt-cf-graph-storage-component-traversal-service`, `cpt-cf-graph-storage-component-storage-layer` |
 | [`cpt-cf-graph-storage-adr-unified-node-model`](./ADR/0002-cpt-cf-graph-storage-adr-unified-node-model.md) | One typed node model; owned vs. reference semantics via GTS base types; provenance-gated scope replacement | `cpt-cf-graph-storage-principle-reference-not-replica`, `cpt-cf-graph-storage-principle-provenance-survives-resync`, `cpt-cf-graph-storage-component-ontology-registry`, `cpt-cf-graph-storage-component-ingest-pipeline` |
 | [`cpt-cf-graph-storage-adr-metadata-partitioning`](./ADR/0003-cpt-cf-graph-storage-adr-metadata-partitioning.md) | Common columns + schema-declared indexed/vectorized attributes + payload ceiling with file-storage offload | `cpt-cf-graph-storage-principle-metadata-only-graph`, `cpt-cf-graph-storage-component-ontology-registry`, `cpt-cf-graph-storage-component-projection-service` |
 | [`cpt-cf-graph-storage-adr-analytics-in-rust`](./ADR/0004-cpt-cf-graph-storage-adr-analytics-in-rust.md) | Rust analytics with per-metric determinism contracts; NetworkX parity waived. Narrowed by ADR-0007 on where it runs | `graph-analytics` gear |
@@ -208,7 +215,7 @@ Every operation has explicit bounds — batch sizes, result limits, traversal de
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-constraint-postgres-pgvector`
 
-The storage backend is PostgreSQL 19 or later with the pgvector extension; SQL/PGQ is load-bearing from the first release, and readiness verifies the server major version and property-graph presence. Until PostgreSQL 19 GA, deployments run a pinned PG19 beta image with pgvector built from a pinned source revision (validated by the PG19 spike and the prototype); the image returns to stock PostgreSQL plus released pgvector at GA. No other extensions and no other database engines are supported; the gear does not target multi-engine portability because tsvector, JSONB indexing, pgvector, and SQL/PGQ are load-bearing.
+The storage backend is PostgreSQL 16 or later with the pgvector extension. SQL/PGQ is a *probed capability*, not a baseline requirement: on PostgreSQL 19+ with the property graph present the SQL/PGQ traversal backend is selected, and on earlier majors traversal is served by the iterative-CTE and entity-query backends with no functional difference to the caller. Readiness reports the server major and property-graph presence, and takes the gear out of service only when an operator explicitly configured a backend the server cannot provide (§ Readiness Matrix). Deployments wanting SQL/PGQ before PostgreSQL 19 GA run a pinned PG19 beta image with pgvector built from a pinned source revision (validated by the PG19 spike and the prototype) and return to stock PostgreSQL plus released pgvector at GA. No other extensions and no other database engines are supported; the gear does not target multi-engine portability because tsvector, JSONB indexing, and pgvector are load-bearing.
 
 #### GTS Draft-07 Contracts
 
@@ -1510,9 +1517,16 @@ PostgreSQL row alignment the two are the same size in these tables anyway.
 | search | TSVECTOR generated | Lexical index source |
 | embedding | VECTOR(dim) | Node embedding (nullable) |
 | embedding_epoch / embedding_input_hash | BIGINT / TEXT | Embedding-space epoch the vector belongs to and the canonical hash of its input (staleness detection) |
+| source_namespace | TEXT | Source namespace for reference nodes; `NULL` for owned nodes |
+| owner_principal | TEXT | Producer principal that created the row; immutable after insert (§ Authorization Model) |
 | created_by | TEXT | Creating actor |
 | created_at / updated_at | TIMESTAMPTZ | Timestamps |
 | deleted_at | TIMESTAMPTZ | Soft-delete tombstone; `NULL` for live rows (Soft Delete Contract) |
+
+`source_namespace` and `owner_principal` are written once, on insert, and never
+by an upsert; the ingest path compares them instead. A companion
+`source_namespace_owner` registry table binds namespaces to producer principals
+per tenant and is the authority the comparison consults.
 
 #### Table: edge
 
@@ -1587,8 +1601,14 @@ make every label change look like a content change to the staleness detector.
 | Column | Type | Description |
 |--------|------|-------------|
 | tenant_id | UUID | Tenant scope |
-| key | TEXT | Meta key (e.g., graph_revision) |
+| key | TEXT | Meta key; **PK (tenant_id, key)** |
 | value | JSONB | Meta value |
+
+Two keys are normative. `graph_revision` is the per-tenant monotonic counter
+advanced by every committed mutation. `source_epoch` is the deployment-wide,
+non-reusable timeline identifier described in § Read Consistency Contract; it is
+rotated by operator action before readiness after a restore or store replacement,
+and it pairs with `graph_revision` in every revision-bound identity.
 
 #### Table: ingest_idempotency
 
@@ -1600,9 +1620,14 @@ make every label change look like a content change to the staleness detector.
 | producer | TEXT | Producer identity (from the security context) |
 | idempotency_key | TEXT | Producer-chosen key; **PK (tenant_id, producer, idempotency_key)** |
 | request_hash | TEXT | Canonical hash of the ingest request |
+| source_epoch | BIGINT | Epoch in force when the original request committed |
 | graph_revision | BIGINT | Revision committed by the original request |
 | response | JSONB | Recorded outcome returned to identical retries |
 | created_at | TIMESTAMPTZ | Retention window anchor |
+
+A receipt whose `source_epoch` is not the current one is treated exactly as an
+expired receipt: the retry is `IDEMPOTENCY_KEY_EXPIRED` and requires
+reconciliation, never automatic re-execution.
 
 #### Table: scope_registry
 
@@ -1784,7 +1809,7 @@ Tenant scoping is the outer wall; the PDP-derived `AccessScope` is the inner, re
 | Operation group | ResourceType | Action | Composition |
 |---|---|---|---|
 | Types (admin) | graph ontology | administer | none (tenant-level) |
-| Ingest | graph node | write | edges authorize via both endpoints; chunks via parent node; scope replacement via owned scope |
+| Ingest | graph node | write | edges authorize via both endpoints; chunks via parent node; scope replacement via owned scope; reference nodes additionally authorize against the source-namespace owner |
 | Node read | graph node | read | chunks, labels and adjacency via the node's scope; unauthorized key follows the anti-enumeration contract |
 | Delete | graph node (+ edge via endpoints) | delete | incident edges follow the node; a caller authorized for the node is authorized for the cascade |
 | Labels (registry) | graph ontology | administer | none (tenant-level) |
@@ -1804,15 +1829,136 @@ A constraint that cannot be represented in SQL for the target entity fails close
 
 **Anti-enumeration.** A denied resource is indistinguishable from a nonexistent one: not present in results, counts, truncation flags, or budget consumption; an unauthorized seed behaves exactly like an unknown key.
 
+**Source namespaces are an ownership boundary, not a payload field.** A reference
+node's identity is the triple `(source, object kind, native identifier)`
+(ADR-0002), and that triple is what makes two producers' references to the same
+upstream object converge. Convergence is the point — but it also means that a
+generic `write` permission would otherwise let any producer submit *another*
+source's triple and overwrite the searchable projection its owner maintains.
+`source` appearing inside a validly typed payload proves nothing about who is
+entitled to speak for it.
+
+The contract:
+
+- a **source namespace is bound to authenticated producer principals** in a
+  tenant-scoped registry; a producer may write reference nodes only under the
+  namespaces bound to it;
+- the **owner is recorded immutably on first creation** of a node in that
+  namespace (`node.source_namespace`, `node.owner_principal`) and is not
+  rewritten by later upserts;
+- **every update and every phantom materialization re-authorizes against that
+  owner**, not merely against the tenant — a mismatch is `permission_denied`,
+  reported the same way whatever the caller's other grants;
+- **ownership transfer and reconciliation are an explicit administrative flow**
+  under the ontology-administration permission, audited in `ingest_audit` like
+  any other mutation; there is no implicit transfer by writing.
+
+An unclaimed namespace is claimed by the first producer that writes it, which
+keeps single-producer deployments free of setup while still making the second
+writer an authorization decision rather than a silent merge.
+
 **Plugins.** The gear remains the PEP for every engine. The selected graph-engine plugin receives a non-forgeable normalized authorization envelope; capability negotiation declares which authorization predicates the engine can enforce. An engine that cannot enforce the complete scope, holds stale authorization state, or cannot prove the requested revision is failed closed or bypassed for the built-in backend — never widened to tenant scope. The same resource-scoped adversarial suite runs against every backend.
 
 **Analytics.** Whole-tenant analytics and its permission live in the `graph-analytics` gear (ADR-0007). What this gear owes it is the topology grant and the revision; metric annotation on a projection is authorized as part of the projection read, since an annotation reveals nothing the projection does not already show.
 
 ### Read Consistency Contract
 
-A compound read — hybrid search (arms + folding + hydration), traversal plus hydration, a projection page — executes every statement against one read-only repeatable-read snapshot. The observed graph revision is captured inside that snapshot and returned in the response; pagination continuation tokens embed it, and a continuation against a newer revision is answered with the recorded revision's data when still retained, or a typed stale-token error otherwise — never a silent mix of revisions.
+**Snapshot identity is `(source_epoch, graph_revision)`, never the revision alone.**
+`graph_revision` is a per-tenant counter and a counter can be rewound: a
+point-in-time restore of PostgreSQL returns the store to an earlier revision, and
+subsequent writes then re-issue revision numbers that already described a
+different graph. A check that compares revisions only would accept a token, a
+cache entry, or a plugin cursor minted on the abandoned timeline.
 
-Metric computation follows the same rule (revision and topology read from one snapshot) and publishes conditionally: after computing, the writer re-checks that the tenant's current revision still equals the captured one and inserts under a single-flight uniqueness guard; on mismatch the result is discarded (or recomputed), so a cache entry never claims a revision whose topology it did not see. The cache identity additionally carries the immutable `algorithm_contract_version` (ADR-0004), so a deployment that changes output-affecting semantics can never serve an old result under new semantics.
+`source_epoch` is the timeline identifier that makes the pair unambiguous. It is
+owned by this gear, stored in `graph_meta`, never reused, and rotated by operator
+action before the gear reports ready after any restore or store replacement.
+Every revision-bound identity carries both halves:
+
+| Identity | Carries the pair | Behavior on epoch mismatch |
+|---|---|---|
+| Pagination / continuation tokens | Yes, inside the opaque token | Typed stale-token error; the caller restarts the query |
+| Metric-cache keys and result provenance | Yes, in the key and in the annotation | Entry is not served and is eligible for cleanup |
+| Analytics job identity and single-flight | Yes, in the dedup tuple | Old-epoch jobs are quarantined, not resumed; a resubmission is a new job |
+| Graph-engine plugin cursors | Yes (§ Plugin Selection and Lifecycle) | Fail closed or route to the built-in engine until rebuild |
+| Idempotency receipts | Yes, alongside the committed revision | See below |
+
+After a restore, old-epoch caches and jobs are invalidated or quarantined rather
+than served; the gear does not attempt to reconcile them with the new timeline.
+
+**A restore that removes an idempotency receipt makes its key outcome-unknown.**
+The producer may hold a key whose original commit is no longer in the store, so a
+retry cannot be treated as a fresh request — the graph may or may not contain its
+effects depending on where the restore point fell. Such a retry is answered with
+`IDEMPOTENCY_KEY_EXPIRED` (`failed_precondition`) exactly as an expired receipt
+is: reconcile, then issue a new logical request. Absence of a receipt never
+authorizes automatic re-execution, whatever removed it.
+
+A compound read — hybrid search (arms + folding + hydration), traversal plus
+hydration, a projection page — executes every statement against one read-only
+repeatable-read snapshot. The observed `(source_epoch, graph_revision)` is
+captured inside that snapshot and returned in the response; continuation tokens
+embed it, and a continuation against a newer revision is answered with the
+recorded revision's data when still retained, or a typed stale-token error
+otherwise — never a silent mix of revisions.
+
+Metric computation follows the same rule (epoch, revision and topology read from
+one snapshot) and publishes conditionally: after computing, the writer re-checks
+that the tenant's current `(epoch, revision)` still equals the captured pair and
+inserts under a single-flight uniqueness guard; on mismatch the result is
+discarded (or recomputed), so a cache entry never claims a graph state whose
+topology it did not see. The cache identity additionally carries the immutable
+`algorithm_contract_version` (ADR-0004), so a deployment that changes
+output-affecting semantics can never serve an old result under new semantics.
+
+### Tenant Offboarding and Deletion Monotonicity
+
+Every byte this gear owns lives inside its PostgreSQL database, which makes
+deletion the one operation a restore can undo. Offboard a tenant at epoch `E2`,
+restore a backup taken before it, and the tenant's nodes, payloads, vectors,
+labels, cached metrics, jobs and idempotency receipts are all back — searchable,
+traversable, and indistinguishable from live data. Deletion must therefore be
+*monotonic*: once a tenant is deleted it stays deleted across any subsequent
+restore, and the gear must be able to tell that it was.
+
+The authority is a **tenant deletion generation** issued by the platform
+control-plane lifecycle owner. It is a monotonic per-tenant counter held in a
+ledger that is **not** rewound by this gear's PostgreSQL restore — that
+independence is the whole mechanism; a generation stored only in the graph
+database would be restored along with the data it is meant to invalidate.
+
+This gear's part of the protocol:
+
+1. **Accept the deletion generation.** Offboarding delivers `(tenant, deletion_generation)`.
+2. **Fence new work first.** The tenant is marked fenced before anything is
+   removed: ingest, reads, traversals, projections and job submissions are
+   rejected with `failed_precondition` / `TENANT_FENCED`. Fencing precedes
+   deletion so that no in-flight request re-creates rows behind the deleter.
+3. **Cancel in-flight work.** Running ingest transactions, index builds,
+   backfills, re-embedding, and analytics jobs for that tenant are cancelled
+   through the normal cancellation contract.
+4. **Delete all tenant-keyed state.** Every table in § 3.7 is keyed by
+   `tenant_id`, so deletion is enumerable rather than a search: nodes, edges,
+   chunks, labels and assignments, types, scope registry, idempotency records and
+   tombstones, audit records, embedding-space rows, and the tenant's entries in
+   the analytics gear's caches and job table via that gear's own offboarding
+   endpoint.
+5. **Acknowledge completion** to the lifecycle owner with the generation that was
+   satisfied.
+6. **Reconcile before readiness.** At startup — and unconditionally after an
+   epoch rotation — the gear reads the ledger and compares each tenant's local
+   applied generation with the authoritative one. Any tenant whose local
+   generation is behind is **quarantined**: its data is present but fenced and
+   unreadable, and deletion is re-executed. The gear reports ready only when no
+   tenant remains unreconciled.
+
+Restored data is quarantined by default rather than served pending
+reconciliation, because the failure being prevented is exactly the one where the
+gear cannot yet tell live data from resurrected data.
+
+The ledger itself is a platform dependency (PRD § 10), not something this gear
+defines; what the gear owns is accepting a generation, fencing, deleting,
+acknowledging, and refusing to become ready while a generation is unsatisfied.
 
 ### Error Model
 
@@ -1833,6 +1979,9 @@ One authoritative chain classifies every failure: `DomainError -> CanonicalError
 | Capability not supported by the selected engine | `unimplemented` | `CAPABILITY_UNSUPPORTED` | Do not retry; use another capability |
 | Dependency unavailable (PDP, types-registry, provider, engine) | `unavailable` | `DEPENDENCY_UNAVAILABLE` | Wait and retry |
 | Vector search blocked by embedding-identity mismatch | `failed_precondition` | `EMBEDDING_SPACE_MISMATCH` | Operator action; other operations unaffected |
+| Filter on an attribute whose index is not `active` | `failed_precondition` | `INDEX_NOT_ACTIVE` | Drop the filter or wait for the build; never retry unchanged in a loop |
+| Write under a source namespace owned by another producer | `permission_denied` | `SOURCE_NAMESPACE_FORBIDDEN` | Never retry; request ownership transfer |
+| Tenant fenced by offboarding or pending deletion reconciliation | `failed_precondition` | `TENANT_FENCED` | Never retry; the tenant is being removed |
 | Unauthorized or unknown resource | `not_found` | `NOT_FOUND` | Indistinguishable by contract (anti-enumeration) |
 | Durable corruption detected | `data_loss` | `PROJECTION_CORRUPT`, `STORE_CORRUPT` | Operator action; never retry |
 | Unexpected internal failure | `unknown` | `INTERNAL` | Retry once, then escalate |
@@ -1840,6 +1989,43 @@ One authoritative chain classifies every failure: `DomainError -> CanonicalError
 Reasons are a stable, published vocabulary; clients never parse human-readable `detail` strings. Transient categories carry a retry-after hint; non-retryable ones explicitly carry none.
 
 The category names above are exactly those the platform's `#[resource_error]` macro generates — `aborted`, `already_exists`, `cancelled`, `data_loss`, `deadline_exceeded`, `failed_precondition`, `invalid_argument`, `not_found`, `out_of_range`, `permission_denied`, `resource_exhausted`, `unimplemented`, `unknown`. There is no `internal` category; unexpected failures map to `unknown`.
+
+**Operation applicability.** The table above is the vocabulary; this one says
+which of it each public operation may emit, so REST/OpenAPI registration, the
+SDK signature and client handling are generated from one source rather than
+guessed per route. `✓` means the operation can produce that category; a blank
+means it never does, and a client that receives it should treat the response as
+a contract violation.
+
+| Operation | `invalid_argument` | `out_of_range` | `permission_denied` / `not_found` | `aborted` | `failed_precondition` | `resource_exhausted` | `deadline_exceeded` / `cancelled` | `unimplemented` | `unavailable` | `data_loss` |
+|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| Register types | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ | |
+| List / get type | ✓ | | ✓ | | | ✓ | ✓ | | ✓ | |
+| Ingest | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ | ✓ |
+| Node read | ✓ | | ✓ | | ✓ | ✓ | ✓ | | ✓ | ✓ |
+| Tabular projection | ✓ | ✓ | ✓ | | ✓ | ✓ | ✓ | | ✓ | ✓ |
+| Soft delete (node / edge) | ✓ | | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ | |
+| Search | ✓ | ✓ | ✓ | | ✓ | ✓ | ✓ | | ✓ | ✓ |
+| Traversal / neighborhood | ✓ | ✓ | ✓ | | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Labels (registry) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ | |
+| Labels (attach / detach) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ | |
+| Readiness | | | | | | | | | | |
+
+Notes that the grid cannot carry:
+
+- `failed_precondition` reaches read paths through `EMBEDDING_SPACE_MISMATCH`,
+  `INDEX_NOT_ACTIVE` and `TENANT_FENCED`, and write paths additionally through
+  `STALE_GENERATION` and `IDEMPOTENCY_KEY_EXPIRED`.
+- `unimplemented` is reachable only where a graph-engine plugin is selected and
+  a requested capability is not negotiated — traversal today.
+- `data_loss` is reachable wherever a read touches a projection or store that
+  the gear has detected as corrupt; it is never a client-fixable outcome.
+- Readiness reports state in its body and does not fail with a canonical error;
+  a not-ready gear answers `503` from the platform health surface, not from this
+  matrix.
+
+The same grid drives the analytics gear's own surfaces, which own the `202`
+job categories (`graph-analytics` DESIGN § Error Model).
 
 **Atomic batches.** A failed batch always has exactly one outer `CanonicalError`: `invalid_argument` when item validation failed (per-item violations attached), `aborted` for CAS or serialization conflicts, `unavailable` for a dependency outage, `deadline_exceeded`, or `unknown`. Any non-success batch outcome means zero newly committed items and carries neither success counts nor a new graph revision — the sole exception is an idempotency replay, which returns the previously committed outcome.
 
@@ -1866,19 +2052,35 @@ The same rules apply during shutdown.
 
 ### Readiness Matrix
 
-Readiness is per capability, not one global boolean: a component is `Healthy`, `Degraded`, or `Unhealthy`, and only some states take the whole gear out of service.
+Readiness is per capability, not one global boolean: a component is `Healthy`,
+`Degraded`, or `Unhealthy`, and only some states take the whole gear out of
+service. For every non-healthy state the matrix names three things — what stays
+available, the exact canonical rejection for what does not, and how the component
+returns to `Healthy`. A degraded component never silently widens behavior.
 
-| Component | Degraded | Unhealthy | Aggregate effect |
-|---|---|---|---|
-| Database, migrations | — | Unreachable, migrations unapplied | Gear not ready |
-| Server major / SQL/PGQ | Server below 19, or property graph absent on 19+ | Server below 19 while the SQL/PGQ backend is explicitly configured | Degraded: SQL/PGQ reported unavailable, CTE and two-query backends serve, gear ready. Unhealthy only when an operator asked for a backend the server cannot provide — naming the required major rather than substituting silently |
-| AuthZ resolver / types-registry | Elevated latency | Unreachable | Unhealthy: gear not ready; authenticated data paths fail closed |
-| Embedding provider | Unavailable (ingest may skip embedding) | Embedding-space identity mismatch | Vector and hybrid search rejected with `EMBEDDING_SPACE_MISMATCH`; lexical search, ingest, traversal, projections unaffected |
-| Graph-engine plugin | Stale projection or unprovable cursor | Incompatible version | Route to the built-in PostgreSQL engine; capabilities unique to the plugin rejected with `CAPABILITY_UNSUPPORTED` |
-| Dynamic indexes | Building or backfilling | Build failed | Filters on affected attributes rejected; everything else unaffected |
-| Metric annotation source | Analytics gear reachable, no entry at this revision | — | Projections served without annotations, saying so; never an error and never a stale-revision annotation. Never unhealthy: an optional gear's absence must not take the graph out of service |
+| Component | State | Blocked operations (canonical rejection) | Operations that remain available | Recovery transition |
+|---|---|---|---|---|
+| Database, migrations | `Unhealthy` — unreachable or migrations unapplied | Everything; gear not ready, no traffic admitted | None | Connectivity restored and migrations applied; probe re-runs on an interval and flips to `Healthy` without restart |
+| Server major / SQL/PGQ | `Degraded` — server below 19, or property graph absent on 19+ | SQL/PGQ backend reported unavailable; nothing rejected | All traversal via the iterative-CTE and entity-query backends; everything else | Automatic when the server is upgraded and the property graph is present; capability re-probed at startup and on reconnect |
+| Server major / SQL/PGQ | `Unhealthy` — SQL/PGQ explicitly configured, server cannot provide it | Everything; gear not ready, naming the required major | None | Operator upgrades the server or removes the explicit selector; deliberate, because silently substituting backend semantics would hide a deployment error |
+| AuthZ resolver | `Degraded` — elevated latency | Nothing; requests consume more of their deadline | All | Automatic when latency returns below threshold |
+| AuthZ resolver | `Unhealthy` — unreachable | Every authenticated data path fails closed, `unavailable` / `DEPENDENCY_UNAVAILABLE`; gear not ready | Unauthenticated health/readiness endpoints only | Automatic on reconnect; no local state to rebuild |
+| Types registry | `Unhealthy` — unreachable | Type registration and any request needing an unresolved type, `unavailable` / `DEPENDENCY_UNAVAILABLE`; gear not ready | — | Automatic on reconnect; the local type cache is re-validated before flipping to `Healthy` |
+| Embedding provider | `Degraded` — provider unavailable | Requests with `embed=true`, `unavailable` / `DEPENDENCY_UNAVAILABLE`; vector arms of search omitted with the response saying so | Ingest with `embed=false`, lexical search, traversal, projections, reads | Automatic on provider recovery; vectors missed while degraded are stale by input hash and re-embedded by the normal path |
+| Embedding-space identity | `Unhealthy` — active identity ≠ stored identity | Vector and hybrid search, `failed_precondition` / `EMBEDDING_SPACE_MISMATCH` | Lexical search, ingest, traversal, projections, reads — the gear stays ready | Operator runs the re-embedding lifecycle (ADR-0005) to `cutover`; identity match restores the capability automatically at cutover |
+| Graph-engine plugin | `Degraded` — stale projection or unprovable cursor | Capabilities unique to the plugin, `unimplemented` / `CAPABILITY_UNSUPPORTED` | Everything routable to the built-in PostgreSQL engine | Plugin acknowledges a rebuild from the current `(source_epoch, graph_revision)`; the gear re-activates it through the activation gate |
+| Graph-engine plugin | `Unhealthy` — incompatible version or configured selector matches nothing | Plugin-only capabilities; the gear stays ready and routes to the built-in engine, except when an explicit selector matched nothing, which is a readiness failure | Built-in engine paths | Operator registers a compatible instance or corrects the selector; re-selection follows the deterministic rules |
+| Dynamic indexes | `Degraded` — building or backfilling | Filters on the affected attributes, `failed_precondition` / `INDEX_NOT_ACTIVE` | Every other filter, and all non-filter operations | Automatic when the build reaches `active`; queued builds are visible with position and estimate |
+| Dynamic indexes | `Unhealthy` — build failed | Filters on the affected attributes, same rejection with a `failed` sub-state | As above; the gear stays ready | Invalid index is dropped and the intent retried under the DDL queue; repeated failure requires operator action and is surfaced as such |
+| Tenant reconciliation | `Unhealthy` — a tenant's deletion generation is unsatisfied | All operations for the affected tenant, `failed_precondition` / `TENANT_FENCED`; gear not ready until reconciliation completes | Other tenants are unaffected once reconciliation has finished for them | Deletion re-executed and acknowledged to the lifecycle owner (§ Tenant Offboarding) |
+| Metric annotation source | `Degraded` — analytics gear reachable, no entry at this revision | Nothing | Projections served without annotations, saying so | Automatic when the analytics gear publishes an entry at the current pair. Never `Unhealthy`: an optional gear's absence must not take the graph out of service |
 
-The readiness endpoint reports per-component state with named problems; the aggregate is ready only when no component is `Unhealthy`. Degraded components never silently widen behavior — the affected operations are rejected canonically instead.
+The readiness endpoint reports per-component state with named problems and, for
+degraded components, the recovery condition being waited on. The aggregate is
+ready only when no component is `Unhealthy`. Every blocked operation above is
+rejected with the canonical category and stable reason from § Error Model — a
+degraded capability never returns a partial or best-effort result in place of
+the rejection.
 
 ### Telemetry and Audit Contract
 
@@ -1962,6 +2164,20 @@ Every bound the gear enforces is a named configuration key with a safe default a
 | Interactive statement deadline | `deadline_interactive` | 10 s | 1 – 60 s | DB `statement_timeout` + cancellation token |
 | Per-tenant concurrent ingest batches | `tenant_max_ingest` | 4 | 1 – 64 | Admission |
 | Per-tenant concurrent queries | `tenant_max_queries` | 32 | 1 – 1,024 | Admission |
+| Cumulative hydrated payload bytes in one response | `response_max_payload_bytes` | 16 MiB | 256 KiB – 128 MiB | Domain, before hydration |
+| Total serialized response bytes | `response_max_bytes` | 32 MiB | 1 – 256 MiB | Domain, before serialization |
+| Edges returned in one response | `response_max_edges` | 20,000 | 100 – 200,000 | Domain, before hydration |
+| Snippet, chunk-provenance and annotation bytes | `response_max_annotation_bytes` | 2 MiB | 64 KiB – 32 MiB | Domain, before hydration |
+| Global concurrent ingest batches | `global_max_ingest` | 32 | 1 – 512 | Global admission |
+| Global concurrent queries | `global_max_queries` | 256 | 1 – 8,192 | Global admission |
+| DB connections reserved for interactive reads | `interactive_reserved_connections` | 25 % of the pool | 0 – 75 % | Global admission |
+| Registered types per tenant | `types_max_per_tenant` | 500 | 10 – 20,000 | Type registration |
+| Indexed payload paths per tenant | `indexed_paths_max_per_tenant` | 50 | 0 – 1,000 | Type registration |
+| Indexed payload paths deployment-wide | `indexed_paths_max_global` | 5,000 | 0 – 100,000 | Type registration |
+| Retained old-version indexes per path | `index_retained_versions` | 1 | 0 – 5 | Retirement |
+| Pending index/backfill jobs per tenant | `ddl_max_pending_per_tenant` | 4 | 1 – 64 | DDL queue admission |
+| Concurrently running index builds (deployment) | `ddl_max_running` | 1 | 1 – 8 | DDL queue dispatch |
+| Estimated index build disk footprint | `ddl_max_estimated_bytes` | 32 GiB | 1 – 1,024 GiB | DDL queue admission |
 | Idempotency record retention | `idempotency_retention` | 7 days | 1 – 90 days | Background cleanup |
 
 The analytics ceilings, job deadline, global memory pool, queue depth and metric-cache retention bounds move to the `graph-analytics` gear with the computation (ADR-0007); they are configuration of a different deployment unit, which is the point of the split.
@@ -1979,6 +2195,73 @@ Rejections are classified by cause, not by the fact that a limit was involved: a
 Every rejection carries the limit name, the configured bound, and the requested value in structured context. Every limit exposes a saturation counter (rejections) and a high-watermark gauge, so capacity pressure is visible in telemetry before it becomes an incident (`cpt-cf-graph-storage-fr-observability`), including idempotency-record retention and cleanup-lag gauges.
 
 **Seed admission.** Because every seed survives truncation, the seed set is bounded before expansion begins: after authorization and deduplication, a request whose distinct authorized seeds exceed the effective node budget is rejected with `out_of_range` (naming the seed count and the budget) rather than silently exceeding the budget. Seeds are ordered deterministically by node key, and the response reports the admitted seed count alongside truncation metadata.
+
+**Aggregate response bounds.** Per-item ceilings do not compose into a bounded
+response: 10,000 nodes each within `payload_max_bytes` is roughly 625 MiB before
+adjacency, returned edges, chunk provenance, snippets and metric annotations are
+counted. The four `response_max_*` bounds above are therefore enforced on the
+aggregate, in the domain layer, **before hydration** — the result set is
+deterministically truncated or paginated at the ordering the query already
+established, and the response reports the truncation rather than discovering the
+limit while serializing. REST and the ClientHub local client are bound by the
+same numbers, because the bound protects the process, not the transport.
+
+**Fairness across shared pools.** Per-tenant limits bound what one tenant may
+*start*; they do not bound what one tenant may *hold*. A tenant staying inside
+`tenant_max_queries` can still occupy every database connection, and admitted
+work from many tenants meets again in the same pools. The contract therefore has
+three parts:
+
+1. **Global caps alongside per-tenant caps** (`global_max_ingest`,
+   `global_max_queries`) — the admission layer holds both, so the sum of
+   per-tenant allowances can exceed capacity without over-committing it.
+2. **Bounded per-tenant queues with tenant-fair dispatch.** Each tenant has its
+   own bounded queue; the dispatcher serves queues round-robin over tenants with
+   at least one waiting request, so service is proportional to the number of
+   active tenants rather than to the number of requests one tenant submits.
+   A full tenant queue is `resource_exhausted` / `TENANT_CONCURRENCY` with a
+   retry-after hint; a full global pool is `QUEUE_FULL`.
+3. **Reserved interactive capacity.** `interactive_reserved_connections` keeps a
+   share of the connection pool unavailable to background work — index builds,
+   backfills, re-embedding, cleanup — so an operator-triggered migration cannot
+   starve user-facing reads. Background work runs at the lowest dispatch priority
+   and yields its slot at chunk boundaries.
+
+Dequeue is FIFO within a tenant queue. A cancelled or deadline-expired request is
+removed from its queue without occupying a dispatch slot, and the caller sees
+`cancelled` or `deadline_exceeded` rather than a late execution. Analytics has
+its own pools in the `graph-analytics` gear (ADR-0007) under the same three
+rules; this section governs ingest, queries, provider calls, index builds and
+re-embedding inside this gear.
+
+**Index and DDL admission.** Authorization to register a type is not a resource
+bound: an ontology administrator acting entirely within permission can publish
+type versions whose accepted `index`, `full_text_search` and `vector_search`
+traits each commit durable index intent, launch `CREATE INDEX CONCURRENTLY` and
+scan the whole table. Left unbounded that starves the shared PostgreSQL instance
+for every tenant. Registration therefore passes capacity admission before index
+intent is committed:
+
+- the per-tenant and deployment-wide caps on registered types and indexed paths
+  above are checked at registration; exceeding one is `resource_exhausted` naming
+  the bound, not a silently queued build;
+- the estimated build footprint (row count × indexed path cardinality × index
+  kind) is compared against `ddl_max_estimated_bytes` and against free space,
+  and capacity is **reserved before the intent row commits** — an intent that
+  cannot be built is never accepted;
+- accepted intents enter a durable, tenant-fair DDL queue bounded by
+  `ddl_max_pending_per_tenant`, dispatched at most `ddl_max_running` at a time
+  deployment-wide, at background priority under the interactive reservation;
+- old-version indexes are retained per `index_retained_versions` during
+  migration and retired afterwards, so a stream of type versions cannot
+  accumulate indexes indefinitely;
+- when the shared budget is exhausted the queue applies backpressure —
+  registrations are rejected with a retry-after hint rather than accepted into
+  an unbounded backlog.
+
+Filters remain admissible only against `active` annotations (ADR-0003), so
+queued or building intent never admits a filter that would become a sequential
+scan.
 
 ### Base Ontology Publication
 
