@@ -376,7 +376,7 @@ Provide durable state primitives and generic CRUD storage for typed resources th
 - [ ] p1 - pluggable storage backend (Relational Database plugin via SecureORM as default)
 - [ ] p1 - configurable soft-delete retention with background purge task
 - [ ] p2 - batch CRUD operations (POST /resources:batch, POST /resources:batch-get) per DNA BATCH.md
-- [ ] p2 - per-resource-type lifecycle notification events (created/updated/deleted) via Events Broker
+- [ ] p2 - per-resource-type lifecycle notification events (created/updated/deleted) via Event Broker
 - [ ] p2 - per-resource-type audit events via Audit Gear
 - [ ] p3 - alternative storage plugins (search engines, vendor-provided backends) with per-type routing
 - [ ] p4 - on-change events and serverless functions or workflows invocation
@@ -521,7 +521,7 @@ Measure platform usage (API calls, compute, storage) for quotas, billing, and in
 - TODO: API link
 - TODO: SDK link
 
-### Events Broker
+### Event Broker
 #### Responsibility
 Provide platform-wide event publishing and subscription for asynchronous workflows and loose coupling between gears.
 #### High Level Scenarios
@@ -727,7 +727,7 @@ pluggable storage backends, consumer-group cursor tracking.
 
 ## BSS (Business Support System)
 
-**BSS Gears** implement the monetization and commercial capabilities of the platform. They cover the full revenue lifecycle: product catalog, plan and price modeling, subscriptions, usage rating, invoicing, payments, billing ledger, tax, FX rates, contracts, orders, and marketplace. BSS gears compose Core Functionality gears (Usage Collector, Events Broker, Types Registry) and Core Platform Integration gears (Credentials Store, License Resolver) to deliver end-to-end commercial workflows.
+**BSS Gears** implement the monetization and commercial capabilities of the platform. They cover the full revenue lifecycle: product catalog, plan and price modeling, subscriptions, usage rating, invoicing, payments, billing ledger, tax, FX rates, contracts, orders, and marketplace. BSS gears compose Core Functionality gears (Usage Collector, Event Broker, Types Registry) and Core Platform Integration gears (Credentials Store, License Resolver) to deliver end-to-end commercial workflows.
 
 BSS gears follow a strict separation of concerns: each gear owns one domain and delegates cross-cutting concerns to its neighbors through stable SDK contracts. Financial-grade auditability, deterministic replay, and multi-tenant isolation are foundational requirements across all BSS gears.
 
@@ -1297,7 +1297,7 @@ sequenceDiagram
     participant M as Target gear (REST handler)
     participant D as Domain service
     participant DB as DB (SecureConn)
-    participant EB as Events Broker
+    participant EB as Event Broker
     participant AUD as Audit
     participant UT as Usage Collector
   end
@@ -1504,7 +1504,7 @@ sequenceDiagram
     participant HK as Hook invocation
     participant JM as Jobs Manager
     participant DB as Chat DB
-    participant EB as Events Broker
+    participant EB as Event Broker
   end
 
   U->>C: Attach file + type message
@@ -1565,7 +1565,7 @@ sequenceDiagram
     participant HK as Hook invocation
     participant LLM as LLM Gateway (embeddings)
     participant LSI as Local Search Index
-    participant EB as Events Broker
+    participant EB as Event Broker
     participant CE as Chat Engine
     participant RAG as RAG Gateway
   end
@@ -1864,7 +1864,7 @@ sequenceDiagram
     participant LLM as LLM Gateway
     participant DB as Chat DB
     participant AM as Agent Memory
-    participant EB as Events Broker
+    participant EB as Event Broker
     participant AUD as Audit
     participant UT as Usage Collector
   end
