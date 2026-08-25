@@ -9,6 +9,7 @@
 - [2. Goals / Non-Goals](#2-goals--non-goals)
   - [2.1 Goals](#21-goals)
   - [2.2 Non-Goals](#22-non-goals)
+  - [2.3 Release Phasing](#23-release-phasing)
 - [3. Principles & Constraints](#3-principles--constraints)
   - [3.1 Design Principles](#31-design-principles)
   - [3.2 Constraints](#32-constraints)
@@ -271,6 +272,40 @@ C4Container
 - **Cross-region settings replication; ancestor-level batch apply across descendants; settings export/import** — deferred (PRD Out of Scope).
 - **Bootstrap / boot-critical infrastructure config** (DB and broker endpoints, service identity, platform TLS, ports, domain) — deployment-owned, delivered via ToolKit config at gear init (§4.9, §4.8); never a managed setting.
 - **Frontend visual design / mockups** — owned by a future frontend DESIGN document.
+
+### 2.3 Release Phasing
+
+This document describes the whole gear. It does not all ship at once, and the sections that carry the first release are not otherwise distinguishable from the ones that look ahead. Releases below are grouped by **what they depend on**, not by requirement priority: priority is the PRD's and stays there, reachable through each requirement id named here. The two axes genuinely differ. `cpt-cf-settings-service-fr-subject-scoped-values` is one requirement spanning two releases, because the PRD asks for its identity model from v1 and lets the implementation phase. And three requirements the PRD ranks below the first tier — `cpt-cf-settings-service-fr-defaults-revert`, `cpt-cf-settings-service-fr-category-access` and `cpt-cf-settings-service-fr-barrier-default-seam` — ship in R1 regardless, because they need nothing that does not already exist and leaving them out would mean shipping a service whose absent behaviour someone could come to rely on.
+
+#### R1 — configuration that resolves and changes safely, in-process
+
+**The defining property: R1 depends on no gear that does not exist.**
+
+Categories and declarations with their lifecycle (`cpt-cf-settings-service-fr-settings-category-model`, `cpt-cf-settings-service-fr-module-contributed-declarations`, `cpt-cf-settings-service-fr-contributed-lifecycle`); GTS typing, validation and secret protection (`cpt-cf-settings-service-fr-typed-value-validation`); Scope Class with cascade, override and source trace (`cpt-cf-settings-service-fr-setting-scope-class`, `cpt-cf-settings-service-fr-tenant-overrides`, `cpt-cf-settings-service-fr-cascading-inheritance`); tenant permission and subtree isolation including the standalone-tenant seam (`cpt-cf-settings-service-fr-tenant-scope-enforcement`, `cpt-cf-settings-service-fr-barrier-default-seam`); authentication and access-level gating with per-category restriction (`cpt-cf-settings-service-fr-authn-role-gating`, `cpt-cf-settings-service-fr-category-access`); staged change → previewed, step-up-verified Apply, effective on next read (`cpt-cf-settings-service-fr-staged-change-pending`, `cpt-cf-settings-service-fr-apply-preview-stepup`, `cpt-cf-settings-service-fr-apply-effect-resolution`); revert to ancestor or Schema Default (`cpt-cf-settings-service-fr-defaults-revert`); audited mutations and secret reveals (`cpt-cf-settings-service-fr-audit-mutations`); single and bulk effective reads (`cpt-cf-settings-service-fr-bulk-effective-read`).
+
+Subject-scoped values (`cpt-cf-settings-service-fr-subject-scoped-values`) enter here as **identity model only** — the columns, the four partial unique indexes and the subject-aware API shape (§4.1, §4.7) — with resolution over subjects deferred to R2, which is the split the PRD asks for.
+
+Three things R1 supplies itself rather than waiting on the platform:
+
+| Need | R1 answer |
+|------|-----------|
+| Audit, which every mutation fails closed on (§4.2 *Audit Emitter*) | A **gear-local sink** writing the record in the mutation's own transaction. The external Audit Subsystem becomes an adapter swap in R2 with no contract change |
+| Step-up verification, without which Apply refuses (§4.2 *Apply Orchestrator*) | The **default OIDC/JWKS binding**, built here: the bearer token is already carried in `SecurityContext` and the JWKS machinery already exists in the platform's auth library |
+| A verified machine caller identity, which the reader and contribution traits assume (§5) | **Not supplied — scoped out.** R1 is **Embedded-only**: the SDK traits are bound in-process, which is the one configuration where the trusted-caller model holds (§4.8 *Trusted-Caller Boundary*) |
+
+Not in R1, and what that costs: no consumer notification, so a consumer learns of a change by re-reading (which is what `cpt-cf-settings-service-fr-apply-effect-resolution` requires anyway); no cross-replica invalidation, so a second host serving the same database is stale for at most `cache_ttl_seconds`; no cleanup on tenant deletion, so a deleted tenant's rows persist until R2 consumes the event.
+
+#### R2 — out of process, and the rest of the administrative surface
+
+Waits on four things this design does not own: **verified machine caller identity** (which unlocks the non-embedded profiles), the **platform Audit Subsystem**, a **tenant-deleted signal** from Account Management, and **per-feature licence entitlement**, which the platform currently implements at base-licence level only.
+
+Contents: the out-of-process deployment profiles; subject-scope resolution on top of R1's identity model; file-valued settings (`cpt-cf-settings-service-fr-file-valued-settings`); cross-field search (`cpt-cf-settings-service-fr-search-discoverability`); mode-filtered reads (`cpt-cf-settings-service-fr-standard-advanced-mode`); feature and licence gating (`cpt-cf-settings-service-fr-feature-license-gating`); and tenant-deleted cleanup.
+
+R2 is the first release in which several replicas are the normal case, but **convergence between them is not part of it**: `cpt-cf-settings-service-fr-replica-coherence` is served by the `cache_invalidate` broadcast, which ships with the rest of the activation machinery in R3. Until then replica staleness stays bounded by the reader's `cache_ttl_seconds` backstop — the same degradation as in R1, at a larger scale.
+
+#### R3 — consumers acknowledge
+
+Consumer activation in full (`cpt-cf-settings-service-fr-consumer-activation`) — per-key subscription, filtered notification, back-response, supersession and the delivery queue — together with replica convergence (`cpt-cf-settings-service-fr-replica-coherence`), whose `cache_invalidate` broadcast is published by the same apply and designed in the same document. Both are the subject of [Settings Activation](./DESIGN-activation.md). With it, dependency groups (`cpt-cf-settings-service-fr-dependency-group-declaration`) and domain-affinity filtering (`cpt-cf-settings-service-fr-domain-affinity-filtering`).
 
 ## 3. Principles & Constraints
 
