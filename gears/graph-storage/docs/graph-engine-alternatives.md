@@ -1,6 +1,14 @@
 # Graph Engine Alternatives — Decision Report
 
-**Date:** 2026-08-12 · **Status:** research complete, decision made
+**Date:** 2026-08-12 · **Status:** superseded — historical evidence, not the current decision
+
+> **Superseded by [ADR-0001](./ADR/0001-cpt-cf-graph-storage-adr-single-postgres-store.md)
+> and the [PG19 spike](./SPIKE-pg19-sqlpgq.md) (2026-08-13).** The verdict below recommends
+> Apache AGE and defers PostgreSQL 19; the spike run the next day found SQL/PGQ in core
+> viable, and ADR-0001 removed AGE. This document is retained unedited as the evidence that
+> was available on 2026-08-12 — it records what was known at decision time and is referenced
+> from ADR-0001 for that reason. Read its verdict, exit strategy and recommended sequence as
+> history; the current backend contract is ADR-0001's.
 **Scope:** alternatives to the current PostgreSQL + Apache AGE + pgvector stack for `studio-graph-storage`.
 
 > **Verdict: stay on PG + AGE + pgvector.** Under the hard OSI-license requirement it is the
