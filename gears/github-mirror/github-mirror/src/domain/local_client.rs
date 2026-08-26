@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use github_mirror_sdk::{GithubMirrorClientV1, MirrorStatus, Repo, SyncSummary};
 
+use crate::domain::ports::github::FetchOptions;
 use crate::domain::scope::ScopeConfig;
 use crate::domain::service::SyncProgress;
 use toolkit_canonical_errors::{CanonicalError, resource_error};
@@ -348,7 +349,11 @@ impl<
                 ctx,
                 owner,
                 name,
-                &ScopeConfig::default(),
+                &FetchOptions {
+                    tenant_id: ctx.subject_tenant_id(),
+                    scope: ScopeConfig::default(),
+                    force: false,
+                },
                 &SyncProgress::new(),
             )
             .await

@@ -12,6 +12,19 @@ use crate::domain::repo::{
 };
 use crate::domain::scope::ScopeConfig;
 
+/// Everything one fetch needs beyond the repository's name.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FetchOptions {
+    /// Whose cache partition the conditional-request store reads and writes.
+    pub tenant_id: uuid::Uuid,
+    /// Which object types and sub-resources to collect.
+    pub scope: ScopeConfig,
+    /// Ignore any cached validator and re-fetch everything (PRD §5.2 force
+    /// mode). Fresh responses are still written back to the cache.
+    pub force: bool,
+}
+
 /// What one sync-lite pass fetched from GitHub for a repository.
 #[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,13 +64,13 @@ pub struct FetchedRepository {
 /// and rate-limit admission arrive as that issue completes.
 #[async_trait]
 pub trait GithubPort: Send + Sync {
-    /// Fetch everything `scope` asks for. A disabled object type costs no
-    /// GitHub call at all — the point of the scope is the request budget, not
-    /// the size of the result.
+    /// Fetch everything `options.scope` asks for. A disabled object type
+    /// costs no GitHub call at all — the point of the scope is the request
+    /// budget, not the size of the result.
     async fn fetch_repository(
         &self,
         owner: &str,
         name: &str,
-        scope: &ScopeConfig,
+        options: &FetchOptions,
     ) -> Result<FetchedRepository, DomainError>;
 }

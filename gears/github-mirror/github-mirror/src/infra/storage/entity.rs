@@ -42,6 +42,46 @@ pub mod repositories {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod http_cache {
+    use super::{DeriveEntityModel, DerivePrimaryKey, DeriveRelation, EnumIter, Scopable, Uuid};
+    use sea_orm::entity::prelude::*;
+
+    /// One cached GitHub response, keyed by a content hash of the request.
+    ///
+    /// Tenant-partitioned: the design permits sharing public-repository
+    /// responses across tenants, but that needs the visibility tracking and
+    /// access grants of ADR-0002, which do not exist yet, so nothing is shared.
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Scopable)]
+    #[sea_orm(table_name = "gm_http_cache")]
+    #[secure(
+        tenant_col = "tenant_id",
+        resource_col = "cache_key",
+        no_owner,
+        no_type
+    )]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub tenant_id: Uuid,
+        /// Hex SHA-256 of method + URL + `Accept`.
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub cache_key: String,
+        /// The URL this entry came from, for debugging only.
+        pub url: String,
+        /// `ETag` to replay as `If-None-Match`.
+        pub etag: Option<String>,
+        /// `Last-Modified` to replay as `If-Modified-Since`.
+        pub last_modified: Option<String>,
+        /// The response body as GitHub returned it.
+        pub body: String,
+        pub fetched_at: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod issue_reactions {
     use super::{DeriveEntityModel, DerivePrimaryKey, DeriveRelation, EnumIter, Scopable, Uuid};
     use sea_orm::entity::prelude::*;

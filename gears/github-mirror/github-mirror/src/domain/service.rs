@@ -16,7 +16,7 @@ use toolkit_security::{AccessScope, SecurityContext, pep_properties};
 use uuid::Uuid;
 
 use super::error::DomainError;
-use super::ports::github::GithubPort;
+use super::ports::github::{FetchOptions, GithubPort};
 use super::repo::{
     BranchRecord, BranchRepository, CheckRunRecord, CheckRunRepository, CommentRecord,
     CommentRepository, CommitCommentRecord, CommitCommentRepository, CommitFileRecord,
@@ -3390,7 +3390,12 @@ impl<
         session: &SyncSessionRecord,
     ) -> Result<SyncSummary, DomainError> {
         let percent = progress.handle();
-        let sync = self.sync_repository(&job.ctx, &job.owner, &job.name, &job.scope, progress);
+        let options = FetchOptions {
+            tenant_id: job.ctx.subject_tenant_id(),
+            scope: job.scope,
+            force: job.force,
+        };
+        let sync = self.sync_repository(&job.ctx, &job.owner, &job.name, &options, progress);
         let mut sync = std::pin::pin!(sync);
 
         loop {
@@ -3542,7 +3547,7 @@ impl<
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
-        sync_scope: &ScopeConfig,
+        options: &FetchOptions,
         progress: &SyncProgress,
     ) -> Result<SyncSummary, DomainError> {
         let tenant_id = ctx.subject_tenant_id();
@@ -3558,10 +3563,7 @@ impl<
             )
             .await?;
 
-        let fetched = self
-            .github
-            .fetch_repository(owner, name, sync_scope)
-            .await?;
+        let fetched = self.github.fetch_repository(owner, name, options).await?;
         progress.fetched();
 
         let conn = self.db.conn()?;

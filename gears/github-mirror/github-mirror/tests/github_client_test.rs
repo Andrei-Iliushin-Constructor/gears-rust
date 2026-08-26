@@ -1,8 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
 
 use github_mirror::domain::error::DomainError;
-use github_mirror::domain::ports::github::GithubPort;
+use github_mirror::domain::ports::github::{FetchOptions, GithubPort};
 use github_mirror::domain::scope::ScopeConfig;
+use github_mirror::infra::github::cache::{CacheKey, CachedResponse, HttpCache};
 use github_mirror::infra::github::client::GithubClient;
 use httpmock::MockServer;
 use serde_json::json;
@@ -436,6 +437,15 @@ fn gh_commit_statuses_json() -> serde_json::Value {
     ])
 }
 
+/// Fetch options for a test: a fresh tenant, no force, the given scope.
+fn opts(scope: ScopeConfig) -> FetchOptions {
+    FetchOptions {
+        tenant_id: uuid::Uuid::new_v4(),
+        scope,
+        force: false,
+    }
+}
+
 /// The scope the gear actually ships with — the type default plus timeline,
 /// which the reference implementation leaves off. Using it here keeps this
 /// test asserting what a stock deployment collects.
@@ -633,7 +643,7 @@ async fn fetch_repository_maps_github_payloads_into_records() {
     let client =
         GithubClient::new(server.base_url(), Some("tok".to_owned())).expect("client must build");
     let fetched = client
-        .fetch_repository("rust-lang", "rust", &shipped_scope())
+        .fetch_repository("rust-lang", "rust", &opts(shipped_scope()))
         .await
         .expect("fetch must succeed");
 
@@ -879,7 +889,7 @@ async fn github_404_maps_to_not_found() {
 
     let client = GithubClient::new(server.base_url(), None).expect("client must build");
     let result = client
-        .fetch_repository("acme", "nope", &ScopeConfig::default())
+        .fetch_repository("acme", "nope", &opts(ScopeConfig::default()))
         .await;
 
     assert!(matches!(result, Err(DomainError::NotFound)));
@@ -897,7 +907,7 @@ async fn github_server_error_maps_to_internal() {
 
     let client = GithubClient::new(server.base_url(), None).expect("client must build");
     let result = client
-        .fetch_repository("acme", "flaky", &ScopeConfig::default())
+        .fetch_repository("acme", "flaky", &opts(ScopeConfig::default()))
         .await;
 
     assert!(matches!(result, Err(DomainError::Internal(_))));
@@ -915,7 +925,7 @@ async fn malformed_json_maps_to_internal() {
 
     let client = GithubClient::new(server.base_url(), None).expect("client must build");
     let result = client
-        .fetch_repository("acme", "garbage", &ScopeConfig::default())
+        .fetch_repository("acme", "garbage", &opts(ScopeConfig::default()))
         .await;
 
     assert!(matches!(result, Err(DomainError::Internal(_))));
@@ -957,7 +967,7 @@ async fn a_narrow_scope_skips_the_calls_it_does_not_need() {
 
     let client = GithubClient::new(server.base_url(), None).expect("client must build");
     let fetched = client
-        .fetch_repository("rust-lang", "rust", &scope)
+        .fetch_repository("rust-lang", "rust", &opts(scope))
         .await
         .expect("fetch must succeed");
 
@@ -971,4 +981,111 @@ async fn a_narrow_scope_skips_the_calls_it_does_not_need() {
     assert!(fetched.pull_requests.is_empty());
     assert!(fetched.workflow_runs.is_empty());
     assert!(fetched.contributors.is_empty());
+}
+
+/// A trivial in-memory cache, standing in for the `SeaORM` one.
+#[derive(Default)]
+struct MemCache {
+    entries: std::sync::Mutex<std::collections::HashMap<String, CachedResponse>>,
+}
+
+#[async_trait::async_trait]
+impl HttpCache for MemCache {
+    async fn get(
+        &self,
+        _tenant_id: uuid::Uuid,
+        key: &CacheKey,
+    ) -> Result<Option<CachedResponse>, DomainError> {
+        Ok(self.entries.lock().unwrap().get(key.as_str()).cloned())
+    }
+
+    async fn put(
+        &self,
+        _tenant_id: uuid::Uuid,
+        key: &CacheKey,
+        _url: &str,
+        entry: CachedResponse,
+    ) -> Result<(), DomainError> {
+        self.entries
+            .lock()
+            .unwrap()
+            .insert(key.as_str().to_owned(), entry);
+        Ok(())
+    }
+}
+
+/// Only the repository endpoint is in scope, so one sync is exactly one call.
+fn repo_only_scope() -> ScopeConfig {
+    ScopeConfig {
+        objects: github_mirror::domain::scope::SyncScope::none(),
+        ..ScopeConfig::default()
+    }
+}
+
+#[tokio::test]
+async fn a_stored_etag_turns_the_next_sync_into_a_free_304() {
+    let server = MockServer::start_async().await;
+    let first = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust")
+                .is_true(|req| {
+                    !req.headers()
+                        .iter()
+                        .any(|(k, _)| k.as_str() == "if-none-match")
+                });
+            then.status(200)
+                .header("etag", "W/\"deadbeef\"")
+                .json_body(gh_repo_json());
+        })
+        .await;
+    let revalidated = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust")
+                .header("if-none-match", "W/\"deadbeef\"");
+            then.status(304);
+        })
+        .await;
+
+    let cache = std::sync::Arc::new(MemCache::default());
+    let client = GithubClient::with_cache(server.base_url(), None, cache.clone())
+        .expect("client must build");
+
+    let scope = repo_only_scope();
+    let tenant = uuid::Uuid::new_v4();
+    let options = FetchOptions {
+        tenant_id: tenant,
+        scope,
+        force: false,
+    };
+
+    let fresh = client
+        .fetch_repository("rust-lang", "rust", &options)
+        .await
+        .expect("first fetch");
+    first.assert_calls_async(1).await;
+    revalidated.assert_calls_async(0).await;
+
+    let cached = client
+        .fetch_repository("rust-lang", "rust", &options)
+        .await
+        .expect("second fetch");
+    revalidated.assert_calls_async(1).await;
+    first.assert_calls_async(1).await;
+
+    assert_eq!(
+        fresh.repository, cached.repository,
+        "the 304 must reproduce the body byte for byte"
+    );
+
+    let forced = FetchOptions {
+        force: true,
+        ..options
+    };
+    client
+        .fetch_repository("rust-lang", "rust", &forced)
+        .await
+        .expect("forced fetch");
+    first.assert_calls_async(2).await;
 }

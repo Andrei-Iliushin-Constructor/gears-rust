@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use github_mirror_sdk::{
     Branch, CheckRun, Comment, Commit, CommitComment, CommitFile, CommitStatus, Contributor,
@@ -9,6 +11,7 @@ use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, Order};
 use toolkit_db::secure::{
     DBRunner, ScopeError, SecureEntityExt, SecureInsertExt, SecureOnConflict,
 };
+use toolkit_db::{DBProvider, DbError};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
@@ -33,6 +36,7 @@ use crate::domain::repo::{
     RepoSyncStatusRepository, SyncSessionRecord, SyncSessionRepository, SyncWatermarkRecord,
     SyncWatermarkRepository,
 };
+use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache};
 
 use super::entity::branches::{self, Entity as BranchEntity};
 use super::entity::check_runs::{self, Entity as CheckRunEntity};
@@ -44,6 +48,7 @@ use super::entity::commits::{self, Entity as CommitEntity};
 use super::entity::contributors::{self, Entity as ContributorEntity};
 use super::entity::deployments::{self, Entity as DeploymentEntity};
 use super::entity::entity_fingerprints::{self, Entity as EntityFingerprintEntity};
+use super::entity::http_cache::{self, Entity as HttpCacheEntity};
 use super::entity::issue_events::{self, Entity as IssueEventEntity};
 use super::entity::issue_reactions::{self, Entity as IssueReactionEntity};
 use super::entity::issue_timeline::{self, Entity as IssueTimelineEntity};
@@ -2852,6 +2857,101 @@ impl IssueTimelineRepository for SeaOrmIssueTimelineRepository {
 
         Ok(rows.into_iter().map(Into::into).collect())
     }
+}
+
+/// `SeaORM`-backed conditional-request cache.
+///
+/// Rows are tenant-partitioned and reached with a scope built from the tenant
+/// id the client was called for. The cache is transport state rather than a
+/// domain aggregate: nothing outside the GitHub client reads it, and it can be
+/// dropped wholesale without losing mirrored data.
+pub struct SeaOrmHttpCache {
+    db: Arc<DBProvider<DbError>>,
+}
+
+impl SeaOrmHttpCache {
+    #[must_use]
+    pub fn new(db: Arc<DBProvider<DbError>>) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl HttpCache for SeaOrmHttpCache {
+    async fn get(
+        &self,
+        tenant_id: Uuid,
+        key: &CacheKey,
+    ) -> Result<Option<CachedResponse>, DomainError> {
+        let scope = AccessScope::for_tenant(tenant_id);
+        let conn = self.db.conn()?;
+
+        let row = HttpCacheEntity::find()
+            .secure()
+            .scope_with(&scope)
+            .filter(sea_orm::Condition::all().add(http_cache::Column::CacheKey.eq(key.as_str())))
+            .one(&conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(row.map(|m| CachedResponse {
+            body: m.body,
+            etag: m.etag,
+            last_modified: m.last_modified,
+        }))
+    }
+
+    async fn put(
+        &self,
+        tenant_id: Uuid,
+        key: &CacheKey,
+        url: &str,
+        entry: CachedResponse,
+    ) -> Result<(), DomainError> {
+        let scope = AccessScope::for_tenant(tenant_id);
+        let conn = self.db.conn()?;
+
+        let model = || http_cache::ActiveModel {
+            tenant_id: ActiveValue::Set(tenant_id),
+            cache_key: ActiveValue::Set(key.as_str().to_owned()),
+            url: ActiveValue::Set(url.to_owned()),
+            etag: ActiveValue::Set(entry.etag.clone()),
+            last_modified: ActiveValue::Set(entry.last_modified.clone()),
+            body: ActiveValue::Set(entry.body.clone()),
+            fetched_at: ActiveValue::Set(now_rfc3339()),
+        };
+
+        let on_conflict = SecureOnConflict::<HttpCacheEntity>::columns([
+            http_cache::Column::TenantId,
+            http_cache::Column::CacheKey,
+        ])
+        .update_columns([
+            http_cache::Column::Url,
+            http_cache::Column::Etag,
+            http_cache::Column::LastModified,
+            http_cache::Column::Body,
+            http_cache::Column::FetchedAt,
+        ])
+        .map_err(map_scope_error)?;
+
+        HttpCacheEntity::insert(model())
+            .secure()
+            .scope_with_model(&scope, &model())
+            .map_err(map_scope_error)?
+            .on_conflict(on_conflict)
+            .exec(&conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(())
+    }
+}
+
+/// The current instant as RFC3339 text, matching every other stored timestamp.
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
 }
 
 pub struct SeaOrmRepoSyncStatusRepository;

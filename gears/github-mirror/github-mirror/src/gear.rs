@@ -22,9 +22,9 @@ use crate::infra::storage::sea_orm_repo::{
     SeaOrmBranchRepository, SeaOrmCheckRunRepository, SeaOrmCommentRepository,
     SeaOrmCommitCommentRepository, SeaOrmCommitFileRepository, SeaOrmCommitRepository,
     SeaOrmCommitStatusRepository, SeaOrmContributorRepository, SeaOrmDeploymentRepository,
-    SeaOrmIssueEventRepository, SeaOrmIssueReactionRepository, SeaOrmIssueRepository,
-    SeaOrmIssueTimelineRepository, SeaOrmLabelRepository, SeaOrmMilestoneRepository,
-    SeaOrmPullRequestCommitRepository, SeaOrmPullRequestFileRepository,
+    SeaOrmHttpCache, SeaOrmIssueEventRepository, SeaOrmIssueReactionRepository,
+    SeaOrmIssueRepository, SeaOrmIssueTimelineRepository, SeaOrmLabelRepository,
+    SeaOrmMilestoneRepository, SeaOrmPullRequestCommitRepository, SeaOrmPullRequestFileRepository,
     SeaOrmPullRequestRepository, SeaOrmReleaseRepository, SeaOrmRepoRepository,
     SeaOrmRepoSyncStatusRepository, SeaOrmReviewCommentRepository, SeaOrmReviewRepository,
     SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository, SeaOrmTagRepository,
@@ -125,9 +125,14 @@ impl Gear for GithubMirrorGear {
         let issue_timeline = Arc::new(SeaOrmIssueTimelineRepository::new());
         let sync_sessions = Arc::new(SeaOrmSyncSessionRepository::new());
         let repo_sync_status = Arc::new(SeaOrmRepoSyncStatusRepository::new());
-        let github: Arc<dyn GithubPort> = Arc::new(GithubClient::new(
+        // Conditional requests: a stored ETag replayed as If-None-Match turns a
+        // repeat sync into 304s, which GitHub does not charge against the rate
+        // limit (#4630).
+        let http_cache = Arc::new(SeaOrmHttpCache::new(Arc::clone(&db)));
+        let github: Arc<dyn GithubPort> = Arc::new(GithubClient::with_cache(
             cfg.api_base_url.clone(),
             cfg.resolved_token()?,
+            http_cache,
         )?);
 
         let authz = ctx
@@ -346,6 +351,6 @@ mod tests {
     fn gear_provides_all_migrations() {
         use toolkit::contracts::DatabaseCapability;
         let gear = GithubMirrorGear::default();
-        assert_eq!(gear.migrations().len(), 32);
+        assert_eq!(gear.migrations().len(), 33);
     }
 }

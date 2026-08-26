@@ -50,6 +50,8 @@ toolkit-utils = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 httpmock = { workspace = true }

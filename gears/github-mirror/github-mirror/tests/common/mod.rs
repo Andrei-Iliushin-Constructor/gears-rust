@@ -111,7 +111,7 @@ impl GithubPort for FakeGithub {
         &self,
         _owner: &str,
         _name: &str,
-        _scope: &github_mirror::domain::scope::ScopeConfig,
+        _options: &github_mirror::domain::ports::github::FetchOptions,
     ) -> Result<FetchedRepository, DomainError> {
         self.result.clone().ok_or(DomainError::NotFound)
     }

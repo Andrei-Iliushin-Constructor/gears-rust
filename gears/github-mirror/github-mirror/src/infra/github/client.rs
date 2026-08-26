@@ -1,8 +1,10 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::domain::error::DomainError;
-use crate::domain::ports::github::{FetchedRepository, GithubPort};
+use crate::domain::ports::github::{FetchOptions, FetchedRepository, GithubPort};
 use crate::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
     CommitRecord, CommitStatusRecord, ContributorRecord, DeploymentRecord, IssueEventRecord,
@@ -11,7 +13,8 @@ use crate::domain::repo::{
     ReviewCommentRecord, ReviewRecord, ReviewThreadRecord, TagRecord, WorkflowJobRecord,
     WorkflowRunRecord,
 };
-use crate::domain::scope::{CollectionMode, ScopeConfig};
+use crate::domain::scope::CollectionMode;
+use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache, NoCache};
 
 const FIRST_PAGE_SIZE: u32 = 50;
 /// GitHub serves reviews and changed files only per pull request, so
@@ -27,6 +30,8 @@ const PER_RUN_SYNC_CAP: usize = 10;
 /// Reactions are only reachable per issue, so the sync walks the first few
 /// issues of the page for the same reason.
 const PER_ISSUE_SYNC_CAP: usize = 10;
+const ACCEPT_JSON: &str = "application/vnd.github+json";
+
 const USER_AGENT: &str = concat!("cf-gears-github-mirror/", env!("CARGO_PKG_VERSION"));
 
 /// Minimal GitHub REST client — increment 1 of gears-rust#4630.
@@ -34,10 +39,19 @@ const USER_AGENT: &str = concat!("cf-gears-github-mirror/", env!("CARGO_PKG_VERS
 /// No conditional requests, pagination, or rate-limit admission yet; those
 /// arrive as #4630 completes. The token comes from gear config as a temporary
 /// shortcut until credstore integration (#4534).
+/// One response header as an owned string, when it is present and printable.
+fn header_string(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(ToOwned::to_owned)
+}
+
 pub struct GithubClient {
     http: reqwest::Client,
     api_base_url: String,
     token: Option<String>,
+    cache: Arc<dyn HttpCache>,
 }
 
 impl GithubClient {
@@ -45,6 +59,19 @@ impl GithubClient {
     /// Returns `DomainError::Internal` when the underlying HTTP client cannot
     /// be constructed.
     pub fn new(api_base_url: String, token: Option<String>) -> Result<Self, DomainError> {
+        Self::with_cache(api_base_url, token, Arc::new(NoCache))
+    }
+
+    /// A client that revalidates against `cache` instead of re-fetching.
+    ///
+    /// # Errors
+    /// Returns `DomainError::Internal` when the underlying HTTP client cannot
+    /// be constructed.
+    pub fn with_cache(
+        api_base_url: String,
+        token: Option<String>,
+        cache: Arc<dyn HttpCache>,
+    ) -> Result<Self, DomainError> {
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .build()
@@ -53,18 +80,69 @@ impl GithubClient {
             http,
             api_base_url,
             token,
+            cache,
         })
     }
 
-    async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, DomainError> {
-        let url = format!("{}{path}", self.api_base_url.trim_end_matches('/'));
-        let mut request = self
-            .http
-            .get(&url)
-            .header("Accept", "application/vnd.github+json");
+    /// The stored entry for this request, unless `force` says to ignore it.
+    ///
+    /// A cache read that fails is a warning, not an error: the worst case is a
+    /// full fetch, which is what would have happened anyway.
+    async fn cached_entry(
+        &self,
+        options: &FetchOptions,
+        url: &str,
+        key: &CacheKey,
+    ) -> Option<CachedResponse> {
+        if options.force {
+            return None;
+        }
+        match self.cache.get(options.tenant_id, key).await {
+            Ok(entry) => entry,
+            Err(e) => {
+                tracing::warn!(%url, error = %e, "cache read failed; fetching fresh");
+                None
+            }
+        }
+    }
+
+    /// The GET request, carrying auth and whichever validator the entry holds.
+    fn conditional_request(
+        &self,
+        url: &str,
+        cached: Option<&CachedResponse>,
+    ) -> reqwest::RequestBuilder {
+        let mut request = self.http.get(url).header("Accept", ACCEPT_JSON);
         if let Some(token) = &self.token {
             request = request.bearer_auth(token);
         }
+        match cached {
+            Some(CachedResponse {
+                etag: Some(etag), ..
+            }) => request.header("If-None-Match", etag.clone()),
+            Some(CachedResponse {
+                last_modified: Some(modified),
+                ..
+            }) => request.header("If-Modified-Since", modified.clone()),
+            _ => request,
+        }
+    }
+
+    /// GET `path`, revalidating against the cache when possible.
+    ///
+    /// A stored `ETag` is replayed as `If-None-Match`; GitHub answers `304`
+    /// without charging a rate-limit unit and the cached body is returned.
+    /// `options.force` skips the validator so the response is always fresh.
+    async fn get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        options: &FetchOptions,
+    ) -> Result<T, DomainError> {
+        let url = format!("{}{path}", self.api_base_url.trim_end_matches('/'));
+        let key = CacheKey::compute("GET", &url, ACCEPT_JSON);
+
+        let cached = self.cached_entry(options, &url, &key).await;
+        let request = self.conditional_request(&url, cached.as_ref());
 
         let response = request
             .send()
@@ -72,6 +150,19 @@ impl GithubClient {
             .map_err(|e| DomainError::internal(format!("GitHub request failed: {e}")))?;
 
         let status = response.status();
+        if status == reqwest::StatusCode::NOT_MODIFIED {
+            let entry = cached.ok_or_else(|| {
+                DomainError::internal(format!(
+                    "GitHub answered 304 for {path} with nothing cached"
+                ))
+            })?;
+            tracing::debug!(%url, "304 Not Modified - served from cache, no quota spent");
+            return serde_json::from_str(&entry.body).map_err(|e| {
+                DomainError::internal(format!(
+                    "cached GitHub body for {path} no longer parses: {e}"
+                ))
+            });
+        }
         if status == reqwest::StatusCode::NOT_FOUND {
             return Err(DomainError::NotFound);
         }
@@ -81,10 +172,41 @@ impl GithubClient {
             )));
         }
 
-        response
-            .json::<T>()
-            .await
-            .map_err(|e| DomainError::internal(format!("GitHub response decode failed: {e}")))
+        let etag = header_string(response.headers(), "etag");
+        let last_modified = header_string(response.headers(), "last-modified");
+        let entry = CachedResponse {
+            body: response
+                .text()
+                .await
+                .map_err(|e| DomainError::internal(format!("GitHub response read failed: {e}")))?,
+            etag,
+            last_modified,
+        };
+
+        let parsed = serde_json::from_str(&entry.body)
+            .map_err(|e| DomainError::internal(format!("GitHub response decode failed: {e}")))?;
+        self.remember(options, &url, &key, entry).await;
+        Ok(parsed)
+    }
+
+    /// Store a fresh response so the next request can revalidate it.
+    ///
+    /// Entries without a validator are dropped: the next request could not
+    /// revalidate them and would re-fetch anyway, so keeping the body only
+    /// costs storage. A failed write is a warning for the same reason.
+    async fn remember(
+        &self,
+        options: &FetchOptions,
+        url: &str,
+        key: &CacheKey,
+        entry: CachedResponse,
+    ) {
+        if !entry.is_revalidatable() {
+            return;
+        }
+        if let Err(e) = self.cache.put(options.tenant_id, key, url, entry).await {
+            tracing::warn!(%url, error = %e, "cache write failed; the next sync will re-fetch");
+        }
     }
 
     async fn post_graphql(&self, query: &str) -> Result<serde_json::Value, DomainError> {
@@ -1061,13 +1183,17 @@ impl GithubClient {
         repo_id: i64,
         commit_records: &mut [CommitRecord],
         with_ci: bool,
+        options: &FetchOptions,
     ) -> Result<CommitDetails, DomainError> {
         let mut commit_files: Vec<CommitFileRecord> = Vec::new();
         let mut commit_statuses: Vec<CommitStatusRecord> = Vec::new();
         let mut check_runs: Vec<CheckRunRecord> = Vec::new();
         for commit in commit_records.iter_mut().take(PER_COMMIT_SYNC_CAP) {
             let detail: GhCommitDetail = self
-                .get_json(&format!("/repos/{owner}/{name}/commits/{}", commit.sha))
+                .get_json(
+                    &format!("/repos/{owner}/{name}/commits/{}", commit.sha),
+                    options,
+                )
                 .await?;
             if let Some(stats) = detail.stats {
                 commit.additions = stats.additions;
@@ -1085,10 +1211,13 @@ impl GithubClient {
             }
 
             let statuses: Vec<GhCommitStatus> = self
-                .get_json(&format!(
-                    "/repos/{owner}/{name}/commits/{}/statuses?per_page={FIRST_PAGE_SIZE}",
-                    commit.sha
-                ))
+                .get_json(
+                    &format!(
+                        "/repos/{owner}/{name}/commits/{}/statuses?per_page={FIRST_PAGE_SIZE}",
+                        commit.sha
+                    ),
+                    options,
+                )
                 .await?;
             commit_statuses.extend(
                 statuses
@@ -1097,10 +1226,13 @@ impl GithubClient {
             );
 
             let checks: GhCheckRunsPage = self
-                .get_json(&format!(
-                    "/repos/{owner}/{name}/commits/{}/check-runs?per_page={FIRST_PAGE_SIZE}",
-                    commit.sha
-                ))
+                .get_json(
+                    &format!(
+                        "/repos/{owner}/{name}/commits/{}/check-runs?per_page={FIRST_PAGE_SIZE}",
+                        commit.sha
+                    ),
+                    options,
+                )
                 .await?;
             check_runs.extend(
                 checks
@@ -1125,14 +1257,18 @@ impl GithubClient {
         name: &str,
         repo_id: i64,
         issues: &[IssueRecord],
+        options: &FetchOptions,
     ) -> Result<Vec<IssueTimelineEventRecord>, DomainError> {
         let mut timeline: Vec<IssueTimelineEventRecord> = Vec::new();
         for issue in issues.iter().take(PER_ISSUE_SYNC_CAP) {
             let entries: Vec<serde_json::Value> = self
-                .get_json(&format!(
-                    "/repos/{owner}/{name}/issues/{}/timeline?per_page={FIRST_PAGE_SIZE}",
-                    issue.number
-                ))
+                .get_json(
+                    &format!(
+                        "/repos/{owner}/{name}/issues/{}/timeline?per_page={FIRST_PAGE_SIZE}",
+                        issue.number
+                    ),
+                    options,
+                )
                 .await?;
             timeline.extend(entries.iter().enumerate().map(|(position, entry)| {
                 issue_timeline_record(repo_id, issue.number, position, entry)
@@ -1150,14 +1286,18 @@ impl GithubClient {
         name: &str,
         repo_id: i64,
         issues: &[IssueRecord],
+        options: &FetchOptions,
     ) -> Result<Vec<IssueReactionRecord>, DomainError> {
         let mut reactions: Vec<IssueReactionRecord> = Vec::new();
         for issue in issues.iter().take(PER_ISSUE_SYNC_CAP) {
             let page: Vec<GhIssueReaction> = self
-                .get_json(&format!(
-                    "/repos/{owner}/{name}/issues/{}/reactions?per_page={FIRST_PAGE_SIZE}",
-                    issue.number
-                ))
+                .get_json(
+                    &format!(
+                        "/repos/{owner}/{name}/issues/{}/reactions?per_page={FIRST_PAGE_SIZE}",
+                        issue.number
+                    ),
+                    options,
+                )
                 .await?;
             reactions.extend(
                 page.into_iter()
@@ -1176,14 +1316,18 @@ impl GithubClient {
         name: &str,
         repo_id: i64,
         runs: &[GhWorkflowRun],
+        options: &FetchOptions,
     ) -> Result<Vec<WorkflowJobRecord>, DomainError> {
         let mut jobs: Vec<WorkflowJobRecord> = Vec::new();
         for run in runs.iter().take(PER_RUN_SYNC_CAP) {
             let page: GhWorkflowJobsPage = self
-                .get_json(&format!(
-                    "/repos/{owner}/{name}/actions/runs/{}/jobs?per_page={FIRST_PAGE_SIZE}",
-                    run.id
-                ))
+                .get_json(
+                    &format!(
+                        "/repos/{owner}/{name}/actions/runs/{}/jobs?per_page={FIRST_PAGE_SIZE}",
+                        run.id
+                    ),
+                    options,
+                )
                 .await?;
             jobs.extend(
                 page.jobs
@@ -1208,26 +1352,29 @@ impl GithubClient {
         owner: &str,
         name: &str,
         repo_id: i64,
-        scope: &ScopeConfig,
+        options: &FetchOptions,
     ) -> Result<IssueFamily, DomainError> {
-        if !scope.objects.issues {
+        if !options.scope.objects.issues {
             return Ok(IssueFamily::default());
         }
 
         let issues: Vec<GhIssue> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/issues?state=all&per_page={FIRST_PAGE_SIZE}"
-            ))
+            .get_json(
+                &format!("/repos/{owner}/{name}/issues?state=all&per_page={FIRST_PAGE_SIZE}"),
+                options,
+            )
             .await?;
         let comments: Vec<GhComment> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/issues/comments?per_page={FIRST_PAGE_SIZE}"
-            ))
+            .get_json(
+                &format!("/repos/{owner}/{name}/issues/comments?per_page={FIRST_PAGE_SIZE}"),
+                options,
+            )
             .await?;
         let issue_events: Vec<GhIssueEvent> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/issues/events?per_page={FIRST_PAGE_SIZE}"
-            ))
+            .get_json(
+                &format!("/repos/{owner}/{name}/issues/events?per_page={FIRST_PAGE_SIZE}"),
+                options,
+            )
             .await?;
 
         let issue_records: Vec<IssueRecord> = issues
@@ -1235,14 +1382,14 @@ impl GithubClient {
             .map(|i| issue_record(repo_id, i))
             .collect();
 
-        let for_reactions = in_collection_mode(&issue_records, scope.collection.reactions);
+        let for_reactions = in_collection_mode(&issue_records, options.scope.collection.reactions);
         let issue_reactions = self
-            .fetch_issue_reactions(owner, name, repo_id, &for_reactions)
+            .fetch_issue_reactions(owner, name, repo_id, &for_reactions, options)
             .await?;
 
-        let for_timeline = in_collection_mode(&issue_records, scope.collection.timeline);
+        let for_timeline = in_collection_mode(&issue_records, options.scope.collection.timeline);
         let issue_timeline = self
-            .fetch_issue_timeline(owner, name, repo_id, &for_timeline)
+            .fetch_issue_timeline(owner, name, repo_id, &for_timeline, options)
             .await?;
 
         Ok(IssueFamily {
@@ -1266,21 +1413,23 @@ impl GithubClient {
         owner: &str,
         name: &str,
         repo_id: i64,
-        scope: &ScopeConfig,
+        options: &FetchOptions,
     ) -> Result<PullFamily, DomainError> {
-        if !scope.objects.pull_requests {
+        if !options.scope.objects.pull_requests {
             return Ok(PullFamily::default());
         }
 
         let pulls: Vec<GhPullRequest> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/pulls?state=all&per_page={FIRST_PAGE_SIZE}"
-            ))
+            .get_json(
+                &format!("/repos/{owner}/{name}/pulls?state=all&per_page={FIRST_PAGE_SIZE}"),
+                options,
+            )
             .await?;
         let review_comments: Vec<GhReviewComment> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/pulls/comments?per_page={FIRST_PAGE_SIZE}"
-            ))
+            .get_json(
+                &format!("/repos/{owner}/{name}/pulls/comments?per_page={FIRST_PAGE_SIZE}"),
+                options,
+            )
             .await?;
 
         let mut pull_records: Vec<PullRequestRecord> = pulls
@@ -1294,7 +1443,7 @@ impl GithubClient {
             review_threads,
             pull_request_commits,
         } = self
-            .fetch_pull_details(owner, name, repo_id, &mut pull_records)
+            .fetch_pull_details(owner, name, repo_id, &mut pull_records, options)
             .await?;
 
         Ok(PullFamily {
@@ -1319,21 +1468,23 @@ impl GithubClient {
         owner: &str,
         name: &str,
         repo_id: i64,
-        scope: &ScopeConfig,
+        options: &FetchOptions,
     ) -> Result<CommitFamily, DomainError> {
-        if !scope.objects.commits {
+        if !options.scope.objects.commits {
             return Ok(CommitFamily::default());
         }
 
         let commits: Vec<GhCommit> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/commits?per_page={FIRST_PAGE_SIZE}"
-            ))
+            .get_json(
+                &format!("/repos/{owner}/{name}/commits?per_page={FIRST_PAGE_SIZE}"),
+                options,
+            )
             .await?;
         let commit_comments: Vec<GhCommitComment> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/comments?per_page={FIRST_PAGE_SIZE}"
-            ))
+            .get_json(
+                &format!("/repos/{owner}/{name}/comments?per_page={FIRST_PAGE_SIZE}"),
+                options,
+            )
             .await?;
 
         let mut commit_records: Vec<CommitRecord> = commits
@@ -1341,13 +1492,13 @@ impl GithubClient {
             .map(|c| commit_record(repo_id, c))
             .collect();
 
-        let with_ci = scope.collection.actions != CollectionMode::None;
+        let with_ci = options.scope.collection.actions != CollectionMode::None;
         let CommitDetails {
             commit_files,
             commit_statuses,
             check_runs,
         } = self
-            .fetch_commit_details(owner, name, repo_id, &mut commit_records, with_ci)
+            .fetch_commit_details(owner, name, repo_id, &mut commit_records, with_ci, options)
             .await?;
 
         Ok(CommitFamily {
@@ -1368,15 +1519,16 @@ impl GithubClient {
         owner: &str,
         name: &str,
         repo_id: i64,
-        scope: &ScopeConfig,
+        options: &FetchOptions,
     ) -> Result<MetadataFamily, DomainError> {
         let mut family = MetadataFamily::default();
 
-        if scope.objects.labels {
+        if options.scope.objects.labels {
             let labels: Vec<GhLabel> = self
-                .get_json(&format!(
-                    "/repos/{owner}/{name}/labels?per_page={FIRST_PAGE_SIZE}"
-                ))
+                .get_json(
+                    &format!("/repos/{owner}/{name}/labels?per_page={FIRST_PAGE_SIZE}"),
+                    options,
+                )
                 .await?;
             family.labels = labels
                 .into_iter()
@@ -1384,11 +1536,14 @@ impl GithubClient {
                 .collect();
         }
 
-        if scope.objects.milestones {
+        if options.scope.objects.milestones {
             let milestones: Vec<GhMilestone> = self
-                .get_json(&format!(
-                    "/repos/{owner}/{name}/milestones?state=all&per_page={FIRST_PAGE_SIZE}"
-                ))
+                .get_json(
+                    &format!(
+                        "/repos/{owner}/{name}/milestones?state=all&per_page={FIRST_PAGE_SIZE}"
+                    ),
+                    options,
+                )
                 .await?;
             family.milestones = milestones
                 .into_iter()
@@ -1396,11 +1551,12 @@ impl GithubClient {
                 .collect();
         }
 
-        if scope.objects.releases {
+        if options.scope.objects.releases {
             let releases: Vec<GhRelease> = self
-                .get_json(&format!(
-                    "/repos/{owner}/{name}/releases?per_page={FIRST_PAGE_SIZE}"
-                ))
+                .get_json(
+                    &format!("/repos/{owner}/{name}/releases?per_page={FIRST_PAGE_SIZE}"),
+                    options,
+                )
                 .await?;
             family.releases = releases
                 .into_iter()
@@ -1408,11 +1564,12 @@ impl GithubClient {
                 .collect();
         }
 
-        if scope.objects.branches {
+        if options.scope.objects.branches {
             let branches: Vec<GhBranch> = self
-                .get_json(&format!(
-                    "/repos/{owner}/{name}/branches?per_page={FIRST_PAGE_SIZE}"
-                ))
+                .get_json(
+                    &format!("/repos/{owner}/{name}/branches?per_page={FIRST_PAGE_SIZE}"),
+                    options,
+                )
                 .await?;
             family.branches = branches
                 .into_iter()
@@ -1420,18 +1577,20 @@ impl GithubClient {
                 .collect();
 
             let tags: Vec<GhTag> = self
-                .get_json(&format!(
-                    "/repos/{owner}/{name}/tags?per_page={FIRST_PAGE_SIZE}"
-                ))
+                .get_json(
+                    &format!("/repos/{owner}/{name}/tags?per_page={FIRST_PAGE_SIZE}"),
+                    options,
+                )
                 .await?;
             family.tags = tags.into_iter().map(|t| tag_record(repo_id, t)).collect();
         }
 
-        if scope.objects.contributors {
+        if options.scope.objects.contributors {
             let contributors: Vec<GhContributor> = self
-                .get_json(&format!(
-                    "/repos/{owner}/{name}/contributors?per_page={FIRST_PAGE_SIZE}"
-                ))
+                .get_json(
+                    &format!("/repos/{owner}/{name}/contributors?per_page={FIRST_PAGE_SIZE}"),
+                    options,
+                )
                 .await?;
             family.contributors = contributors
                 .into_iter()
@@ -1448,27 +1607,29 @@ impl GithubClient {
         owner: &str,
         name: &str,
         repo_id: i64,
-        scope: &ScopeConfig,
+        options: &FetchOptions,
     ) -> Result<ActionsFamily, DomainError> {
-        if !scope.objects.github_actions {
+        if !options.scope.objects.github_actions {
             return Ok(ActionsFamily::default());
         }
 
         let runs: GhWorkflowRunsPage = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/actions/runs?per_page={FIRST_PAGE_SIZE}"
-            ))
+            .get_json(
+                &format!("/repos/{owner}/{name}/actions/runs?per_page={FIRST_PAGE_SIZE}"),
+                options,
+            )
             .await?;
         let deployments: Vec<GhDeployment> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/deployments?per_page={FIRST_PAGE_SIZE}"
-            ))
+            .get_json(
+                &format!("/repos/{owner}/{name}/deployments?per_page={FIRST_PAGE_SIZE}"),
+                options,
+            )
             .await?;
 
-        let workflow_jobs = if scope.collection.actions == CollectionMode::None {
+        let workflow_jobs = if options.scope.collection.actions == CollectionMode::None {
             Vec::new()
         } else {
-            self.fetch_workflow_jobs(owner, name, repo_id, &runs.workflow_runs)
+            self.fetch_workflow_jobs(owner, name, repo_id, &runs.workflow_runs, options)
                 .await?
         };
 
@@ -1492,6 +1653,7 @@ impl GithubClient {
         name: &str,
         repo_id: i64,
         pull_records: &mut [PullRequestRecord],
+        options: &FetchOptions,
     ) -> Result<PullDetails, DomainError> {
         let mut reviews: Vec<ReviewRecord> = Vec::new();
         let mut pull_request_files: Vec<PullRequestFileRecord> = Vec::new();
@@ -1499,10 +1661,13 @@ impl GithubClient {
         let mut pull_request_commits: Vec<PullRequestCommitRecord> = Vec::new();
         for pull in pull_records.iter_mut().take(PER_PULL_SYNC_CAP) {
             let page: Vec<GhReview> = self
-                .get_json(&format!(
-                    "/repos/{owner}/{name}/pulls/{}/reviews?per_page={FIRST_PAGE_SIZE}",
-                    pull.number
-                ))
+                .get_json(
+                    &format!(
+                        "/repos/{owner}/{name}/pulls/{}/reviews?per_page={FIRST_PAGE_SIZE}",
+                        pull.number
+                    ),
+                    options,
+                )
                 .await?;
             reviews.extend(
                 page.into_iter()
@@ -1510,10 +1675,13 @@ impl GithubClient {
             );
 
             let files: Vec<GhPullFile> = self
-                .get_json(&format!(
-                    "/repos/{owner}/{name}/pulls/{}/files?per_page={FIRST_PAGE_SIZE}",
-                    pull.number
-                ))
+                .get_json(
+                    &format!(
+                        "/repos/{owner}/{name}/pulls/{}/files?per_page={FIRST_PAGE_SIZE}",
+                        pull.number
+                    ),
+                    options,
+                )
                 .await?;
             pull.lines_added = files.iter().map(|f| f.additions).sum();
             pull.lines_removed = files.iter().map(|f| f.deletions).sum();
@@ -1524,10 +1692,13 @@ impl GithubClient {
             );
 
             let pull_commits: Vec<GhCommit> = self
-                .get_json(&format!(
-                    "/repos/{owner}/{name}/pulls/{}/commits?per_page={FIRST_PAGE_SIZE}",
-                    pull.number
-                ))
+                .get_json(
+                    &format!(
+                        "/repos/{owner}/{name}/pulls/{}/commits?per_page={FIRST_PAGE_SIZE}",
+                        pull.number
+                    ),
+                    options,
+                )
                 .await?;
             pull_request_commits.extend(
                 pull_commits
@@ -1563,21 +1734,27 @@ impl GithubPort for GithubClient {
         &self,
         owner: &str,
         name: &str,
-        scope: &ScopeConfig,
+        options: &FetchOptions,
     ) -> Result<FetchedRepository, DomainError> {
-        let repo: GhRepository = self.get_json(&format!("/repos/{owner}/{name}")).await?;
+        let repo: GhRepository = self
+            .get_json(&format!("/repos/{owner}/{name}"), options)
+            .await?;
         let repo_id = repo.id;
 
-        let issues = self.fetch_issue_family(owner, name, repo_id, scope).await?;
-        let pulls = self.fetch_pull_family(owner, name, repo_id, scope).await?;
+        let issues = self
+            .fetch_issue_family(owner, name, repo_id, options)
+            .await?;
+        let pulls = self
+            .fetch_pull_family(owner, name, repo_id, options)
+            .await?;
         let commits = self
-            .fetch_commit_family(owner, name, repo_id, scope)
+            .fetch_commit_family(owner, name, repo_id, options)
             .await?;
         let meta = self
-            .fetch_metadata_family(owner, name, repo_id, scope)
+            .fetch_metadata_family(owner, name, repo_id, options)
             .await?;
         let actions = self
-            .fetch_actions_family(owner, name, repo_id, scope)
+            .fetch_actions_family(owner, name, repo_id, options)
             .await?;
 
         Ok(FetchedRepository {
