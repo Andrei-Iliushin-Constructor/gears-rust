@@ -2,6 +2,7 @@
 
 use github_mirror::domain::error::DomainError;
 use github_mirror::domain::ports::github::GithubPort;
+use github_mirror::domain::scope::ScopeConfig;
 use github_mirror::infra::github::client::GithubClient;
 use httpmock::MockServer;
 use serde_json::json;
@@ -435,6 +436,13 @@ fn gh_commit_statuses_json() -> serde_json::Value {
     ])
 }
 
+/// The scope the gear actually ships with — the type default plus timeline,
+/// which the reference implementation leaves off. Using it here keeps this
+/// test asserting what a stock deployment collects.
+fn shipped_scope() -> ScopeConfig {
+    github_mirror::config::GithubMirrorConfig::default().scope
+}
+
 #[tokio::test]
 async fn fetch_repository_maps_github_payloads_into_records() {
     let server = MockServer::start_async().await;
@@ -625,7 +633,7 @@ async fn fetch_repository_maps_github_payloads_into_records() {
     let client =
         GithubClient::new(server.base_url(), Some("tok".to_owned())).expect("client must build");
     let fetched = client
-        .fetch_repository("rust-lang", "rust")
+        .fetch_repository("rust-lang", "rust", &shipped_scope())
         .await
         .expect("fetch must succeed");
 
@@ -870,7 +878,9 @@ async fn github_404_maps_to_not_found() {
         .await;
 
     let client = GithubClient::new(server.base_url(), None).expect("client must build");
-    let result = client.fetch_repository("acme", "nope").await;
+    let result = client
+        .fetch_repository("acme", "nope", &ScopeConfig::default())
+        .await;
 
     assert!(matches!(result, Err(DomainError::NotFound)));
 }
@@ -886,7 +896,9 @@ async fn github_server_error_maps_to_internal() {
         .await;
 
     let client = GithubClient::new(server.base_url(), None).expect("client must build");
-    let result = client.fetch_repository("acme", "flaky").await;
+    let result = client
+        .fetch_repository("acme", "flaky", &ScopeConfig::default())
+        .await;
 
     assert!(matches!(result, Err(DomainError::Internal(_))));
 }
@@ -902,7 +914,61 @@ async fn malformed_json_maps_to_internal() {
         .await;
 
     let client = GithubClient::new(server.base_url(), None).expect("client must build");
-    let result = client.fetch_repository("acme", "garbage").await;
+    let result = client
+        .fetch_repository("acme", "garbage", &ScopeConfig::default())
+        .await;
 
     assert!(matches!(result, Err(DomainError::Internal(_))));
+}
+
+/// The point of the scope is the request budget: a disabled object type must
+/// cost no GitHub call at all, not merely produce an empty result.
+#[tokio::test]
+async fn a_narrow_scope_skips_the_calls_it_does_not_need() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/rust-lang/rust");
+            then.status(200).json_body(gh_repo_json());
+        })
+        .await;
+    let labels = server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/rust-lang/rust/labels");
+            then.status(200).json_body(gh_labels_json());
+        })
+        .await;
+    let issues = server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/rust-lang/rust/issues");
+            then.status(200).json_body(gh_issues_json());
+        })
+        .await;
+    let commits = server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/rust-lang/rust/commits");
+            then.status(200).json_body(gh_commits_json());
+        })
+        .await;
+
+    let mut scope = ScopeConfig::default();
+    scope.objects = github_mirror::domain::scope::SyncScope::none();
+    scope.objects.labels = true;
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let fetched = client
+        .fetch_repository("rust-lang", "rust", &scope)
+        .await
+        .expect("fetch must succeed");
+
+    labels.assert_calls_async(1).await;
+    issues.assert_calls_async(0).await;
+    commits.assert_calls_async(0).await;
+
+    assert!(!fetched.labels.is_empty(), "labels were in scope");
+    assert!(fetched.issues.is_empty());
+    assert!(fetched.commits.is_empty());
+    assert!(fetched.pull_requests.is_empty());
+    assert!(fetched.workflow_runs.is_empty());
+    assert!(fetched.contributors.is_empty());
 }

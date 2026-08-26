@@ -111,6 +111,7 @@ impl GithubPort for FakeGithub {
         &self,
         _owner: &str,
         _name: &str,
+        _scope: &github_mirror::domain::scope::ScopeConfig,
     ) -> Result<FetchedRepository, DomainError> {
         self.result.clone().ok_or(DomainError::NotFound)
     }
@@ -179,6 +180,7 @@ pub fn service_with_github(
         enforcer(),
         ServiceConfig {
             api_base_url: api_base_url.to_owned(),
+            scope: github_mirror::domain::scope::ScopeConfig::default(),
         },
     ))
 }

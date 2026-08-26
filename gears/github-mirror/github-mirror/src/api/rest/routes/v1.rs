@@ -60,6 +60,14 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .path_param("owner", "Repo owner login")
         .path_param("name", "Repo name")
         .query_param("force", false, "Bypass the HTTP cache (inert until #4630)")
+        .query_param(
+            "include",
+            false,
+            "Comma-separated object types to collect, e.g. `issues,pull_requests`",
+        )
+        .query_param("actions_scope", false, "`all`, `open` or `none` for CI results")
+        .query_param("reactions_scope", false, "`all`, `open` or `none` for reactions")
+        .query_param("timeline_scope", false, "`all`, `open` or `none` for timeline events")
         .handler(handlers::sync_repository)
         .json_response_with_schema::<dto::SyncAcceptedDto>(
             openapi,

@@ -15,6 +15,8 @@ use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::SecurityContext;
 
 use crate::api::rest::routes::ConcreteService;
+use crate::domain::error::DomainError;
+use crate::domain::scope::{CollectionMode, ScopeConfig, SyncScope};
 
 use super::dto::{
     AuthenticatedUserDto, BranchDto, CheckRunDto, CheckRunsPageDto, CommentDto, CommitCommentDto,
@@ -31,9 +33,83 @@ const MAX_PER_PAGE: u64 = 100;
 
 /// `?force=true` bypasses the HTTP cache (PRD §5.2 force mode). Accepted and
 /// carried through, but inert until conditional requests land (#4630).
+///
+/// The remaining fields narrow what the run collects (PRD §5.4, §5.19). Any
+/// field left out keeps the gear's configured default, and `include`
+/// restricts the object types to exactly the ones named.
 #[derive(Debug, Default, Deserialize)]
-pub struct ForceQuery {
+pub struct SyncQuery {
     pub force: Option<bool>,
+    /// Comma-separated object types to collect, e.g.
+    /// `issues,pull_requests,commits`. Omit to collect the configured set.
+    pub include: Option<String>,
+    /// `all` / `open` / `none` for workflow runs and CI checks.
+    pub actions_scope: Option<String>,
+    /// `all` / `open` / `none` for reactions.
+    pub reactions_scope: Option<String>,
+    /// `all` / `open` / `none` for timeline events.
+    pub timeline_scope: Option<String>,
+}
+
+impl SyncQuery {
+    /// The scope this request asks for, or `None` to use the gear's default.
+    ///
+    /// # Errors
+    /// `Validation` when a mode or an object type does not parse.
+    fn scope(&self, default: ScopeConfig) -> Result<Option<ScopeConfig>, DomainError> {
+        if self.include.is_none()
+            && self.actions_scope.is_none()
+            && self.reactions_scope.is_none()
+            && self.timeline_scope.is_none()
+        {
+            return Ok(None);
+        }
+
+        let mut scope = default;
+        if let Some(include) = self.include.as_deref() {
+            scope.objects = objects_from_include(include)?;
+        }
+        if let Some(mode) = self.actions_scope.as_deref() {
+            scope.collection.actions = CollectionMode::parse(mode)?;
+        }
+        if let Some(mode) = self.reactions_scope.as_deref() {
+            scope.collection.reactions = CollectionMode::parse(mode)?;
+        }
+        if let Some(mode) = self.timeline_scope.as_deref() {
+            scope.collection.timeline = CollectionMode::parse(mode)?;
+        }
+        Ok(Some(scope))
+    }
+}
+
+/// Build an object scope enabling exactly the comma-separated types named.
+fn objects_from_include(include: &str) -> Result<SyncScope, DomainError> {
+    let mut scope = SyncScope::none();
+    for raw in include.split(',') {
+        let name = raw.trim().to_ascii_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        match name.as_str() {
+            "issues" => scope.issues = true,
+            "pull_requests" | "pulls" => scope.pull_requests = true,
+            "commits" => scope.commits = true,
+            "releases" => scope.releases = true,
+            "branches" => scope.branches = true,
+            "labels" => scope.labels = true,
+            "milestones" => scope.milestones = true,
+            "github_actions" | "actions" => scope.github_actions = true,
+            "contributors" => scope.contributors = true,
+            "security" => scope.security = true,
+            other => {
+                return Err(DomainError::Validation {
+                    field: "include".to_owned(),
+                    message: format!("unknown object type `{other}`"),
+                });
+            }
+        }
+    }
+    Ok(scope)
 }
 
 /// `?repo=owner/name` narrows a resume to one repository; omitting it resumes
@@ -153,10 +229,11 @@ pub async fn sync_repository(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<ConcreteService>>,
     Path((owner, name)): Path<(String, String)>,
-    Query(force): Query<ForceQuery>,
+    Query(query): Query<SyncQuery>,
 ) -> ApiResult<(StatusCode, JsonBody<SyncAcceptedDto>)> {
+    let scope = query.scope(svc.default_scope())?;
     let session_id = svc
-        .enqueue_sync(&ctx, &owner, &name, force.force.unwrap_or(false))
+        .enqueue_sync(&ctx, &owner, &name, scope, query.force.unwrap_or(false))
         .await?;
     Ok((
         StatusCode::ACCEPTED,

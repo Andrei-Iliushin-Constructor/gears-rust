@@ -170,6 +170,7 @@ impl Gear for GithubMirrorGear {
             policy_enforcer,
             ServiceConfig {
                 api_base_url: cfg.api_base_url,
+                scope: cfg.scope,
             },
         ));
 

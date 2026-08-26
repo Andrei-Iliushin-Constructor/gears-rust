@@ -40461,6 +40461,42 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Comma-separated object types to collect, e.g. `issues,pull_requests`",
+            "in": "query",
+            "name": "include",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`all`, `open` or `none` for CI results",
+            "in": "query",
+            "name": "actions_scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`all`, `open` or `none` for reactions",
+            "in": "query",
+            "name": "reactions_scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`all`, `open` or `none` for timeline events",
+            "in": "query",
+            "name": "timeline_scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {

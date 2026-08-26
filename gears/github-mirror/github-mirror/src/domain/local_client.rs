@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use github_mirror_sdk::{GithubMirrorClientV1, MirrorStatus, Repo, SyncSummary};
 
+use crate::domain::scope::ScopeConfig;
 use crate::domain::service::SyncProgress;
 use toolkit_canonical_errors::{CanonicalError, resource_error};
 use toolkit_macros::domain_model;
@@ -343,7 +344,13 @@ impl<
     ) -> Result<SyncSummary, CanonicalError> {
         let summary = self
             .service
-            .sync_repository(ctx, owner, name, &SyncProgress::new())
+            .sync_repository(
+                ctx,
+                owner,
+                name,
+                &ScopeConfig::default(),
+                &SyncProgress::new(),
+            )
             .await
             .map_err(CanonicalError::from)?;
         Ok(SyncSummary {

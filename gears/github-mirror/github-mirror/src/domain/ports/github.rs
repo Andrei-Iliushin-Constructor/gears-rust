@@ -10,6 +10,7 @@ use crate::domain::repo::{
     ReviewCommentRecord, ReviewRecord, ReviewThreadRecord, TagRecord, WorkflowJobRecord,
     WorkflowRunRecord,
 };
+use crate::domain::scope::ScopeConfig;
 
 /// What one sync-lite pass fetched from GitHub for a repository.
 #[domain_model]
@@ -50,9 +51,13 @@ pub struct FetchedRepository {
 /// and rate-limit admission arrive as that issue completes.
 #[async_trait]
 pub trait GithubPort: Send + Sync {
+    /// Fetch everything `scope` asks for. A disabled object type costs no
+    /// GitHub call at all — the point of the scope is the request budget, not
+    /// the size of the result.
     async fn fetch_repository(
         &self,
         owner: &str,
         name: &str,
+        scope: &ScopeConfig,
     ) -> Result<FetchedRepository, DomainError>;
 }

@@ -33,6 +33,7 @@ use super::repo::{
     TagRecord, TagRepository, WorkflowJobRecord, WorkflowJobRepository, WorkflowRunRecord,
     WorkflowRunRepository,
 };
+use super::scope::ScopeConfig;
 
 pub const GEAR_NAME: &str = "github-mirror";
 
@@ -293,6 +294,9 @@ pub struct SyncJob {
     pub ctx: SecurityContext,
     pub owner: String,
     pub name: String,
+    /// What this run collects. Resolved at enqueue time from the request, or
+    /// from the gear config when the request says nothing.
+    pub scope: ScopeConfig,
     /// Bypass the HTTP cache entirely (PRD §5.2 force mode).
     ///
     /// Carried end to end but **not yet honoured**: the gear has no `ETag` or
@@ -332,6 +336,8 @@ pub(crate) mod actions {
 #[derive(Debug, Clone)]
 pub struct ServiceConfig {
     pub api_base_url: String,
+    /// What a sync collects when the request does not say.
+    pub scope: ScopeConfig,
 }
 
 #[domain_model]
@@ -3047,6 +3053,12 @@ impl<
     /// # Errors
     /// Whatever [`Self::sync_repository`] returns; the session row records
     /// the failure before the error propagates.
+    /// What a sync collects when the request does not narrow it.
+    #[must_use]
+    pub fn default_scope(&self) -> ScopeConfig {
+        self.config.scope
+    }
+
     /// Scope for writing this tenant's session rows.
     async fn session_scope(
         &self,
@@ -3182,6 +3194,10 @@ impl<
     /// only once the `ETag` cache and change-detection state exist (#4630 and
     /// #4632 slice 6) — until then it costs a full sync.
     ///
+    /// Resume takes no per-run scope: `ALGORITHMS.md` §8 has it resolve scope
+    /// from configuration only, so a resumed run collects whatever the gear
+    /// is configured to collect.
+    ///
     /// `only` narrows the operation to one `owner/name` slug, matching the
     /// documented CLI's `resume <ORG/REPO>`. A repository that is not
     /// `in_progress` has nothing to resume and yields an empty result rather
@@ -3207,7 +3223,7 @@ impl<
                 );
                 continue;
             };
-            match self.enqueue_sync(ctx, owner, name, force).await {
+            match self.enqueue_sync(ctx, owner, name, None, force).await {
                 Ok(session_id) => resumed.push(session_id),
                 Err(e) => tracing::warn!(
                     repository = %repo.repo_full_name,
@@ -3235,8 +3251,11 @@ impl<
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
+        sync_scope: Option<ScopeConfig>,
         force: bool,
     ) -> Result<Uuid, DomainError> {
+        let sync_scope = sync_scope.unwrap_or(self.config.scope);
+        sync_scope.validate()?;
         let tenant_id = ctx.subject_tenant_id();
         let scope = self.session_scope(ctx, actions::UPSERT).await?;
         let conn = self.db.conn()?;
@@ -3272,6 +3291,7 @@ impl<
             ctx: ctx.clone(),
             owner: owner.to_owned(),
             name: name.to_owned(),
+            scope: sync_scope,
             force,
         };
         if let Err(e) = self.sync_tx.try_send(job) {
@@ -3370,7 +3390,7 @@ impl<
         session: &SyncSessionRecord,
     ) -> Result<SyncSummary, DomainError> {
         let percent = progress.handle();
-        let sync = self.sync_repository(&job.ctx, &job.owner, &job.name, progress);
+        let sync = self.sync_repository(&job.ctx, &job.owner, &job.name, &job.scope, progress);
         let mut sync = std::pin::pin!(sync);
 
         loop {
@@ -3522,6 +3542,7 @@ impl<
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
+        sync_scope: &ScopeConfig,
         progress: &SyncProgress,
     ) -> Result<SyncSummary, DomainError> {
         let tenant_id = ctx.subject_tenant_id();
@@ -3537,7 +3558,10 @@ impl<
             )
             .await?;
 
-        let fetched = self.github.fetch_repository(owner, name).await?;
+        let fetched = self
+            .github
+            .fetch_repository(owner, name, sync_scope)
+            .await?;
         progress.fetched();
 
         let conn = self.db.conn()?;

@@ -11,6 +11,7 @@ use crate::domain::repo::{
     ReviewCommentRecord, ReviewRecord, ReviewThreadRecord, TagRecord, WorkflowJobRecord,
     WorkflowRunRecord,
 };
+use crate::domain::scope::{CollectionMode, ScopeConfig};
 
 const FIRST_PAGE_SIZE: u32 = 50;
 /// GitHub serves reviews and changed files only per pull request, so
@@ -976,6 +977,72 @@ struct CommitDetails {
     check_runs: Vec<CheckRunRecord>,
 }
 
+/// The issues a per-issue sub-resource should be fetched for, under `mode`.
+///
+/// `Open` keeps only open issues — the actionable working set — which is what
+/// makes the default cost roughly one call per open issue rather than one per
+/// issue ever filed.
+fn in_collection_mode(issues: &[IssueRecord], mode: CollectionMode) -> Vec<IssueRecord> {
+    if mode == CollectionMode::None {
+        return Vec::new();
+    }
+    issues
+        .iter()
+        .filter(|i| mode.includes(i.state == "open"))
+        .cloned()
+        .collect()
+}
+
+/// The issue slice of one sync pass: issues and everything hanging off them.
+#[derive(Default)]
+struct IssueFamily {
+    issues: Vec<IssueRecord>,
+    comments: Vec<CommentRecord>,
+    issue_events: Vec<IssueEventRecord>,
+    issue_reactions: Vec<IssueReactionRecord>,
+    issue_timeline: Vec<IssueTimelineEventRecord>,
+}
+
+/// The pull-request slice of one sync pass.
+#[derive(Default)]
+struct PullFamily {
+    pull_requests: Vec<PullRequestRecord>,
+    review_comments: Vec<ReviewCommentRecord>,
+    reviews: Vec<ReviewRecord>,
+    pull_request_files: Vec<PullRequestFileRecord>,
+    review_threads: Vec<ReviewThreadRecord>,
+    pull_request_commits: Vec<PullRequestCommitRecord>,
+}
+
+/// The commit slice of one sync pass.
+#[derive(Default)]
+struct CommitFamily {
+    commits: Vec<CommitRecord>,
+    commit_files: Vec<CommitFileRecord>,
+    commit_comments: Vec<CommitCommentRecord>,
+    commit_statuses: Vec<CommitStatusRecord>,
+    check_runs: Vec<CheckRunRecord>,
+}
+
+/// The repository-metadata slice: the cheap single-page list endpoints.
+#[derive(Default)]
+struct MetadataFamily {
+    labels: Vec<LabelRecord>,
+    milestones: Vec<MilestoneRecord>,
+    releases: Vec<ReleaseRecord>,
+    branches: Vec<BranchRecord>,
+    tags: Vec<TagRecord>,
+    contributors: Vec<ContributorRecord>,
+}
+
+/// The GitHub Actions slice: workflow runs, their jobs, and deployments.
+#[derive(Default)]
+struct ActionsFamily {
+    workflow_runs: Vec<WorkflowRunRecord>,
+    workflow_jobs: Vec<WorkflowJobRecord>,
+    deployments: Vec<DeploymentRecord>,
+}
+
 /// The per-pull-request slices of one sync pass.
 struct PullDetails {
     reviews: Vec<ReviewRecord>,
@@ -993,6 +1060,7 @@ impl GithubClient {
         name: &str,
         repo_id: i64,
         commit_records: &mut [CommitRecord],
+        with_ci: bool,
     ) -> Result<CommitDetails, DomainError> {
         let mut commit_files: Vec<CommitFileRecord> = Vec::new();
         let mut commit_statuses: Vec<CommitStatusRecord> = Vec::new();
@@ -1011,6 +1079,10 @@ impl GithubClient {
                     .into_iter()
                     .map(|f| commit_file_record(repo_id, &commit.sha, f)),
             );
+
+            if !with_ci {
+                continue;
+            }
 
             let statuses: Vec<GhCommitStatus> = self
                 .get_json(&format!(
@@ -1126,6 +1198,294 @@ impl GithubClient {
     /// Fetch the per-pull-request slices for the first
     /// `PER_PULL_SYNC_CAP` pull requests, filling each record's line counts
     /// on the way.
+    /// Issues plus their comments, events, reactions and timeline.
+    ///
+    /// Reactions and timeline are per-issue sub-resources and dominate the
+    /// call count, so each has its own [`CollectionMode`] on top of the
+    /// object-level `issues` flag.
+    async fn fetch_issue_family(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: i64,
+        scope: &ScopeConfig,
+    ) -> Result<IssueFamily, DomainError> {
+        if !scope.objects.issues {
+            return Ok(IssueFamily::default());
+        }
+
+        let issues: Vec<GhIssue> = self
+            .get_json(&format!(
+                "/repos/{owner}/{name}/issues?state=all&per_page={FIRST_PAGE_SIZE}"
+            ))
+            .await?;
+        let comments: Vec<GhComment> = self
+            .get_json(&format!(
+                "/repos/{owner}/{name}/issues/comments?per_page={FIRST_PAGE_SIZE}"
+            ))
+            .await?;
+        let issue_events: Vec<GhIssueEvent> = self
+            .get_json(&format!(
+                "/repos/{owner}/{name}/issues/events?per_page={FIRST_PAGE_SIZE}"
+            ))
+            .await?;
+
+        let issue_records: Vec<IssueRecord> = issues
+            .into_iter()
+            .map(|i| issue_record(repo_id, i))
+            .collect();
+
+        let for_reactions = in_collection_mode(&issue_records, scope.collection.reactions);
+        let issue_reactions = self
+            .fetch_issue_reactions(owner, name, repo_id, &for_reactions)
+            .await?;
+
+        let for_timeline = in_collection_mode(&issue_records, scope.collection.timeline);
+        let issue_timeline = self
+            .fetch_issue_timeline(owner, name, repo_id, &for_timeline)
+            .await?;
+
+        Ok(IssueFamily {
+            issues: issue_records,
+            comments: comments
+                .into_iter()
+                .map(|c| comment_record(repo_id, c))
+                .collect(),
+            issue_events: issue_events
+                .into_iter()
+                .map(|e| issue_event_record(repo_id, e))
+                .collect(),
+            issue_reactions,
+            issue_timeline,
+        })
+    }
+
+    /// Pull requests plus their reviews, comments, files and commits.
+    async fn fetch_pull_family(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: i64,
+        scope: &ScopeConfig,
+    ) -> Result<PullFamily, DomainError> {
+        if !scope.objects.pull_requests {
+            return Ok(PullFamily::default());
+        }
+
+        let pulls: Vec<GhPullRequest> = self
+            .get_json(&format!(
+                "/repos/{owner}/{name}/pulls?state=all&per_page={FIRST_PAGE_SIZE}"
+            ))
+            .await?;
+        let review_comments: Vec<GhReviewComment> = self
+            .get_json(&format!(
+                "/repos/{owner}/{name}/pulls/comments?per_page={FIRST_PAGE_SIZE}"
+            ))
+            .await?;
+
+        let mut pull_records: Vec<PullRequestRecord> = pulls
+            .into_iter()
+            .map(|p| pull_request_record(repo_id, p))
+            .collect();
+
+        let PullDetails {
+            reviews,
+            pull_request_files,
+            review_threads,
+            pull_request_commits,
+        } = self
+            .fetch_pull_details(owner, name, repo_id, &mut pull_records)
+            .await?;
+
+        Ok(PullFamily {
+            pull_requests: pull_records,
+            review_comments: review_comments
+                .into_iter()
+                .map(|c| review_comment_record(repo_id, c))
+                .collect(),
+            reviews,
+            pull_request_files,
+            review_threads,
+            pull_request_commits,
+        })
+    }
+
+    /// Commits plus their files, comments and CI results.
+    ///
+    /// Statuses and check runs are CI, so they follow the `actions`
+    /// collection mode rather than the `commits` object flag alone.
+    async fn fetch_commit_family(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: i64,
+        scope: &ScopeConfig,
+    ) -> Result<CommitFamily, DomainError> {
+        if !scope.objects.commits {
+            return Ok(CommitFamily::default());
+        }
+
+        let commits: Vec<GhCommit> = self
+            .get_json(&format!(
+                "/repos/{owner}/{name}/commits?per_page={FIRST_PAGE_SIZE}"
+            ))
+            .await?;
+        let commit_comments: Vec<GhCommitComment> = self
+            .get_json(&format!(
+                "/repos/{owner}/{name}/comments?per_page={FIRST_PAGE_SIZE}"
+            ))
+            .await?;
+
+        let mut commit_records: Vec<CommitRecord> = commits
+            .into_iter()
+            .map(|c| commit_record(repo_id, c))
+            .collect();
+
+        let with_ci = scope.collection.actions != CollectionMode::None;
+        let CommitDetails {
+            commit_files,
+            commit_statuses,
+            check_runs,
+        } = self
+            .fetch_commit_details(owner, name, repo_id, &mut commit_records, with_ci)
+            .await?;
+
+        Ok(CommitFamily {
+            commits: commit_records,
+            commit_files,
+            commit_comments: commit_comments
+                .into_iter()
+                .map(|c| commit_comment_record(repo_id, c))
+                .collect(),
+            commit_statuses,
+            check_runs,
+        })
+    }
+
+    /// The cheap single-page list endpoints, each behind its own flag.
+    async fn fetch_metadata_family(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: i64,
+        scope: &ScopeConfig,
+    ) -> Result<MetadataFamily, DomainError> {
+        let mut family = MetadataFamily::default();
+
+        if scope.objects.labels {
+            let labels: Vec<GhLabel> = self
+                .get_json(&format!(
+                    "/repos/{owner}/{name}/labels?per_page={FIRST_PAGE_SIZE}"
+                ))
+                .await?;
+            family.labels = labels
+                .into_iter()
+                .map(|l| label_record(repo_id, l))
+                .collect();
+        }
+
+        if scope.objects.milestones {
+            let milestones: Vec<GhMilestone> = self
+                .get_json(&format!(
+                    "/repos/{owner}/{name}/milestones?state=all&per_page={FIRST_PAGE_SIZE}"
+                ))
+                .await?;
+            family.milestones = milestones
+                .into_iter()
+                .map(|m| milestone_record(repo_id, m))
+                .collect();
+        }
+
+        if scope.objects.releases {
+            let releases: Vec<GhRelease> = self
+                .get_json(&format!(
+                    "/repos/{owner}/{name}/releases?per_page={FIRST_PAGE_SIZE}"
+                ))
+                .await?;
+            family.releases = releases
+                .into_iter()
+                .map(|r| release_record(repo_id, r))
+                .collect();
+        }
+
+        if scope.objects.branches {
+            let branches: Vec<GhBranch> = self
+                .get_json(&format!(
+                    "/repos/{owner}/{name}/branches?per_page={FIRST_PAGE_SIZE}"
+                ))
+                .await?;
+            family.branches = branches
+                .into_iter()
+                .map(|b| branch_record(repo_id, b))
+                .collect();
+
+            let tags: Vec<GhTag> = self
+                .get_json(&format!(
+                    "/repos/{owner}/{name}/tags?per_page={FIRST_PAGE_SIZE}"
+                ))
+                .await?;
+            family.tags = tags.into_iter().map(|t| tag_record(repo_id, t)).collect();
+        }
+
+        if scope.objects.contributors {
+            let contributors: Vec<GhContributor> = self
+                .get_json(&format!(
+                    "/repos/{owner}/{name}/contributors?per_page={FIRST_PAGE_SIZE}"
+                ))
+                .await?;
+            family.contributors = contributors
+                .into_iter()
+                .map(|c| contributor_record(repo_id, c))
+                .collect();
+        }
+
+        Ok(family)
+    }
+
+    /// Workflow runs, their jobs, and deployments.
+    async fn fetch_actions_family(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: i64,
+        scope: &ScopeConfig,
+    ) -> Result<ActionsFamily, DomainError> {
+        if !scope.objects.github_actions {
+            return Ok(ActionsFamily::default());
+        }
+
+        let runs: GhWorkflowRunsPage = self
+            .get_json(&format!(
+                "/repos/{owner}/{name}/actions/runs?per_page={FIRST_PAGE_SIZE}"
+            ))
+            .await?;
+        let deployments: Vec<GhDeployment> = self
+            .get_json(&format!(
+                "/repos/{owner}/{name}/deployments?per_page={FIRST_PAGE_SIZE}"
+            ))
+            .await?;
+
+        let workflow_jobs = if scope.collection.actions == CollectionMode::None {
+            Vec::new()
+        } else {
+            self.fetch_workflow_jobs(owner, name, repo_id, &runs.workflow_runs)
+                .await?
+        };
+
+        Ok(ActionsFamily {
+            workflow_runs: runs
+                .workflow_runs
+                .into_iter()
+                .map(|w| workflow_run_record(repo_id, w))
+                .collect(),
+            workflow_jobs,
+            deployments: deployments
+                .into_iter()
+                .map(|d| deployment_record(repo_id, d))
+                .collect(),
+        })
+    }
+
     async fn fetch_pull_details(
         &self,
         owner: &str,
@@ -1203,201 +1563,50 @@ impl GithubPort for GithubClient {
         &self,
         owner: &str,
         name: &str,
+        scope: &ScopeConfig,
     ) -> Result<FetchedRepository, DomainError> {
         let repo: GhRepository = self.get_json(&format!("/repos/{owner}/{name}")).await?;
         let repo_id = repo.id;
 
-        let issues: Vec<GhIssue> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/issues?state=all&per_page={FIRST_PAGE_SIZE}"
-            ))
+        let issues = self.fetch_issue_family(owner, name, repo_id, scope).await?;
+        let pulls = self.fetch_pull_family(owner, name, repo_id, scope).await?;
+        let commits = self
+            .fetch_commit_family(owner, name, repo_id, scope)
             .await?;
-        let pulls: Vec<GhPullRequest> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/pulls?state=all&per_page={FIRST_PAGE_SIZE}"
-            ))
+        let meta = self
+            .fetch_metadata_family(owner, name, repo_id, scope)
             .await?;
-        let commits: Vec<GhCommit> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/commits?per_page={FIRST_PAGE_SIZE}"
-            ))
-            .await?;
-        let comments: Vec<GhComment> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/issues/comments?per_page={FIRST_PAGE_SIZE}"
-            ))
-            .await?;
-        let review_comments: Vec<GhReviewComment> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/pulls/comments?per_page={FIRST_PAGE_SIZE}"
-            ))
-            .await?;
-
-        let labels: Vec<GhLabel> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/labels?per_page={FIRST_PAGE_SIZE}"
-            ))
-            .await?;
-
-        let milestones: Vec<GhMilestone> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/milestones?state=all&per_page={FIRST_PAGE_SIZE}"
-            ))
-            .await?;
-
-        let releases: Vec<GhRelease> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/releases?per_page={FIRST_PAGE_SIZE}"
-            ))
-            .await?;
-
-        let branches: Vec<GhBranch> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/branches?per_page={FIRST_PAGE_SIZE}"
-            ))
-            .await?;
-
-        let contributors: Vec<GhContributor> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/contributors?per_page={FIRST_PAGE_SIZE}"
-            ))
-            .await?;
-
-        let workflow_runs: GhWorkflowRunsPage = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/actions/runs?per_page={FIRST_PAGE_SIZE}"
-            ))
-            .await?;
-
-        let deployments: Vec<GhDeployment> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/deployments?per_page={FIRST_PAGE_SIZE}"
-            ))
-            .await?;
-
-        let issue_events: Vec<GhIssueEvent> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/issues/events?per_page={FIRST_PAGE_SIZE}"
-            ))
-            .await?;
-
-        let commit_comments: Vec<GhCommitComment> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/comments?per_page={FIRST_PAGE_SIZE}"
-            ))
-            .await?;
-
-        let tags: Vec<GhTag> = self
-            .get_json(&format!(
-                "/repos/{owner}/{name}/tags?per_page={FIRST_PAGE_SIZE}"
-            ))
-            .await?;
-
-        let issue_records: Vec<IssueRecord> = issues
-            .into_iter()
-            .map(|i| issue_record(repo_id, i))
-            .collect();
-
-        let issue_reactions = self
-            .fetch_issue_reactions(owner, name, repo_id, &issue_records)
-            .await?;
-
-        let issue_timeline = self
-            .fetch_issue_timeline(owner, name, repo_id, &issue_records)
-            .await?;
-
-        let mut commit_records: Vec<CommitRecord> = commits
-            .into_iter()
-            .map(|c| commit_record(repo_id, c))
-            .collect();
-
-        let workflow_jobs = self
-            .fetch_workflow_jobs(owner, name, repo_id, &workflow_runs.workflow_runs)
-            .await?;
-
-        let CommitDetails {
-            commit_files,
-            commit_statuses,
-            check_runs,
-        } = self
-            .fetch_commit_details(owner, name, repo_id, &mut commit_records)
-            .await?;
-
-        let mut pull_records: Vec<PullRequestRecord> = pulls
-            .into_iter()
-            .map(|p| pull_request_record(repo_id, p))
-            .collect();
-
-        let PullDetails {
-            reviews,
-            pull_request_files,
-            review_threads,
-            pull_request_commits,
-        } = self
-            .fetch_pull_details(owner, name, repo_id, &mut pull_records)
+        let actions = self
+            .fetch_actions_family(owner, name, repo_id, scope)
             .await?;
 
         Ok(FetchedRepository {
             repository: repository_record(repo),
-            issues: issue_records,
-            pull_requests: pull_records,
-            commits: commit_records,
-            comments: comments
-                .into_iter()
-                .map(|c| comment_record(repo_id, c))
-                .collect(),
-            review_comments: review_comments
-                .into_iter()
-                .map(|c| review_comment_record(repo_id, c))
-                .collect(),
-            reviews,
-            labels: labels
-                .into_iter()
-                .map(|l| label_record(repo_id, l))
-                .collect(),
-            milestones: milestones
-                .into_iter()
-                .map(|m| milestone_record(repo_id, m))
-                .collect(),
-            releases: releases
-                .into_iter()
-                .map(|r| release_record(repo_id, r))
-                .collect(),
-            branches: branches
-                .into_iter()
-                .map(|b| branch_record(repo_id, b))
-                .collect(),
-            contributors: contributors
-                .into_iter()
-                .map(|c| contributor_record(repo_id, c))
-                .collect(),
-            workflow_runs: workflow_runs
-                .workflow_runs
-                .into_iter()
-                .map(|w| workflow_run_record(repo_id, w))
-                .collect(),
-            pull_request_files,
-            tags: tags.into_iter().map(|t| tag_record(repo_id, t)).collect(),
-            commit_files,
-            review_threads,
-            commit_comments: commit_comments
-                .into_iter()
-                .map(|c| commit_comment_record(repo_id, c))
-                .collect(),
-            issue_events: issue_events
-                .into_iter()
-                .map(|e| issue_event_record(repo_id, e))
-                .collect(),
-            deployments: deployments
-                .into_iter()
-                .map(|d| deployment_record(repo_id, d))
-                .collect(),
-            pull_request_commits,
-            commit_statuses,
-            workflow_jobs,
-            issue_reactions,
-            check_runs,
-            issue_timeline,
+            issues: issues.issues,
+            pull_requests: pulls.pull_requests,
+            commits: commits.commits,
+            comments: issues.comments,
+            review_comments: pulls.review_comments,
+            reviews: pulls.reviews,
+            labels: meta.labels,
+            milestones: meta.milestones,
+            releases: meta.releases,
+            branches: meta.branches,
+            contributors: meta.contributors,
+            workflow_runs: actions.workflow_runs,
+            pull_request_files: pulls.pull_request_files,
+            tags: meta.tags,
+            commit_files: commits.commit_files,
+            review_threads: pulls.review_threads,
+            commit_comments: commits.commit_comments,
+            issue_events: issues.issue_events,
+            deployments: actions.deployments,
+            pull_request_commits: pulls.pull_request_commits,
+            commit_statuses: commits.commit_statuses,
+            workflow_jobs: actions.workflow_jobs,
+            issue_reactions: issues.issue_reactions,
+            check_runs: commits.check_runs,
+            issue_timeline: issues.issue_timeline,
         })
     }
 }

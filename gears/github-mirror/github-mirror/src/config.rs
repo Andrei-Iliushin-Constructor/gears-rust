@@ -1,4 +1,6 @@
 use serde::Deserialize;
+
+use crate::domain::scope::{CollectionMode, ScopeConfig};
 use toolkit_utils::var_expand::ExpandVarsError;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -14,6 +16,23 @@ pub struct GithubMirrorConfig {
     /// [`GithubMirrorConfig::resolved_token`] rather than reading the field.
     #[serde(default)]
     pub github_token: Option<String>,
+    /// What a sync collects when the request does not say (PRD §5.4).
+    ///
+    /// The shipped default differs from [`ScopeConfig::default`] in one
+    /// place: timeline collection is on. The reference implementation leaves
+    /// it off as a high-volume, low-signal feed, but the mirror has always
+    /// collected it and turning it off here would silently shrink what an
+    /// existing deployment stores.
+    #[serde(default = "default_scope")]
+    pub scope: ScopeConfig,
+}
+
+/// The gear's shipped scope: the type's default, with timeline turned on to
+/// preserve the behaviour the mirror has had since #4532.
+fn default_scope() -> ScopeConfig {
+    let mut scope = ScopeConfig::default();
+    scope.collection.timeline = CollectionMode::Open;
+    scope
 }
 
 impl GithubMirrorConfig {
@@ -37,6 +56,7 @@ impl Default for GithubMirrorConfig {
         Self {
             api_base_url: default_api_base_url(),
             github_token: None,
+            scope: default_scope(),
         }
     }
 }
