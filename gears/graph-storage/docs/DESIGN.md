@@ -76,7 +76,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-fr-read-consistency` | Compound reads (hybrid search, traversal + hydration, projections) execute on one repeatable-read snapshot; responses report the observed graph revision; continuation tokens are revision-bound (Read Consistency Contract) |
 | `p1` | `cpt-cf-graph-storage-fr-graph-traversal` | Traversal Service expands breadth-first through the GraphQueryPort: SQL/PGQ `GRAPH_TABLE` hop patterns from v1 for fixed-depth shapes (direction-explicit, per-hop dedup), iterative scoped hops for variable depth until PG20-class quantifiers, per ADR-0001 |
 | `p1` | `cpt-cf-graph-storage-fr-neighborhood-projection` | Projection Service returns degree-ordered, budget-truncated neighborhoods with phantom toggle and metric annotations |
-| `p1` | `cpt-cf-graph-storage-fr-tabular-projection` | Projection Service serves OData-filtered, paginated node tables over the payload paths a type declares in its `index` trait, plus labels; `CursorV1` extended with the observed revision |
+| `p1` | `cpt-cf-graph-storage-fr-tabular-projection` | Projection Service serves OData-filtered, paginated node tables over the payload paths a type declares in its `index` trait, plus labels; paged with the platform `CursorV1` |
 | `p1` | `cpt-cf-graph-storage-fr-soft-delete` | Tombstone on node and edge; incident edges follow the node in one transaction; every read path and every read-path index filters on it (Soft Delete Contract) |
 | `p2` | `cpt-cf-graph-storage-fr-labels` | Per-tenant label registry and assignment table; attach/detach as its own action; label filtering in search, projection and per-hop traversal (Label Contract) |
 | `p2` | `cpt-cf-graph-storage-fr-change-events` | `emit_events` trait per type, overridable per GTS pattern by configuration; published through the transactional outbox with the committing revision |
@@ -227,7 +227,9 @@ Every operation has explicit bounds — batch sizes, result limits, traversal de
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-constraint-postgres-pgvector`
 
-The storage backend is PostgreSQL 16 or later with the pgvector extension. SQL/PGQ is a *probed capability*, not a baseline requirement: on PostgreSQL 19+ with the property graph present the SQL/PGQ traversal backend is selected, and on earlier majors traversal is served by the iterative-CTE and entity-query backends with no functional difference to the caller. Readiness reports the server major and property-graph presence, and takes the gear out of service only when an operator explicitly configured a backend the server cannot provide (§ Readiness Matrix). Deployments wanting SQL/PGQ before PostgreSQL 19 GA run a pinned PG19 beta image with pgvector built from a pinned source revision (validated by the PG19 spike and the prototype) and return to stock PostgreSQL plus released pgvector at GA. No other extensions and no other database engines are supported; the gear does not target multi-engine portability because tsvector, JSONB indexing, and pgvector are load-bearing.
+The storage backend is PostgreSQL 16 or later with the pgvector extension. SQL/PGQ is a *probed capability*, not a baseline requirement: on PostgreSQL 19+ with the property graph present the SQL/PGQ traversal backend is selected, and on earlier majors traversal is served by the iterative-CTE and entity-query backends with no functional difference to the caller. Readiness reports the server major and property-graph presence, and takes the gear out of service only when an operator explicitly configured a backend the server cannot provide (§ Readiness Matrix).
+
+**Found while building the prototype: the probe happens in the migration, not at runtime.** A running gear cannot ask the server what version it is. The secure ORM's runner is sealed — deliberately, since an escape hatch for `SELECT current_setting('server_version_num')` is an escape hatch for anything — so there is no statement API a gear can reach `pg_catalog` through. What *can* probe is the migration, and it must: it decides whether to emit the property-graph DDL at all. The capability is therefore determined once, when the schema is applied, and the running gear inherits that decision; a request whose pattern the server refuses falls back to the two-query hop with a logged reason rather than being discovered by a probe. Reporting the server major in readiness needs a narrow read-only capability surface from the platform (`server_version()`, `has_extension(..)`) that does not exist yet. Deployments wanting SQL/PGQ before PostgreSQL 19 GA run a pinned PG19 beta image with pgvector built from a pinned source revision (validated by the PG19 spike and the prototype) and return to stock PostgreSQL plus released pgvector at GA. No other extensions and no other database engines are supported; the gear does not target multi-engine portability because tsvector, JSONB indexing, and pgvector are load-bearing.
 
 #### GTS Draft-07 Contracts
 
@@ -326,9 +328,21 @@ Domain vocabulary follows the PRD glossary. The base ontology published by the g
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-entity-base-ontology`
 
-The gear publishes three abstract bases (node, edge, attribute) and six concrete
-family types derived from them. Producers derive their own types from a family
-type, never from a base directly.
+The gear publishes three abstract bases (node, edge, attribute) and six family
+types derived from them. A node or edge producer derives its own types from a
+family type, never from a base directly.
+
+Four of the six families are themselves abstract (owned, reference, static,
+analysis); the other two are not, and deliberately so — `phantom_node` is final
+because the *gear* instantiates it for an unresolved endpoint and nothing
+derives from it, and `provenance` is a concrete attribute embedded in analysis
+edge payloads. The per-family table below is authoritative on which is which.
+
+**Found while building the prototype.** Attributes have no families: the
+attribute base fixes no `family` trait, and `provenance` derives straight from
+it. The "derive from a family, never from a base" rule and the required-`family`
+rule below are therefore node and edge rules. An implementation that applies
+them to attributes rejects the gear's own provenance type.
 
 **What the schema describes.** The validated instance is the node or edge as the
 gear materializes it, not the wire DTO: the GTS instance envelope (`id`, `type`)
@@ -614,8 +628,10 @@ reproduced against the reference implementation.
    `source` or `provenance` and rejects them. Such a type either leaves `payload`
    open or restates the inherited members alongside its own.
 4. **`family` is required and has no default, and that is the enforcement.** A
-   producer deriving straight from an abstract base resolves no `family` and the
-   registration fails; deriving from a family type is the only way through.
+   node or edge producer deriving straight from its abstract base resolves no
+   `family` and the registration fails; deriving from a family type is the only
+   way through. The attribute base declares no `family` at all, so this rule
+   does not reach attribute types (see the note above § Family types).
 5. **Endpoint constraints, index declarations and event emission are trait
    values, not extension keywords.** Their merge semantics along the chain are
    the registry's, already specified and already implemented, so the gear
@@ -625,6 +641,27 @@ reproduced against the reference implementation.
    chain-resolved trait object next to the schema (`gts_type.effective_traits`)
    so ingest validation, `$filter` admissibility and index provisioning read one
    object per type instead of re-walking the chain per item.
+
+**Found while building the prototype: what this costs an existing producer.**
+The `studio-graph-storage` prototype accepted free-form types and interned them
+by name, so a producer moving to this ontology changes three things at once, and
+none of them fails until registration is attempted:
+
+- **The identifier gains its chain.** `gts.cf.studio.kg.file.v1~` becomes
+  `gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~cf.studio.kg.file.v1~`.
+  Every stored reference to the old identifier — in a producer's own tables, in
+  fixtures, in dashboards — is stale.
+- **The schema gains an `allOf`.** A document with no `$ref` to a family has no
+  chain to validate an instance against, which is the point of the base
+  ontology; it is refused rather than accepted as a root type.
+- **Searchable text stops being producer-supplied.** The prototype took a
+  `search_text` string per node. Here a type declares which payload paths are
+  searchable (`full_text_search`) and the gear composes the text from them, so
+  the producer moves that logic into the type and drops the field.
+
+Two derivations is the ceiling (`guidelines/GTS.md` §9), and the family already
+spends one — so a producer type is always the third segment and can never
+introduce a hierarchy of its own beneath it.
 
 ##### What the gear enforces beyond JSON Schema
 
@@ -962,17 +999,35 @@ because each was answerable more than one way:
 
 **OData binding.** Tabular projection binds all five system query options the
 platform accepts (`$filter`, `$orderby`, `$select`, `$top`, `$skiptoken`, with
-`cursor` as the alias for `$skiptoken`); type listing binds `$filter` and `$top`.
-Anything else is rejected rather than ignored. Payload attributes are addressed
-by the same path the type declares in its `index` trait, in OData path syntax
-(`payload/severity`, not `severity`), so one declaration governs the index and
-the filter surface together. Orderable: `name`, `created_at`, `updated_at`, and
-any path in the `index` trait. Deliberately not filterable in v1: `search_text`,
-embeddings, chunk contents, and metric annotations. Continuation tokens are the
-platform `CursorV1` extended with the observed graph revision — not a second
-token format; `CursorV1` already carries the filter hash the Read Consistency
-Contract needs to bind, and the platform already rejects `cursor` together with
-`$orderby`.
+`cursor` as the alias for `$skiptoken`). Anything else is rejected rather than
+ignored. Payload attributes are addressed by the same path the type declares in
+its `index` trait, in OData path syntax (`payload/severity`, not `severity`), so
+one declaration governs the index and the filter surface together. Orderable:
+`name`, `created_at`, `updated_at`, and any path in the `index` trait.
+Deliberately not filterable in v1: `search_text`, embeddings, chunk contents,
+and metric annotations. Continuation tokens are the platform `CursorV1`, which
+already carries the filter hash the Read Consistency Contract needs to bind, and
+the platform already rejects `cursor` together with `$orderby`.
+
+**Found while building the prototype: the type catalog is not an OData
+collection.** An earlier draft had type listing bind `$filter` and `$top`, with
+`$filter` carrying the GTS identifier pattern. It cannot: `$filter` denotes a
+filter expression over declared columns, the platform extractor parses it as
+one, and the architecture lints (`DE0802`, `DE0803`) refuse a hand-rolled
+`$`-prefixed parameter precisely to keep that meaning stable. A GTS pattern is
+resolved to a set of registered types, not evaluated as an expression, so the
+type catalog takes `pattern` and `limit` as ordinary query parameters. Only the
+node projection is an OData collection.
+
+**Found while building the prototype: `CursorV1` cannot be extended with the
+revision.** An earlier draft said continuation tokens were "the platform
+`CursorV1` extended with the observed graph revision". A gear cannot do that —
+`CursorV1` has no revision member and `toolkit_odata::Page` carries only
+`items` and `page_info { next_cursor, prev_cursor, limit }`. Using the platform
+binding is itself mandatory here, so a gear-local page envelope is not an
+alternative. The consequence is recorded under § Read Consistency Contract:
+tabular projection is the one read surface that does not report the revision,
+until the platform offers a slot for it.
 
 **Versioning policy.** `/v1/` is additive-only: new optional fields, new
 endpoints and new enum variants ship without a major bump. Renames, removals,
@@ -1068,6 +1123,10 @@ pub trait GraphStoreV1: Send + Sync + 'static {
     /// in `StoreCtx` observes one graph state.
     async fn begin_read(&self, ctx: &StoreCtx<'_>)
         -> Result<ReadSnapshot, GraphStoreError>;
+    /// Release a snapshot. Whatever holds it — a transaction, a copy — is held
+    /// until this is called, so the gateway calls it on every path out of a
+    /// compound read, including the failing ones.
+    async fn end_read(&self, snapshot: ReadSnapshot) -> Result<(), GraphStoreError>;
     async fn revision(&self, ctx: &StoreCtx<'_>)
         -> Result<GraphRevision, GraphStoreError>;
     async fn get_node(&self, ctx: &StoreCtx<'_>, key: &NodeKey, adjacency_limit: u32)
@@ -1112,6 +1171,21 @@ capability absent in `StoreCapabilities` and returns
 `GraphStoreError::Unsupported` from the affected method. It does not implement a
 weaker version — a silently weakened guarantee is worse than an absent
 capability, because the gear can route around the second and not the first.
+
+**Found while building the prototype: the built-in store declines the snapshot
+obligation.** A true repeatable-read snapshot needs one transaction held across
+the several calls that share it. The secure ORM's transaction API owns its
+transaction for the duration of a single closure and the runner is sealed, so a
+gear has no way to keep one alive between trait calls — the prototype's
+PostgreSQL store therefore declares `snapshots` absent and `begin_read` returns
+the revision observed when the read began, with the arms not isolated from a
+concurrent commit. This is the mechanism above working as intended rather than
+an exception to it: the capability is declared absent instead of approximated,
+and the in-memory fake does honour the obligation, so the conformance case still
+has a passing implementation and the asymmetry is visible rather than assumed.
+Closing it needs a platform API for a caller-held snapshot handle; until then a
+deployment that requires cross-arm isolation cannot get it from the built-in
+store.
 
 ##### `GraphEngineV1`
 
@@ -1159,6 +1233,15 @@ Two shapes here are consequences of the PG19 spike rather than preference: the
 direction is explicit because the undirected shorthand plans as an all-vertex
 probe, and expansion is a one-hop primitive because multi-hop chain patterns
 enumerate paths and explode on hubs.
+
+**Found while building the prototype: the caller deduplicates edges, not just
+nodes.** `expand` reports the edges it traversed for one frontier, and an edge
+is incident to both of its endpoints — so a walk that visits both meets it
+twice, once expanding the source and once expanding the destination. Per-hop
+node dedup does not remove it, because the two sightings happen on different
+hops. The chaining caller therefore keys seen edges as well as seen nodes;
+without that, a two-hop walk of `a → b → c` reports `a → b` twice and anything
+drawing or counting the result is wrong.
 
 When an engine cannot enforce a scope property it returns
 `GraphEngineError::ScopeNotEnforceable` rather than executing with a weaker
@@ -1489,6 +1572,26 @@ Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by mi
 The SQL/PGQ property graph is created by a gear migration alongside the tables, so every fresh database can serve `GRAPH_TABLE` queries without manual setup; the platform migration runner executes that DDL without special handling.
 
 `tenant_id` is the designated partition key and participates in every primary, unique, and foreign-key contract from day one (e.g., nodes are unique on `(tenant_id, node_key)` and edges reference `(tenant_id, node_id)`), so adopting PostgreSQL partitioning at scale is a physical reorganization, not an identity migration (ADR-0001 § scale envelope). `metrics_cache` is written by the analytics gear and its growth is bounded by that gear's retention limits (ADR-0007); this gear reads it for annotation only.
+
+**Found while building the prototype: two PostgreSQL details this schema
+depends on.**
+
+- **A RESTRICT refusal reports two different SQLSTATEs by major.** PostgreSQL 18
+  gave `ON DELETE RESTRICT` its own code: a refusal arrives as `23001`
+  (`restrict_violation`) on 18 and later, and as `23503`
+  (`foreign_key_violation`) on 17 and earlier — `NO ACTION` still reports
+  `23503` everywhere. The endpoint FKs above are RESTRICT, so a classifier that
+  knows only `23503` reports "internal error" on exactly the deployments this
+  gear targets. Both codes must classify as a foreign-key violation. This is
+  pure PostgreSQL, unrelated to the graph features, and any gear on 18+ with
+  RESTRICT keys meets it.
+- **The text-search configuration cannot be a bound parameter.**
+  `websearch_to_tsquery` takes a `regconfig`, not text, so binding the
+  configuration name fails at runtime with "function
+  websearch_to_tsquery(text, text) does not exist". The name is a compile-time
+  constant shared with the index migration rather than caller data, so it is
+  written into the statement while the caller's query text stays bound — which
+  is also what keeps the predicate and the GIN index on one expression.
 
 #### Table: gts_type
 
@@ -1922,6 +2025,25 @@ embed it, and a continuation against a newer revision is answered with the
 recorded revision's data when still retained, or a typed stale-token error
 otherwise — never a silent mix of revisions.
 
+**Found while building the prototype: two of these are not yet reachable.**
+
+- **Tabular projection does not report the revision.** Its response envelope is
+  the platform's `Page`, and its continuation token the platform's `CursorV1`;
+  neither has a member a gear can put the revision in, and using the platform
+  binding is mandatory for this surface (`fr-tabular-projection`). Node read,
+  search, traversal and ingest all report the pair. Until the platform offers a
+  slot, a caller that needs a projection page bound to a revision reads the
+  revision surface alongside it and compares — which is weaker, because the two
+  calls are not one snapshot.
+- **The snapshot is per-statement, not per-read, on the built-in store.** See
+  § 3.3, where the store declines the snapshot obligation: holding one
+  transaction across the calls that make up a compound read is not expressible
+  through the secure ORM today. Each statement is individually consistent; the
+  arms are not isolated from a commit landing between them.
+
+Both are recorded as platform asks rather than as design changes: the contract
+above is what the gear should provide, and both gaps close without changing it.
+
 Metric computation follows the same rule (epoch, revision and topology read from
 one snapshot) and publishes conditionally: after computing, the writer re-checks
 that the tenant's current `(epoch, revision)` still equals the captured pair and
@@ -2082,7 +2204,7 @@ returns to `Healthy`. A degraded component never silently widens behavior.
 | Component | State | Blocked operations (canonical rejection) | Operations that remain available | Recovery transition |
 |---|---|---|---|---|
 | Database, migrations | `Unhealthy` — unreachable or migrations unapplied | Everything; gear not ready, no traffic admitted | None | Connectivity restored and migrations applied; probe re-runs on an interval and flips to `Healthy` without restart |
-| Server major / SQL/PGQ | `Degraded` — server below 19, or property graph absent on 19+ | SQL/PGQ backend reported unavailable; nothing rejected | All traversal via the iterative-CTE and entity-query backends; everything else | Automatic when the server is upgraded and the property graph is present; capability re-probed at startup and on reconnect |
+| Server major / SQL/PGQ | `Degraded` — server below 19, or property graph absent on 19+ | SQL/PGQ backend reported unavailable; nothing rejected | All traversal via the iterative-CTE and entity-query backends; everything else | The migration re-probes when it next runs and creates the property graph; a gear cannot re-probe at runtime (see § 2.2), so an in-place server upgrade is picked up on the next migration run rather than on reconnect |
 | Server major / SQL/PGQ | `Unhealthy` — SQL/PGQ explicitly configured, server cannot provide it | Everything; gear not ready, naming the required major | None | Operator upgrades the server or removes the explicit selector; deliberate, because silently substituting backend semantics would hide a deployment error |
 | AuthZ resolver | `Degraded` — elevated latency | Nothing; requests consume more of their deadline | All | Automatic when latency returns below threshold |
 | AuthZ resolver | `Unhealthy` — unreachable | Every authenticated data path fails closed, `unavailable` / `DEPENDENCY_UNAVAILABLE`; gear not ready | Unauthenticated health/readiness endpoints only | Automatic on reconnect; no local state to rebuild |
@@ -2360,6 +2482,21 @@ permissions before any runtime registration happens. Registration is idempotent
 for byte-identical schemas; a schema change to a base type is a new GTS version,
 never an in-place edit, because producer types are already derived from the
 existing one.
+
+**Found while building the prototype: publication happens twice, in two
+registries, at two moments.** The paragraph above describes the platform
+types-registry, which is what producers browse. The gear also keeps its own
+per-tenant projection of the types it validates against (`gts_type`, § 3.7), and
+that copy cannot be written at startup: it is per tenant, and the tenants are
+not known then. It is published on a tenant's **first type registration**, with
+whichever base schemas that tenant is missing prepended to the caller's own
+batch, so ancestors and descendants commit together.
+
+Without that, the first registration a producer ever attempts fails on an
+ancestor nobody registered — and it fails for the producer, not for the gear,
+which is the wrong place for the error to appear. Deferring to first use rather
+than seeding at startup also means a tenant that never touches the graph carries
+no rows, and a tenant created later still finds its ancestors.
 
 ## 5. Traceability
 
