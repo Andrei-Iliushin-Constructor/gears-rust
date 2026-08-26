@@ -29,6 +29,7 @@ pub mod domain;
 pub mod gear;
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod test_support;
 
 pub use gear::StaticLicensePlugin;

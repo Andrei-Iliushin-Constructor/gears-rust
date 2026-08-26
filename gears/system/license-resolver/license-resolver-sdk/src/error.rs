@@ -127,5 +127,6 @@ impl From<LicenseResolverError> for CanonicalError {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "error_tests.rs"]
 mod error_tests;

@@ -87,3 +87,8 @@ impl Gear for StaticLicensePlugin {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "gear_tests.rs"]
+mod gear_tests;

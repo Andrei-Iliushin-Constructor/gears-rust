@@ -7,6 +7,7 @@ pub mod service;
 pub mod validation;
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub mod test_support;
 
 pub use error::DomainError;

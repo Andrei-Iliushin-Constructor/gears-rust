@@ -151,5 +151,6 @@ pub struct LicenseResourceV1<M: gts::GtsSchema> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "gts_tests.rs"]
 mod gts_tests;

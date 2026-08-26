@@ -153,3 +153,15 @@ fn choose_plugin_failures_map_onto_the_domain() {
         "got: {invalid:?}"
     );
 }
+
+#[test]
+fn plugin_internal_reason_is_kept_verbatim() {
+    let err = DomainError::from_plugin(
+        "gts.x",
+        LicenseResolverError::Internal("backend bug".to_owned()),
+    );
+    assert!(
+        matches!(err, DomainError::Internal(ref msg) if msg == "backend bug"),
+        "got: {err:?}"
+    );
+}

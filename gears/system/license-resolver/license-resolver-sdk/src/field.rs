@@ -119,5 +119,6 @@ impl core::fmt::Display for ValidationReason {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "field_tests.rs"]
 mod field_tests;

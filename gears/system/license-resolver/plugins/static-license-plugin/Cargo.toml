@@ -52,3 +52,4 @@ inventory = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
+tokio-util = { workspace = true }

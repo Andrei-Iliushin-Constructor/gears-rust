@@ -96,3 +96,8 @@ pub fn build_default_adapter(vendor: &str) -> Arc<LicenseMetricsMeter> {
     let meter = opentelemetry::global::meter_with_scope(scope);
     Arc::new(LicenseMetricsMeter::new(&meter, DEFAULT_PREFIX, vendor))
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "metrics_tests.rs"]
+mod metrics_tests;

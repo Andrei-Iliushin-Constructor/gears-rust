@@ -17,4 +17,5 @@ pub mod gear;
 pub mod infra;
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod test_contracts;

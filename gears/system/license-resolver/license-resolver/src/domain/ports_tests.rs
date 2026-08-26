@@ -75,3 +75,54 @@ fn check_outcome_labels_are_distinct() {
     unique.dedup();
     assert_eq!(unique.len(), labels.len(), "labels must be distinct");
 }
+
+#[test]
+fn every_domain_error_maps_onto_its_check_outcome() {
+    use crate::domain::DomainError;
+
+    let cases = [
+        (
+            DomainError::ContractViolation { violations: vec![] },
+            CheckOutcome::InvalidRequest,
+        ),
+        (
+            DomainError::PluginNotFound {
+                vendor: "acme".to_owned(),
+            },
+            CheckOutcome::NoPlugin,
+        ),
+        (
+            DomainError::TypesRegistryUnavailable("down".to_owned()),
+            CheckOutcome::Unavailable,
+        ),
+        (
+            DomainError::PluginUnavailable {
+                gts_id: "gts.x".to_owned(),
+                reason: "gone".to_owned(),
+            },
+            CheckOutcome::Unavailable,
+        ),
+        (DomainError::Unauthorized, CheckOutcome::Unauthorized),
+        (
+            DomainError::InvalidPluginInstance {
+                gts_id: "gts.x".to_owned(),
+                reason: "bad".to_owned(),
+            },
+            CheckOutcome::Error,
+        ),
+        (
+            DomainError::ContractUnusable {
+                type_id: "gts.x~".to_owned(),
+                reason: "bad".to_owned(),
+            },
+            CheckOutcome::Error,
+        ),
+        (
+            DomainError::Internal("boom".to_owned()),
+            CheckOutcome::Error,
+        ),
+    ];
+    for (err, expected) in cases {
+        assert_eq!(CheckOutcome::from(&err), expected, "for {err:?}");
+    }
+}

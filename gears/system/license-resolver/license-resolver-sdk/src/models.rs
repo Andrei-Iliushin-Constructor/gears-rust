@@ -236,5 +236,6 @@ impl LicenseDecision {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "models_tests.rs"]
 mod models_tests;

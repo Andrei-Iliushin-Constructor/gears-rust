@@ -325,3 +325,69 @@ async fn all_violations_are_collected() {
         "expected both the bad type and the missing property: {violations:?}"
     );
 }
+
+#[tokio::test]
+async fn uncompilable_contract_schema_is_catalog_drift() {
+    let mut body = <TestModelUsageResourceV1 as GtsSchema>::gts_schema_with_refs();
+    body["pattern"] = json!("[");
+    let drifted = GtsTypeSchema::try_new(
+        GtsTypeId::new(MODEL_USAGE_RESOURCE),
+        body,
+        None,
+        Some(Arc::new(resource_base_schema())),
+    )
+    .expect("an uncompilable schema is still a well-formed type-schema");
+
+    let validator =
+        validator(FakeContractRegistry::new().with_contracts([user_subject_schema(), drifted]));
+    let err = validator
+        .validate(&conforming_request())
+        .await
+        .expect_err("an uncompilable schema must not pass");
+    assert!(
+        matches!(err, DomainError::ContractUnusable { ref reason, .. } if reason.contains("not a valid JSON Schema")),
+        "expected ContractUnusable naming the compile failure, got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn null_admitted_subjects_admits_nobody() {
+    let mut body = <TestModelUsageResourceV1 as GtsSchema>::gts_schema_with_refs();
+    body["x-gts-traits"]["admitted_subjects"] = json!(null);
+    let drifted = GtsTypeSchema::try_new(
+        GtsTypeId::new(MODEL_USAGE_RESOURCE),
+        body,
+        None,
+        Some(Arc::new(resource_base_schema())),
+    )
+    .expect("a null trait is still a well-formed type-schema");
+
+    let validator =
+        validator(FakeContractRegistry::new().with_contracts([user_subject_schema(), drifted]));
+    let violations = violations_of(&validator, &conforming_request()).await;
+    assert_eq!(reasons(&violations), vec![field::SUBJECT_NOT_ADMITTED]);
+}
+
+#[tokio::test]
+async fn non_string_admitted_subjects_entry_is_catalog_drift() {
+    let mut body = <TestModelUsageResourceV1 as GtsSchema>::gts_schema_with_refs();
+    body["x-gts-traits"]["admitted_subjects"] = json!([USER_SUBJECT, 42]);
+    let drifted = GtsTypeSchema::try_new(
+        GtsTypeId::new(MODEL_USAGE_RESOURCE),
+        body,
+        None,
+        Some(Arc::new(resource_base_schema())),
+    )
+    .expect("a drifted trait is still a well-formed type-schema");
+
+    let validator =
+        validator(FakeContractRegistry::new().with_contracts([user_subject_schema(), drifted]));
+    let err = validator
+        .validate(&conforming_request())
+        .await
+        .expect_err("a non-string entry must not pass");
+    assert!(
+        matches!(err, DomainError::ContractUnusable { ref reason, .. } if reason.contains("non-string")),
+        "expected ContractUnusable naming the non-string entry, got: {err:?}"
+    );
+}
