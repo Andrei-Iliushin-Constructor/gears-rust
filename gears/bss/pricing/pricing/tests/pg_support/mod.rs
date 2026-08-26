@@ -198,6 +198,13 @@ use toolkit_db::{ConnectOpts, Db, connect_db};
 
 /// The image tag every Postgres suite pins, matching `postgres_migrations.rs`;
 /// see its note on why the image default is not used.
+///
+/// Below the workspace floor (`test_containers::POSTGRES_TAG`) on purpose: this
+/// suite's own floor predates it and nothing here depends on 18-only behavior.
+/// Going through `postgres_tagged` rather than `postgres().with_tag(PG_TAG)`
+/// keeps this floor overridable by `GEARS_TEST_PG_TAG` for a CI version matrix
+/// — chaining `.with_tag` onto the workspace default would silently opt out of
+/// it (docs/TESTING.md 4.4).
 pub const PG_TAG: &str = "16-alpine";
 
 /// The one container's name — fixed, so a later run finds it instead of
@@ -454,8 +461,7 @@ async fn start_named(docker: &Docker) -> Option<ContainerAsync<Postgres>> {
         // Bound per iteration rather than carried across them: the sibling check
         // below returns without reading it, which makes a loop-scoped `last` a
         // dead assignment on that path (`-D unused-assignments`).
-        let last = match Postgres::default()
-            .with_tag(PG_TAG)
+        let last = match test_containers::postgres_tagged(PG_TAG)
             .with_container_name(HARNESS_CONTAINER)
             .start()
             .await

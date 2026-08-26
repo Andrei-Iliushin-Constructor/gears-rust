@@ -1639,6 +1639,7 @@ dependencies = [
  "cf-gears-resource-group-sdk",
  "cf-gears-tenant-resolver",
  "cf-gears-tenant-resolver-sdk",
+ "cf-gears-test-containers",
  "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-db",
@@ -1833,6 +1834,7 @@ name = "cf-gears-bss-coord"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "cf-gears-test-containers",
  "cf-gears-toolkit-db",
  "cf-gears-toolkit-db-macros",
  "cf-gears-toolkit-security",
@@ -1884,6 +1886,7 @@ dependencies = [
  "cf-gears-bss-coord",
  "cf-gears-bss-ledger",
  "cf-gears-bss-ledger-sdk",
+ "cf-gears-test-containers",
  "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-db",
@@ -1948,6 +1951,7 @@ dependencies = [
  "cf-gears-bss-fixtures-conformance",
  "cf-gears-bss-pricing",
  "cf-gears-bss-pricing-sdk",
+ "cf-gears-test-containers",
  "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-db",
@@ -2091,6 +2095,7 @@ dependencies = [
  "cf-gears-cluster-conformance",
  "cf-gears-cluster-sdk",
  "cf-gears-standalone-cluster-plugin",
+ "cf-gears-test-containers",
  "cf-gears-toolkit",
  "cf-postgres-cluster-plugin",
  "parking_lot",
@@ -2815,6 +2820,7 @@ dependencies = [
  "cf-gears-authz-resolver",
  "cf-gears-authz-resolver-sdk",
  "cf-gears-resource-group-sdk",
+ "cf-gears-test-containers",
  "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-db",
@@ -3158,12 +3164,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-gears-test-containers"
+version = "0.1.0"
+dependencies = [
+ "serial_test",
+ "temp-env",
+ "testcontainers",
+ "testcontainers-modules",
+]
+
+[[package]]
 name = "cf-gears-timescaledb-usage-collector-plugin"
 version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "bigdecimal",
+ "cf-gears-test-containers",
  "cf-gears-toolkit",
  "cf-gears-toolkit-macros",
  "cf-gears-toolkit-odata",
@@ -3400,6 +3417,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bigdecimal",
+ "cf-gears-test-containers",
  "cf-gears-toolkit-db-macros",
  "cf-gears-toolkit-odata",
  "cf-gears-toolkit-security",
@@ -3837,6 +3855,7 @@ dependencies = [
  "cf-gears-cluster-conformance",
  "cf-gears-cluster-sdk",
  "cf-gears-standalone-cluster-plugin",
+ "cf-gears-test-containers",
  "cf-gears-toolkit",
  "cf-gears-toolkit-macros",
  "dashmap",
@@ -12942,7 +12961,9 @@ checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "proc-macro2",
  "serde_json",
+ "syn 2.0.117",
 ]
 
 [[package]]
