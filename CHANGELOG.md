@@ -9,6 +9,13 @@ release-plz updates this file in the Release PR.
 
 ## [Unreleased]
 
+### Fixed
+
+- Documented that OoP HTTP bootstrap `oop_http.allow_loopback_advertise` **defaults to `false`**. A loopback
+  or unspecified `advertise_uri` (`127.0.0.1`, `::1`, `localhost`, `0.0.0.0`, `[::]`) — including the value
+  derived from an unspecified `listen_addr` when `advertise_uri` is unset — refuses to boot. Set a routable
+  `advertise_uri`, or `oop_http.allow_loopback_advertise: true` for single-host / local-dev. (#4581)
+
 ## [0.10.19](https://github.com/constructorfabric/gears-rust/compare/cf-gears-mini-chat-sdk-v0.10.18...cf-gears-mini-chat-sdk-v0.10.19) - 2026-08-24
 
 ### Other
