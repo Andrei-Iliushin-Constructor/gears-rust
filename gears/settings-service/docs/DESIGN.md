@@ -103,10 +103,10 @@ The service is delivered as a **Constructor Fabric Gear** — the platform's uni
 | `cpt-cf-settings-service-fr-contributed-lifecycle` | Reconciler match by version-stripped instance path; new/compatible/upgrade cases; retire → `status=retired` with values retained; re-declare-to-revive |
 | `cpt-cf-settings-service-fr-setting-scope-class` | `ScopeClass` enum on the declaration drives resolution; per-class algorithm in the Value Resolver; `global ⇒ tenant_overridable=false` enforced by a DB check |
 | `cpt-cf-settings-service-fr-typed-value-validation` | Type Validator against the value type in the key's left half + traits; `secret` routed to the Secret Manager; `public`/`pii`/`secret` classification drives masking |
-| `cpt-cf-settings-service-fr-set-value` | Staging Manager writes `pending_changes` on the pending plane; one active pending per `(declaration, scope)`; discard individually or in bulk |
-| `cpt-cf-settings-service-fr-validate-before-set` | Apply Orchestrator `preview` computes a `checksum`; `POST /v1/applies` requires a fresh step-up assertion verified by a `StepUpVerifier` |
-| `cpt-cf-settings-service-fr-live-read-activation` | Commit-per-change, then local eviction, then signal publish; per-change `ApplyChangeResult`; consumers self-react on `apply_notification` |
-| `cpt-cf-settings-service-fr-tenant-overrides` | `stage_set` / `clone_override` at any tenant inside the caller's subtree; the override row is created at the target tenant |
+| `cpt-cf-settings-service-fr-set-value` | Value Writer validates then commits per change; a `set` may carry several settings with per-item results and no atomicity across them |
+| `cpt-cf-settings-service-fr-validate-before-set` | Value Writer `validate` is read-only and repeatable; every write requires a fresh step-up assertion verified by a `StepUpVerifier` |
+| `cpt-cf-settings-service-fr-live-read-activation` | Commit-per-change, then local eviction, then signal publish; per-change result in the response; consumers self-react on `change_notification` |
+| `cpt-cf-settings-service-fr-tenant-overrides` | `set` / `clone` at any tenant inside the caller's subtree; the override row is created at the target tenant |
 | `cpt-cf-settings-service-fr-cascading-inheritance` | Ancestor-id walk via the Tenant Resolver, nearest-match wins; `inheritance_trail` on the read; bounded `cascading_impact` report |
 | `cpt-cf-settings-service-fr-tenant-scope-enforcement` | Enforced by the platform data path, not by hand-written predicates: `PolicyEnforcer` compiles the decision into an `AccessScope` and `SecureConn` applies it as automatic `WHERE` clauses (§4.8 *The Data Path*). Reads are further gated by `tenant_visible`, writes by `tenant_overridable` |
 | `cpt-cf-settings-service-fr-authn-role-gating` | Bearer token via the AuthN Resolver, then a fail-closed `PolicyEnforcer` decision; step-up on apply and on behavior-affecting declaration actions |
@@ -116,22 +116,22 @@ The service is delivered as a **Constructor Fabric Gear** — the platform's uni
 | `cpt-cf-settings-service-fr-feature-license-gating` | `licence_feature` checked through the License Resolver on administrative read paths only; the in-process reader is not gated |
 | `cpt-cf-settings-service-fr-standard-advanced-mode` | `mode` on the declaration; mode-filtered lists expose `hidden_advanced_count`; per-user preference persisted |
 | `cpt-cf-settings-service-fr-search-discoverability` | Trigram GIN indexes over key/description/category/value with classification split into the index predicates |
-| `cpt-cf-settings-service-fr-defaults-revert` | `default_value` column is authoritative and immutable; `stage_revert` returns the resolved fallback for a pre-commit preview |
+| `cpt-cf-settings-service-fr-defaults-revert` | `default_value` column is authoritative and immutable; `revert` returns the resolved fallback, and `validate` reports it beforehand |
 | `cpt-cf-settings-service-fr-domain-affinity-filtering` | Optional `domain_affinity` on category and declaration; hub filters by the admin's current domain |
 | `cpt-cf-settings-service-fr-dependency-group-declaration` | **Deferred, not dropped** — the PRD carries this at `p3`, in scope. Not designed for v1 because no setting pair with a cross-setting invariant has been identified; the design agenda is the open question in §6.2 |
 | `cpt-cf-settings-service-fr-bulk-effective-read` | `resolve_bulk` (key set) sharing one ancestry walk per scope, with independent per-key outcomes; surfaced on the SDK as `get_effective_bulk` and on REST as `GET /v1/settings` filtered by key set — same visibility, scope and masking rules as the single read (§4.2 *Value Resolver*, §4.3, §4.5) |
 | `cpt-cf-settings-service-fr-subject-scoped-values` | Value identity carries `(subject_type, subject_id)` beside `tenant_id`, giving four scope shapes — platform, tenant, and either of those with a subject — each with its own partial unique index, plus a `CHECK` requiring a subject to be named by both of its columns or by neither; subject-naming and subject-less requests resolve on independent tracks that meet only at the Schema Default, each walking the scope chain by Scope Class, never walking subjects as ancestors; scope shape and signal attributes are subject-aware from v1 while v1 writes only `NULL`s, so no migration is needed to switch it on (§4.2 *Value Resolver*, §4.7, [Settings Activation](./DESIGN-activation.md) §4.4) |
-| `cpt-cf-settings-service-fr-barrier-default-seam` | `get_ancestors` marks a tenant **standalone**; inheritance into it is unchanged (the ancestor walk is not truncated), while the tenant is removed from every ancestor's subtree for reads and writes — excluded from single and bulk reads, from the search corpus, and from `cascading_impact`'s `changed[]` **and** `total_changed`. Isolation is per tenant, so no per-declaration flag exists (§4.2 *Value Resolver*, §4.2 *Staging Manager*, §4.2 *Search*) |
+| `cpt-cf-settings-service-fr-barrier-default-seam` | `get_ancestors` marks a tenant **standalone**; inheritance into it is unchanged (the ancestor walk is not truncated), while the tenant is removed from every ancestor's subtree for reads and writes — excluded from single and bulk reads, from the search corpus, and from `cascading_impact`'s `changed[]` **and** `total_changed`. Isolation is per tenant, so no per-declaration flag exists (§4.2 *Value Resolver*, §4.2 *Value Writer*, §4.2 *Search*) |
 
 #### NFR Allocation
 
 | NFR ID | NFR Summary | Allocated To | Design Response | Verification Approach |
 |--------|-------------|--------------|-----------------|----------------------|
 | `cpt-cf-settings-service-nfr-performance-read-cache` | Cache-served effective reads stay on the hot path | Effective-Value Cache + Settings Reader | In-process cache keyed by `(key, scope)`; invalidate on apply; `cache_ttl_seconds` backstop; resolve cost is O(depth), not O(tenant count) | Integration benchmark on a warm cache and on a seeded hierarchy |
-| `cpt-cf-settings-service-nfr-reliability-validated-set` | Unapplied changes never affect running services | Staging Manager + Apply Orchestrator | Pending rows are never read by resolution; failed items stay pending; apply is checksum-keyed and idempotent | API + E2E apply-failure and retry paths |
+| `cpt-cf-settings-service-nfr-reliability-validated-set` | An invalid or stale write stores nothing | Value Writer | Validation runs before persistence; the commit is guarded on `If-Match` and refuses a moved value `412` | API + E2E rejection and stale-write paths |
 | `cpt-cf-settings-service-nfr-scope-isolation` | No cross-scope leakage on any read path | Value Resolver + Search + REST layer | Server-side subtree enforcement; `404` for non-visible settings; classification split in index predicates | Integration + E2E isolation tests per read path |
 | `cpt-cf-settings-service-nfr-security-baseline` | AuthN, secret confidentiality, step-up, audit | Secret Manager + Audit Emitter + AuthZ | Secrets held by reference and masked on every administrative path; plaintext only via the audited machine path; fail-closed audit | API/E2E secret and audit tests |
-| `cpt-cf-settings-service-nfr-efficiency-live-read` | No platform-initiated reload or restart | Apply Orchestrator | Apply commits and publishes signals only; consumers self-react | Assert zero reload/restart calls in apply tests |
+| `cpt-cf-settings-service-nfr-efficiency-live-read` | No platform-initiated reload or restart | Value Writer | The writer commits and publishes signals only; consumers self-react | Assert zero reload/restart calls in write tests |
 | `cpt-cf-settings-service-nfr-availability` | Read path stays available | Cache + Settings Reader | Warm reads served from cache; distinguishable `Unavailable` error so consumers own their degradation posture | Operational SLO from liveness aggregation |
 | `cpt-cf-settings-service-nfr-scale-growth` | Tenant, setting, and audit volume | Data model + Audit Subsystem | Bounds in §7 *NFR Mapping & Scale Model*; audit volume and retention are requirements on the platform Audit Subsystem | Load test against the declared bounds |
 | `cpt-cf-settings-service-nfr-ops-set-monitoring` | Aggregate apply-failure visibility | Metrics | `settings_apply_failure_ratio` on shared dashboards plus an alert-routing rule | Dashboard and alert-rule review |
@@ -145,9 +145,9 @@ The service is delivered as a **Constructor Fabric Gear** — the platform's uni
 ├─────────────────────────────────────────────────────────────┤
 │  settings-service-sdk │ Reader + Contribution traits, DTOs  │
 ├─────────────────────────────────────────────────────────────┤
-│  settings-service     │ REST, authz, staging, apply, search │
+│  settings-service     │ REST, authz, validate, set, search  │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ Domain: resolver · staging · apply · validator ·     │   │
+│  │ Domain: resolver · writer · validator ·              │   │
 │  │         scope-class engine · secret manager          │   │
 │  ├──────────────────────────────────────────────────────┤   │
 │  │ Infrastructure: effective-value cache · audit emitter│   │
@@ -163,8 +163,8 @@ The service is delivered as a **Constructor Fabric Gear** — the platform's uni
 | Layer | Responsibility | Technology |
 |-------|---------------|------------|
 | SDK | Public trait definitions, transport-agnostic models, errors, shared GTS type ids | Rust crate (`settings-service-sdk`) |
-| Gear | REST surface, authorization, declaration lifecycle, staging and apply, resolution, search | Rust crate (`settings-service`), ToolKit gear, Axum |
-| Domain | Effective-value resolution, Scope Class behaviour, staging/apply state machine, type validation, secret handling | In-process Rust modules |
+| Gear | REST surface, authorization, declaration lifecycle, value writes, resolution, search | Rust crate (`settings-service`), ToolKit gear, Axum |
+| Domain | Effective-value resolution, Scope Class behaviour, the value write path, type validation, secret handling | In-process Rust modules |
 | Infrastructure | Hot-path effective-value cache with signal-driven invalidation; fail-closed audit emission | In-memory cache, Event Broker client |
 | External | Type and trait resolution, tenant ancestry, authentication and authorization decisions, secret storage, event transport, entitlement | `types-registry`, `tenant-resolver`, `authn-resolver`, `authz-resolver`, `credstore`, `event-broker`, `license-resolver`. Audit is **not** external in R1 — the store is gear-local (§4.2 *Audit Emitter*) |
 | Storage | Declarations, categories, values, pending changes, apply records, audit records | PostgreSQL via `toolkit-db`, reached through `SecureConn` (§4.8 *The Data Path*) |
@@ -179,7 +179,7 @@ C4Context
  Person(tenant_admin, "Tenant Admin", "Configures delegated settings within own tenant scope")
 
  Enterprise_Boundary(vhp, "the platform OSS") {
- System(settings_service, "Settings Service", "Declarative, centralized platform configuration; includes Settings Activation — publishes apply_notification + cache_invalidate on apply")
+ System(settings_service, "Settings Service", "Declarative, centralized platform configuration; includes Settings Activation — publishes change_notification + cache_invalidate on a value change")
  System(types_registry, "GTS Schema Registry", "Type + trait validation for values")
  System(authz, "AuthZ Resolver", "Access gating for read/mutate/apply")
  System(tenant_resolver, "Tenant Resolver (the Tenant Resolver)", "Org-hierarchy ancestry for cascade")
@@ -204,8 +204,8 @@ C4Context
  Rel(settings_service, audit, "ship audit records (R2; R1 writes locally)", "audit API")
  Rel(settings_service, license_resolver, "check feature/licence entitlement (read paths)", "in-process (ClientHub)")
  Rel(settings_service, credstore, "store/resolve secret values (machine path)", "credstore API")
- Rel(settings_service, event_broker, "publish apply/lifecycle events + activation signals (apply_notification per subscriber, cache_invalidate broadcast); consume tenant_deleted", "Event Broker")
- Rel(modules, event_broker, "subscribe to apply_notification; ack activation", "Event Broker")
+ Rel(settings_service, event_broker, "publish change/lifecycle events + activation signals (change_notification per subscriber, cache_invalidate broadcast); consume tenant_deleted", "Event Broker")
+ Rel(modules, event_broker, "subscribe to change_notification; ack activation", "Event Broker")
 ```
 
 #### Container View
@@ -216,7 +216,7 @@ C4Container
 
  Container(rest, "REST API", "HTTP/JSON", "Admin & tenant operations")
  Container(clienthub, "Settings Reader (ClientHub)", "In-process trait", "Effective-value reads for services on the hot path")
- Container(domain, "Domain Core", "ToolKit gear", "Resolver, staging, apply, validation, search")
+ Container(domain, "Domain Core", "ToolKit gear", "Resolver, writer, validation, search")
  ContainerDb(postgres, "PostgreSQL", "Database", "Declarations, categories, values, pending, apply")
  Container(cache, "Effective-Value Cache", "In-memory + local invalidation", "Hot-path read cache keyed by (key, scope)")
  Container_Ext(types_registry, "GTS Schema Registry", "ClientHub", "Type + trait validation")
@@ -253,11 +253,11 @@ C4Container
 - **Typed values** validated against GTS schema + traits (scalar and structured), with rendering metadata exposure.
 - **Secret values** — `secret`-trait settings backed by the Credential Store: plaintext never enters the settings DB, cache, search index, or audit trail; masked on every **administrative** read/search/list, with **no human reveal path**. Plaintext resolves only through the **machine-only runtime path** — the `SettingsReaderClient` SDK trait (§4.5), which `ClientHub` may bind locally or to a remote client (§4.9) — and only for a consuming service authorized to that specific setting; every resolution is audited as a secret-use event (§4.2 *Secret Manager*).
 - **Effective-value resolution** with inheritance walk and source trace; hot-path **cache** with invalidation on apply — local in-process. Cross-instance cache coherence is driven by the [Settings Activation](./DESIGN-activation.md) (separate design).
-- **Staged change → explicit, credential-verified Apply**: pending state, pending-changes view, apply preview, step-up, per-change result reporting, and an optimistic-concurrency `checksum` verified at apply time. On Apply the service **commits the value** and publishes the apply signals — a filtered **`apply_notification`** per subscriber (consumer activation) and a **`cache_invalidate`** broadcast (replica cache); consumers read the new value **on demand** (pull) and activate it themselves. Proactive notification is owned by the [Settings Activation](./DESIGN-activation.md) (separate design).
+- **Validate, then set**: a read-only check before writing, a step-up-verified write that validates inline and refuses a stale value, and per-change result reporting. On a write the service **commits the value** and publishes the signals — a filtered **`change_notification`** per subscriber (consumer activation) and a **`cache_invalidate`** broadcast (replica cache); consumers read the new value **on demand** (pull) and activate it themselves. Proactive notification is owned by the [Settings Activation](./DESIGN-activation.md) (separate design).
 - **Multi-tenant overrides**: set/clone/remove tenant overrides; server-side scope enforcement; visibility-gated reads; non-blocking cascading-impact warning.
 - **Standard / Advanced mode** — a per-user complexity split with mode-filtered browsing and search (§4.1, §4.3).
-- **Optimistic-concurrency conflict handling** — `If-Match`/ETag on `PATCH`/`DELETE` and an apply `checksum` (`409 ApplyChecksumMismatch`) so concurrent edits and stale applies fail loudly.
-- **Events** — apply-lifecycle, declaration, and secret-use events published through the platform Event Broker; the **`apply_notification`** consumer signal and the **`cache_invalidate`** cross-instance cache broadcast are owned by the Settings Activation (separate design); `tenant_deleted` consumed for cleanup (§4.4).
+- **Optimistic-concurrency conflict handling** — `If-Match`/ETag on every mutating call, so a concurrent edit fails loudly (`412`) instead of overwriting.
+- **Events** — value-change, declaration, and secret-use events published through the platform Event Broker; the **`change_notification`** consumer signal and the **`cache_invalidate`** cross-instance cache broadcast are owned by the Settings Activation (separate design); `tenant_deleted` consumed for cleanup (§4.4).
 - **Search** (cross-field), **Defaults & Revert**, **Domain Affinity filtering**.
 - **Audit** of all mutations; **feature/licence gating**.
 - **Gear SDK for in-process access** (`settings-service-sdk`: Settings Reader + Contribution clients) for services on the hot path.
@@ -268,7 +268,7 @@ C4Container
 - **Managed-resource desired-state reconciliation** — owned by RMS. This service governs platform configuration, not managed resources.
 - **Org-hierarchy CRUD and closure-table maintenance** — owned by the Tenant Resolver gear.
 - **Role/permission CRUD and authorization decisions** — owned by RBAC Engine and the AuthZ Resolver Plugin.
-- **Hot-reload / restart / template-regeneration execution** — this service commits values and publishes the apply signals (consumer `apply_notification` + replica `cache_invalidate`); it never reloads or restarts a consumer in-process. Heavier activation (reload/restart/regenerate) for components that cannot self-react is owned by the [Settings Activation](./DESIGN-activation.md) and **deferred** (out of scope for v1).
+- **Hot-reload / restart / template-regeneration execution** — this service commits values and publishes the signals (consumer `change_notification` + replica `cache_invalidate`); it never reloads or restarts a consumer in-process. Heavier activation (reload/restart/regenerate) for components that cannot self-react is owned by the [Settings Activation](./DESIGN-activation.md) and **deferred** (out of scope for v1).
 - **Cross-region settings replication; ancestor-level batch apply across descendants; settings export/import** — deferred (PRD Out of Scope).
 - **Bootstrap / boot-critical infrastructure config** (DB and broker endpoints, service identity, platform TLS, ports, domain) — deployment-owned, delivered via ToolKit config at gear init (§4.9, §4.8); never a managed setting.
 - **Frontend visual design / mockups** — owned by a future frontend DESIGN document.
@@ -281,7 +281,7 @@ This document describes the whole gear. It does not all ship at once, and the se
 
 **The defining property: R1 depends on no gear that does not exist.**
 
-Categories and declarations with their lifecycle (`cpt-cf-settings-service-fr-settings-category-model`, `cpt-cf-settings-service-fr-module-contributed-declarations`, `cpt-cf-settings-service-fr-contributed-lifecycle`); GTS typing, validation and secret protection (`cpt-cf-settings-service-fr-typed-value-validation`); Scope Class with cascade, override and source trace (`cpt-cf-settings-service-fr-setting-scope-class`, `cpt-cf-settings-service-fr-tenant-overrides`, `cpt-cf-settings-service-fr-cascading-inheritance`); tenant permission and subtree isolation including the standalone-tenant seam (`cpt-cf-settings-service-fr-tenant-scope-enforcement`, `cpt-cf-settings-service-fr-barrier-default-seam`); authentication and access-level gating with per-category restriction (`cpt-cf-settings-service-fr-authn-role-gating`, `cpt-cf-settings-service-fr-category-access`); staged change → previewed, step-up-verified Apply, effective on next read (`cpt-cf-settings-service-fr-set-value`, `cpt-cf-settings-service-fr-validate-before-set`, `cpt-cf-settings-service-fr-live-read-activation`); revert to ancestor or Schema Default (`cpt-cf-settings-service-fr-defaults-revert`); audited mutations and secret reveals (`cpt-cf-settings-service-fr-audit-mutations`); single and bulk effective reads (`cpt-cf-settings-service-fr-bulk-effective-read`).
+Categories and declarations with their lifecycle (`cpt-cf-settings-service-fr-settings-category-model`, `cpt-cf-settings-service-fr-module-contributed-declarations`, `cpt-cf-settings-service-fr-contributed-lifecycle`); GTS typing, validation and secret protection (`cpt-cf-settings-service-fr-typed-value-validation`); Scope Class with cascade, override and source trace (`cpt-cf-settings-service-fr-setting-scope-class`, `cpt-cf-settings-service-fr-tenant-overrides`, `cpt-cf-settings-service-fr-cascading-inheritance`); tenant permission and subtree isolation including the standalone-tenant seam (`cpt-cf-settings-service-fr-tenant-scope-enforcement`, `cpt-cf-settings-service-fr-barrier-default-seam`); authentication and access-level gating with per-category restriction (`cpt-cf-settings-service-fr-authn-role-gating`, `cpt-cf-settings-service-fr-category-access`); a validated, step-up-verified write, effective on next read (`cpt-cf-settings-service-fr-set-value`, `cpt-cf-settings-service-fr-validate-before-set`, `cpt-cf-settings-service-fr-live-read-activation`); revert to ancestor or Schema Default (`cpt-cf-settings-service-fr-defaults-revert`); audited mutations and secret reveals (`cpt-cf-settings-service-fr-audit-mutations`); single and bulk effective reads (`cpt-cf-settings-service-fr-bulk-effective-read`).
 
 Subject-scoped values (`cpt-cf-settings-service-fr-subject-scoped-values`) enter here as **identity model only** — the columns, the partial unique indexes and the subject-aware API shape (§4.1, §4.7) — with resolution over subjects deferred to R2, which is the split the PRD asks for.
 
@@ -290,7 +290,7 @@ Three things R1 supplies itself rather than waiting on the platform:
 | Need | R1 answer |
 |------|-----------|
 | Audit, which every mutation fails closed on (§4.2 *Audit Emitter*) | A **gear-local sink** writing the record in the mutation's own transaction, and the store of record for the online window. R2 enqueues the same record into ToolKit's transactional outbox, whose handler posts it onward to the platform subsystem — an addition behind the same port, not a replacement |
-| Step-up verification, without which Apply refuses (§4.2 *Apply Orchestrator*) | The **default OIDC/JWKS binding**, built here: the bearer token is already carried in `SecurityContext` and the JWKS machinery already exists in the platform's auth library |
+| Step-up verification, without which every write refuses (§4.2 *Value Writer*) | The **default OIDC/JWKS binding**, built here: the bearer token is already carried in `SecurityContext` and the JWKS machinery already exists in the platform's auth library |
 | A verified machine caller identity, which the reader and contribution traits assume (§5) | **Not supplied — scoped out.** R1 is **Embedded-only**: the SDK traits are bound in-process, which is the one configuration where the trusted-caller model holds (§4.8 *Trusted-Caller Boundary*) |
 
 Not in R1, and what that costs: no consumer notification, so a consumer learns of a change by re-reading (which is what `cpt-cf-settings-service-fr-live-read-activation` requires anyway); no cross-replica invalidation, so a second host serving the same database is stale for at most `cache_ttl_seconds`; no cleanup on tenant deletion, so a deleted tenant's rows persist until R2 consumes the event.
@@ -299,7 +299,7 @@ Not in R1, and what that costs: no consumer notification, so a consumer learns o
 
 Waits on four things this design does not own: **verified machine caller identity** (which unlocks the non-embedded profiles), the **platform Audit Subsystem**, a **tenant-deleted signal** from Account Management, and **per-feature licence entitlement**, which the platform currently implements at base-licence level only.
 
-Contents: the out-of-process deployment profiles; subject-scope resolution on top of R1's identity model; file-valued settings (`cpt-cf-settings-service-fr-file-valued-settings`); cross-field search (`cpt-cf-settings-service-fr-search-discoverability`); mode-filtered reads (`cpt-cf-settings-service-fr-standard-advanced-mode`); feature and licence gating (`cpt-cf-settings-service-fr-feature-license-gating`); tenant-deleted cleanup; and, if the platform delivers a short-lived elevated session and the PRD accepts the weaker guarantee it implies, moving step-up onto it behind the existing `StepUpVerifier` port (§4.2 *Apply Orchestrator*).
+Contents: the out-of-process deployment profiles; subject-scope resolution on top of R1's identity model; file-valued settings (`cpt-cf-settings-service-fr-file-valued-settings`); cross-field search (`cpt-cf-settings-service-fr-search-discoverability`); mode-filtered reads (`cpt-cf-settings-service-fr-standard-advanced-mode`); feature and licence gating (`cpt-cf-settings-service-fr-feature-license-gating`); tenant-deleted cleanup; and, if the platform delivers a short-lived elevated session and the PRD accepts the weaker guarantee it implies, moving step-up onto it behind the existing `StepUpVerifier` port (§4.2 *Value Writer*).
 
 R2 is the first release in which several replicas are the normal case, but **convergence between them is not part of it**: `cpt-cf-settings-service-fr-replica-coherence` is served by the `cache_invalidate` broadcast, which ships with the rest of the activation machinery in R3. Until then replica staleness stays bounded by the reader's `cache_ttl_seconds` backstop — the same degradation as in R1, at a larger scale.
 
@@ -315,13 +315,13 @@ Consumer activation in full (`cpt-cf-settings-service-fr-consumer-activation`) �
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-principle-declaration-value-split`
 
-A setting's **declaration** (key, value type, Schema Default, Scope Class, metadata) is distinct from its **values** at each scope. Declarations are authored — by an administrator or contributed by a gear — and are addressed by immutable UUID on the management plane. Values are staged and applied, and are addressed by `key` on the read plane. Keeping the planes separate is what allows a gear to own a setting's shape while an administrator owns its runtime value.
+A setting's **declaration** (key, value type, Schema Default, Scope Class, metadata) is distinct from its **values** at each scope. Declarations are authored — by an administrator or contributed by a gear — and are addressed by immutable UUID on the management plane. Values are written and read by `key`. Keeping the planes separate is what allows a gear to own a setting's shape while an administrator owns its runtime value.
 
-#### Staging Governs Values; Declarations Are Gated by Immutability
+#### Values Are Written; Declarations Are Gated by Immutability
 
-- [ ] `p1` - **ID**: `cpt-cf-settings-service-principle-staging-scope`
+- [ ] `p1` - **ID**: `cpt-cf-settings-service-principle-write-scope`
 
-Only value operations are staged. A declaration edit has no in-effect value to gate, so descriptive metadata applies immediately — but the fields that *would* change live resolution (Schema Default, value type, Scope Class) are immutable rather than staged, and the two actions that change whether a setting resolves at all (retire, reactivate) require credential step-up. No ungated path can alter a live setting's resolution.
+The value write path covers value operations only. A declaration edit has no in-effect value to gate, so descriptive metadata applies immediately — but the fields that *would* change live resolution (Schema Default, value type, Scope Class) are immutable, and the two actions that change whether a setting resolves at all (retire, reactivate) require credential step-up. No ungated path can alter a live setting's resolution.
 
 #### Behaviour Derives From One Declared Attribute
 
@@ -405,7 +405,7 @@ A `file-reference`-trait value names a file held by the `file-storage` gear; the
 
 **What this does *not* mirror about a secret is the byte path.** A secret's plaintext flows *through* this service, and the SDK deliberately withholds a credstore-resolvable handle, because credstore knows nothing of settings or consumers and only this service can enforce per-setting authorization and the secret-use audit record (§4.2 *Secret Manager*). `file-storage` enforces its own access on both its control and data planes, so routing file content through here would buy no guarantee and cost the one property this section exists to keep. Stored by reference: alike. Who carries the content: opposite.
 
-**The reference is always pinned to a version.** `file-storage` guarantees content immutability per version — a backend object lives at `/{file_id}/{version_id}` and is immutable, and a replacement is always a new version plus a pointer swap — so `version_id` *is* the identity of the bytes. A reference naming only `file_id` would instead resolve through that gear's `content_id` pointer, which an ordinary `bind` call swaps under optimistic CAS: content would change for every consumer with **no** value change, no staged change, no apply, no audit record, and no activation signal. This design therefore has **no floating variant** — one shape, both fields, always. Showing consumers different content means repointing the setting at another version, which is an ordinary staged change (§4.2 *Staging Manager*). A stored content checksum would add nothing: it would restate a fact `file-storage` already guarantees, this service never reads bytes so could never compare it, and a consumer that wants to verify its download reads the per-version hash from `file-storage` directly.
+**The reference is always pinned to a version.** `file-storage` guarantees content immutability per version — a backend object lives at `/{file_id}/{version_id}` and is immutable, and a replacement is always a new version plus a pointer swap — so `version_id` *is* the identity of the bytes. A reference naming only `file_id` would instead resolve through that gear's `content_id` pointer, which an ordinary `bind` call swaps under optimistic CAS: content would change for every consumer with **no** value change, no write, no audit record and no activation signal. This design therefore has **no floating variant** — one shape, both fields, always. Showing consumers different content means repointing the setting at another version, which is an ordinary write (§4.2 *Value Writer*). A stored content checksum would add nothing: it would restate a fact `file-storage` already guarantees, this service never reads bytes so could never compare it, and a consumer that wants to verify its download reads the per-version hash from `file-storage` directly.
 
 > **This rests on a `file-storage` invariant.** Version immutability is that gear's published contract, not something this service can verify — it never reads content. Were the invariant weakened, `version_id` would stop being a content identity and this section would need revisiting.
 
@@ -419,9 +419,9 @@ What follows from that, stated so nobody has to discover it:
 - a reference whose file or version was deleted keeps resolving as a perfectly valid **value**; it is not flagged `needs_review`, is not excluded from apply, and no event is consumed to detect it. A dangling reference is discovered at fetch, by the consumer, from `file-storage`;
 - a caller that may write the setting may therefore attach a file it cannot itself read. Whether the consumer that fetches it can is between that consumer and `file-storage`.
 
-> **Decision on record.** Validation of file references was considered and **deliberately dropped** (design review, 2026-08-24): the reference is opaque to this service and its usability is the caller's responsibility. This reverses three of the four properties requested in review — declared content-type/size constraints checked at staging, refusing an apply whose reference no longer resolves, and a `needs-review` state for a dangling applied reference. Version pinning and classification handling, the other two, are kept. Recorded here so the trade is visible rather than re-litigated.
+> **Decision on record.** Validation of file references was considered and **deliberately dropped** (design review, 2026-08-24): the reference is opaque to this service and its usability is the caller's responsibility. This reverses three of the four properties requested in review — declared content-type/size constraints checked on write, refusing a write whose reference no longer resolves, and a `needs-review` state for a dangling applied reference. Version pinning and classification handling, the other two, are kept. Recorded here so the trade is visible rather than re-litigated.
 
-**The reference does not own the file.** Removing the value, retiring the declaration, or deleting the tenant removes the *reference* — the file itself is never touched. Two reasons: this service did not create it (it existed before the setting, uploaded by its own owner), and it cannot see who else points at it, since another setting, another scope, or something outside settings entirely may hold the same reference; deleting would destroy data this service neither owns nor has a complete view of. This is the deliberate opposite of a secret, whose Credential-Store entry this service *does* create and which `delete_secret` therefore removes when the override is removed or applied away (§4.2 *Secret Manager*). Cleanup belongs to `file-storage`: owner deletion is already a requirement it carries, and long-lived orphans are its retention sweep's business. One useful consequence — a file-valued setting is **cloneable** where a secret one is not (`422 SecretNotCloneable`, §4.2 *Staging Manager*): the hazard there is the source's credstore entry being deleted underneath the clone, and nothing here is ever deleted underneath anything.
+**The reference does not own the file.** Removing the value, retiring the declaration, or deleting the tenant removes the *reference* — the file itself is never touched. Two reasons: this service did not create it (it existed before the setting, uploaded by its own owner), and it cannot see who else points at it, since another setting, another scope, or something outside settings entirely may hold the same reference; deleting would destroy data this service neither owns nor has a complete view of. This is the deliberate opposite of a secret, whose Credential-Store entry this service *does* create and which `delete_secret` therefore removes when the override is removed or applied away (§4.2 *Secret Manager*). Cleanup belongs to `file-storage`: owner deletion is already a requirement it carries, and long-lived orphans are its retention sweep's business. One useful consequence — a file-valued setting is **cloneable** where a secret one is not (`422 SecretNotCloneable`, §4.2 *Value Writer*): the hazard there is the source's credstore entry being deleted underneath the clone, and nothing here is ever deleted underneath anything.
 
 **What the trait buys over a plain string.** Less than it might appear, and worth being exact about. Storage is identical and validation is now shape-only, so three things remain: the resolved trait set tells a client to render a file picker instead of a text box (`cpt-cf-settings-service-fr-typed-value-validation`); the reference is excluded from the search corpus (§4.2 *Search*); and combining it with `secret` is refused at declaration. Everything else a `file-reference` does, a structured string setting of the same shape would do too.
 
@@ -433,7 +433,7 @@ What follows from that, stated so nobody has to discover it:
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-constraint-step-up-at-idp`
 
-OIDC bearer via the AuthN Resolver / IdP. Apply requires **step-up = re-authentication at the IdP**, not a password entered into this service: the frontend re-runs the IdP login ceremony and the service verifies only the resulting fresh token's claims. **The Settings Service never receives or verifies raw credentials** (§4.2 *Apply Orchestrator*).
+OIDC bearer via the AuthN Resolver / IdP. A value write requires **step-up = re-authentication at the IdP**, not a password entered into this service: the frontend re-runs the IdP login ceremony and the service verifies only the resulting fresh token's claims. **The Settings Service never receives or verifies raw credentials** (§4.2 *Value Writer*).
 
 #### AuthZ
 
@@ -451,13 +451,13 @@ Visibility gating by `licence_feature` uses the the License Resolver via `Licens
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-constraint-audit-and-events`
 
-Mutations write an audit record in their own transaction, to the gear's `audit_records` store in R1 and shipped onward once the platform subsystem exists (§4.2 *Audit Emitter*); unlike RBAC v1, audit is **not** deferred here — it is a PRD show-stopper. Apply-lifecycle, declaration, and secret-use events are published, and `tenant_deleted` is consumed, through the platform **Event Broker** (§4.4); local cache invalidation is in-process, while cross-instance coherence (`cache_invalidate`) and the consumer signal (`apply_notification`) are owned by the Settings Activation (separate design).
+Mutations write an audit record in their own transaction, to the gear's `audit_records` store in R1 and shipped onward once the platform subsystem exists (§4.2 *Audit Emitter*); unlike RBAC v1, audit is **not** deferred here — it is a PRD show-stopper. Value-change, declaration, and secret-use events are published, and `tenant_deleted` is consumed, through the platform **Event Broker** (§4.4); local cache invalidation is in-process, while cross-instance coherence (`cache_invalidate`) and the consumer signal (`change_notification`) are owned by the Settings Activation (separate design).
 
 #### Optimistic concurrency
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-constraint-optimistic-concurrency`
 
-`PATCH`/`DELETE` require `If-Match`/ETag and Apply verifies a previewed `checksum` (`409 ApplyChecksumMismatch`), so concurrent edits and stale applies fail loudly. The DB-level partial-unique pending index is an additional data-integrity invariant.
+Every mutating call requires `If-Match`/ETag, so a concurrent edit fails loudly (`412`) instead of overwriting (§4.2 *Value Writer*, *Stale-write rejection*).
 
 #### Activation model
 
@@ -476,10 +476,7 @@ On Apply the value is committed and is **effective on next read**; consumers rea
 | Category | `gts.cf.toolkit.settings.category.v1~` |
 | Setting Declaration | `gts.cf.toolkit.settings.declaration.v1~` |
 | Setting Value | `gts.cf.toolkit.settings.value.v1~` |
-| Pending Change | `gts.cf.toolkit.settings.pending_change.v1~` |
-| Apply Operation | `gts.cf.toolkit.settings.apply_operation.v1~` |
 | Effective Value | `gts.cf.toolkit.settings.effective_value.v1~` |
-| Apply Bundle | `gts.cf.toolkit.settings.apply_bundle.v1~` |
 
 GTS identifiers follow `gts.<vendor>.<package>.<namespace>.<type>.v<MAJOR>[.<MINOR>]~`. **These are the control-plane entity types** — the shape of a category row, a declaration row, and so on — used as RBAC resource types and internal schemas. They are authored by the gear itself, so they carry vendor `cf` (Constructor Fabric), package `toolkit`, namespace `settings`.
 
@@ -573,7 +570,7 @@ An **applied** override at a specific scope (distinct from the Schema Default an
 | `created_at` / `updated_at` | `timestamptz` | Yes | UTC timestamps. |
 | `set_by` | string | Yes | Subject who set the value. |
 
-**Invariants:** at most one applied value per scope shape — with a subject and without — enforced by the two partial unique indexes (§4.7), with a subject named by both of its columns or by neither; exactly one of `value`/`secret_ref` is set — and **which** one follows the declaration's `secret` trait, both enforced by `CHECK` (§4.7); the serialized `value` MUST NOT exceed the **64 KiB** size cap (enforced at staging by the Type Validator, §4.2 *Type Validator*); `global` declarations may only have a value at platform scope (`tenant_id` = the root tenant); `local` and `cascading` may have per-tenant values (`tenant_id` set) subject to `tenant_overridable`.
+**Invariants:** at most one applied value per scope shape — with a subject and without — enforced by the two partial unique indexes (§4.7), with a subject named by both of its columns or by neither; exactly one of `value`/`secret_ref` is set — and **which** one follows the declaration's `secret` trait, both enforced by `CHECK` (§4.7); the serialized `value` MUST NOT exceed the **64 KiB** size cap (enforced on write by the Type Validator, §4.2 *Type Validator*); `global` declarations may only have a value at platform scope (`tenant_id` = the root tenant); `local` and `cascading` may have per-tenant values (`tenant_id` set) subject to `tenant_overridable`.
 
 #### Entity: `EffectiveValue` (computed, not persisted)
 
@@ -597,78 +594,12 @@ Returned by the resolver and the Settings Reader.
 | `inherited` | Resolved from a nearest-ancestor override (cascading). |
 | `schema_default` | No override in the chain; the declaration's own default (§4.1 `default_value` — a declaration field, not a property of the value type). |
 
-#### Entity: `PendingChange`
-
-A staged, not-yet-applied mutation. Does not affect running services until Apply (`cpt-cf-settings-service-fr-set-value`).
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `id` | UUID | Yes | Unique pending-change ID (UUIDv7). |
-| `declaration_id` | UUID | Yes | Target declaration (FK). |
-| `scope` | string | Yes | Target scope. |
-| `change_type` | `ChangeType` | Yes | `set` / `revert` / `remove` / `clone`. |
-| `staged_value` | JSON | No | Proposed inline (non-secret) value; `NULL` for `revert`/`remove` or when the staged value is a secret held via `staged_secret_ref`. |
-| `staged_secret_ref` | string | No | Credential-Store reference for a staged `secret`-trait value (§4.2 *Secret Manager*); `NULL` for inline/no-value changes. |
-| `prior_value_snapshot` | JSON | No | Effective value before the change (for preview / audit pre-image). |
-| `status` | `PendingStatus` | Yes | `pending` / `applying` / `applied`. **No `failed`** — a change whose apply failed stays `pending`, because that is what keeps preview and retry selecting it (§4.2 *Apply Orchestrator*). Failure is a fact about the **operation**, not about the change. |
-| `failure_detail` | string | No | Why the **last** apply attempt failed for this change, while it stays `pending`. Advisory: the authoritative per-change outcome is its `ApplyChangeResult`. |
-| `staged_by` | string | Yes | Subject who staged the change. |
-| `staged_at` | `timestamptz` | Yes | UTC timestamp. |
-| `applied_at` | `timestamptz` | No | Set when the change reaches `applied`. |
-
-**Invariants:** a `set` or `clone` carries **exactly one** of `staged_value` / `staged_secret_ref`; a `revert` or `remove` carries **neither** — both enforced by `CHECK` (§4.6). Which of the two a `set` uses follows the declaration's `secret` trait, enforced in the staging transaction rather than by a constraint, since the trait is not denormalized onto this table (§4.6). A `clone` is never secret-backed: cloning a `secret`-classified value is refused (§4.2 *Staging Manager*).
-
-**Invariants:** at most one `pending`/`applying` change per `(declaration_id, scope)`; a new staged change supersedes a prior discarded one.
-
-#### Enum: `ChangeType` / `PendingStatus`
-
-| Enum | Values |
-|------|--------|
-| `ChangeType` | `set`, `revert`, `remove`, `clone` |
-| `PendingStatus` | `pending`, `applying`, `applied` |
-
-#### Entity: `ApplyOperation`
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `id` | UUID | Yes | Unique apply ID (UUIDv7). |
-| `scope` | string | Yes | Scope being applied (own scope only). |
-| `actor` | string | Yes | Subject performing the apply. |
-| `status` | `ApplyStatus` | Yes | `previewed` / `running` / `succeeded` / `partial_failed` / `failed`. |
-| `step_up_verified` | boolean | Yes | Whether IdP step-up re-verification succeeded before execution. |
-| `summary` | JSON | Yes | Per-outcome counts (e.g. `{ applied: 8, failed: 1 }`). |
-| `checksum` | string | Yes | Content hash of the previewed change set, verified at apply time (`409 ApplyChecksumMismatch` on drift; §4.2 *Apply Orchestrator*, §4.3). |
-| `started_at` / `completed_at` | `timestamptz` | Yes/No | UTC timestamps. |
-
-#### Enum: `ApplyStatus`
-
-| Value | Description |
-|-------|-------------|
-| `previewed` | Preview computed; awaiting step-up + confirm. |
-| `running` | Execution in progress. |
-| `succeeded` | All changes applied. |
-| `partial_failed` | Some changes applied; failed items left pending for retry. |
-| `failed` | No change applied. |
-
-#### Entity: `ApplyChangeResult`
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | UUID | Result ID. |
-| `apply_operation_id` | UUID | Owning apply (FK). |
-| `pending_change_id` | UUID | The change (FK). |
-| `outcome` | `Outcome` | `success` / `failure`. |
-| `detail` | string \| `null` | Failure detail. |
-
 #### Entity Relationships
 
 ```mermaid
 erDiagram
  Category ||--o{ SettingDeclaration : "groups"
  SettingDeclaration ||--o{ SettingValue : "scoped value"
- SettingDeclaration ||--o{ PendingChange : "staged change"
- ApplyOperation ||--o{ ApplyChangeResult : "results"
- PendingChange ||--o| ApplyChangeResult : "applied via"
 
  Category {
  uuid id PK
@@ -704,30 +635,6 @@ erDiagram
  string data_classification "denormalized for index predicates"
  timestamptz last_change_at
  }
- PendingChange {
- uuid id PK
- uuid declaration_id FK
- string scope
- string change_type
- jsonb staged_value
- string staged_secret_ref
- string status
- string staged_by
- }
- ApplyOperation {
- uuid id PK
- string scope
- string actor
- string status
- bool step_up_verified
- string checksum
- }
- ApplyChangeResult {
- uuid id PK
- uuid apply_operation_id FK
- uuid pending_change_id FK
- string outcome
- }
 ```
 
 ### 4.2 Component Model
@@ -745,8 +652,7 @@ graph TD
  reconciler["Contribution Reconciler<br/><small>register/retire</small>"]
  validator["Type Validator<br/><small>GTS + traits</small>"]
  resolver["Value Resolver<br/><small>effective value + source trace</small>"]
- staging["Staging Manager<br/><small>pending changes</small>"]
- apply["Apply<br/><small>preview · step-up · commit · publish apply_notification + cache_invalidate · checksum</small>"]
+ writer["Value Writer<br/><small>validate · step-up · commit · publish change_notification + cache_invalidate</small>"]
  secrets["Secret Manager<br/><small>store · mask · resolve (machine-only)</small>"]
  search["Search"]
  scopeclass["Scope Class Engine"]
@@ -771,8 +677,7 @@ graph TD
 
  rest_api -->|delegates| cat
  rest_api -->|delegates| decl
- rest_api -->|delegates| staging
- rest_api -->|delegates| apply
+ rest_api -->|delegates| writer
  rest_api -->|delegates| search
  rest_api -->|reads| resolver
  reader_api -->|hot read| cache
@@ -782,34 +687,33 @@ graph TD
  decl -->|validates default| validator
  decl -->|derives behaviour| scopeclass
  reconciler -->|reconciles declarations| decl
- staging -->|validates value| validator
- staging -->|derives override rules| scopeclass
- staging -->|store secret| secrets
+ writer -->|validates value| validator
+ writer -->|derives override rules| scopeclass
+ writer -->|store secret| secrets
  resolver -->|ancestry walk| tenant
  resolver -->|reads| pg
  resolver -->|mask secret| secrets
  validator -->|type+traits| types
- apply -->|invalidate (local)| cache
- apply -->|validate step-up token| idp
- apply -->|publish apply_notification + cache_invalidate| broker
+ writer -->|invalidate (local)| cache
+ writer -->|validate step-up token| idp
+ writer -->|publish change_notification + cache_invalidate| broker
  secrets -->|store/resolve| credstore
 
  cat -->|reads/writes| pg
  decl -->|reads/writes| pg
- staging -->|reads/writes| pg
- apply -->|reads/writes| pg
+ writer -->|reads/writes| pg
  search -->|reads| pg
 
  cat -->|authorize| authz
  decl -->|authorize| authz
- staging -->|authorize| authz
+ writer -->|authorize| authz
 
  cat -->|entitlement| licence
  decl -->|entitlement| licence
  search -->|entitlement| licence
 
  apply -->|audit| emitter
- staging -->|audit| emitter
+ writer -->|audit| emitter
  secrets -->|secret-use audit| emitter
  emitter -->|records| audit
  emitter -->|publish events| broker
@@ -844,18 +748,18 @@ Manages **admin-authored** declarations and serves reads for both authored and c
 | Operation | Input | Output | Key Behavior |
 |-----------|-------|--------|--------------|
 | `create_declaration` | `CreateDeclarationRequest`, `Context` | `SettingDeclaration` | Authorize `create` on `gts.cf.toolkit.settings.declaration.v1~`. Verify category exists (`404`). The admin supplies `value_type_id` (a curated **value type** from `gts.cf.toolkit.settings.types.*~`), plus a `vendor` and a leaf `name`. Build the setting **instance id** `gts.<vendor>.toolkit.settings.<category>.<name>.v1`, where `<category>` is the target category's slug, `<vendor>`/`<name>` are the admin's inputs (validate each segment against the GTS grammar — lowercase, `[a-z0-9_]`, no `/`, `422` otherwise). The `key` is the **GTS instance identifier** `<value_type_id>~<instance-id>` (left = the value type ending `~`; right = the instance id, no trailing `~`). The setting is a GTS **instance** and is **not** registered in GTS (only the value type is). `key` is **globally unique** (`uq_declaration_key`) and the leaf `name` is unique within its category (`UNIQUE(category_id, leaf_slug)`, `cpt-cf-settings-service-fr-settings-category-model`). The `<category>` segment tracks the owning category: renaming or moving the category **re-keys** the setting, and the stale key resolves as `NotFound` (§4.2 *Value Resolver*) — no succession, no stored old-key record. The Schema Default lives solely in the `default_value` column — the value type is validation-only. Validate `default_value` against `value_type_id` via Type Validator. Resolve `has_secret_trait` from that type's trait set; when `true`, the setting is secret-backed and its **values** are stored via the Secret Manager (§4.2 *Secret Manager*) — its **default** is not: reject a non-empty `default_value` on a secret-trait type (`422`), see *A secret setting has no secret default* there. Set `data_classification` (§4.1): **`secret` is derived** from the trait, never author-supplied; otherwise take the author's declared class — `pii` or `public` (default `public`). Reject an author-supplied `secret` on a non-secret type (`422`). Force `tenant_overridable=false` when `scope_class=global`. Set `mode` (default `standard`). Reject duplicate `key` (`409`). Set `source=admin_authored`. Insert; audit. (`cpt-cf-settings-service-fr-settings-category-model`) |
-| `update_declaration` | `id`, `UpdateDeclarationRequest`, `Context` | `SettingDeclaration` | Authorize `update` on `gts.cf.toolkit.settings.declaration.v1~` (metadata, incl. `tenant_visible`/`tenant_overridable` — platform-scope-gated). Reject if `source=module_contributed` (`409 ContributedDeclarationImmutable`). Partial update of **metadata only** (`description`, `tenant_visible`, `tenant_overridable`, `domain_affinity`, `licence_feature`, `mode`). **`default_value` (the Schema Default) is NOT editable here** — the PRD treats it as a **read-only** stable declared floor and a revert target: change the effective baseline via a **platform-scope override** (staged, §4.2 *Staging Manager*/§4.3), not by editing the default. The value **type** is immutable too (baked into the `key` — a type change is a re-key, §4.2 *Contribution Reconciler*, never a `PATCH`). Requires `If-Match` (optimistic concurrency, §4.3). |
-| `delete_declaration` | `id`, `Context` | `SettingDeclaration` (retired) | Authorize `delete` on `gts.cf.toolkit.settings.declaration.v1~` (retire = soft-delete) **and require credential step-up** — retire drops a live setting out of resolution at once, so it is a **behavior-affecting authoring action** gated like Apply (step-up contract §4.2 *Apply Orchestrator*, authz §4.8). Reject if `source=module_contributed` (`409 ContributedDeclarationImmutable` — gear declarations retire via §4.2 *Contribution Reconciler*, they are not admin-deletable). **Immediate soft-delete** (retire) — **not** staged (`cpt-cf-settings-service-fr-set-value`: declaration operations apply at once): sets `status=retired` on the declaration (same terminal state as a gear retire, §4.2 *Contribution Reconciler*) in one transaction, invalidates cache, and publishes `cache_invalidate` for affected scopes + `event_declaration_retired` (§4.4). **Values are retained** in `setting_values` (not deleted) but are **excluded from resolution** — a read of a retired key returns the distinct `Retired` outcome (§4.2 *Value Resolver*/§4.5), symmetric with a gear retire. Recovery is by **re-declaring the key** — a `POST /v1/declarations` at the same key revives this retired row (§4.3 re-declare-to-revive); full disposition of the retained values (purge / archive / keep) is the same open lifecycle question as gear removal (§6). Requires `If-Match` (§4.3). There is no pending state and no Apply step. Audit the retire with pre-images (§4.2 *Audit Emitter*). |
+| `update_declaration` | `id`, `UpdateDeclarationRequest`, `Context` | `SettingDeclaration` | Authorize `update` on `gts.cf.toolkit.settings.declaration.v1~` (metadata, incl. `tenant_visible`/`tenant_overridable` — platform-scope-gated). Reject if `source=module_contributed` (`409 ContributedDeclarationImmutable`). Partial update of **metadata only** (`description`, `tenant_visible`, `tenant_overridable`, `domain_affinity`, `licence_feature`, `mode`). **`default_value` (the Schema Default) is NOT editable here** — the PRD treats it as a **read-only** stable declared floor and a revert target: change the effective baseline via a **platform-scope override** (§4.2 *Value Writer*/§4.3), not by editing the default. The value **type** is immutable too (baked into the `key` — a type change is a re-key, §4.2 *Contribution Reconciler*, never a `PATCH`). Requires `If-Match` (optimistic concurrency, §4.3). |
+| `delete_declaration` | `id`, `Context` | `SettingDeclaration` (retired) | Authorize `delete` on `gts.cf.toolkit.settings.declaration.v1~` (retire = soft-delete) **and require credential step-up** — retire drops a live setting out of resolution at once, so it is a **behavior-affecting authoring action** gated like Apply (step-up contract §4.2 *Value Writer*, authz §4.8). Reject if `source=module_contributed` (`409 ContributedDeclarationImmutable` — gear declarations retire via §4.2 *Contribution Reconciler*, they are not admin-deletable). **Immediate soft-delete** (retire) — it does not go through the value write path (`cpt-cf-settings-service-fr-set-value`): sets `status=retired` on the declaration (same terminal state as a gear retire, §4.2 *Contribution Reconciler*) in one transaction, invalidates cache, and publishes `cache_invalidate` for affected scopes + `event_declaration_retired` (§4.4). **Values are retained** in `setting_values` (not deleted) but are **excluded from resolution** — a read of a retired key returns the distinct `Retired` outcome (§4.2 *Value Resolver*/§4.5), symmetric with a gear retire. Recovery is by **re-declaring the key** — a `POST /v1/declarations` at the same key revives this retired row (§4.3 re-declare-to-revive); full disposition of the retained values (purge / archive / keep) is the same open lifecycle question as gear removal (§6). Requires `If-Match` (§4.3). There is no pending state and no Apply step. Audit the retire with pre-images (§4.2 *Audit Emitter*). |
 | `get_declaration` / `list_declarations` | filter, `Context` | declaration(s) | Visibility-, domain-, and licence-gated. Returns the setting `key` (the `<value-type>~<instance>` id), its `value_type_id` (the key's left half), and resolved `traits` for client rendering (`cpt-cf-settings-service-fr-typed-value-validation`). |
 
-**Declaration mutation classes — what is immediate, what is immutable, what is step-up gated.** Declaration operations are never value-staged (§4.2 *Staging Manager*), but they are **not** uniformly ungated: each field falls into one of three classes by its effect on live resolution.
+**Declaration mutation classes — what is immediate, what is immutable, what is step-up gated.** Declaration operations do not go through the value write path (§4.2 *Value Writer*), but they are **not** uniformly ungated: each field falls into one of three classes by its effect on live resolution.
 
 | Class | Fields / actions | Gate |
 |-------|------------------|------|
 | **Descriptive metadata** | `description`, `mode`, `domain_affinity`, `licence_feature`, and — for admin-authored settings — `tenant_visible` / `tenant_overridable` | **Immediate**, `update` permission + `If-Match`. No gate needed: none of these changes an effective value. |
 | **Behavior-affecting fields** | `default_value` (Schema Default), value **type**, `scope_class` | **Immutable** — an in-place edit is rejected (`422`, §4.3). The change is expressible only as a **replacement declaration** (a new key) or, for the type, a **new major version** (§4.2 *Contribution Reconciler*). No ungated edit can alter a live setting's resolution. |
-| **Behavior-affecting actions** | **retire** (soft-delete, §4.2 *Declaration Management*) and **reactivate** (re-declare-to-revive, §4.3) | **Immediate + credential step-up** — each changes whether a live setting resolves at all, so both are gated like Apply (§4.2 *Apply Orchestrator*, §4.8). |
-| **Classification change** | `data_classification` (§4.1) | **Tightening** (`public` → `pii`) is immediate. **Loosening** (`pii` → `public`) requires **credential step-up** — it un-masks content previously withheld from callers without PII entitlement (§4.2 *Secret Manager*, *Search*). Neither alters effective-value resolution, so neither is value-staged. |
+| **Behavior-affecting actions** | **retire** (soft-delete, §4.2 *Declaration Management*) and **reactivate** (re-declare-to-revive, §4.3) | **Immediate + credential step-up** — each changes whether a live setting resolves at all, so both are gated like Apply (§4.2 *Value Writer*, §4.8). |
+| **Classification change** | `data_classification` (§4.1) | **Tightening** (`public` → `pii`) is immediate. **Loosening** (`pii` → `public`) requires **credential step-up** — it un-masks content previously withheld from callers without PII entitlement (§4.2 *Secret Manager*, *Search*). Neither alters effective-value resolution, so neither goes through the value write path. |
 
 Step-up applies to the **administrative** retire/reactivate path only. The module register/retire lifecycle (§4.2 *Contribution Reconciler*) is a machine caller with no interactive session to re-authenticate; it is governed by the contribution trust model (§4.8) instead.
 
@@ -918,7 +822,7 @@ Both rows coexist, matched by the version-stripped path `cf.toolkit.settings.cat
 
 > For a setting, the `gts_type_id` passed here is the setting's **`value_type_id`** (§1.3) — the curated catalog value type that forms the **left half** of the setting's `key` (`<value-type>~<instance>`), for both module and admin settings. The Type Validator itself is generic — it validates a value against any GTS type id.
 
-**Trusted-input note:** structured values are validated in full before staging; the staged change carries the already-validated value so Apply does not re-validate (the type could not have changed between staging and apply within one declaration version; a `needs-review` flag covers the version-change case).
+**Trusted-input note:** structured values are validated in full before they are stored; a `needs-review` flag covers the case where the type changes afterwards.
 
 #### Component: Value Resolver
 
@@ -946,9 +850,9 @@ Resolves the **effective value** with source trace; the hot read path (`cpt-cf-s
 
 **Standalone tenants: the runtime read path is unchanged, the administrative one is blocked.** `tenant-resolver` marks a tenant **standalone** (isolated / unmanaged). Effective-value resolution for that tenant is **exactly as for any other**: a consumer inside it reads through the Settings Read SDK and gets the same answer, inheritance from its parent chain included. It still runs on this platform and still needs the platform's defaults, so cutting its inheritance would leave it with nothing rather than with independence (`cpt-cf-settings-service-fr-barrier-default-seam`).
 
-What is blocked is the **administrative** path from above: an administrator — platform-level, or any ancestor tenant's — **MUST NOT** read or set a standalone tenant's setting values. Reads and writes are blocked together, so `stage_set`, `stage_revert` and `clone_override` against a standalone target are rejected by the same check that hides it from reads. This is the same line the service already draws for licence gating (§4.2 *Search*, §4.5): administrative visibility is gated, runtime configuration resolution is not.
+What is blocked is the **administrative** path from above: an administrator — platform-level, or any ancestor tenant's — **MUST NOT** read or set a standalone tenant's setting values. Reads and writes are blocked together, so `set`, `revert` and `clone` against a standalone target are rejected by the same check that hides it from reads. This is the same line the service already draws for licence gating (§4.2 *Search*, §4.5): administrative visibility is gated, runtime configuration resolution is not.
 
-The block covers **every** administrative surface, including the two that would otherwise disclose indirectly rather than by oversight: `cascading_impact` (§4.2 *Staging Manager*) omits a standalone descendant from `changed[]` **and** from `total_changed`, since a bare count still says the tenant exists and differs; and the search corpus (§4.2 *Search*) excludes its rows, on the same footing as any value the caller cannot read. The inheritance trail needs no change — it names ancestors, never descendants.
+The block covers **every** administrative surface, including the two that would otherwise disclose indirectly rather than by oversight: `cascading_impact` (§4.2 *Value Writer*) omits a standalone descendant from `changed[]` **and** from `total_changed`, since a bare count still says the tenant exists and differs; and the search corpus (§4.2 *Search*) excludes its rows, on the same footing as any value the caller cannot read. The inheritance trail needs no change — it names ancestors, never descendants.
 
 **Scope Class is the dispatch key, and the set is open.** Resolution behaviour is a function of Scope Class and of nothing else — the table above is a total dispatch over the three classes. A further strategy (composition across the hierarchy, for instance, rather than nearest-match) is added as a **new class or a trait**, never by special-casing an existing one, so settings already declared keep the semantics they were declared with. This is what makes the class an authoring-time decision the administrator can rely on rather than a behaviour that can shift underneath a live setting.
 
@@ -974,107 +878,64 @@ The consequence worth stating plainly, because it is the part that surprises: co
 
 **Why a single ancestry source:** ancestry is owned by the Tenant Resolver; the resolver never reconstructs the hierarchy from scope strings beyond parsing `/tenants/{id}`. This keeps cascade semantics consistent with the Tenant Resolver and avoids a second source of truth.
 
-#### Component: Staging Manager
+#### Component: Value Writer
 
-- [ ] `p1` - **ID**: `cpt-cf-settings-service-component-staging-manager`
+- [ ] `p1` - **ID**: `cpt-cf-settings-service-component-value-writer`
 
-Implements the **staged-then-apply** model for all value mutations (`cpt-cf-settings-service-fr-set-value`, `cpt-cf-settings-service-fr-tenant-overrides`).
+Validates and stores value changes (`cpt-cf-settings-service-fr-set-value`, `cpt-cf-settings-service-fr-validate-before-set`, `cpt-cf-settings-service-fr-live-read-activation`, `cpt-cf-settings-service-fr-tenant-overrides`, `cpt-cf-settings-service-nfr-reliability-validated-set`).
 
-**Dependencies:** `TypeValidator`, `ScopeClassEngine`, Declaration Management, Secret Manager, PostgreSQL, Audit Emitter
+**Dependencies:** `TypeValidator`, `ScopeClassEngine`, Declaration Management, Secret Manager, `AuthZResolverClient` (with `PolicyEnforcer` built over it), IdP (step-up), Cache, Change Publisher (Settings Activation), Audit Emitter, PostgreSQL
 
 **Operations:**
 
 | Operation | Input | Output | Key Behavior |
 |-----------|-------|--------|--------------|
-| `stage_set` | `key`, `tenant`, `value`, `Context` | `PendingChange` | Resolve the target `tenant` (optional; defaults to the caller's own tenant) and authorize `write`: the target MUST be within the caller's **subtree** (own tenant or a descendant), else `403` (`cpt-cf-settings-service-fr-tenant-scope-enforcement`). Enforce Scope Class always, and `tenant_overridable` **for a tenant caller** (reject overriding a `global` setting from anyone, or a non-overridable setting from a tenant, `403`/`409`; §4.8). Validate value via Type Validator. For a secret-backed setting, store the plaintext via the Secret Manager (§4.2 *Secret Manager*) and stage only the resulting `staged_secret_ref` — plaintext is never persisted in `pending_changes`. Snapshot prior effective value. Upsert pending change (one per key+tenant) **at the target tenant**. Audit `stage`. |
-| `stage_revert` | `key`, `scope`, `Context` | `PendingChange` | Stage clearing of the scope's override. Compute fallback (nearest ancestor for tenant scope; Schema Default for `/`) and return it for the pre-commit fallback preview (`cpt-cf-settings-service-fr-defaults-revert`). |
-| `stage_remove` | `key`, `scope`, `Context` | `PendingChange` | Stage removal of a **value** at a scope (revert/remove-value). Declaration removal is **not** staged — it is an immediate soft-delete (retire) (§4.2 *Declaration Management*). |
-| `clone_override` | `key`, `from_scope`, `to_scope`, `Context` | `PendingChange` | Stage copying an effective value as an explicit override at `to_scope` (pin-inheritance, `cpt-cf-settings-service-fr-tenant-overrides`). **Authorize both ends.** The caller MUST be authorized to **read the source effective value** at `from_scope` (`read` + `tenant_visible`, with `from_scope` inside the caller's subtree) **and** to mutate `to_scope` (`write` + `tenant_overridable` + subtree), else `403`. The source check is not optional: a clone that read a scope the caller cannot read would **exfiltrate a value across the scope boundary** — the write authorization on the target says nothing about the right to the source content. **A `secret`-classified value cannot be cloned** — reject with `422 SecretNotCloneable`. Cloning by reference would leave the target holding the **source's** Credential-Store entry, which `delete_secret` removes as soon as the source override is removed or applied away (§4.2 *Secret Manager*), so the clone would silently dangle; the credstore gear offers only `get`/`put`/`delete` and no server-side copy, so giving the target its own entry would route an administrative action through the machine-only plaintext path. Nor is the operation meaningful: there is **no human reveal path**, so the administrator would be pinning a credential they cannot see, and materialising an ancestor's credential as the target's own override propagates it across a scope boundary. A secret at the target is set explicitly with `stage_set`. The clone copies the **value only** — not the Declaration — and establishes **no** continuing link, so a later source change does not propagate to the target override. |
-| `list_pending` | `scope`/all, `Context` | `PendingChange[]` | Pending-changes view across categories: category, key, old value (or "default"), new value, who staged (`cpt-cf-settings-service-fr-set-value`). |
-| `discard_pending` | `id[]` \| bulk filter, `Context` | — | Discard individual/bulk pending changes without applying (`cpt-cf-settings-service-fr-set-value`). |
+| `validate` | `key`, `scope`, `value`, `Context`, `limit?` | `ValidationReport` | **Read-only.** Authorize `read` at scope. Validate the value via Type Validator and report: valid or not (with field-level detail), the current effective value and its source, and — for a `cascading` setting — the affected descendants via `cascading_impact`. Stores nothing, needs no step-up, and returns the same answer for the same inputs, so a client may call it as often as it likes (`cpt-cf-settings-service-fr-validate-before-set`). |
+| `set` | `changes[]` (`key`, `tenant`, `value`, `if_match`), `step_up_assertion`, `Context` | `SetResult[]` | Verify step-up once for the request via the resolved `StepUpVerifier` (the **step-up contract** below; `401`/`403` on failure) (`cpt-cf-settings-service-fr-authn-role-gating`). Then, **per change**: resolve the target `tenant` (optional; defaults to the caller's own tenant) and authorize `write` — the target MUST be within the caller's **subtree**, else `403` (`cpt-cf-settings-service-fr-tenant-scope-enforcement`). Enforce Scope Class always, and `tenant_overridable` **for a tenant caller** (reject overriding a `global` setting from anyone, or a non-overridable setting from a tenant, `403`/`409`; §4.8). Validate the value via Type Validator. Reject the change if the stored value moved since the caller read it (`412`; *Stale-write rejection* below). For a secret-backed setting, store the plaintext via the Secret Manager (§4.2 *Secret Manager*) and keep only the returned `secret_ref` — plaintext is never persisted in `setting_values`. Commit the value, its audit record and — where present — its `secret_ref` in **one transaction** (*Set atomicity model* below), then evict the local cache and publish the signals. Each change gets its own entry in `SetResult[]`: old → new value, scope, and success or failure; a change that fails commits nothing (`cpt-cf-settings-service-fr-live-read-activation`). |
+| `revert` | `key`, `scope`, `if_match`, `step_up_assertion`, `Context` | `SetResult` | Clear the scope's override. The response carries the resulting fallback — nearest ancestor for a tenant scope, Schema Default for `/` (`cpt-cf-settings-service-fr-defaults-revert`); `validate` reports the same fallback beforehand. |
+| `remove_value` | `key`, `scope`, `if_match`, `step_up_assertion`, `Context` | `SetResult` | Remove a **value** at a scope. Declaration removal is a separate, immediate soft-delete (retire) (§4.2 *Declaration Management*). |
+| `clone` | `key`, `from_scope`, `to_scope`, `step_up_assertion`, `Context` | `SetResult` | Copy an effective value as an explicit override at `to_scope` (pin-inheritance, `cpt-cf-settings-service-fr-tenant-overrides`). **Authorize both ends.** The caller MUST be authorized to **read the source effective value** at `from_scope` (`read` + `tenant_visible`, with `from_scope` inside the caller's subtree) **and** to mutate `to_scope` (`write` + `tenant_overridable` + subtree), else `403`. The source check is not optional: a clone that read a scope the caller cannot read would **exfiltrate a value across the scope boundary** — the write authorization on the target says nothing about the right to the source content. **A `secret`-classified value cannot be cloned** — reject with `422 SecretNotCloneable`. Cloning by reference would leave the target holding the **source's** Credential-Store entry, which `delete_secret` removes as soon as the source override is removed (§4.2 *Secret Manager*), so the clone would silently dangle; the credstore gear offers only `get`/`put`/`delete` and no server-side copy, so giving the target its own entry would route an administrative action through the machine-only plaintext path. Nor is the operation meaningful: there is **no human reveal path**, so the administrator would be pinning a credential they cannot see, and materialising an ancestor's credential as the target's own override propagates it across a scope boundary. A secret at the target is set explicitly with `set`. The clone copies the **value only** — not the Declaration — and establishes **no** continuing link, so a later source change does not propagate to the target override. |
 | `cascading_impact` | `key`, `scope`, `value`, `Context`, `limit?` | `ImpactReport` | For `cascading`, list descendants whose effective value would change (current vs new), via the Tenant Resolver subtree. **Bounded:** returns the **first `limit`** changed descendants **in subtree traversal order** (BFS from the requesting scope — no ranking; there is no notion of a "more important" descendant), plus the **total count** `total_changed` and a `truncated` flag. It does **not** stream the full subtree; on very large subtrees the walk itself is capped (see below) and `truncated=true`. **Non-blocking** — informational only (`cpt-cf-settings-service-fr-cascading-inheritance`). **Standalone descendants are omitted** from `changed[]` and from `total_changed` — they are outside the caller's subtree for reading (§4.2 *Value Resolver*), and a count alone would still disclose them. |
 
-**Impact report bound.** `cascading_impact` is an advisory preview, not a system-of-record query, so it MUST NOT run unbounded on a deep/wide subtree. It walks the requesting scope's subtree breadth-first via `get_descendants`, evaluating changed-vs-unchanged per descendant, and stops at a **node budget** (default 5,000 descendants scanned). `ImpactReport` carries `changed[]` (the first `limit` changed descendants in traversal order — **not** ranked), `total_changed` (the full count, up to the node budget), `scanned`, and `truncated` (true when either the node budget or `limit` was hit). A truncated report is still valid — it warns "≥ N descendants affected" — and the UI presents it as such; because the report is non-blocking (`cpt-cf-settings-service-fr-cascading-inheritance`), truncation never blocks the stage/apply.
+**Impact report bound.** `cascading_impact` is an advisory preview, not a system-of-record query, so it MUST NOT run unbounded on a deep/wide subtree. It walks the requesting scope's subtree breadth-first via `get_descendants`, evaluating changed-vs-unchanged per descendant, and stops at a **node budget** (default 5,000 descendants scanned). `ImpactReport` carries `changed[]` (the first `limit` changed descendants in traversal order — **not** ranked), `total_changed` (the full count, up to the node budget), `scanned`, and `truncated` (true when either the node budget or `limit` was hit). A truncated report is still valid — it warns "≥ N descendants affected" — and the UI presents it as such; because the report is non-blocking (`cpt-cf-settings-service-fr-cascading-inheritance`), truncation never blocks the set.
 
-**Pending indicator:** `count_pending(scope)` powers the persistent pending-change badge for the user's visible scope (`cpt-cf-settings-service-fr-set-value`).
 
-#### Component: Apply Orchestrator
+**Stale-write rejection.** A change carries the `SettingValue.last_change_at` (or the row version derived from it) the caller last read, as an `If-Match` ETag on the REST surface (§4.3). The commit is guarded on it: if the stored value moved in between, the change is rejected `412` and stores nothing, so one administrator cannot silently overwrite another's (`cpt-cf-settings-service-nfr-reliability-validated-set`). This is optimistic concurrency, **not** an idempotency key — no `Idempotency-Key` store exists here, the same stance §4.3 *Create idempotency* takes for the creating `POST`s. It does make a resubmitted `set` safe after a lost response: the resubmission either lands, because the first one did not, or is refused `412`, because it did.
 
-- [ ] `p1` - **ID**: `cpt-cf-settings-service-component-apply-orchestrator`
+**Set atomicity model.** A `set` **commits per change**, in its own transaction: the value write, its audit record (§4.2 *Audit Emitter*), and — for a `secret`-trait change — the `secret_ref` returned by the Secret Manager. All three are local-DB writes, so unlike the Credential Store leg they *can* be committed together, and committing them apart would leave a window where a value is live with no record of who set it. A single transaction across every change in the request is **not** available and **not** promised: a change may span the local DB and the Credential Store, which cannot be committed atomically together. A change that fails to commit stores nothing; changes already committed stay committed, and the response says which is which (`cpt-cf-settings-service-fr-set-value`). The one exception is a Dependency Group, which is `p3` (`cpt-cf-settings-service-fr-dependency-group-declaration`).
 
-The explicit, credential-verified activation of pending changes (`cpt-cf-settings-service-fr-validate-before-set`, `cpt-cf-settings-service-fr-live-read-activation`, `cpt-cf-settings-service-nfr-reliability-validated-set`).
+**A change is stored, then signalled.** A change counts as set only when its new value is **durably persisted** *and* the target scope's cache invalidation has been issued (with descendant invalidation emitted for `cascading` settings, §4.2 *Cache & Invalidation*). The order is fixed and not an implementation detail: **commit the value, then evict the local cache, then publish the signals** — so no consumer can observe an invalidation or a `change_notification` for a value that is not yet stored.
 
-**Dependencies:** Staging Manager, `AuthZResolverClient` (with `PolicyEnforcer` built over it), IdP (step-up), Cache, Apply Publisher (Settings Activation), Secret Manager, Audit Emitter, PostgreSQL
-
-**Operations:**
-
-| Operation | Input | Output | Key Behavior |
-|-----------|-------|--------|--------------|
-| `preview` | `scope`, `Context` | `ApplyPreview` | List pending changes (old → new, scope, staged-by) and compute the `checksum` over the pending set (§4.3). Requires no step-up to preview. |
-| `apply` | `scope`, `checksum`, `step_up_assertion`, `Context` | `ApplyOperation` | **Steps 1–4 run inside the request and decide the response; steps 5 onward run in a background task under the gear's lifecycle (§4.9), and the request returns `202` after step 4.** 1. Authorize `apply` at scope. 2. Verify step-up via the resolved `StepUpVerifier` (the **step-up contract** below; `401/403` on failure) (`cpt-cf-settings-service-fr-authn-role-gating`). 3. Verify the previewed `checksum` against the current pending set; reject `409 ApplyChecksumMismatch` on drift. 4. Mark the scope's current pending changes `applying`, **pinning** the set step 3 verified, create the `apply_operation` row and **return `202` with its `Location`** — everything that can reject the apply has been decided by here (first reclaiming any `applying` rows left by an apply that died holding them — *Apply failure* below). 5. **Commit** each change — the applied value (secret-backed values written by reference via the Secret Manager, §4.2 *Secret Manager*), the change's own `applying → applied` transition, **and** its `success` `ApplyChangeResult` — all in **one transaction**, guarded on `status = 'applying'`. The result commits *with* the value so the two cannot diverge: no interruption can leave a live value that no result records. 6. A change that did **not** commit gets a `failure` `ApplyChangeResult` (with `detail`) written separately — its own transaction rolled back, so there is nothing to attach it to — and stays `pending`. 7. On partial/total failure, mark the **`apply_operation`** `failed`/`partial_failed` and audit; the unapplied changes stay `pending` for retry and never take a `failed` status of their own (§4.1 `PendingStatus`). Raise a durable `event_apply_failed` notification (§4.4); failures remain **durable and queryable** via `apply_status` (`cpt-cf-settings-service-nfr-reliability-validated-set`). 8. Invalidate the **local** cache for applied keys/scopes. 9. Hand the committed keys to the **Apply Publisher** ([Settings Activation](./DESIGN-activation.md)): **once per apply** it publishes a filtered **`apply_notification`** per subscriber (consumer activation) and a **`cache_invalidate`** broadcast to replicas (cross-instance cache coherence) — one outbox row per apply, drained after the apply settles. 10. Emit `apply_completed` and audit the apply. 11. On a fully `succeeded` operation, once the audit write is durable, **delete** the `apply_operation` row (its `apply_change_results` cascade) — it is a settled execution record, not the system of record; `failed`/`partial_failed` operations are retained for retry/query (§4.7 Row lifecycle, `cpt-cf-settings-service-nfr-reliability-validated-set`). |
-| `apply_status` | `apply_operation_id` | `ApplyOperation` + results | Per-change progress (pending → running → success/failure) for the UI. |
-
-**Step-up contract.** Step-up is a **re-authentication ceremony at the IdP**, not a credential prompt in the settings UI. The **expected admin experience is re-entering the password** — but that prompt is presented and verified by the **IdP**, not by this service. The frontend redirects the admin to the IdP (`prompt=login` / `acr_values` / `max_age=0`); the IdP re-challenges (password by default; it MAY substitute MFA/passkey for SSO/WebAuthn/passwordless admins who have no password) and returns a fresh assertion. **The Settings Service MUST NOT receive or verify raw credentials.** Verification is **local claims inspection** on the fresh token — no per-apply runtime call to the IdP — checking:
+**Step-up contract.** Step-up is a **re-authentication ceremony at the IdP**, not a credential prompt in the settings UI. The **expected admin experience is re-entering the password** — but that prompt is presented and verified by the **IdP**, not by this service. The frontend redirects the admin to the IdP (`prompt=login` / `acr_values` / `max_age=0`); the IdP re-challenges (password by default; it MAY substitute MFA/passkey for SSO/WebAuthn/passwordless admins who have no password) and returns a fresh assertion. **The Settings Service MUST NOT receive or verify raw credentials.** Verification is **local claims inspection** on the fresh token — no per-set runtime call to the IdP — checking:
 
 - **signature** valid against the IdP's published **JWKS**;
 - **`sub`** matches the current session's subject;
 - **`auth_time`** is fresh — within the step-up **freshness window (≤ 5 min)** — this is the field that distinguishes a re-authenticated token from the morning's session token;
 - **`acr` / `amr`** meet the required assurance level / methods.
 
-The `step_up_assertion` input carries this fresh token. Because the token itself is the assertion (RFC 9470: a `401` challenge with `error="insufficient_user_authentication"`, `acr_values`, `max_age` drives the re-auth), the parameter MAY be folded into the bearer token in implementation. **The step-up contract itself is owned by the `authn-resolver` gear** — this service references it rather than defining its own. **IdP integration prerequisites** (record against IAM): the IdP MUST be configured to emit `auth_time`/`acr`/`amr` in tokens (often off by default), and the freshness window MUST be agreed. No IdP runtime dependency is added to the gear (§4.9) — only the IdP's JWKS is needed, fetched and cached — so there is **no per-apply IdP-outage failure mode**; the C4 IdP relationship (§1.3) denotes token/JWKS trust, not a synchronous call at apply.
+The `step_up_assertion` input carries this fresh token. Because the token itself is the assertion (RFC 9470: a `401` challenge with `error="insufficient_user_authentication"`, `acr_values`, `max_age` drives the re-auth), the parameter MAY be folded into the bearer token in implementation. **The step-up contract itself is owned by the `authn-resolver` gear** — this service references it rather than defining its own. **IdP integration prerequisites** (record against IAM): the IdP MUST be configured to emit `auth_time`/`acr`/`amr` in tokens (often off by default), and the freshness window MUST be agreed. No IdP runtime dependency is added to the gear (§4.9) — only the IdP's JWKS is needed, fetched and cached — so there is **no per-set IdP-outage failure mode**; the C4 IdP relationship (§1.3) denotes token/JWKS trust, not a synchronous call on the write path.
 
-**Step-up verification is a swappable `StepUpVerifier` plugin.** The local-claims check above is the **default binding** — an OIDC/JWKS `StepUpVerifier`. Unlike `TenantResolverClient` or `AuthZResolverClient` this trait is **defined by this gear**, not consumed from another — it exists so the domain layer states the rule (*Apply requires a fresh re-authentication*) without importing JWT and JWKS handling, which the layering lint forbids. Its shape follows the platform precedent for such ports: declared in the domain, adapted in infra, injected at construction. Because verification is a resolved trait, not hard-coded gear logic, a deployment can — **without editing the gear** — bind a **non-OIDC** verifier (SAML/LDAP/…) or an **added-factor** verifier. What a deployment may **not** bind is a verifier that does not verify: `cpt-cf-settings-service-fr-validate-before-set` requires credential re-verification before **every** Apply and carries no environment carve-out, so an always-satisfied binding does not implement this contract — it removes it, and a deployment running one is non-conformant however convenient it is in a sandbox. The default OIDC/JWKS binding is exactly what this contract specifies; the trait makes the *mechanism* pluggable, **never the requirement** — every binding must be capable of failing. The one sanctioned non-verifying binding is `MockStepUpVerifier`, and it exists only inside the test harness (§7 *Testing Architecture*).
+**Step-up verification is a swappable `StepUpVerifier` plugin.** The local-claims check above is the **default binding** — an OIDC/JWKS `StepUpVerifier`. Unlike `TenantResolverClient` or `AuthZResolverClient` this trait is **defined by this gear**, not consumed from another — it exists so the domain layer states the rule (*setting a value requires a fresh re-authentication*) without importing JWT and JWKS handling, which the layering lint forbids. Its shape follows the platform precedent for such ports: declared in the domain, adapted in infra, injected at construction. Because verification is a resolved trait, not hard-coded gear logic, a deployment can — **without editing the gear** — bind a **non-OIDC** verifier (SAML/LDAP/…) or an **added-factor** verifier. What a deployment may **not** bind is a verifier that does not verify: `cpt-cf-settings-service-fr-validate-before-set` requires credential re-verification before **every** set and carries no environment carve-out, so an always-satisfied binding does not implement this contract — it removes it, and a deployment running one is non-conformant however convenient it is in a sandbox. The default OIDC/JWKS binding is exactly what this contract specifies; the trait makes the *mechanism* pluggable, **never the requirement** — every binding must be capable of failing. The one sanctioned non-verifying binding is `MockStepUpVerifier`, and it exists only inside the test harness (§7 *Testing Architecture*).
 
-**What the port is actually for: the R2 successor.** R1's binding reads `auth_time` from the token presented with the apply — the check above, implemented here. The platform is expected to grow a **short-lived elevated session** ("sudo"): one re-authentication ceremony, then a bounded window during which privileged operations proceed without repeating it. When it exists, it becomes the binding behind this same port: the verifier stops inspecting claims and asks the session one question instead. The requirement does not move, the Apply path does not change, and no call site is touched — which is the concrete substitution this trait exists to permit, rather than a speculative one.
+**What the port is actually for: the R2 successor.** R1's binding reads `auth_time` from the token presented with the set — the check above, implemented here. The platform is expected to grow a **short-lived elevated session** ("sudo"): one re-authentication ceremony, then a bounded window during which privileged operations proceed without repeating it. When it exists, it becomes the binding behind this same port: the verifier stops inspecting claims and asks the session one question instead. The requirement does not move, the write path does not change, and no call site is touched — which is the concrete substitution this trait exists to permit, rather than a speculative one.
 
 Two things are worth stating plainly about that succession. **The primitive does not exist:** `SecurityContext` carries subject, tenant, token scopes and the bearer token, and nothing about elevation or authentication recency, so there is no field an `is_elevated()` could be derived from today. The platform's authorization design carries the whole subject as an open question — MFA support, which names RFC 9470 step-up and asks whether `SecurityContext` should gain `acr` / `amr` or an assurance level. R1's binding is one concrete answer to that question; choosing the platform-wide one is that document's business, not this one's.
 
-**And it is a weaker guarantee, not merely a different mechanism.** An elevated session covers every apply inside its window with one ceremony, while `cpt-cf-settings-service-fr-validate-before-set` requires re-verification before **every** Apply and carries no carve-out. Adopting it is therefore a decision for the PRD author, not a binding this design may swap on its own authority — the port makes the swap cheap, it does not make it ours to make.
+**And it is a weaker guarantee, not merely a different mechanism.** An elevated session covers every set inside its window with one ceremony, while `cpt-cf-settings-service-fr-validate-before-set` requires re-verification before **every** set and carries no carve-out. Adopting it is therefore a decision for the PRD author, not a binding this design may swap on its own authority — the port makes the swap cheap, it does not make it ours to make.
 
-**No `StepUpVerifier` binding exists in the workspace today — and what is missing is smaller than it looks.** Apply and the behavior-affecting declaration actions (retire/reactivate) are gated on this verification, so a reader should know its implementation status without inferring it. Three things are needed, none of them a new platform primitive:
+**No `StepUpVerifier` binding exists in the workspace today — and what is missing is smaller than it looks.** Setting a value and the behavior-affecting declaration actions (retire/reactivate) are gated on this verification, so a reader should know its implementation status without inferring it. Three things are needed, none of them a new platform primitive:
 
 | Needed | Owner | Note |
 |--------|-------|------|
 | the IdP configured to emit `auth_time` / `acr` / `amr` | deployment / IAM | **often off by default** (above); nothing to build |
 | an OIDC/JWKS verifier behind the `StepUpVerifier` trait | **this gear** — it is the default binding this design specifies, not a platform dependency to wait on (a deployment may substitute its own) | JWKS fetch + cache, then the four claim comparisons above, executing **in-process**: `ClientHub` hands back a local object, not a remote service. The gear already loads the JWKS endpoint and the freshness window at init (§4.9) |
-| the admin console redirecting on the `401` challenge | admin console | `max_age=0` / `prompt=login`; without it a correct verifier refuses every Apply, because no fresh `auth_time` can exist |
+| the admin console redirecting on the `401` challenge | admin console | `max_age=0` / `prompt=login`; without it a correct verifier refuses every set, because no fresh `auth_time` can exist |
 
-What is **not** needed: a re-authentication method on `authn-resolver`, or a second-authentication gear. Step-up is a ceremony **browser ↔ IdP** (above) and this gear only inspects claims locally, so the absence of either is not what blocks Apply. The PRD's approved interim mechanism is an **integrator-supplied implementation behind the same contract** — writing the verifier is sanctioned, redefining the contract is not.
+What is **not** needed: a re-authentication method on `authn-resolver`, or a second-authentication gear. Step-up is a ceremony **browser ↔ IdP** (above) and this gear only inspects claims locally, so the absence of either is not what blocks a set. The PRD's approved interim mechanism is an **integrator-supplied implementation behind the same contract** — writing the verifier is sanctioned, redefining the contract is not.
 
-Order matters when closing this, and it is an order of **binding**, not of authoring: the verifier can be written at any time, but binding it is what starts enforcement, and a bound verifier ahead of the console redirect will correctly refuse every Apply because no fresh `auth_time` can be obtained. So bind in this order — IdP claims emitted, console redirect in place, verifier bound last.
+Order matters when closing this, and it is an order of **binding**, not of authoring: the verifier can be written at any time, but binding it is what starts enforcement, and a bound verifier ahead of the console redirect will correctly refuse every set because no fresh `auth_time` can be obtained. So bind in this order — IdP claims emitted, console redirect in place, verifier bound last.
 
-**With no `StepUpVerifier` bound, the gear starts, serves reads, and refuses Apply** (`401`, the challenge above). This is the **floor under an unbound trait, not a phase to plan around**: the binding is this design's own to ship, so a deployment sitting in this state has an unfinished gear rather than an interim mode. Refusing to start is the wrong failure: settings reads are a **boot-time dependency** for the platform (§4.5 *Reader degradation contract*), so a gear that will not boot takes down every consumer that reads configuration at startup — a far larger outage than the loss of the administrative write path. Apply is the dangerous operation and is the one that fails closed. There is deliberately **no development or sandbox bypass** — no config flag that proceeds without verification — because such a flag is exactly the always-satisfied binding this contract rejects, and "non-production only" has never kept one out of production. The sanctioned non-verifying binding is `MockStepUpVerifier`, bound by the test harness and reachable no other way (§7 *Testing Architecture*).
-
-**Apply is accepted synchronously and executed in the background.** The request decides everything that can refuse it — authorization, step-up, checksum currency — pins the verified set and returns `202` with the apply's `Location` (steps 1–4 above). Execution then runs as a task under the gear's `LifecycleCapability` (§4.9): `start` spawns it with the runtime's cancellation token, `stop` asks it to finish the change in flight and stop taking the next, and the runtime's shutdown deadline bounds that wait. Because each change is its own transaction (*Apply atomicity model*, below), a shutdown mid-batch leaves the residue `pending` — the same shape as any partial failure, retried the same way.
-
-Two properties fall out, and both are worth being explicit about. A `202` means **accepted and pinned**, never "accepted, may conflict later": the checksum was verified before the response, so an apply that would have raced another administrator is still refused with `409` at the point of submission, not discovered afterwards in a progress facet. And the step-up assertion is verified **at acceptance**; execution may run minutes later without a fresh one, because the ceremony authorized this apply, not a window during which its writes must complete. A freshness rule that expired mid-execution would make a large batch impossible to apply at all.
-
-Progress is read from the commit facet, `GET /v1/applies/{apply_id}/commit` (§4.3), which already carries per-change results; the batch outcome an earlier design reported as `200` or `207` is now that facet's content.
-
-**Apply atomicity model.** Apply **commits per change** — each pending change is applied in its own transaction (value write; the change's own `applying → applied` transition, step 5; for `secret`-trait changes its Credential Store reference, §4.2 *Secret Manager*; the audit record, §4.2 *Audit Emitter*). **The value write, the status transition and the audit record share that transaction** — all three are writes to the local DB, so unlike the Credential Store leg they *can* be committed together, and committing them apart would leave a window where the value is live while its change still looks unapplied. A whole-bundle single transaction is not available: applying a change may span the local DB, the Credential Store, and the Audit Subsystem, which cannot be committed atomically together (§4.2 *Audit Emitter*). A change that fails to commit — and every change not yet reached — stays `pending`; already-committed changes stay committed (`partial_failed`). Intermediate state is not observable to readers — a value becomes effective only after its own commit, and pending changes are never read (`cpt-cf-settings-service-fr-set-value`, `cpt-cf-settings-service-nfr-reliability-validated-set`).
-
-**Apply is not idempotent, and the `checksum` is not what would make it so.** The two are often conflated because both concern a repeated `POST`, so the contract is stated explicitly. A success **removes** its change from the pending set (step 5) and the `checksum` is a hash **over that set** (§4.3), so re-submitting the original `checksum` presents a set that no longer exists — a strictly smaller one after a partial failure, an empty one after a full success — and step 3 answers `409 ApplyChecksumMismatch`. That is the `checksum` doing its job, not failing at another: it is **optimistic concurrency**, the guarantee that the admin commits exactly the change set the preview showed them. It is **not** an idempotency key, and no `Idempotency-Key` store exists here — the same stance §4.3 *Create idempotency* takes for the creating `POST`s.
-
-**Retry is a fresh apply of the residue.** After a partial failure the caller previews again, obtaining a new `checksum` over what is *still* pending, and issues a new `POST /v1/applies` under a new `apply_id`. This is not a re-run of the earlier operation and is not addressed as one. It needs no stored bundle because **the pending set is itself the durable record of the residue**: successes have left it, failures and un-reached changes remain in it. That is also why deleting a fully-succeeded `apply_operation` on settle (step 11) loses nothing a retry would need.
-
-**A lost response is disambiguated by re-reading, not by replaying.** A caller that never saw its response holds no `apply_id` and cannot `GET` the operation; it re-reads the pending set via `applies:preview` for the scope — **empty** ⇒ everything applied, **unchanged** ⇒ nothing applied, **smaller** ⇒ partial, with `GET /v1/applies/{apply_id}/commit` available for per-change detail once the id is known. Blind replay is additionally excluded by the step-up contract above: the assertion must carry a fresh `auth_time` (≤ 5 min), so a stored request body is not re-submittable indefinitely. This is why §4.3 marks `POST /v1/applies` **non-idempotent** — the designation is accurate and deliberate.
-
-**"Successfully applied" is defined by durability, then signal.** A change counts as applied only when its new value is **durably persisted** *and* the applied scope's cache invalidation has been issued (with descendant invalidation emitted for `cascading` settings, §4.2 *Cache & Invalidation*). The order is fixed and not an implementation detail: **commit the value first (step 5), then evict the local cache (step 8), then publish the signals (step 9)** — so no consumer can observe an invalidation or an `apply_notification` for a value that is not yet stored. That order constrains the **outward** signals, not the bookkeeping: the change's own `applying → applied` transition is **not** deferred to the end but commits atomically with the value write (step 5), since deferring it is precisely what would leave a committed value looking unapplied. Nothing observable leaves the service before the value is stored; the status is not observable.
-
-**Apply failure:** a partial/total failure leaves unapplied changes `pending` for retry, records the failure on the **`apply_operation`** (`failed` / `partial_failed`) and per change on its `ApplyChangeResult`, and raises a durable `event_apply_failed` notification (`cpt-cf-settings-service-nfr-reliability-validated-set`). **The change itself never takes a `failed` status.** It would drop out of `preview`, and therefore out of the next `checksum` — out of the very retry path this sentence promises. Failure is a property of the attempt, not of the proposal. Consumer-side activation — reaction sequencing across modules and any orchestrated fallback — is owned by the [Settings Activation](./DESIGN-activation.md).
-
-**An abandoned apply's `applying` rows are reclaimed.** Step 4 marks the batch `applying` to **pin** it: the apply then commits exactly the set step 3 verified, and a change staged elsewhere mid-apply is not swept in. Every ordinary exit — per-change success, per-change failure, total failure — writes a terminal status at step 7, so rows are left in `applying` only when **step 7 itself never runs**. Two ways remain, and both need something to actually go wrong:
-
-- **the failure path itself fails** — step 7 records the failure in the same database the apply was writing to, so the outage that failed the apply also takes out the record of it;
-- **the process dies** — OOM-kill, node loss, a rollout draining faster than the executor can finish, or a panic that unwinds past step 7.
-
-**What no longer strands an apply is the client.** Execution moved off the request (above): the handler returns `202` at step 4 and the remaining steps run in a background task under the gear's lifecycle (§4.9). A disconnect, a closed tab or a gateway idle-timeout now ends a *poll*, not the work — which is what makes the deadline below a statement about process death rather than a bet that execution outruns a timeout it was expected to hit.
-
-The window is narrower than it was: the audit write is local and inside the same transaction (§4.2 *Audit Emitter*), so it no longer contributes an external round trip per change. What remains is the batch itself — up to 500 changes (§6), each `secret`-trait one also touching the Credential Store.
-
-Those rows would otherwise be stranded: `preview` lists `pending` changes, so they are invisible to it and therefore absent from the next `checksum` — never retried and never cleared — and they still occupy `uq_pending_active`, so the setting cannot be re-staged either. **The rule:** an `apply_operations` row still `running` past the **apply deadline** (`apply_deadline_seconds`, default 300 s — §6) is treated as abandoned. The deadline now means one thing — how long a batch may plausibly run before a still-`running` row is better explained by a dead process than by slow work — rather than doubling as a wager against a gateway timeout it was expected to lose; reclaiming it sets the operation `failed` with a `failure_detail` naming the timeout and returns its scope's `applying` rows to `pending`, where the ordinary retry path (above) picks them up. Reclamation runs **lazily at the head of `preview` and `apply` for that scope**. A background executor now exists and could sweep, but it deliberately does not: stranded rows matter only to someone returning to that scope, and that person's next call is exactly where the lazy check sits.
-
-**Why the scope, not the row, is the unit of reclamation:** `pending_changes` carries no link to the operation that marked it (the link, `apply_change_results`, is written only *after* a change commits, so an un-reached change has none), while an apply pins a whole scope's batch and a scope may carry **at most one live apply** — enforced by the partial unique `uq_apply_running` (§4.7), not assumed, since without it two concurrent applies could each mark rows `applying` and one could reclaim the other's. Given that constraint, "no live operation for this scope" is precisely the condition under which a scope's `applying` rows can belong to nobody. A **live** apply keeps its operation `running` within the deadline, so nothing of its is reclaimed. And reclamation is safe even against a process that is merely stalled rather than dead: the per-change transition is guarded on `status = 'applying'` (§7 *Concurrency Testing*), so once a row is back to `pending` the stalled applier's guarded update matches no row and its transaction rolls back — **the value write with it**, since the two now share that transaction (above).
+**With no `StepUpVerifier` bound, the gear starts, serves reads, and refuses every set** (`401`, the challenge above). This is the **floor under an unbound trait, not a phase to plan around**: the binding is this design's own to ship, so a deployment sitting in this state has an unfinished gear rather than an interim mode. Refusing to start is the wrong failure: settings reads are a **boot-time dependency** for the platform (§4.5 *Reader degradation contract*), so a gear that will not boot takes down every consumer that reads configuration at startup — a far larger outage than the loss of the administrative write path. Setting a value is the dangerous operation and is the one that fails closed. There is deliberately **no development or sandbox bypass** — no config flag that proceeds without verification — because such a flag is exactly the always-satisfied binding this contract rejects, and "non-production only" has never kept one out of production. The sanctioned non-verifying binding is `MockStepUpVerifier`, bound by the test harness and reachable no other way (§7 *Testing Architecture*).
 
 #### Component: Secret Manager
 
@@ -1082,7 +943,7 @@ Those rows would otherwise be stranded: `preview` lists `pending` changes, so th
 
 Handles `secret`-trait values, backed by the platform **Credential Store** (the credstore backend, the `credstore` gear; gear dependency `credstore`). Plaintext never enters the settings DB, cache, search index, or audit trail — the settings row holds only an opaque `secret_ref`. `create_declaration` (§4.2 *Declaration Management*) resolves `has_secret_trait` from the type's trait set to route the setting's values through this component.
 
-**A secret setting has no secret default.** `default_value` is an ordinary JSONB column in the settings DB, so a `secret`-trait declaration's default MUST be a **non-secret placeholder** — never a live credential. The placeholder is an **empty value of the declared type** (`""` for a string-shaped secret type, JSON `null` for one that admits it); it is **not** an omitted default, which is rejected here exactly as on any other declaration (`422 DefaultRequired`, §4.1) — a secret setting resolves to its placeholder, not to nothing. One rule, both authoring paths: a gear's contributed declaration ships in source control to every installation, where a real credential would be a universally known shared secret; an administrator's declaration would put plaintext in the settings DB, which §4.8 forbids outright. `create_declaration` and `register_declarations` therefore reject a non-empty default on a secret-trait type (`422`). A real secret is set as a **value at a scope** through `stage_set` (§4.2 *Staging Manager*), which stores the plaintext here and persists only the `secret_ref` — the only path that keeps plaintext out of this database. Reverting that scope then falls back to the placeholder, i.e. to *not configured*, rather than resurrecting a previous credential.
+**A secret setting has no secret default.** `default_value` is an ordinary JSONB column in the settings DB, so a `secret`-trait declaration's default MUST be a **non-secret placeholder** — never a live credential. The placeholder is an **empty value of the declared type** (`""` for a string-shaped secret type, JSON `null` for one that admits it); it is **not** an omitted default, which is rejected here exactly as on any other declaration (`422 DefaultRequired`, §4.1) — a secret setting resolves to its placeholder, not to nothing. One rule, both authoring paths: a gear's contributed declaration ships in source control to every installation, where a real credential would be a universally known shared secret; an administrator's declaration would put plaintext in the settings DB, which §4.8 forbids outright. `create_declaration` and `register_declarations` therefore reject a non-empty default on a secret-trait type (`422`). A real secret is set as a **value at a scope** through `set` (§4.2 *Value Writer*), which stores the plaintext here and persists only the `secret_ref` — the only path that keeps plaintext out of this database. Reverting that scope then falls back to the placeholder, i.e. to *not configured*, rather than resurrecting a previous credential.
 
 **Dependencies:** Credential Store (the credstore backend), Audit Emitter
 
@@ -1149,7 +1010,7 @@ The corpus covers only Schema Defaults and overrides the caller may **already re
 
 **A hierarchy change invalidates too, not only an apply.** A cached effective value for a `cascading` setting is a function of the tenant's **ancestor chain**, so a change to the hierarchy itself — a tenant re-parent, or a new tenant inserted mid-chain — can change the correct effective value with **no settings apply involved**. Apply-driven invalidation alone would therefore serve a stale value until the entry's TTL expired. The cache also evicts on a **hierarchy-change signal** from the Tenant Resolver: for every `cascading` declaration, the cached `(key, scope)` entries of the affected subtree are dropped so the next read re-resolves against the new ancestry. `tenant_deleted` (§4.4) is the special case already handled; re-parent / mid-chain insert is the general one. **Dependency:** the Tenant Resolver does not publish such a signal today (§4.4, §6) — until it does, `cache_ttl_seconds` below is the only backstop and the post-re-parent staleness window equals that TTL.
 
-**Cache TTL — this cache owns the knob.** The local effective-value cache also evicts entries older than **`cache_ttl_seconds`** (default 30 s) as a **backstop**: a missed `cache_invalidate` broadcast self-heals within the TTL, so no replica serves a value staler than `cache_ttl_seconds` after an apply. The TTL is a property of **this** cache (and, symmetrically, of the reader-SDK consumer cache, §4.5); Settings Activation only **references** it as the backstop for its best-effort broadcast (activation §4.2 *Declaration Management* / *Apply Orchestrator*), it does not define it.
+**Cache TTL — this cache owns the knob.** The local effective-value cache also evicts entries older than **`cache_ttl_seconds`** (default 30 s) as a **backstop**: a missed `cache_invalidate` broadcast self-heals within the TTL, so no replica serves a value staler than `cache_ttl_seconds` after an apply. The TTL is a property of **this** cache (and, symmetrically, of the reader-SDK consumer cache, §4.5); Settings Activation only **references** it as the backstop for its best-effort broadcast (activation §4.2 *Declaration Management* / *Value Writer*), it does not define it.
 
 #### Component: Audit Emitter
 
@@ -1203,15 +1064,13 @@ What remains is smaller and is a consequence of holding the store here rather th
 
 All REST APIs follow the shared DNA REST contract: `snake_case` JSON; UUIDv7 IDs; ISO-8601 UTC timestamps with milliseconds; cursor pagination (`cursor`, `limit`) returning `{ "items": [...], "page_info": {...} }` (no `total_count`); errors use RFC 9457 `application/problem+json` (§4.3). **Collection `GET` endpoints** (`/v1/declarations`, `/v1/categories`, settings-browse) adopt the platform **OData** surface — `$filter` / `$orderby` / `$select` (guideline §4.4) parsed via the shared `toolkit_odata` (`ODataQuery`/`Page`), the same as the AM gear — with allowed fields declared per endpoint via `x-odata-filter`/`-orderby`/`-select`; `tenant`/`scope` are **resolution context**, not filters (they stay named), and `GET /v1/search` (§4.3, `cpt-cf-settings-service-fr-search-discoverability`) is a **purpose-built value-search** (its `q`, which MAY layer `$orderby`/`$select`). **`PATCH` bodies are JSON Merge Patch (RFC 7396)** (guideline §4.2). Mutating `PATCH`/`DELETE` on categories and declarations carry an optimistic-concurrency precondition: `GET` returns an `ETag` (derived from the normalized UTC `updated_at`) and the mutation requires `If-Match` — missing → `428`, stale → `412`.
 
-**Create idempotency.** Resource-creating `POST`s (`/v1/categories`, `/v1/declarations`) use the guideline §4.8 idempotency strategy for **critical operations** — a **permanent DB unique constraint → `409`** (`uq_declaration_key`, category-key uniqueness), a *permanent* uniqueness guarantee, not a time-windowed cache. Because of that, a client's **lost-response retry** also lands on `409`; a client **MUST disambiguate** its own retry from a genuine conflict by **re-reading** (`GET` by key / list) — the service keeps **no `Idempotency-Key` store**. `POST` (not a key-addressed `PUT`-create) is required: the `key` is server-composed and **mutable** (re-key on category rename/move, §4.2 *Declaration Management* / *Value Resolver*), while identity is the server-assigned UUIDv7 (§4.3 /). (The apply path has its own retry story — checksum-verified, already-committed = no-op, §4.2 *Apply Orchestrator*.)
+**Create idempotency.** Resource-creating `POST`s (`/v1/categories`, `/v1/declarations`) use the guideline §4.8 idempotency strategy for **critical operations** — a **permanent DB unique constraint → `409`** (`uq_declaration_key`, category-key uniqueness), a *permanent* uniqueness guarantee, not a time-windowed cache. Because of that, a client's **lost-response retry** also lands on `409`; a client **MUST disambiguate** its own retry from a genuine conflict by **re-reading** (`GET` by key / list) — the service keeps **no `Idempotency-Key` store**. `POST` (not a key-addressed `PUT`-create) is required: the `key` is server-composed and **mutable** (re-key on category rename/move, §4.2 *Declaration Management* / *Value Resolver*), while identity is the server-assigned UUIDv7 (§4.3 /). (The write path has its own retry story — `If-Match`-guarded, §4.2 *Value Writer*.)
 
-**Success codes & staging semantics.** `GET` → `200`; `PATCH` → `200`. A resource-creating `POST` → `201 Created` + `Location`; an action-style `POST` named `resource:verb` (`applies:preview`, `pending:discard`, and the per-setting actions `pending/{key}:revert` / `:clone`) → `200 OK` with a result body. **Direct (immediate, not staged)** mutations: a `DELETE` on a **category** or a **pending-change discard** → `204 No Content` (hard deletes, no body); a **declaration retire** (`DELETE /v1/declarations/{id}`, soft-delete) → **`200 OK`** with the retired declaration body (`status=retired`, `updated_at` = retire time — the soft-delete tombstone per guideline §4.2, distinguishable from a hard delete); **declaration create** (`POST /v1/declarations`) → `201 Created` (or `200 OK` with `reactivated: true` when the key belongs to a **retired** declaration — re-declare-to-revive, §4.3); **declaration metadata edit** (`PATCH /v1/declarations/{id}`) → `200 OK` — all take effect at once (declaration operations are not staged, `cpt-cf-settings-service-fr-set-value`).
+**Success codes.** `GET` → `200`; `PUT`/`PATCH` → `200`. A resource-creating `POST` → `201 Created` + `Location`; an action-style `POST` named `resource:verb` (the per-setting actions `settings/{key}/validate`, `settings/{key}/value:revert` / `:clone`) → `200 OK` with a result body. A `DELETE` on a **category** → `204 No Content` (hard deletes, no body); a **declaration retire** (`DELETE /v1/declarations/{id}`, soft-delete) → **`200 OK`** with the retired declaration body (`status=retired`, `updated_at` = retire time — the soft-delete tombstone per guideline §4.2, distinguishable from a hard delete); **declaration create** (`POST /v1/declarations`) → `201 Created` (or `200 OK` with `reactivated: true` when the key belongs to a **retired** declaration — re-declare-to-revive, §4.3); **declaration metadata edit** (`PATCH /v1/declarations/{id}`) → `200 OK` — all take effect at once (declaration operations do not go through the value write path, `cpt-cf-settings-service-fr-set-value`).
 
-**Action naming — one rule.** A non-CRUD action is an action-style `POST` named **`resource:verb`**, whether the resource is a **collection** (`applies:preview`, `pending:discard`) or an **item** (`pending/{key}:revert` / `:clone`). A **`GET`** computed sub-resource keeps a **path segment** (`settings/{key}/impact`, `settings/{key}/history`) — it is a sub-resource read, not an action. **Apply is a resource with two facets:** an apply lives under the plural namespace **`/v1/applies/{apply_id}`** — applying is `POST /v1/applies` (batch create), preview is the `applies:preview` action, and its two opposite-lifecycle facets are `…/{apply_id}/commit` (execution, delete-on-settle) and `…/{apply_id}/activation` (consumer activation, unbounded, owned by the activation design). See §4.3.
+**Action naming — one rule.** A non-CRUD action is an action-style `POST` named **`resource:verb`** on the item it acts on (`settings/{key}/value:revert`, `settings/{key}/value:clone`). A **`GET`** computed sub-resource keeps a **path segment** (`settings/{key}/impact`, `settings/{key}/history`) — it is a sub-resource read, not an action. **The check is an action on the item:** `POST /v1/settings/{key}/validate` reads and computes but changes nothing, and is a `POST` rather than a `GET` because the candidate value travels in the body. See §4.3.
 
-**Staging targets the pending resource, not the setting.** A staged value mutation does **not** change live state, and is **not** addressed as if it did — it is a write to the setting's `PendingChange` on the **pending plane**: `PUT /v1/pending/{key}?tenant={tenant_id}` **creates or replaces** the single active pending change for `(setting, tenant)` as a `set` → **`201 Created`** on first create / **`200 OK`** on replace, `Location: /v1/pending/{id}`; the clear/derive actions are action-style — `POST /v1/pending/{key}:revert` / `:clone?tenant={tenant_id}` → `200 OK` with the `PendingChange`. `GET /v1/pending/{key}?tenant={tenant_id}` reads that draft back — **read-your-write holds on the addressed resource** — and `DELETE /v1/pending/{key}?tenant={tenant_id}` discards it (`204`). Consequently `/v1/settings/{key}` is a **read-only effective-value** resource (plus `impact`); whether a draft exists is surfaced there by `has_pending`/`pending_id` (§4.3), never by mutating that URI. Staged changes take effect only after Apply (§4.3).
 
-**Addressing the pending plane — by id or by key.** `/v1/pending/{id}` names a pending change by its immutable **UUIDv7** (the durable handle from `GET /v1/pending`, used for by-id and bulk discard); `/v1/pending/{key}?tenant={tenant_id}` names the **same** resource by its natural `(key, tenant)` handle for staging and read-your-write. A path segment that parses as a UUIDv7 is treated as `{id}`; otherwise it is a `{key}` (a GTS instance id, URL-encoded) and the `tenant` query is **required**. Same two-planes / two-identifiers rationale as declarations (§4.3).
 
 #### REST API — Categories
 
@@ -1238,8 +1097,8 @@ All REST APIs follow the shared DNA REST contract: `snake_case` JSON; UUIDv7 IDs
 | `POST` | `/v1/declarations` | Create an admin-authored declaration — **or reactivate** a retired one at the same key (re-declare-to-revive), in which case **credential step-up is required** (reactivation is behavior-affecting, §4.2 *Declaration Management*) | No — unique key → `409`; lost-response retry disambiguated by re-read (§4.3 DNA) |
 | `GET` | `/v1/declarations` | List declarations — OData `$filter` (e.g. `category_id`, `domain_affinity`), `$orderby`/`$select` (§4.3 DNA); visibility/licence gated | Yes |
 | `GET` | `/v1/declarations/{id}` | Get a declaration (incl. `value_type_id` = key's left half + resolved `traits`) | Yes |
-| `PATCH` | `/v1/declarations/{id}` | Update declaration metadata — **immediate**, not staged (admin-authored only) | Yes |
-| `DELETE` | `/v1/declarations/{id}` | **Immediately** retire a declaration — `status=retired`, values retained but excluded from resolution (**`200`** with the retired body — soft-delete tombstone; admin-authored only) — not staged, but **step-up gated** (§4.2 *Declaration Management*) | Yes |
+| `PATCH` | `/v1/declarations/{id}` | Update declaration metadata — **immediate** (admin-authored only) | Yes |
+| `DELETE` | `/v1/declarations/{id}` | **Immediately** retire a declaration — `status=retired`, values retained but excluded from resolution (**`200`** with the retired body — soft-delete tombstone; admin-authored only) — **step-up gated** (§4.2 *Declaration Management*) | Yes |
 
 > **Why declarations are addressed by UUID while values/history are addressed by key.** The `key` is a **mutable attribute** of a declaration, not its identity: a category rename, a move to another category, or a leaf-slug edit **re-keys** the setting (§4.2 *Declaration Management* / *Value Resolver*, §6), and a read under the old key returns plain `NotFound` (§4.3/§4.5), indistinguishable from a key that never existed. The two access planes sit on opposite sides of that mutability:
 > - **Read plane (consumers)** address settings by `key` (`/v1/settings/{key}`, §4.3). Key churn is absorbed by the read contract — a consumer that hits a stale key gets `NotFound` and re-reads under the current key. It only ever needs a *current* handle, not a durable one.
@@ -1263,7 +1122,7 @@ All REST APIs follow the shared DNA REST contract: `snake_case` JSON; UUIDv7 IDs
 
 ##### `PATCH`/`DELETE /v1/declarations/{id}` — Rules
 
-Both are **immediate** — declaration operations are not staged (§4.2 *Declaration Management*, `cpt-cf-settings-service-fr-set-value`). `PATCH` edits metadata in place (`200`); `DELETE` is a **soft-delete (retire)** — sets `status=retired` and returns **`200`** with the retired declaration body (`status=retired`, `updated_at` = retire time — the soft-delete tombstone per guideline §4.2; distinguishable from a hard delete and anchoring the re-declare / `If-Match` follow-up, §4.3), **retaining** the declaration's `setting_values` (excluded from resolution, recoverable by **re-declaring the key**, §4.3), with cache invalidation and `cache_invalidate` for affected scopes — there is no pending state or Apply step.
+Both are **immediate** — declaration operations do not go through the value write path (§4.2 *Declaration Management*, `cpt-cf-settings-service-fr-set-value`). `PATCH` edits metadata in place (`200`); `DELETE` is a **soft-delete (retire)** — sets `status=retired` and returns **`200`** with the retired declaration body (`status=retired`, `updated_at` = retire time — the soft-delete tombstone per guideline §4.2; distinguishable from a hard delete and anchoring the re-declare / `If-Match` follow-up, §4.3), **retaining** the declaration's `setting_values` (excluded from resolution, recoverable by **re-declaring the key**, §4.3), with cache invalidation and `cache_invalidate` for affected scopes — there is no pending state or Apply step.
 
 | Condition | Error | Description |
 |-----------|-------|-------------|
@@ -1271,7 +1130,7 @@ Both are **immediate** — declaration operations are not staged (§4.2 *Declara
 | Actor authorized | `403` | `update` on `declaration.v1~` (`PATCH`) / `delete` (`DELETE`) — platform-admin |
 | Step-up verified — **`DELETE` only** | `401`/`403` | Retire is behavior-affecting and requires credential step-up (§4.2 *Declaration Management*). `PATCH` touches descriptive metadata only, changes no effective value, and needs none. |
 | Not module-contributed | `409 ContributedDeclarationImmutable` | Contributed declarations are immutable to admins (retire via §4.2 *Contribution Reconciler*); values change via §4.3 |
-| `owner_module`, `source`, `key`, `default_value` immutable | `422` | Immutable fields rejected if included in a `PATCH`. **`default_value`** (Schema Default) is **not** editable via `PATCH` — it is the stable declared floor (read-only per PRD); change the effective baseline via a platform-scope override (staged, §4.3). The value **type** is immutable via the `key` (type change = re-key, §4.2 *Contribution Reconciler*). |
+| `owner_module`, `source`, `key`, `default_value` immutable | `422` | Immutable fields rejected if included in a `PATCH`. **`default_value`** (Schema Default) is **not** editable via `PATCH` — it is the stable declared floor (read-only per PRD); change the effective baseline via a platform-scope override (§4.3). The value **type** is immutable via the `key` (type change = re-key, §4.2 *Contribution Reconciler*). |
 
 #### REST API — Setting Values (effective reads)
 
@@ -1279,7 +1138,7 @@ Both are **immediate** — declaration operations are not staged (§4.2 *Declara
 |--------|----------|-------------|-------------|
 | `GET` | `/v1/settings/{key}?tenant={tenant_id}` | Read the effective value with source trace + type/traits | Yes |
 | `GET` | `/v1/settings?tenant={tenant_id}` | Bulk effective read (browse) — OData `$filter` over `category_id`, `needs_review` (e.g. `$filter=needs_review eq true` — the migration prompt), plus `$orderby`/`$select` (§4.3 DNA); `tenant` is resolution context. **By key set** as well as by category: `$filter=key in (…)` returns the named keys with **per-key outcomes** in the item list — a key the caller may not see or that does not exist is reported in its own entry, never as a failure of the whole request (`cpt-cf-settings-service-fr-bulk-effective-read`). Same visibility, scope, and secret-masking rules as the single read above | Yes |
-| `GET` | `/v1/settings/{key}/impact?tenant={tenant_id}&limit={n}` | Non-blocking cascading-impact report (affected descendants); bounded — `limit` (default 100, max 500) plus `total_changed`/`truncated` (§4.2 *Staging Manager*) | Yes |
+| `GET` | `/v1/settings/{key}/impact?tenant={tenant_id}&limit={n}` | Non-blocking cascading-impact report (affected descendants); bounded — `limit` (default 100, max 500) plus `total_changed`/`truncated` (§4.2 *Value Writer*) | Yes |
 
 > `{key}` in these paths is the setting `key` (URL-encoded) — a **GTS instance identifier** `<value-type>~<instance-id>` for both authors; the `~`/`.` in the key are URL-encoded like any other characters and matched as an opaque string, not parsed. `{tenant_id}` is a bare the Tenant Resolver **tenant id** (UUID), not a path; **omitted ⇒ platform scope**. The service resolves ancestry from the id via the Tenant Resolver — it never parses a scope path (§4.2 *Value Resolver*, §4.7).
 
@@ -1291,82 +1150,63 @@ Both are **immediate** — declaration operations are not staged (§4.2 *Declara
   - **value arm** = the `last_change_at` of the **resolved** row only (own override → nearest-ancestor override → none if the effective value is the Schema Default) — always within the caller's own ancestor chain, which it may already read; **never** a max over sibling/descendant scopes.
  Hence the returned timestamp reveals nothing the caller cannot already see. A "when did this setting change **anywhere** in the subtree" view (a max over all overrides) is a **different** semantic, sound only for a platform-admin entitled to every scope, and is deliberately **not** provided on this read.
 - This recency is **admin-facing only** — it is part of the `GET /v1/settings/{key}` admin read, **not** the consumer effective-value read path (`SettingsReaderClient.get_effective` / `EffectiveValue`, §4.5, which carry no recency — consumers resolve values, they do not display recency).
-- **Needs-review listing:** `GET /v1/settings?tenant={tenant_id}&$filter=needs_review eq true` returns the overrides in the caller's subtree whose value no longer validates against the current type (backed by `idx_values_needs_review`, §4.7) — the data source for the admin migration prompt. Same visibility/subtree gating as browse. Resolution of a flagged override **falls through** to the nearest valid value (§4.2 *Value Resolver*) — never served, but visible here and apply-blocked; the flag is cleared when a valid value is re-staged and applied or the override is reverted — the exact Reconciler flag-**set** rule (§4.2 *Contribution Reconciler*) and flag-**clear**-on-apply step (§4.2 *Apply Orchestrator*) are the remaining follow-up.
-- **Pending-draft pointer.** When a staged change exists for this `(key, tenant)`, the read includes `has_pending: true` and `pending_id` (the `/v1/pending/{id}` handle). This is a **pointer, not the draft's content**: the returned `value` stays the **live effective** value; the staged content is fetched from `/v1/pending/{key}` (§4.3). Avoids a one-read visibility gap without the effective read serving draft state.
+- **Needs-review listing:** `GET /v1/settings?tenant={tenant_id}&$filter=needs_review eq true` returns the overrides in the caller's subtree whose value no longer validates against the current type (backed by `idx_values_needs_review`, §4.7) — the data source for the admin migration prompt. Same visibility/subtree gating as browse. Resolution of a flagged override **falls through** to the nearest valid value (§4.2 *Value Resolver*) — never served, but visible here, and it blocks a write until fixed; the flag is cleared when a valid value is set or the override is reverted — the exact Reconciler flag-**set** rule (§4.2 *Contribution Reconciler*) and flag-**clear**-on-write step (§4.2 *Value Writer*) are the remaining follow-up.
 - **Stale key → `404`.** A read under a key whose category segment has changed (the setting was re-keyed by a category rename or a move to another category — either author, §4.2 *Declaration Management* / *Contribution Reconciler*/§4.2 *Value Resolver*) returns `404`, **the same as a key that never existed** — no record of the old key is kept, so the two cannot be told apart (§4.2 *Value Resolver*). No redirect to the new key.
 - **Visibility-gated**, not Scope-Class-gated: a `global` setting marked `tenant_visible` is returned **read-only** to tenants; a setting not visible to the caller's scope returns `404` (never leaks existence) (`cpt-cf-settings-service-fr-tenant-scope-enforcement`, `cpt-cf-settings-service-nfr-scope-isolation`).
 - Tenant callers are constrained server-side to their own subtree regardless of client-supplied `tenant`; a target outside the subtree is rejected (`cpt-cf-settings-service-fr-tenant-scope-enforcement`).
 
-> **Value mutations moved to the pending plane.** Set / revert / clone are staged as writes to the setting's `PendingChange` — `PUT /v1/pending/{key}`, `POST /v1/pending/{key}:revert` / `:clone` — not as `PUT`/`DELETE`/`clone` on this read-only URI. Endpoints and staging rules: §4.3. A subsequent `GET /v1/settings/{key}` still returns the **live** effective value; a draft's presence is flagged by `has_pending`/`pending_id` above.
+> **Writes live under `/value`.** Set / revert / clone / remove act on `/v1/settings/{key}/value`, not on this read-only URI; rules below. The read always returns the **live** effective value, and its `last_change_at` is the ETag a write submits as `If-Match`.
 
-#### REST API — Pending Changes & Apply
+#### REST API — Setting Values (writes)
 
 | Method | Endpoint | Description | Idempotency |
 |--------|----------|-------------|-------------|
-| `PUT` | `/v1/pending/{key}?tenant={tenant_id}` | **Stage a set** — create/replace the pending change for `(key, tenant)` (`201` create / `200` replace); `Location: /v1/pending/{id}` | Yes (per key+tenant) |
-| `POST` | `/v1/pending/{key}:revert?tenant={tenant_id}` | **Stage a revert** — clear the override at the target scope | Yes |
-| `POST` | `/v1/pending/{key}:clone?tenant={tenant_id}` | **Stage a clone** — copy an effective value from another scope (`from` in body) as an override | No |
-| `GET` | `/v1/pending/{key}?tenant={tenant_id}` | Read the staged draft for `(key, tenant)` (read-your-write) | Yes |
-| `DELETE` | `/v1/pending/{key}?tenant={tenant_id}` | Discard the draft for `(key, tenant)` | Yes |
-| `GET` | `/v1/pending?scope={path}` | List pending changes across categories | Yes |
-| `DELETE` | `/v1/pending/{id}` | Discard one pending change by id | Yes |
-| `POST` | `/v1/pending:discard` | Bulk-discard pending changes (by filter/selection) | Yes |
-| `POST` | `/v1/applies:preview?scope={path}` | Compute apply preview (changes, old → new) + `checksum` | Yes |
-| `POST` | `/v1/applies?scope={path}` | Accept an apply — `202 Accepted` with `Location: /v1/applies/{apply_id}`; execution runs in the background and progress is read from the commit facet (step-up + previewed `checksum` required) | No — each call mints a new `apply_id`, and the `checksum` is concurrency control, not a retry key (below). Retry is a re-preview + re-apply of what remains pending; a lost-response retry is disambiguated by re-reading the pending set, not by replay (§4.2 *Apply Orchestrator*) |
-| `GET` | `/v1/applies/{apply_id}` | Apply summary — links to the `commit` and `activation` facets | Yes |
-| `GET` | `/v1/applies/{apply_id}/commit` | Execution facet — per-change commit results (delete-on-settle; `404` after settle) | Yes |
-| `GET` | `/v1/applies/{apply_id}/activation` (+ `/responses`) | Activation facet — consumer-activation tracking (owned by Settings Activation, §4.3 there; unbounded) | Yes |
+| `POST` | `/v1/settings/{key}/validate?tenant={tenant_id}` | **Check a value without storing it** — validity, current effective value + source, and (for `cascading`) the affected descendants, paginated. Read-only, needs no step-up, and not required before a write (`cpt-cf-settings-service-fr-validate-before-set`) | Yes |
+| `PUT` | `/v1/settings/{key}/value?tenant={tenant_id}` | **Set the value** at the target scope (`If-Match` + step-up required) | Yes (same value + same `If-Match` ⇒ same outcome) |
+| `POST` | `/v1/settings/batch` | **Set several settings in one call** — per-item results, no atomicity across items (below) | No |
+| `POST` | `/v1/settings/{key}/value:revert?tenant={tenant_id}` | **Revert** — clear the override at the target scope; the response carries the resulting fallback | Yes |
+| `POST` | `/v1/settings/{key}/value:clone?tenant={tenant_id}` | **Clone** — copy an effective value from another scope (`from` in body) as an override here | No |
+| `DELETE` | `/v1/settings/{key}/value?tenant={tenant_id}` | **Remove the value** at the target scope | Yes |
 
-> **`/v1/pending/{key}` vs `/v1/pending/{id}`.** A path segment that parses as a **UUIDv7** names the pending change by its durable id (the handle from `GET /v1/pending`, used for by-id discard); otherwise the segment is a **`{key}`** (a GTS instance id, URL-encoded) and the `tenant` query is **required** — the natural `(key, tenant)` handle for staging and read-your-write. Same entity, two identifiers — the two-planes rationale of §4.3.
+> `{key}` and `{tenant_id}` follow the read surface above: `{key}` is the URL-encoded GTS instance id, matched as an opaque string; `{tenant_id}` is a bare tenant id, **omitted ⇒ platform scope**. Every write targets the caller's own tenant or a descendant within its subtree; a target outside it is rejected `403` (`cpt-cf-settings-service-fr-tenant-scope-enforcement`).
 
-##### `PUT /v1/pending/{key}` — Set Staging Rules
-
-Creates or replaces the single active pending `set` for `(key, tenant)` (`201` create / `200` replace).
+##### `PUT /v1/settings/{key}/value` — Set Rules
 
 | Condition | Error | Description |
 |-----------|-------|-------------|
 | Setting visible to caller | `404` | Hidden settings never leak |
-| Overridable at this tenant | `403`/`409` | `global` not tenant-overridable; `tenant_overridable=false` rejects tenant change (`cpt-cf-settings-service-fr-setting-scope-class`, `cpt-cf-settings-service-fr-tenant-scope-enforcement`) |
+| Overridable at this tenant | `403`/`409` | `global` not tenant-overridable; `tenant_overridable=false` rejects a tenant change (`cpt-cf-settings-service-fr-setting-scope-class`, `cpt-cf-settings-service-fr-tenant-scope-enforcement`) |
 | Value valid | `422` | Validated against type + traits (`cpt-cf-settings-service-fr-typed-value-validation`) |
 | Value within size cap | `413`/`422 ValueTooLarge` | Serialized value MUST NOT exceed 64 KiB (§4.2 *Type Validator*) |
-| Target within caller's subtree | `403` | The optional `tenant` targets the caller's own tenant or any **descendant** within its subtree; a target outside the subtree (an ancestor or sibling) is rejected server-side. Omitted ⇒ the caller's own tenant. The override is created **at the target tenant** (`cpt-cf-settings-service-fr-tenant-overrides`, `cpt-cf-settings-service-fr-tenant-scope-enforcement`). |
+| Target within caller's subtree | `403` | The optional `tenant` targets the caller's own tenant or any **descendant**; an ancestor or sibling is rejected server-side. Omitted ⇒ the caller's own tenant. The override is created **at the target tenant** (`cpt-cf-settings-service-fr-tenant-overrides`) |
+| Step-up verified | `401`/`403` | IdP credential re-verification required. The `401` carries the RFC 9470 challenge that drives the re-auth — `WWW-Authenticate: Bearer error="insufficient_user_authentication"` with `max_age` (and `acr_values` where an assurance level is required), so the client learns what to ask the IdP for rather than guessing (§4.2 *Value Writer*, step-up contract). Nothing is stored by the refusal (`cpt-cf-settings-service-fr-validate-before-set`, `cpt-cf-settings-service-fr-authn-role-gating`) |
+| Value not changed since read | `412` | `If-Match` carries the ETag from the caller's last read; a value that moved in between is refused rather than overwritten (§4.2 *Value Writer*, *Stale-write rejection*) (`cpt-cf-settings-service-nfr-reliability-validated-set`) |
+| Value stored | `200` | Response reports `old_value`, `new_value`, `scope` and the new `etag`. The value is committed, the local cache evicted and the signals (`change_notification` + `cache_invalidate`) published (§4.2 *Value Writer*); consumers read the new value on demand |
 
-> The change is **staged**, not live (`cpt-cf-settings-service-fr-set-value`). It affects running services only after Apply.
+##### `POST /v1/settings/batch` — Bulk Set Rules
 
-##### `POST /v1/pending/{key}:revert` / `:clone` — Revert & Clone Staging Rules
+The body carries a list of changes, each with its own `key`, optional `tenant`, `value` and `If-Match`. Step-up is verified **once for the request**; the per-change conditions above are then evaluated per item.
 
-`:revert` stages clearing the setting's override at the target scope; the effective value then falls back per Scope Class (`cpt-cf-settings-service-fr-defaults-revert`):
+- **Per-item results, no atomicity across items.** The response lists one entry per change — `old_value`, `new_value`, `scope`, and success or the error that rejected it. A change that fails stores nothing; the others still land (`cpt-cf-settings-service-fr-set-value`). The response status reflects the request, not the items: `200` when every item was answered, and the caller reads the outcomes.
+- **Bounded.** At most 500 changes per request (§6); a larger body is rejected `422`.
+- The only set that commits all-or-nothing is a **Dependency Group**, which is `p3` and not part of this surface (`cpt-cf-settings-service-fr-dependency-group-declaration`).
+
+##### `POST /v1/settings/{key}/value:revert` / `:clone` — Revert & Clone Rules
+
+`:revert` clears the setting's override at the target scope; the effective value then falls back per Scope Class (`cpt-cf-settings-service-fr-defaults-revert`):
 
 | Scope | Fallback after revert |
 |-------|-----------------------|
 | `/` (platform) | Schema Default |
 | tenant scope | nearest-ancestor override, else Schema Default (`cascading`); Schema Default (`local`) |
 
-- **Staged**, not live: creates a `PendingChange` (`change_type = revert`) carrying the resolved fallback for a pre-commit preview (§4.2 *Staging Manager* `stage_revert`); it affects running services only after Apply.
+- The response carries the resolved fallback; `/validate` reports the same fallback beforehand.
 - Both accept the same optional `tenant` as the set endpoint: a tenant caller may act at its own tenant or any tenant within its subtree, while a platform admin MAY target a specific tenant (e.g. tenant offboarding/reset — multi-tenant Story 3). A target outside the caller's subtree is rejected (`cpt-cf-settings-service-fr-tenant-scope-enforcement`).
-- `:clone?tenant={to}` stages a `clone` — copying the effective value resolved at the `from` scope (request body) as an explicit override at the target tenant (§4.2 *Staging Manager* `clone_override`, `cpt-cf-settings-service-fr-tenant-overrides`). **Both ends are authorized**: read on the `from` scope *and* write on the target, each within the caller's subtree — a source the caller may not read is rejected `403`, so clone cannot be used to lift a value out of a scope the caller has no access to. A `secret`-classified setting is **not cloneable at all** — `422 SecretNotCloneable` (§4.2 *Staging Manager* `clone_override`); set it at the target with `:set` instead.
+- `:clone?tenant={to}` copies the effective value resolved at the `from` scope (request body) as an explicit override at the target tenant (§4.2 *Value Writer* `clone`, `cpt-cf-settings-service-fr-tenant-overrides`). **Both ends are authorized**: read on the `from` scope *and* write on the target, each within the caller's subtree — a source the caller may not read is rejected `403`, so clone cannot be used to lift a value out of a scope the caller has no access to. A `secret`-classified setting is **not cloneable at all** — `422 SecretNotCloneable` (§4.2 *Value Writer* `clone`); set it at the target with `PUT` instead.
 
-`applies:preview` computes and returns a `checksum` — a content hash over a canonical (scope-sorted) serialization of each pending change's `(declaration_id, scope, change_type, staged_value, staged_secret_ref)`; the `POST /v1/applies` create requires it (§4.2 *Apply Orchestrator*).
+##### Activation tracking
 
-**The `checksum` is optimistic concurrency, not an idempotency key.** It guarantees one thing: the admin commits exactly the change set the preview showed them, and a set that drifted in between fails loudly (`409 ApplyChecksumMismatch`). It deliberately does **not** make `POST /v1/applies` replayable — a change that applied has left the pending set, so re-submitting the original `checksum` describes a set that no longer exists and is rejected by design. Retry after a partial failure is therefore a **new preview and a new apply over what is still pending**, under a new `apply_id`; a caller that lost its response re-reads the pending set rather than replaying the request. Full contract in §4.2 *Apply Orchestrator*.
-
-**One apply, two facets under `/v1/applies/{apply_id}`.** An apply's `apply_id` is a **namespace**, not one record — the two things you can ask about an apply have **opposite lifecycles**, so each is its own facet:
-- **`GET /v1/applies/{apply_id}/commit`** — the **execution** facet ("did the values commit"): per-change commit results, `value.v1~`, **deleted on settle** (a fully-succeeded apply's row is removed once audited, §4.2 *Apply Orchestrator* step 11 / §4.7), so it **404s** after settle and its history is served from the audit trail (§4.3).
-- **`GET /v1/applies/{apply_id}/activation`** (+ `…/responses`) — the **activation** facet ("did the consumers activate"): owned by the [Settings Activation](./DESIGN-activation.md) design (same gear), **unbounded** lifecycle (§4.2 *Value Resolver* there).
-
-The parent **`GET /v1/applies/{apply_id}`** is a thin summary linking both, living as long as either facet does. Grouping the facets under the **neutral `apply_id` namespace** — rather than nesting the activation facet under the delete-on-settle execution record — is what avoids the orphaned-sub-resource trap: the `commit` facet 404s independently while `activation` lives on.
-
-##### `POST /v1/applies` — Apply Rules
-
-| Condition | Error | Description |
-|-----------|-------|-------------|
-| Actor authorized | `403` | `apply` on `gts.cf.toolkit.settings.value.v1~` at scope |
-| Step-up verified | `401`/`403` | IdP credential re-verification required. The `401` carries the RFC 9470 challenge that drives the re-auth — `WWW-Authenticate: Bearer error="insufficient_user_authentication"` with `max_age` (and `acr_values` where an assurance level is required), so the client learns what to ask the IdP for rather than guessing (§4.2 *Apply Orchestrator*, step-up contract). Nothing is applied and no pending change is altered by the refusal. (`cpt-cf-settings-service-fr-validate-before-set`, `cpt-cf-settings-service-fr-authn-role-gating`) |
-| Checksum current | `409 ApplyChecksumMismatch` | The previewed `checksum` no longer matches the pending set (it changed since preview) |
-| Apply accepted | `202 Accepted` | Every rejectable condition above is decided **before** the response, so a `202` means the pending set was verified and pinned, never "accepted, may conflict later". Per-change outcomes are read from the commit facet; the batch convention (all-applied vs mixed) is reported there rather than in a status code | . **Not `201`** — the success record is **delete-on-settle**, so this is accepted batch execution, not durable creation |
-| Operation readable | `Location: /v1/applies/{apply_id}` | The `POST` returns the created apply's location; the execution facet is readable at `GET /v1/applies/{apply_id}/commit` (until delete-on-settle); partial/`failed` operations persist for retry (`cpt-cf-settings-service-fr-live-read-activation`, `cpt-cf-settings-service-nfr-reliability-validated-set`) |
-
-**Apply response** reports per change: `success`/`failure` and any failure detail. Pending flags clear only for successes. On success the value is committed and the apply signals (`apply_notification` + `cache_invalidate`) published (§4.2 *Apply Orchestrator*); consumers read the new value on demand (`cpt-cf-settings-service-nfr-reliability-validated-set`).
+Consumer activation is tracked per stored change, under `GET /v1/changes/{change_id}/activation` (+ `…/responses`), and is owned by the [Settings Activation](./DESIGN-activation.md) design (same gear, `p3`). It has an **unbounded** lifecycle: an activation stays open until the consumer answers.
 
 #### REST API — Search, History & Preferences
 
@@ -1407,7 +1247,7 @@ All 4xx/5xx responses use `Content-Type: application/problem+json` (RFC 9457).
 
 ### 4.4 External Interfaces & Protocols
 
-The service publishes apply-lifecycle and cache-invalidation events, and consumes `tenant_deleted`, through the platform **Event Broker** (gear dependency `event-broker`; §1.3/§1.3). Delivery follows the Event Broker's contract — **at-least-once** — so a consumer must tolerate a repeated event; ordering across events is not guaranteed. The Audit Emitter's `emit` operation (§4.2 *Audit Emitter*) is the publish path. Apply lifecycle is additionally observable via `GET /v1/applies/{apply_id}/commit` (§4.3) and the audit trail (§4.3).
+The service publishes value-change and cache-invalidation events, and consumes `tenant_deleted`, through the platform **Event Broker** (gear dependency `event-broker`; §1.3/§1.3). Delivery follows the Event Broker's contract — **at-least-once** — so a consumer must tolerate a repeated event; ordering across events is not guaranteed. The Audit Emitter's `emit` operation (§4.2 *Audit Emitter*) is the publish path. Value changes are additionally observable through the audit trail (§4.3).
 
 Event type identifiers follow `gts.<vendor>.<package>.<namespace>.<type>.v<MAJOR>~`. The envelope (id, timestamp, source, content type, transport) is owned by the platform event system and composed via the platform base event type `gts://gts.cf.core.events.type.v1~` (`guidelines/GTS.md` §2.1/§7).
 
@@ -1415,14 +1255,14 @@ Event type identifiers follow `gts.<vendor>.<package>.<namespace>.<type>.v<MAJOR
 
 | Event Type (GTS) | Description | Payload Fields |
 |------------------|-------------|----------------|
-| `gts.cf.toolkit.settings.event_apply_completed.v1~` | An apply operation finished | `apply_operation_id`, `scope`, `status`, `summary` |
-| `gts.cf.toolkit.settings.event_apply_failed.v1~` | Apply partially/fully failed (durable notification, `cpt-cf-settings-service-nfr-reliability-validated-set`) | `apply_operation_id`, `scope`, `failed_keys`, `detail` |
+| `gts.cf.toolkit.settings.event_value_changed.v1~` | A value was stored | `declaration_key`, `scope`, `actor` |
+| `gts.cf.toolkit.settings.event_value_change_failed.v1~` | A value change was rejected (durable notification, `cpt-cf-settings-service-nfr-reliability-validated-set`) | `declaration_key`, `scope`, `reason`, `detail` |
 | `gts.cf.toolkit.settings.event_declaration_registered.v1~` | Module contributed/upgraded a declaration | `owner_module`, `key` |
 | `gts.cf.toolkit.settings.event_declaration_retired.v1~` | Module retired a declaration | `owner_module`, `key` |
 | `gts.cf.toolkit.settings.event_declaration_reactivated.v1~` | A retired declaration was revived by re-declaring its key (admin `POST` or gear reconcile, §4.2 *Declaration Management* / *Contribution Reconciler*/§4.3) | `key`, `source`, `actor` |
 | `gts.cf.toolkit.settings.event_secret_used.v1~` | Security audit event for a **machine secret-use** — a plaintext resolution through the machine-only reader path; value masked (§4.2 *Secret Manager*) | `declaration_key`, `scope`, `resolving_service`, `request_id` |
 
-> The identifiers above are the **payload `type`** constants (bare GTS type IDs). The corresponding **registered schema `$id`s** are the base-event-composed forms, derived from `gts.cf.core.events.type.v1~` (e.g. `gts://gts.cf.core.events.type.v1~cf.toolkit.settings.event_apply_completed.v1~`); the two forms denote the same event. These schemas are registered at gear init (§4.7). The consumer-facing **`apply_notification`** signal and the **`cache_invalidate`** cross-instance cache broadcast are defined and owned by the [Settings Activation](./DESIGN-activation.md); this service publishes them on apply (§4.2 *Apply Orchestrator*).
+> The identifiers above are the **payload `type`** constants (bare GTS type IDs). The corresponding **registered schema `$id`s** are the base-event-composed forms, derived from `gts.cf.core.events.type.v1~` (e.g. `gts://gts.cf.core.events.type.v1~cf.toolkit.settings.event_value_changed.v1~`); the two forms denote the same event. These schemas are registered at gear init (§4.7). The consumer-facing **`change_notification`** signal and the **`cache_invalidate`** cross-instance cache broadcast are defined and owned by the [Settings Activation](./DESIGN-activation.md); this service publishes them on a write (§4.2 *Value Writer*).
 
 #### Events Consumed
 
@@ -1434,13 +1274,13 @@ Event type identifiers follow `gts.<vendor>.<package>.<namespace>.<type>.v<MAJOR
 
 #### Event-Driven Invalidation
 
-Apply (§4.2 *Apply Orchestrator*) publishes two signals (owned by the [Settings Activation](./DESIGN-activation.md)): a filtered **`apply_notification`** per subscriber (consumer activation) and a **`cache_invalidate`** broadcast — the Cache component (§4.2 *Cache & Invalidation*) evicts on the broadcast so all instances converge after an ancestor apply. Partial-apply failures raise a **durable failure notification** via `event_apply_failed` in addition to the persisted `failed` state.
+The Value Writer (§4.2) publishes two signals (owned by the [Settings Activation](./DESIGN-activation.md)): a filtered **`change_notification`** per subscriber (consumer activation) and a **`cache_invalidate`** broadcast — the Cache component (§4.2 *Cache & Invalidation*) evicts on the broadcast so all instances converge after an ancestor's value changes. A rejected change raises a **durable failure notification** via `event_value_change_failed`.
 
 #### Internal Activation & Cache Coherence (no internal REST surface)
 
 Activation introduces **no internal REST endpoints and no platform service-token surface** — matching the [Settings Activation](./DESIGN-activation.md) design (§4.3 there). The two operations that might otherwise need internal token-only calls are both realized without an endpoint:
 
-- **Checksum-verified activation (value commit) is in-process, not a separate call.** Verifying the previewed `checksum` happens inside the user-facing `POST /v1/applies` (step-up + checksum, §4.3), and the commit sequence runs in a background task in the **same process** (§4.2 *Apply Orchestrator*). There is **no** `/internal/v1/applies:activate` endpoint: a second, service-token entry point would be needed for **split-process** execution, not for asynchrony — moving work off the request does not move it off the host, and the Apply Publisher likewise publishes in-process (§4.2 *Apply Orchestrator* step 9). Retry safety comes from the **pending set**, not from a separate networked step and not from the `checksum`: a committed change has left that set, so what a retry re-previews and re-applies is exactly the residue (§4.2 *Apply Orchestrator*).
+- **The value commit is in-process, not a separate call.** Step-up, validation, the guarded commit and the signal publish all happen inside the user-facing write (§4.3, §4.2 *Value Writer*). There is **no** `/internal/v1/...:activate` endpoint: a second, service-token entry point would be needed for **split-process** execution, and nothing here is split. Retry safety comes from the `If-Match` guard: a resubmission either lands, because the first did not, or is refused `412`, because it did.
 - **Cache invalidation is not a REST endpoint.** Cross-instance cache coherence is the **`cache_invalidate` broadcast event** (Settings Activation, §4.2 *Cache & Invalidation*/§4.4): every replica consumes it and evicts. There is **no** `cache:invalidate` HTTP endpoint.
 
 ### 4.5 Service-to-Service Pattern
@@ -1454,7 +1294,7 @@ The hot path: platform services read effective configuration in-process via `Cli
 | `get_effective` | `GetEffectiveRequest { key, scope }` | `EffectiveValueResponse` \| `Err(Unavailable \| Retired \| NotFound)` | Cache-first effective value; secret-trait values are returned masked as a `SecretHandle` (§4.2 *Secret Manager*). A `needs_review` override falls through to a valid value (§4.2 *Value Resolver*) — never surfaced here. May fail — see the degradation contract below. |
 | `get_effective_bulk` | `keys[] \| category`, `scope` | `Result<EffectiveValueResponse>[]` | Batched read sharing one ancestry walk. **Per-key outcomes:** each element is `Ok` or `Err(Unavailable \| Retired \| NotFound)` for that key — never all-or-nothing. |
 | `resolve_secret` | `SecretHandle` | plaintext \| `Err(Unauthorized \| Unavailable \| NotFound)` | **The sole plaintext path for a `secret`-trait value, and it is machine-only** (§4.2 *Secret Manager*). Resolves the opaque handle returned by `get_effective` into plaintext, authorizing the calling service **against that specific setting** and emitting one secret-use audit event per resolution. Plaintext is **never cached** and never crosses an administrative/human path. The handle carries no credstore coordinates, so a consumer cannot bypass this call. **An unconfigured secret resolves `NotFound`.** A `secret`-trait setting with no override anywhere resolves to its declaration's placeholder default (§4.2 *Secret Manager*), which is not a credential and has no `secret_ref`; `get_effective` still returns a `SecretHandle` — the shape does not vary by whether a credential exists — but `resolve_secret` on that handle returns `Err(NotFound)`, meaning *no credential is configured at any scope*. Here `NotFound` names the **credential**, not the declaration — unlike the resolver's `NotFound` (§4.2 *Value Resolver*), which means no declaration row exists; a `SecretHandle` is proof the declaration resolved, so the two cannot be confused at this call site. Deliberately **not** `Unauthorized` (the caller's rights are not the problem) and deliberately not the placeholder itself, since handing a placeholder to a backend as if it were a credential is the failure this prevents. A consumer can see it coming without the round trip: `source = schema_default` on the `EffectiveValueResponse` says the same thing (below). |
-| `watch` | `keys` | change stream | Subscribe to change notifications (the `apply_notification` signal) for **exact setting keys** and re-read on change — **no category** (a prefix subscription, excluded by the activation per-exact-key Non-Goal) and **no scope** (the notification carries the tenant). Any trusted reader may watch any key it can read (not ownership-bound, activation §4.2 *Subscription Manager*). The durable, cross-process subscribe contract is owned by the [Settings Activation](./DESIGN-activation.md) (its `subscribe(keys)` SDK); this trait is its consumer-facing entry point. |
+| `watch` | `keys` | change stream | Subscribe to change notifications (the `change_notification` signal) for **exact setting keys** and re-read on change — **no category** (a prefix subscription, excluded by the activation per-exact-key Non-Goal) and **no scope** (the notification carries the tenant). Any trusted reader may watch any key it can read (not ownership-bound, activation §4.2 *Subscription Manager*). The durable, cross-process subscribe contract is owned by the [Settings Activation](./DESIGN-activation.md) (its `subscribe(keys)` SDK); this trait is its consumer-facing entry point. |
 
 **`SettingsContributionClient` trait:**
 
@@ -1483,48 +1323,43 @@ Deciding **what is safe to expose** is that gateway's responsibility, and delibe
 
 ### 4.6 Interactions & Sequences
 
-The two sequences below are the design's load-bearing interactions: the **administrator write path** (staged, previewed, step-up-gated, committed per change) and the **consumer read path** (in-process, cache-first, resolved along the scope chain). Component names in *italics* refer to §4.2.
+The two sequences below are the design's load-bearing interactions: the **administrator write path** (validated, step-up-gated, committed per change) and the **consumer read path** (in-process, cache-first, resolved along the scope chain). Component names in *italics* refer to §4.2.
 
-#### Stage, preview, and apply a change
+#### Validate and set a value
 
-- [ ] `p1` - **ID**: `cpt-cf-settings-service-seq-stage-preview-apply`
+- [ ] `p1` - **ID**: `cpt-cf-settings-service-seq-validate-and-set`
 
-Values are never written live. A change is staged as a pending row, previewed to obtain a `checksum`, then applied under a fresh step-up token. Apply commits **per change** in its own transaction, so a failing change stays `pending` while already-committed ones stay committed (`partial_failed`, §4.2 *Apply Orchestrator*). Step-up claims are validated **locally** against the configured JWKS — there is no per-apply IdP call (§4.8).
+A caller may check a value first, then set it; the check is optional and the same validation runs inside the set. The set commits **per change** in its own transaction, so a failing change stores nothing while the others still land (§4.2 *Value Writer*). Step-up claims are validated **locally** against the configured JWKS — there is no per-set IdP call (§4.8).
 
 ```mermaid
 sequenceDiagram
  autonumber
  actor Admin
  participant API as REST API (§4.3)
- participant SM as Staging Manager
- participant AO as Apply Orchestrator
+ participant VW as Value Writer
  participant CS as Credential Store
  participant DB as Settings DB
  participant Broker as Event Broker
 
- Admin->>API: stage_set(key, scope, value)
- API->>SM: validate value against the key's value type (TypesRegistryClient)
+ Admin->>API: POST /v1/settings/{key}/validate (value, scope)
+ API->>VW: validate against the key's value type (TypesRegistryClient)
+ VW-->>Admin: valid? · current effective value + source · affected descendants (paged)
+ Admin->>API: PUT /v1/settings/{key}/value (value, If-Match, step-up token)
+ VW->>VW: verify token locally — JWKS signature, sub-match, auth_time ≤ 5 min, acr/amr
+ VW->>VW: validate value again
  alt secret-trait setting
-  SM->>CS: put plaintext
-  CS-->>SM: staged_secret_ref
-  Note over SM: only the ref is staged — plaintext never enters the settings DB
+  VW->>CS: put plaintext
+  CS-->>VW: secret_ref
+  Note over VW: only the ref is stored — plaintext never enters the settings DB
  end
- SM->>DB: upsert pending row (partial-unique index enforces one pending per key+scope)
- Admin->>API: preview pending changes
- API-->>Admin: change set + checksum
- Admin->>API: POST /v1/applies (checksum, step-up token)
- AO->>AO: verify token locally — JWKS signature, sub-match, auth_time ≤ 5 min, acr/amr
- AO->>DB: re-derive checksum
- alt checksum differs
-  AO-->>Admin: 409 ApplyChecksumMismatch (pending rows untouched)
- else checksum matches
-  loop per staged change
-   AO->>DB: commit change in its own transaction
-  end
-  AO->>DB: record apply outcome (succeeded / partial_failed / failed)
-  AO->>Broker: publish apply-lifecycle events + cache_invalidate broadcast
-  Note over AO,Broker: apply_notification per subscriber is owned by the<br/>[Settings Activation](./DESIGN-activation.md)
-  AO-->>Admin: apply_id (outcome also at GET /v1/applies/{apply_id}/commit)
+ VW->>DB: commit value + audit record (+ secret_ref), guarded on If-Match
+ alt value moved since the caller read it
+  DB-->>Admin: 412 Precondition Failed (nothing stored)
+ else committed
+  VW->>VW: evict local cache
+  VW->>Broker: publish change_notification + cache_invalidate broadcast
+  Note over VW,Broker: change_notification per subscriber is owned by the<br/>[Settings Activation](./DESIGN-activation.md)
+  VW-->>Admin: 200 old_value → new_value, scope, new etag
  end
 ```
 
@@ -1583,7 +1418,7 @@ sequenceDiagram
 
 - [ ] `p2` - **ID**: `cpt-cf-settings-service-seq-file-valued-setting`
 
-The service never carries the bytes, so a file-valued setting is written in **two independent calls by the client**, not by this service: the file goes into `file-storage` first, then the reference is staged like any other value (§3 *Files*). The read side is symmetric — the consumer receives the reference and fetches the content itself.
+The service never carries the bytes, so a file-valued setting is written in **two independent calls by the client**, not by this service: the file goes into `file-storage` first, then the reference is set like any other value (§3 *Files*). The read side is symmetric — the consumer receives the reference and fetches the content itself.
 
 ```mermaid
 sequenceDiagram
@@ -1600,10 +1435,10 @@ sequenceDiagram
     Adm->>FSD: PUT bytes (upload_url)
     Adm->>FS: POST /files/{id}/bind
 
-    Note over Adm,S: 2 — point the setting at it: an ordinary staged change
-    Adm->>S: stage_set(key, {file_id, version_id})
+    Note over Adm,S: 2 — point the setting at it: an ordinary value change
+    Adm->>S: set(key, {file_id, version_id})
     Note over S: shape only — file_id and version_id present; the reference itself is not checked
-    S-->>Adm: PendingChange
+    S-->>Adm: SetResult
     Adm->>S: preview + apply (step-up, audit, activation)
 
     Note over Con,FSD: 3 — read: the service hands back the reference, nothing more
@@ -1678,9 +1513,9 @@ Two things follow from the shape of this flow. An orphan is possible by construc
 | `value` | JSONB | Yes | — | Inline (non-secret) override value. SQL `NULL` means **no inline value in this column** (the value is a secret ref) and is not the JSON value `null`: a setting whose type admits `null` stores `'null'::jsonb`, a non-`NULL` column, so the exactly-one constraint below reads it as a value like any other |
 | `secret_ref` | text | Yes | — | Credential-Store reference for a `secret`-trait value (§4.2 *Secret Manager*); `NULL` for inline values |
 | `data_classification` | text | No | `'public'` | Check: `public`, `pii`, `secret`. **Denormalized** from the owning declaration (§4.1) so the search-index predicates below can reference it — a partial-index predicate cannot reach another table (see the note under Constraints/Indexes). Copied on write, re-synced when the declaration's classification changes. |
-| `needs_review` | boolean | No | `false` | `true` when this override no longer validates against the setting's current GTS type — set by the Reconciler on an invalidating type upgrade (§4.2 *Contribution Reconciler*). Excluded from apply until corrected; cleared when a valid value is re-staged/applied or the override is reverted (per the PRD type-versioning policy, `cpt-cf-settings-service-fr-typed-value-validation`). |
+| `needs_review` | boolean | No | `false` | `true` when this override no longer validates against the setting's current GTS type — set by the Reconciler on an invalidating type upgrade (§4.2 *Contribution Reconciler*). Blocks a write until corrected; cleared when a valid value is set or the override is reverted (per the PRD type-versioning policy, `cpt-cf-settings-service-fr-typed-value-validation`). |
 | `needs_review_detail` | text | Yes | — | Short human-readable reason the value was flagged (e.g. "value no longer matches enum after type v2 upgrade"); surfaced to the admin (§4.3). `NULL` when `needs_review = false`. |
-| `last_change_at` | `timestamptz` | No | current timestamp | |
+| `last_change_at` | `timestamptz` | No | current timestamp | Recency of this override, and the value behind the read's `ETag`: a write guards on it via `If-Match` (§4.2 *Value Writer*, *Stale-write rejection*) |
 | `created_at` | `timestamptz` | No | current timestamp | |
 | `updated_at` | `timestamptz` | No | current timestamp | |
 | `set_by` | text | No | — | |
@@ -1703,55 +1538,6 @@ Both subject columns are **load-bearing** in the subject index: `subject_id` is 
 **Why the subject columns exist before anything writes them.** `cpt-cf-settings-service-fr-subject-scoped-values` requires the identity model, the API shape, and the uniqueness indexes to be subject-aware **from v1**, while allowing the implementation to phase — tenant scope first, subject scopes later. The constraint that forces the columns in now is the one on migration: nothing may ship that would need a data migration to add a subject scope, and retrofitting a column into a unique index is exactly such a migration. Carrying two nullable columns and one extra partial index costs a v1 that writes only `NULL`s almost nothing; adding them later costs a rebuild of the uniqueness rules on a live table.
 
 **Scope is an id, resolution is by ancestor-id lookup.** `tenant_id` holds a single id — never a path, and never `NULL` — so ancestry is **not** encoded in the column and is never derived from it. The subject columns extend the scope **sideways, not upward**: a subject-scoped row belongs to exactly one tenant and never participates in the ancestor walk, so ancestry stays a property of `tenant_id` alone and the query below is unchanged for tenant-scoped resolution. Cascade resolution asks `TenantResolverClient.get_ancestors` (§4.2 *Value Resolver*) for the ancestor id list and reads with one exact-match set query: `WHERE declaration_id = ? AND tenant_id IN (<ancestor ids>))` — served by `idx_values_declaration` + the partial unique indexes. There is no prefix/`LIKE` scan and no scope-prefix index: the Tenant Resolver is the single source of ancestry, so a tenant re-parent needs no stored-scope rewrite.
-
-#### Table: `pending_changes`
-
-| Column | Type | Nullable | Default | Constraints |
-|--------|------|----------|---------|-------------|
-| `id` | UUID | No | auto-generated | **PK** |
-| `declaration_id` | UUID | No | — | **FK** → `setting_declarations(id)` ON DELETE CASCADE |
-| `scope` | text | No | — | |
-| `change_type` | text | No | — | Check: `set`, `revert`, `remove`, `clone` |
-| `staged_value` | JSONB | Yes | — | `NULL` for `revert`/`remove` or when the staged value is a secret ref |
-| `staged_secret_ref` | text | Yes | — | Credential-Store reference for a staged `secret`-trait value (§4.2 *Secret Manager*) |
-| `prior_value_snapshot` | JSONB | Yes | — | Pre-image for preview/audit |
-| `status` | text | No | `'pending'` | Check: `pending`, `applying`, `applied` — **no `failed`**: a failed apply leaves its change `pending` so preview and retry keep selecting it (§4.1 `PendingStatus`, §4.2 *Apply Orchestrator*) |
-| `failure_detail` | text | Yes | — | |
-| `staged_by` | text | No | — | |
-| `staged_at` | `timestamptz` | No | current timestamp | |
-| `applied_at` | `timestamptz` | Yes | — | |
-
-**Constraints/Indexes:** `CHECK (num_nonnulls(staged_value, staged_secret_ref) = CASE WHEN change_type IN ('set','clone') THEN 1 ELSE 0 END)` — a `set` or `clone` carries **exactly one** representation, a `revert` or `remove` carries **neither**; without it a staged change could be simultaneously doubly-valued and, for a `revert`, carry a value Apply has no reason to read. **Which** of the two a `set` may use follows the declaration's `secret` trait, and that cannot be a `CHECK` here — the trait lives on `setting_declarations` and this table keeps no denormalized copy, unlike `setting_values` where one exists for the search-index predicates. It is enforced in the staging transaction instead, which resolves the declaration anyway to validate the value against its type (§4.2 *Staging Manager*). A `clone` never stages a secret at all: cloning a `secret`-classified value is refused outright (§4.2 *Staging Manager* `clone_override`), so `staged_secret_ref` stays `NULL` for that change type. Partial unique `uq_pending_active` (`declaration_id`, `scope`) where `status IN ('pending','applying')` — at most one active pending change per setting+scope; `idx_pending_scope` (`scope`); `idx_pending_status` (`status`).
-
-#### Table: `apply_operations`
-
-| Column | Type | Nullable | Default | Constraints |
-|--------|------|----------|---------|-------------|
-| `id` | UUID | No | auto-generated | **PK** |
-| `scope` | text | No | — | |
-| `actor` | text | No | — | |
-| `status` | text | No | `'previewed'` | Check: `previewed`, `running`, `succeeded`, `partial_failed`, `failed` |
-| `step_up_verified` | boolean | No | `false` | |
-| `summary` | JSONB | No | `'{}'` | Per-effect counts |
-| `checksum` | text | No | — | Content hash of the previewed change set, verified at apply (§4.2 *Apply Orchestrator*, §4.3) |
-| `started_at` | `timestamptz` | No | current timestamp | |
-| `completed_at` | `timestamptz` | Yes | — | |
-
-**Indexes:** `idx_apply_scope` (`scope`); `idx_apply_status` (`status`); **partial unique `uq_apply_running` on (`scope`) `WHERE status = 'running'`** — **at most one live apply per scope**. This is what makes the scope a safe unit of ownership: an apply pins its batch by marking rows `applying` (§4.2 *Apply Orchestrator* step 4) while `pending_changes` carries no back-pointer to the operation, so "a live operation exists for this scope" must be a fact the database enforces rather than one the reclaimer hopes for. A second concurrent `apply` on the same scope loses the insert and is rejected `409 ApplyInProgress`, and the reclaimer can therefore treat *no* live operation as proof that the scope's `applying` rows belong to nobody. This mirrors how `uq_pending_active` serializes competing stages on the same setting+scope (§4.7) — the same house pattern, one level up.
-
-#### Table: `apply_change_results`
-
-| Column | Type | Nullable | Default | Constraints |
-|--------|------|----------|---------|-------------|
-| `id` | UUID | No | auto-generated | **PK** |
-| `apply_operation_id` | UUID | No | — | **FK** → `apply_operations(id)` ON DELETE CASCADE |
-| `pending_change_id` | UUID | No | — | **FK** → `pending_changes(id)` ON DELETE RESTRICT |
-| `outcome` | text | No | — | Check: `success`, `failure` |
-| `detail` | text | Yes | — | |
-
-**Indexes:** `idx_results_apply` (`apply_operation_id`).
-
-**Row lifecycle.** `apply_operations` and their cascaded `apply_change_results` are **operational execution records, not the system of record.** When an operation reaches `succeeded` and its outcome is durably recorded in the audit trail (§4.2 *Audit Emitter*), the operation row is **deleted**; its `apply_change_results` children cascade away (`ON DELETE CASCADE`). Deletion is delete-on-settle, not a retention window — there is no "keep for N days" knob to tune, and per-operation history is served from the audit store. The **activation outcome** of the same apply is the longer-lived **`activation` facet** (`GET /v1/applies/{apply_id}/activation`, Settings Activation §4.3) — keyed by `apply_id` correlation (no FK), so it outlives this `commit`-facet deletion. `failed` / `partial_failed` operations are **not** deleted: `cpt-cf-settings-service-nfr-reliability-validated-set` requires them durable and queryable via `apply_status` for retry (§4.2 *Apply Orchestrator*), so they persist until their remaining pending changes are re-applied or reverted (the `apply_change_results.pending_change_id` `ON DELETE RESTRICT` FK also blocks deleting a pending row still referenced by a retained failure result). `pending_changes` rows are **kept for as long as needed**: a `pending` change is a proposal awaiting an admin decision and MUST NOT be auto-expired or pruned on any timeout — it lives until the admin approves, rejects, or reverts it. Terminal `pending_changes` rows (`applied`) do not block new staging because `uq_pending_active` is a partial unique index scoped to `status IN ('pending','applying')` only (see `pending_changes` above), so keeping them costs a row but never a slot.
 
 #### Table: `user_mode_preferences`
 
@@ -1789,19 +1575,16 @@ The gear-local audit store (§4.2 *Audit Emitter*). Append-only: no `UPDATE`, no
 
 #### GTS Type & Schema Identifiers
 
-Settings domain entities have canonical JSON Schemas with GTS-compliant `$id` identifiers, registered during gear init via `TypesRegistryClient.register(...)`. Naming follows the four-segment shape `gts.cf.toolkit.settings.<type>.v1~`: `<type>` encodes the category — entities (`category`, `declaration`, `value`, `pending_change`, `apply_operation`, `effective_value`), errors (`error_<name>`), events (`event_<name>`, §4.4).
+Settings domain entities have canonical JSON Schemas with GTS-compliant `$id` identifiers, registered during gear init via `TypesRegistryClient.register(...)`. Naming follows the four-segment shape `gts.cf.toolkit.settings.<type>.v1~`: `<type>` encodes the category — entities (`category`, `declaration`, `value`, `effective_value`), errors (`error_<name>`), events (`event_<name>`, §4.4).
 
 | Schema | GTS `$id` | Status |
 |--------|-----------|--------|
 | Category | `gts://gts.cf.toolkit.settings.category.v1~` | Registered at gear init |
 | Setting Declaration | `gts://gts.cf.toolkit.settings.declaration.v1~` | Registered at gear init |
 | Setting Value | `gts://gts.cf.toolkit.settings.value.v1~` | Registered at gear init |
-| Pending Change | `gts://gts.cf.toolkit.settings.pending_change.v1~` | Registered at gear init |
-| Apply Operation | `gts://gts.cf.toolkit.settings.apply_operation.v1~` | Registered at gear init |
 | Effective Value | `gts://gts.cf.toolkit.settings.effective_value.v1~` | Registered at gear init |
-| Apply Bundle | `gts://gts.cf.toolkit.settings.apply_bundle.v1~` | Registered at gear init (activation bundle-status resource type, §4.8 / Settings Activation) |
 
-The settings **event** schemas (`event_apply_completed`, `event_apply_failed`, `event_declaration_registered`, `event_declaration_retired`, `event_declaration_reactivated`, `event_secret_used`; §4.4) are also registered at gear init; their registered `$id`s are the base-event-composed forms, derived from `gts.cf.core.events.type.v1~` (e.g. `gts://gts.cf.core.events.type.v1~cf.toolkit.settings.event_apply_completed.v1~`). The `apply_notification` and `cache_invalidate` signal schemas are owned by the Settings Activation. The `apply_bundle` **resource type** (read scope for bundle status, activation §4.8) is a control-plane type registered **here** — the signal schemas stay with Activation, the RBAC resource type sits under the settings registry.
+The settings **event** schemas (`event_value_changed`, `event_value_change_failed`, `event_declaration_registered`, `event_declaration_retired`, `event_declaration_reactivated`, `event_secret_used`; §4.4) are also registered at gear init; their registered `$id`s are the base-event-composed forms, derived from `gts.cf.core.events.type.v1~` (e.g. `gts://gts.cf.core.events.type.v1~cf.toolkit.settings.event_value_changed.v1~`). The `change_notification` and `cache_invalidate` signal schemas are owned by the Settings Activation. The activation **resource type** (read scope for activation status, activation §4.8) is a control-plane type registered **here** — the signal schemas stay with Activation, the RBAC resource type sits under the settings registry.
 
 > **Two families of GTS identifiers.** The identifiers above are the settings **control-plane** entity/event types — the shape of our rows (a category, a declaration, and so on), authored by the gear itself under `gts.cf.toolkit.settings.*~`. Separate from them: the **value types** a setting's value conforms to — a small **curated catalog** under `gts.cf.toolkit.settings.types.*~` (`bool_flag`, number ranges, `url`, choice lists, …), each a registered GTS **type**. **These value types are the only setting-related types registered in GTS.**
 >
@@ -1833,34 +1616,31 @@ Authorization is enforced server-side via `PolicyEnforcer` over the AuthZ Resolv
 - **`create`** — create a `declaration` or a `category`.
 - **`update`** — edit a `declaration`'s metadata (including `tenant_visible` / `tenant_overridable`, platform-scope-gated) or a `category`.
 - **`delete`** — **retire** a `declaration` (soft-delete, `status=retired`, §4.2 *Declaration Management*) or delete an (empty) `category`.
-- **`apply`** — activate staged changes (and compute an apply preview).
 - **No `reveal` action** — secret plaintext has no administrative action or endpoint at all. It resolves only through the **machine-only** reader path (`resolve_secret`, §4.5), authorized per setting against the calling service and audited as a secret-use event (§4.2 *Secret Manager*).
 
-> **No coarse `manage` action.** Definition governance is **per-resource-type CRUD** (`declaration` / `category` → `create` / `read` / `update` / `delete`), matching the platform PEP pattern (AM, RMS, RBAC service), so "may edit but not retire" or "may create but not delete categories" are grantable via `{operation, target_type}` role rules. A platform-admin bundle aggregates these through a role definition with `operation: "*"` (RBAC engine) — no umbrella action needed. **Value** actions stay upsert-style: `value` keeps `write` (staging is upsert — one pending per key+tenant, §4.2 *Staging Manager*), distinct from the UUID-addressed, `PATCH` + `If-Match` `update` of declarations/categories.
+> **No coarse `manage` action.** Definition governance is **per-resource-type CRUD** (`declaration` / `category` → `create` / `read` / `update` / `delete`), matching the platform PEP pattern (AM, RMS, RBAC service), so "may edit but not retire" or "may create but not delete categories" are grantable via `{operation, target_type}` role rules. A platform-admin bundle aggregates these through a role definition with `operation: "*"` (RBAC engine) — no umbrella action needed. **Value** actions stay upsert-style: `value` keeps `write` (a value write is an upsert at `(key, tenant)`, §4.2 *Value Writer*), distinct from the UUID-addressed `update` of declarations/categories.
 
 | Operation | Required permission | Scope | Unauthorized response |
 |-----------|---------------------|-------|------------------------|
 | Any call without valid authentication | Valid bearer token (AuthN Resolver) | — | `401`. AuthN runs before AuthZ. |
 | Read effective value / browse / search | `read` on `gts.cf.toolkit.settings.value.v1~`; further gated by `tenant_visible` + licence | Caller scope subtree | `404` for not-visible settings (no existence leak, `cpt-cf-settings-service-nfr-scope-isolation`) |
 | Stage override (set/revert/remove) | `write` on `gts.cf.toolkit.settings.value.v1~`; **for a tenant caller** also `tenant_overridable` (see the note below) | Target scope, within the caller's subtree | `403`/`409` |
-| Stage a **clone** | `read` on `gts.cf.toolkit.settings.value.v1~` at the **source** scope **and** `write` at the **target**, plus `tenant_overridable` there **when the caller is a tenant** — both within the caller's subtree (§4.2 *Staging Manager*). Read authorization on the source is mandatory: without it, clone would exfiltrate a value the caller may not read. | Source + target scope | `403`/`409` |
+| **Clone** a value | `read` on `gts.cf.toolkit.settings.value.v1~` at the **source** scope **and** `write` at the **target**, plus `tenant_overridable` there **when the caller is a tenant** — both within the caller's subtree (§4.2 *Value Writer*). Read authorization on the source is mandatory: without it, clone would exfiltrate a value the caller may not read. | Source + target scope | `403`/`409` |
 | Create declaration / category | `create` on `gts.cf.toolkit.settings.declaration.v1~` / `gts.cf.toolkit.settings.category.v1~` | Platform (admin) | `403` |
 | Update declaration / category (metadata; declaration incl. `tenant_visible`/`tenant_overridable`) | `update` on `gts.cf.toolkit.settings.declaration.v1~` / `gts.cf.toolkit.settings.category.v1~` | Platform only | `403` — tenants MUST NOT change their own visibility/override (`cpt-cf-settings-service-fr-tenant-scope-enforcement`) |
 | Retire declaration (soft-delete) | `delete` on `gts.cf.toolkit.settings.declaration.v1~` **+ IdP step-up** — behavior-affecting: it drops a live setting out of resolution (§4.2 *Declaration Management*) | Platform (admin) | `401`/`403`/`409` |
 | Reactivate declaration (re-declare-to-revive) | `create` on `gts.cf.toolkit.settings.declaration.v1~` **+ IdP step-up** — behavior-affecting: it puts a setting back into live resolution (§4.3). The **module** revive path is machine-side and not step-up gated (§4.2 *Contribution Reconciler*). | Platform (admin) | `401`/`403` |
 | Delete (empty) category | `delete` on `gts.cf.toolkit.settings.category.v1~` — **no step-up**: an empty category holds no setting, so its removal changes no effective value | Platform (admin) | `403`/`409` |
 | Apply pending changes | `apply` on `gts.cf.toolkit.settings.value.v1~` **+ IdP step-up** | Own scope | `401`/`403` |
-| List / read pending changes (`GET /v1/pending`, `GET /v1/pending/{key}`) | `read` on `gts.cf.toolkit.settings.value.v1~` | Own scope subtree | `403` |
-| Discard pending (`DELETE /v1/pending/{id}` \| `/{key}`, `POST /v1/pending:discard`) | `write` on `gts.cf.toolkit.settings.value.v1~` (mutates staged state) | Own scope subtree | `403`/`409` |
-| Preview apply (`POST /v1/applies:preview`) | `apply` on `gts.cf.toolkit.settings.value.v1~` — **no step-up** (read-only preview, §4.2 *Apply Orchestrator*) | Own scope | `403` |
-| Read apply commit facet (`GET /v1/applies/{apply_id}/commit`) | `read` on `gts.cf.toolkit.settings.value.v1~` | Apply's scope | `404` when not visible, or after **settle** (execution facet deleted — §4.2 *Apply Orchestrator*/§4.7; history via audit §4.3, activation facet via `GET /v1/applies/{apply_id}/activation`, activation §4.3). |
+| Validate a value (`POST /v1/settings/{key}/validate`) | `read` on `gts.cf.toolkit.settings.value.v1~` — **no step-up** (read-only, §4.2 *Value Writer*) | Own scope subtree | `403` |
+| Read activation status (`GET /v1/changes/{change_id}/activation`) | `read` on `gts.cf.toolkit.settings.value.v1~` | The change's scope | `404` when not visible (activation §4.3) |
 | Resolve a secret's plaintext (`resolve_secret`, machine path) | **Machine-only — no administrative action exists.** Authorized **per setting** against the **calling service** and audited as a secret-use event (§4.2 *Secret Manager*) — but against a **declared** identity while a verified one is still a prerequisite (§6), so both the check and the attribution are bounded by the trusted-caller boundary below, not stronger than it. | Caller's scope | `403` |
 | Read/set own mode preference (`GET`/`PUT /v1/me/preferences`) | Authenticated caller, **own record only** — `user_id` forced to the token subject; no cross-user access (§4.3) | Self | `401` (no valid bearer) |
 | Internal **SDK traits** (`SettingsReaderClient` read; `SettingsContributionClient` register/retire) | **Trusted caller** — no in-service service-identity check (§6). Caller owns `tenant_id` correctness/scope-read right (read) and `owner_module` correctness (contribution). Valid **within the deployment's trust boundary** only. | — | — |
 
 `PATCH`/`DELETE` on categories and declarations additionally require the `If-Match` precondition (§4.3).
 
-**`tenant_overridable` binds tenant callers, not the platform administrator.** The flag answers "may a **tenant** set its own value for this setting" (§4.1, `cpt-cf-settings-service-fr-tenant-scope-enforcement`), so a platform administrator targeting a specific tenant (§4.3 *Revert & Clone Staging Rules*) is not blocked by it. Reading the flag as an unconditional gate would erase a shape the model deliberately supports: a `cascading` or `local` setting with `tenant_overridable = false` carries **different values per tenant, inherited by their subtrees, writable only centrally** — a per-tenant quota or limit set by the platform. `scope_class = global` is the separate case: there the flag is forced `false` by a `CHECK` (§4.7) and **nobody**, platform administrator included, writes a tenant-scoped value, because a `global` setting has none to write.
+**`tenant_overridable` binds tenant callers, not the platform administrator.** The flag answers "may a **tenant** set its own value for this setting" (§4.1, `cpt-cf-settings-service-fr-tenant-scope-enforcement`), so a platform administrator targeting a specific tenant (§4.3 *Revert & Clone Rules*) is not blocked by it. Reading the flag as an unconditional gate would erase a shape the model deliberately supports: a `cascading` or `local` setting with `tenant_overridable = false` carries **different values per tenant, inherited by their subtrees, writable only centrally** — a per-tenant quota or limit set by the platform. `scope_class = global` is the separate case: there the flag is forced `false` by a `CHECK` (§4.7) and **nobody**, platform administrator included, writes a tenant-scoped value, because a `global` setting has none to write.
 
 #### Category access
 
@@ -1899,7 +1679,7 @@ Every query this gear issues goes through `SecureConn`, which takes an `AccessSc
 |--------|--------|-------|---|
 | Read or write a value at the caller's own scope | `setting_values` | the constraints the PDP returns for the caller | ordinary |
 | An administrator writing a descendant's value | `setting_values` | the same — a tenant's closure runs **downward**, so descendants are already inside it | ordinary |
-| Staging, apply records, per-user mode, audit | `pending_changes`, `apply_operations`, `apply_change_results`, `user_mode_preferences`, `audit_records` | the caller's constraints; the audit sink takes the scope explicitly (§4.2 *Audit Emitter*) | ordinary |
+| Per-user mode, audit | `user_mode_preferences`, `audit_records` | the caller's constraints; the audit sink takes the scope explicitly (§4.2 *Audit Emitter*) | ordinary |
 | Reading or listing definitions | `categories`, `setting_declarations` | **unconstrained — these entities have no tenant dimension** | not an exception, see below |
 | **Resolving an effective value** | `setting_values` | **elevated to the caller's ancestor chain** | the one exception |
 
@@ -1930,9 +1710,9 @@ Three rules keep it reviewable:
 | Data classification | Every setting value carries `public` / `pii` / `secret` (§4.1). `pii` is unmasked only for a caller authorized for unmasked PII, and masked in every other administrative read and in audit/report output; `secret` has no human path at all. Search enforces the classes **before matching**: the classification predicate in the query keeps withheld content out of every match, count and snippet, whatever plan the planner picks. **Timing is guaranteed for `secret` only** — its content is absent from the searchable column altogether — since the split index predicates are an access path, not a barrier (§4.2 *Search*, §4.6). Audit actor identities are classified the same way (§4.2 *Audit Emitter*). |
 | Input validation | GTS type + trait validation on every value; Scope Class / overridability checks; scope-path validation; namespaced-key check for contributed declarations. |
 | Contributed-declaration protection | Module-contributed declarations are immutable to admins (values only). |
-| Optimistic concurrency | `PATCH`/`DELETE` require `If-Match`; Apply verifies a previewed `checksum` (§4.3), so concurrent edits and stale applies fail loudly. |
+| Optimistic concurrency | Every mutating call requires `If-Match`, so a concurrent edit fails `412` instead of overwriting (§4.2 *Value Writer*). |
 | Declaration mutation gating | No declaration edit can silently change a live setting's resolution: descriptive metadata is immediate, resolution-affecting fields (`default_value`, value type, `scope_class`) are **immutable** (`422`; change via replacement declaration / new major version), and the two resolution-affecting actions — **retire** and **reactivate** — require credential step-up (§4.2 *Declaration Management*, §4.3, §4.8). |
-| Fail-safe staging | Changes never affect running services until an explicit, step-up-verified Apply; failed/partial applies leave items pending for retry + durable `failed` state queryable via `GET /v1/applies/{apply_id}/commit` and an `event_apply_failed` notification (§4.4) (`cpt-cf-settings-service-nfr-reliability-validated-set`). |
+| Fail-safe writes | A value changes only through an explicit, step-up-verified write that validates first; a rejected change stores nothing and raises an `event_value_change_failed` notification (§4.4) (`cpt-cf-settings-service-nfr-reliability-validated-set`). |
 
 #### Trusted-Caller Boundary
 
@@ -1986,7 +1766,7 @@ The Settings Service is **supplied as a Constructor Fabric Gear** — a composab
 
 **Everything else via `#[toolkit::consumes]`** — `authz-resolver` (`AuthZResolverClient`, with the SDK's `PolicyEnforcer` built over it), `tenant-resolver` (`TenantResolverClient`), `credstore` (`CredStoreClientV1`), `event-broker` (`EventBrokerApi`) in R1, and `license-resolver` from R2. All are used on the **request** path, never during our init, so the client is resolved when first needed rather than eagerly. `consumes` wires it without an ordering edge, and — unlike simply omitting the name — keeps the dependency's `inventory::submit!` registration linked and registers a directory-resolving proxy in the out-of-process profiles. In R1, which is Embedded-only (§2.3), the wiring short-circuits to the co-located implementation and readiness flips immediately.
 
-**Must be built first:** `license-resolver` — the gear is documentation only, there is no crate to depend on, and the platform implements licence validation at base-licence level with per-feature entitlement still pending. A platform **audit** gear exists under no name at all. R1 waits on neither (§2.3): licence gating ships in R2, and audit is a gear-local store written inside the mutation's own transaction (§4.2 *Audit Emitter*). **No IdP gear dependency** — the step-up re-authentication happens **browser ↔ IdP** (the apply request arrives already bearing a fresh token); the gear only **validates that token's claims locally against the IdP's cached JWKS** (§4.2 *Apply Orchestrator*), so the IdP is not a per-apply runtime dependency — only its JWKS endpoint is configured (fetched/refreshed in the background). Step-up verification is a **ClientHub-resolved `StepUpVerifier`** trait — default binding = the OIDC/JWKS verifier (§4.2 *Apply Orchestrator*); a deployment may bind a non-OIDC or added-factor verifier **without gear code** — but never an always-satisfied one: the mechanism is pluggable, the requirement is not (§4.2 *Apply Orchestrator*). |
+**Must be built first:** `license-resolver` — the gear is documentation only, there is no crate to depend on, and the platform implements licence validation at base-licence level with per-feature entitlement still pending. A platform **audit** gear exists under no name at all. R1 waits on neither (§2.3): licence gating ships in R2, and audit is a gear-local store written inside the mutation's own transaction (§4.2 *Audit Emitter*). **No IdP gear dependency** — the step-up re-authentication happens **browser ↔ IdP** (the apply request arrives already bearing a fresh token); the gear only **validates that token's claims locally against the IdP's cached JWKS** (§4.2 *Value Writer*), so the IdP is not a per-write runtime dependency — only its JWKS endpoint is configured (fetched/refreshed in the background). Step-up verification is a **ClientHub-resolved `StepUpVerifier`** trait — default binding = the OIDC/JWKS verifier (§4.2 *Value Writer*); a deployment may bind a non-OIDC or added-factor verifier **without gear code** — but never an always-satisfied one: the mechanism is pluggable, the requirement is not (§4.2 *Value Writer*). |
 | Capabilities | `db`, `rest` |
 
 > **Why not `system`.** The ToolKit runtime re-partitions gears at init into *all system gears first, then all non-system gears* (`registry::gears_by_system_priority`), preserving the dependency topo-order only *within* each group. A `system` `settings-service` would therefore init **before** `types-registry`, and registering the settings GTS schemas (§4.8 *Bootstrap*) would fail. `system` is intentionally **not** declared (the reference `authz-resolver` gear omits it for the same reason). The reader's early availability is instead provided by dependency ordering — a gear that must read effective values during its own init declares `settings-service` in its `deps`.
@@ -1997,8 +1777,8 @@ The Settings Service is **supplied as a Constructor Fabric Gear** — a composab
 
 | Hook | Responsibility |
 |------|----------------|
-| Gear init | Load config (incl. the IdP **JWKS endpoint** + step-up **freshness window** for local step-up token validation, §4.2 *Apply Orchestrator*); resolve `TypesRegistryClient` (called here) and construct the `StepUpVerifier` (default: OIDC/JWKS, a gear-owned port — §4.2 *Apply Orchestrator*); construct services/repos. The consumed clients — authz, tenant-resolver, credstore, event-broker — are **not** resolved here: they are wired by the proxy-wiring phase and fetched at first use, which is what keeps them off this gear's `deps` (above); register `SettingsReaderClient` + `SettingsContributionClient` in `ClientHub`; register settings GTS schemas (incl. event schemas, §4.7) in types-registry; subscribe to `tenant_deleted`. |
-| Gear lifecycle | Declares `LifecycleCapability`. `start` spawns the **apply executor** — the background task that runs an accepted apply's commit steps (§4.2 *Apply Orchestrator*) — with the runtime's cancellation token. `stop` asks it to finish the change in flight and take no more, within the runtime's shutdown deadline; anything unfinished stays `pending` and is retried the ordinary way. |
+| Gear init | Load config (incl. the IdP **JWKS endpoint** + step-up **freshness window** for local step-up token validation, §4.2 *Value Writer*); resolve `TypesRegistryClient` (called here) and construct the `StepUpVerifier` (default: OIDC/JWKS, a gear-owned port — §4.2 *Value Writer*); construct services/repos. The consumed clients — authz, tenant-resolver, credstore, event-broker — are **not** resolved here: they are wired by the proxy-wiring phase and fetched at first use, which is what keeps them off this gear's `deps` (above); register `SettingsReaderClient` + `SettingsContributionClient` in `ClientHub`; register settings GTS schemas (incl. event schemas, §4.7) in types-registry; subscribe to `tenant_deleted`. |
+| Gear lifecycle | Declares `LifecycleCapability`. `start` and `stop` follow the runtime's cancellation token and shutdown deadline; a write is served inside its request, so shutdown has no background write work to drain. |
 | Database migrations | Apply settings schema migrations (§4.7). |
 | REST registration | Register versioned REST routes + OpenAPI docs (§4.3). There are **no** internal token-only routes — activation commits in-process and cache coherence is the `cache_invalidate` broadcast (§4.4). |
 | Reader availability | The in-process reader is available to any gear that declares `settings-service` in its own `deps` — dependency ordering runs `settings-service` init first. (`system` is intentionally not declared — see the capabilities note above.) |
@@ -2034,7 +1814,7 @@ Decisions taken during design, with the alternative that was rejected and the re
   - **Contribution (`register_declarations`/`retire_declarations`):** `owner_module` stays **caller-supplied and taken on trust** — the service verifies only that keys sit under the *claimed* gear's namespace (§4.2 *Contribution Reconciler*), not that the caller *is* that module. **Accepted risk:** a caller that can reach the contribution trait can register or **retire** declarations under another gear's `owner_module` (silently removing another gear's settings from resolution). This is accepted under the trust assumption below, not mitigated in-service.
   - **Assumption this rests on (stated so it can be revisited):** every reader/contribution caller is a **trusted, in-platform component behind the deployment's trust boundary** — co-located in-process, or reached over REST only within a trusted network. If a deployment ever exposes these traits to an **untrusted** network, this decision MUST be revisited and a service-identity model (service-token subject; `owner_module` bound to caller identity; per-service scope-read policy) added first. The conditions under which the model holds, and the isolation a remote binding **MUST** supply in the meantime, are stated normatively in §4.8 *Trusted-Caller Boundary* — the obligation is the deployment's, since the gear enforces nothing here and cannot detect the difference.
   - **Unaffected:** the **user-facing** REST surface (§4.3) keeps full RBAC + tenant-subtree enforcement (§4.8) — admin value/declaration writes and reads are authorization-checked. This decision covers **only** the gear's internal service-to-service SDK traits, not any human-initiated operation.
-- **Staging scope for declaration create/metadata/remove — RESOLVED: declaration operations are NOT staged** (`cpt-cf-settings-service-fr-set-value`). Staging is scoped to **value** operations (set / revert / remove-value / clone). **All** declaration operations apply **immediately**: `create_declaration` inserts directly, `update_declaration` edits metadata in place, and `delete_declaration` is an immediate **soft-delete (retire)** — `status=retired`, values **retained** but excluded from resolution, symmetric with a gear retire (§4.2 *Declaration Management*, *Contribution Reconciler*, §4.3). Rationale: staging exists to keep a change off the live system until Apply, and a declaration edit has no in-effect value to gate — a fresh declaration has no reader, metadata has no runtime effect, and a retire takes the setting out of resolution at once (there is nothing to preview-then-apply that Apply would add). Routing `tenant_visible`/`tenant_overridable` through staged-then-apply is **deliberately not adopted** — the PRD author scoped staging to values, so these flags flip immediately like other metadata; the tenant-facing exposure they cause is governed by RBAC (platform-admin-only, `cpt-cf-settings-service-fr-tenant-scope-enforcement`), not by an Apply gate.
+- **Write scope for declaration create/metadata/remove — RESOLVED: declaration operations do not go through the value write path** (`cpt-cf-settings-service-fr-set-value`). That path covers **value** operations only (set / revert / remove-value / clone). **All** declaration operations apply **immediately**: `create_declaration` inserts directly, `update_declaration` edits metadata in place, and `delete_declaration` is an immediate **soft-delete (retire)** — `status=retired`, values **retained** but excluded from resolution, symmetric with a gear retire (§4.2 *Declaration Management*, *Contribution Reconciler*, §4.3). Rationale: a declaration edit has no in-effect value to gate — a fresh declaration has no reader, metadata has no runtime effect, and a retire takes the setting out of resolution at once. The exposure that `tenant_visible`/`tenant_overridable` cause is governed by RBAC (platform-admin-only, `cpt-cf-settings-service-fr-tenant-scope-enforcement`).
 - **Last-change recency — RESOLVED: `max` of definition-change and resolved-value-change, no cross-tenant leak**. The admin read (§4.3) returns `last_change_at = max(declaration.last_change_at, resolved_row.last_change_at)` — the honest recency of the effective value the caller sees. The `max` is the right semantics only with both arms scoped narrowly: were the declaration `last_change_at` to mean "the declaration **or any of its values**," it would fold every tenant's override into a platform-visible field. So the declaration arm is definition-only (§1.3), and the value arm is the **resolved** row only (own→ancestor→default) — always in the caller's ancestor chain, never a max over sibling/descendant scopes. Recency is **admin-only** — not on the SDK reader / `EffectiveValue` (§4.5). A "changed anywhere in the subtree" view is a distinct, platform-admin-only semantic, deliberately not provided here.
 - **Schema Default authority — RESOLVED: the `default_value` column is authoritative**. The setting's **value type** is **validation-only** and carries no `default` keyword, so the default has a single home (the DB column), read locally with the values (GTS Registry off the resolution path). No column-vs-type divergence, no sync rule.
 - **Reader degradation — RESOLVED: consumer's responsibility**. The service returns a distinguishable `Unavailable` error (§4.5); consumers handle resolve-failure like any dependency outage. (A `needs_review` override is not a consumer error — it falls through to a valid value, §4.2 *Value Resolver*.) The service does not substitute a Schema Default on failure; the SDK MAY serve stale-from-cache (bounded TTL) best-effort. Settings are a boot-time dependency and cold-boot failure surfaces via the consumer's readiness.
@@ -2047,17 +1827,17 @@ Decisions taken during design, with the alternative that was rejected and the re
   - **Category rename / setting move = re-key (both authors).** The key's instance half embeds the category segment, so renaming or moving the category re-keys the setting; there is **no succession/redirect and no stored old-key record** — a read of a stale key returns plain `NotFound` (§4.2 *Value Resolver*/§4.3), indistinguishable from a key that never existed, and callers re-read under the new key. A distinct `Gone` outcome was considered and dropped: it would need an old-key tombstone kept indefinitely, and since neither outcome names the replacement the reader has to go looking either way.
 
  **Consequence — reference-only-GTS rule is satisfied for all settings.** Because every setting key is a valid GTS (instance) id, declaration **events** (§4.4) and **audit** (§4.2 *Audit Emitter*) reference settings by a GTS-conformant `key` uniformly; there is **no admin-vs-module referenceability asymmetry**. Only value types occupy the Registry; per-tenant values and overrides stay in the Settings DB, off the Registry hot path.
-- **Step-up model — RESOLVED: re-authentication at the IdP; the service never receives raw credentials**. Step-up is a re-auth ceremony at the IdP (`prompt=login`/`acr_values`/`max_age=0`) that produces a fresh token; the Settings Service performs **local claims validation only** — JWKS signature, `sub`-match, `auth_time` freshness (≤ 5 min), `acr`/`amr` level — and never handles a password (§4.2 *Apply Orchestrator*). This supports SSO/WebAuthn/passwordless admins and keeps the service off the credential-attack surface. No IdP **runtime** dependency is added (only its JWKS is configured, §4.9), so there is no per-apply IdP-outage failure mode; the C4 IdP relationship denotes token/JWKS trust, not a synchronous call. The step-up **contract itself is owned by the `authn-resolver` gear** and referenced here. **IAM integration prerequisites:** the IdP MUST emit `auth_time`/`acr`/`amr` (often off by default) and the freshness window MUST be agreed.
-- **Step-up verification is a swappable `StepUpVerifier` plugin — RESOLVED**. The OIDC/JWKS local-claims logic is the **default** `ClientHub` binding (§4.2 *Apply Orchestrator*/§4.9), not hard-coded gear logic; a deployment may bind a non-OIDC verifier (SAML/LDAP/…) or an added-factor verifier **without editing the gear** — consistent with how `authn`/`policy`/`tenant` are resolved — but **not** an always-satisfied one: the mechanism is pluggable, the requirement is not (§4.2 *Apply Orchestrator*). The default binding is preserved: local JWKS validation, the step-up contract owned by the `authn-resolver` gear, and no per-apply IdP call.
+- **Step-up model — RESOLVED: re-authentication at the IdP; the service never receives raw credentials**. Step-up is a re-auth ceremony at the IdP (`prompt=login`/`acr_values`/`max_age=0`) that produces a fresh token; the Settings Service performs **local claims validation only** — JWKS signature, `sub`-match, `auth_time` freshness (≤ 5 min), `acr`/`amr` level — and never handles a password (§4.2 *Value Writer*). This supports SSO/WebAuthn/passwordless admins and keeps the service off the credential-attack surface. No IdP **runtime** dependency is added (only its JWKS is configured, §4.9), so there is no per-write IdP-outage failure mode; the C4 IdP relationship denotes token/JWKS trust, not a synchronous call. The step-up **contract itself is owned by the `authn-resolver` gear** and referenced here. **IAM integration prerequisites:** the IdP MUST emit `auth_time`/`acr`/`amr` (often off by default) and the freshness window MUST be agreed.
+- **Step-up verification is a swappable `StepUpVerifier` plugin — RESOLVED**. The OIDC/JWKS local-claims logic is the **default** `ClientHub` binding (§4.2 *Value Writer*/§4.9), not hard-coded gear logic; a deployment may bind a non-OIDC verifier (SAML/LDAP/…) or an added-factor verifier **without editing the gear** — consistent with how `authn`/`policy`/`tenant` are resolved — but **not** an always-satisfied one: the mechanism is pluggable, the requirement is not (§4.2 *Value Writer*). The default binding is preserved: local JWKS validation, the step-up contract owned by the `authn-resolver` gear, and no per-apply IdP call.
 
 ### 5.2 Security and Performance Risks
 
 - **No hierarchy-change signal from Account Management** — a cached `cascading` effective value depends on the tenant's ancestor chain, so a **re-parent** or a mid-chain tenant insert would change the correct value with no settings apply to trigger invalidation (§4.2 *Cache & Invalidation*, §4.4). Account Management publishes **no** tenant-lifecycle events today — neither `tenant_deleted` nor a hierarchy-change event. **Not exploitable in v1:** AM defers subtree reparenting post-v1 and exposes no `parent_id` mutator, so an established ancestor chain cannot change; a mid-chain insert is equally unreachable, since `create_tenant` only attaches a new tenant under an existing parent. Consequence once AM ships `move_subtree`: after a re-parent a replica may serve the pre-move effective value for up to `cache_ttl_seconds` (default 30 s). Mitigation: the TTL backstop bounds it; the durable fix is an AM hierarchy-change event this service consumes. Raise with the Account Management gear owners **before** reparenting lands, not after.
-- **Activation of non-self-reacting components** — heavier activation (reload/restart/regenerate) for components that cannot re-read on a signal is owned by the [Settings Activation](./DESIGN-activation.md) and **deferred** (out of scope for v1 — depends on orchestration primitives that do not yet exist). This service commits values and publishes the apply signals (`apply_notification` + `cache_invalidate`); it never executes restarts in-process.
+- **Activation of non-self-reacting components** — heavier activation (reload/restart/regenerate) for components that cannot re-read on a signal is owned by the [Settings Activation](./DESIGN-activation.md) and **deferred** (out of scope for v1 — depends on orchestration primitives that do not yet exist). This service commits values and publishes the signals (`change_notification` + `cache_invalidate`); it never executes restarts in-process.
 - **Cross-instance cache coherence depends on the broadcast** — peers evict on the `cache_invalidate` broadcast (§4.2 *Cache & Invalidation*); a dropped broadcast could leave a peer serving a stale value until its own TTL. Mitigation: the `cache_ttl_seconds` backstop (§4.2 *Cache & Invalidation*). Broadcast durability and transport (Event Broker) are owned by the [Settings Activation](./DESIGN-activation.md).
-- **Durable failure notification depends on the Event Broker** — `event_apply_failed` (§4.4) requires the Event Broker; the persisted `failed` pending state + `GET /v1/applies/{apply_id}/commit` remain the authoritative, broker-independent record.
+- **Durable failure notification depends on the Event Broker** — `event_value_change_failed` (§4.4) requires the Event Broker; the write's own response and the audit trail remain the authoritative, broker-independent record.
 - **GTS type versioning of stored values** — the `needs-review` flow has a representation (`setting_values.needs_review`, §4.7), a resolver contract (**fall through** past the flagged override — admin-visible, apply-blocked — §4.2 *Value Resolver*), a listing API (§4.3), and a stuck detector (`settings_needs_review_total`, §7 *Feature Metrics*). What still depends on **GTS Schema Registry compatibility rules landing** is the *automatic* compatible-vs-breaking classification at upgrade time; until those land, whether a given type change invalidates existing values must be determined conservatively (treat as invalidating → flag `needs_review`) rather than auto-classified.
-- **GTS Registry unavailable** — the Registry is on the **validate** path (resolving a setting's **value type** to check a value at write time; registering **value types**), not on the effective-value **read** hot path (values resolve from local tables) and not on setting listing (settings are DB rows, §4.3). If the Registry is slow or down: **creating a setting fails-closed** if its referenced value type cannot be resolved/validated; **staging or changing a value (`stage_set`) also fails-closed**, since the value is validated against its value type via the Registry; value-type registration and gear reconcile **retry** with backoff idempotently; existing value reads and setting listing are unaffected. Validation verdicts MUST NOT be cached to "ride out" an outage, to avoid accepting values against a stale type.
+- **GTS Registry unavailable** — the Registry is on the **validate** path (resolving a setting's **value type** to check a value at write time; registering **value types**), not on the effective-value **read** hot path (values resolve from local tables) and not on setting listing (settings are DB rows, §4.3). If the Registry is slow or down: **creating a setting fails-closed** if its referenced value type cannot be resolved/validated; **setting a value also fails-closed**, since the value is validated against its value type via the Registry; value-type registration and gear reconcile **retry** with backoff idempotently; existing value reads and setting listing are unaffected. Validation verdicts MUST NOT be cached to "ride out" an outage, to avoid accepting values against a stale type.
 - **Secret storage model — OPEN** — credential store (the credstore backend) by reference vs. inline envelope encryption in the persistence layer (§4.2 *Secret Manager*). The credstore approach is the working choice for stronger isolation and reuse of the existing deployment; confirm with persistence/security owners.
 
 ## 6. Open Questions
@@ -2068,11 +1848,11 @@ Decisions taken during design, with the alternative that was rejected and the re
 
 ### 6.2 Design-Specific Questions
 
-- **Atomic apply of a group of interdependent settings — OPEN (external requirement).** The apply model (§4.2 *Apply Orchestrator*) commits **per change**: each staged change is applied in its own transaction, a failed one stays `pending`, and already-committed ones stay committed (`partial_failed`). The gears PRD requirement `cpt-cf-settings-service-fr-dependency-group-declaration` introduces a **Dependency Group** — a declared set of interdependent settings with a cross-setting constraint over their combined values, applied all-or-nothing, with the **resulting configuration** of the scope validated before commit. **No pair of settings with such an invariant has been identified in the platform** — neither the PRD nor any story states such a requirement — so the mechanism is **deferred rather than designed**: the PRD carries the requirement at `p3`, in scope, and it will be specified once product confirms concrete setting pairs. What must be settled if product confirms the requirement: (a) the concrete setting pairs that need the invariant, without which there is nothing to specify a constraint language against; (b) the representation of the constraint itself (expression language / JSON Schema over a tuple / a GTS type) and its validation at declaration time; (c) the atomicity boundary — one Postgres transaction covers inline values only, while a group containing a `secret`-classified setting also touches the Credential Store and cannot be atomic in general (§4.2 *Secret Manager*); (d) whether a group may span admin-authored and contributed settings, and settings of different gears; (e) behaviour when a member override is flagged `needs_review` (it is excluded from Apply, so the whole group becomes inapplicable — §4.2 *Value Resolver*). This is phasing, not divergence: the requirement stands at `p3` and the items above are its design agenda. Note that (c) and (e) are substantive limits rather than gaps to be filled — a group spanning a `secret`-classified setting cannot be made atomic by any schema or contract change, and group membership interacts with `needs_review` exclusion by construction — so whatever is specified later will have to live with both.
-- **No `StepUpVerifier` binding exists yet — OPEN (implementation, not design).** Apply and the behavior-affecting declaration actions are gated on step-up verification (§4.2 *Apply Orchestrator*), and no binding exists in the workspace, not even a stub. The design is complete: the claims to check, the freshness window, the RFC 9470 challenge and the `ClientHub` binding point are all specified, and the gear already loads the JWKS endpoint and window at init (§4.9). What is outstanding is an IdP configured to emit `auth_time`/`acr`/`amr`, a verifier behind the trait, and the admin console's redirect on the challenge — in that order, since a verifier shipped first correctly refuses every Apply. Until a binding exists the gear starts, serves reads, and refuses Apply; there is no bypass flag by design. Notably this is **not** blocked on `authn-resolver` gaining a re-authentication method, nor on a second-authentication gear: step-up is a browser ↔ IdP ceremony and this gear only inspects claims locally. Owner: deployment IAM + admin console + this gear's default binding; resolve before GA (PRD §10.1, where the approved interim mechanism is an integrator-supplied implementation behind the same contract).
+- **Atomic apply of a group of interdependent settings — OPEN (external requirement).** The write model (§4.2 *Value Writer*) commits **per change**: each change lands in its own transaction, a failed one stores nothing, and already-committed ones stay committed. The gears PRD requirement `cpt-cf-settings-service-fr-dependency-group-declaration` introduces a **Dependency Group** — a declared set of interdependent settings with a cross-setting constraint over their combined values, set all-or-nothing, with the **resulting configuration** of the scope validated before commit. **No pair of settings with such an invariant has been identified in the platform** — neither the PRD nor any story states such a requirement — so the mechanism is **deferred rather than designed**: the PRD carries the requirement at `p3`, in scope, and it will be specified once product confirms concrete setting pairs. What must be settled if product confirms the requirement: (a) the concrete setting pairs that need the invariant, without which there is nothing to specify a constraint language against; (b) the representation of the constraint itself (expression language / JSON Schema over a tuple / a GTS type) and its validation at declaration time; (c) the atomicity boundary — one Postgres transaction covers inline values only, while a group containing a `secret`-classified setting also touches the Credential Store and cannot be atomic in general (§4.2 *Secret Manager*); (d) whether a group may span admin-authored and contributed settings, and settings of different gears; (e) behaviour when a member override is flagged `needs_review` (it is excluded from Apply, so the whole group becomes inapplicable — §4.2 *Value Resolver*). This is phasing, not divergence: the requirement stands at `p3` and the items above are its design agenda. Note that (c) and (e) are substantive limits rather than gaps to be filled — a group spanning a `secret`-classified setting cannot be made atomic by any schema or contract change, and group membership interacts with `needs_review` exclusion by construction — so whatever is specified later will have to live with both.
+- **No `StepUpVerifier` binding exists yet — OPEN (implementation, not design).** Value writes and the behavior-affecting declaration actions are gated on step-up verification (§4.2 *Value Writer*), and no binding exists in the workspace, not even a stub. The design is complete: the claims to check, the freshness window, the RFC 9470 challenge and the `ClientHub` binding point are all specified, and the gear already loads the JWKS endpoint and window at init (§4.9). What is outstanding is an IdP configured to emit `auth_time`/`acr`/`amr`, a verifier behind the trait, and the admin console's redirect on the challenge — in that order, since a verifier shipped first correctly refuses every Apply. Until a binding exists the gear starts, serves reads, and refuses Apply; there is no bypass flag by design. Notably this is **not** blocked on `authn-resolver` gaining a re-authentication method, nor on a second-authentication gear: step-up is a browser ↔ IdP ceremony and this gear only inspects claims locally. Owner: deployment IAM + admin console + this gear's default binding; resolve before GA (PRD §10.1, where the approved interim mechanism is an integrator-supplied implementation behind the same contract).
 - **Verified machine caller identity — OPEN.** The machine-only plaintext path (§4.2 *Secret Manager* `resolve_plaintext`, §4.5 `resolve_secret`) is specified to authorize the calling service **per setting** and to attribute a **secret-use** audit record to it. Both need a verified caller service identity, which the gear's trusted-caller model for the SDK traits (§4.8) deliberately does not establish. Consequence today: the machine path enforces only the deployment trust boundary, and the secret-use record attributes the resolution to the caller's **declared** module rather than a verified one — so the audit trail answers "which module claims to have used this secret", not "which service did". This is the same trust assumption the trusted-caller model rests on, but secrets raise its stakes, and the exposure is **not conditional on some future change**: `ClientHub` is transport-agnostic, so an out-of-process consumer binds the same trait to a REST/gRPC client (`docs/ARCHITECTURE_MANIFEST.md`) and a deployment can put this path on the network without a line changing here. The identity must therefore come from the platform, **uniformly on both transports**. This design deliberately does **not** gate `resolve_secret` on its transport: that would make a gear contract transport-dependent, and it would not even be sound — a local call may be a remote one already terminated by a gateway or sidecar, so a transport check yields false assurance rather than a boundary. Until verified service identity exists, deploying a secret-consuming gear out-of-process is a decision to be taken knowingly. The **contribution traits need the same identity, and arguably need it first**: `register_declarations`/`retire_declarations` take `owner_module` on trust (§5), so a reachable caller can retire another gear's settings and remove them from resolution platform-wide — a platform-wide availability loss, against the confidentiality loss of a single secret read. One verified identity closes both, and neither is closed by anything else, so this prerequisite covers the contribution path as well. Owner: platform AuthN/AuthZ + this design; resolve before GA, and in any case before these traits are bound outside the host process (§4.8 *Trusted-Caller Boundary*).
 - **ETag granularity under sub-millisecond writes** — the `If-Match`/ETag precondition (§4.3, §4.7) derives the ETag from the normalized UTC `updated_at`. Two writes to the same row within the same serialized timestamp tick would produce an identical ETag, so a stale write could pass `If-Match`. **Recommended resolution:** back the ETag with a monotonic per-row `version` counter (or `xmin`) incremented on every write, rather than a timestamp, so concurrent edits always differ. Confirm in DESIGN before implementation.
-- **Orphaned staged secret ref on discard** — `stage_set` for a secret-backed setting writes the plaintext to the Credential Store and stages only the `staged_secret_ref` (§4.2 *Staging Manager*, *Secret Manager*). `discard_pending` (§4.2 *Staging Manager*) drops the pending row but does not currently call `delete_secret` (§4.2 *Secret Manager*), so the staged credstore entry is orphaned when a staged secret change is discarded (and, symmetrically, when a pending secret change is superseded). **Recommended resolution:** `discard_pending` and pending-supersession MUST delete the associated `staged_secret_ref` from the Credential Store (idempotent), with a reconciliation sweep as a backstop. Confirm in DESIGN before implementation.
+- **Orphaned secret ref on a rolled-back write** — a secret-backed `set` writes the plaintext to the Credential Store before opening the transaction, so a commit that then rolls back (an invalid value caught late, a lost `If-Match` race) leaves the credstore entry with no row referencing it (§4.2 *Value Writer*, *Secret Manager*). It leaks, it does not corrupt: nothing can reach an unreferenced entry. **Recommended resolution:** delete the entry on a failed commit (idempotent), with a reconciliation sweep as a backstop. Confirm in DESIGN before implementation.
 - **Tenant-deleted cleanup — disposition policy OPEN** — the service consumes `gts.cf.core.events.type.v1~cf.core.am.tenant_deleted.v1~` (§4.4) to clean up tenant-scoped overrides, pending changes, and secret refs, but the **disposition policy** is unresolved: (a) **hard delete** satisfies GDPR-style erasure but destroys audit pre-images and is unrecoverable if the event fires in error; (b) **soft delete** (`deleted_at`, grace period) preserves recoverability but needs a purge job; (c) **audit-preserve + hard delete** deletes live data but retains audit records. **Open:** confirm with product and compliance owners.
 
 ## 7. Additional context
@@ -2088,14 +1868,13 @@ All metrics exposed as Prometheus scrape targets.
 | **Performance** | `settings_rest_request_duration_seconds` | Histogram | `method`, `endpoint`, `status_code` | REST API request latency | p95 ≤ 50ms |
 | **Performance** | `settings_cache_hit_ratio` | Gauge | `scope_class` | Effective-value cache hit ratio | ≥ 0.95 |
 | **Reliability** | `settings_service_up` | Gauge | `instance` | Liveness; availability SLO computed externally over 30 days (§7 *NFR Mapping & Scale Model*) | — |
-| **Reliability** | `settings_apply_operations_total` | Counter | `status` (`succeeded`,`partial_failed`,`failed`) | Apply outcomes; partial/failed feed durable notifications | — |
-| **Reliability** | `settings_apply_failure_ratio` | Gauge | — | Apply failure rate, derived from `settings_apply_operations_total` — the **aggregate operator-facing** signal, distinct from the per-administrator `event_apply_failed` notification. Published to the shared platform dashboards with an **alert-routing rule** for platform-wide failure conditions (e.g. a bad value-type rollout failing applies across many unrelated admins and scopes), which a per-admin notification cannot surface | alert on sustained > 1% |
-| **Reliability** | `settings_pending_changes` | Gauge | `status` | Outstanding pending changes (stuck-pending detector) | — |
+| **Reliability** | `settings_value_writes_total` | Counter | `result` (`stored`,`rejected`) | Per-change write outcomes; rejections feed durable notifications | — |
+| **Reliability** | `settings_value_write_failure_ratio` | Gauge | — | Write failure rate, derived from `settings_value_writes_total` — the **aggregate operator-facing** signal, distinct from the per-administrator `event_value_change_failed` notification. Published to the shared platform dashboards with an **alert-routing rule** for platform-wide failure conditions (e.g. a bad value-type rollout failing writes across many unrelated admins and scopes), which a per-admin notification cannot surface | alert on sustained > 1% |
 | **Security** | `settings_audit_events_total` | Counter | `kind` (`mutation`,`apply`,`secret_use`) | Audit volume emitted by this service — capacity tracking against the declared annual bound (§7 *NFR Mapping & Scale Model*) | — |
 | **Reliability** | `settings_needs_review_total` | Gauge | `source` | Overrides flagged `needs_review` awaiting an admin fix (stuck-needs-review detector, §4.2 *Value Resolver*/§4.7) | — |
 | **Reliability** | `settings_resolve_failures_total` | Counter | `reason` (`unavailable`) | Reader resolve failures — surfaces consumer-visible degradation (§4.5). `needs_review` is not a resolve failure — it falls through (§4.2 *Value Resolver*). | — |
 | **Security** | `settings_authz_denial_total` | Counter | `operation`, `reason` | Authorization denials | — |
-| **Security** | `settings_step_up_total` | Counter | `operation` (`apply`,`retire`,`reactivate`), `result` | Step-up verification outcomes — apply (§4.2 *Apply Orchestrator*) and the behavior-affecting declaration actions retire/reactivate (§4.2 *Declaration Management*) | — |
+| **Security** | `settings_step_up_total` | Counter | `operation` (`set`,`retire`,`reactivate`), `result` | Step-up verification outcomes — value writes (§4.2 *Value Writer*) and the behavior-affecting declaration actions retire/reactivate (§4.2 *Declaration Management*) | — |
 | **Security** | `settings_secret_use_total` | Counter | `result` (`allowed`,`denied`) | Machine secret-use — plaintext resolutions through the machine-only reader path (§4.2 *Secret Manager*) | — |
 | **Versatility** | `settings_declarations_total` | Gauge | `source` (`admin_authored`,`module_contributed`), `status` | Declaration count by source/status | — |
 | **Versatility** | `settings_values_total` | Gauge | `scope_class`, `scope_kind` (`platform`,`tenant`) | Override count by class/scope | — |
@@ -2108,7 +1887,7 @@ All metrics exposed as Prometheus scrape targets.
 | Effective-value read — cache miss/resolve (p95) | ≤ 15 ms | `cpt-cf-settings-service-nfr-performance-read-cache` | Same histogram `source="resolve"`; ancestry walk + DB read |
 | REST API latency (p95 / p99) | ≤ 50 ms / ≤ 100 ms | `cpt-cf-settings-service-nfr-performance-read-cache` | `settings_rest_request_duration_seconds` |
 | Cache hit ratio | ≥ 0.95 | `cpt-cf-settings-service-nfr-performance-read-cache` | `settings_cache_hit_ratio`; invalidation only on apply |
-| Apply success | ≥ 99.9% of applies | `cpt-cf-settings-service-nfr-reliability-validated-set` | `settings_apply_operations_total`; partial failures retriable |
+| Write success | ≥ 99.9% of value writes | `cpt-cf-settings-service-nfr-reliability-validated-set` | `settings_value_writes_total`; a rejected change is resubmittable |
 | Availability | 99.95% over rolling 30-day window | `cpt-cf-settings-service-nfr-reliability-validated-set` | Aggregated `settings_service_up`; PostgreSQL HA + service replicas |
 | Apply-failure alerting | A platform-wide Apply-failure condition raises an alert | `cpt-cf-settings-service-nfr-reliability-validated-set` | `settings_apply_failure_ratio` on the shared platform dashboards + an alert-routing rule (§7 *Feature Metrics*) — aggregate, not per-administrator |
 | Audit volume | ≥ 50,000,000 audit events per **platform instance** per year (aggregate) | `cpt-cf-settings-service-fr-audit-mutations` | `settings_audit_events_total`; capacity per §7 *NFR Mapping & Scale Model*. **Requirement on the platform Audit Subsystem**, which owns the store — this service emits and must not be throttled by it |
@@ -2119,7 +1898,7 @@ All metrics exposed as Prometheus scrape targets.
 
 #### Scale Model
 
-The targets above are validated against these order-of-magnitude bounds. They are design anchors, not SLAs: they size the cache (§4.2 *Cache & Invalidation*), the search index (§4.2 *Search*), and the cascading-impact walk (§4.2 *Staging Manager*), and bound the JSONB value size. Concrete capacity numbers are a product/deployment call; these are the working assumptions the design is dimensioned for.
+The targets above are validated against these order-of-magnitude bounds. They are design anchors, not SLAs: they size the cache (§4.2 *Cache & Invalidation*), the search index (§4.2 *Search*), and the cascading-impact walk (§4.2 *Value Writer*), and bound the JSONB value size. Concrete capacity numbers are a product/deployment call; these are the working assumptions the design is dimensioned for.
 
 | Dimension | Bound | Anchors / rationale |
 |-----------|-------|---------------------|
@@ -2130,12 +1909,11 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | Explicit override rows (`setting_values`) | ≤ 1,000,000 | Most tenants inherit; only a fraction override. This — not `declarations × tenants` — is what value search and the search GIN index scale on (§4.2 *Search*). |
 | Cached effective entries per instance | ≤ 500,000 | Hot working set of `(key, scope)` pairs, not the full cross-product. Sizes cache memory + eviction. |
 | Effective-value reads (in-process, per instance) | ≤ 5,000 req/s | Hot path; validates the cache-hit p95 ≤ 2 ms and hit-ratio ≥ 0.95 targets. |
-| REST mutate/apply requests (aggregate) | ≤ 50 req/s | Human-driven admin traffic; validates REST p95 ≤ 50 ms. |
-| Pending changes per apply batch | ≤ 500 | Bounds `checksum` computation and per-change `ApplyChangeResult` writes (§4.2 *Apply Orchestrator*). |
-| Apply deadline (`apply_deadline_seconds`) | 300 s (configurable) | An `apply_operations` row still `running` past this is treated as **abandoned**, and its scope's `applying` rows are reclaimed to `pending` (§4.2 *Apply Orchestrator*). Sized to exceed the **longest plausible apply**, not to match a proxy timeout: a 500-change batch commits per change against the local DB, the Credential Store, and a **synchronous** external audit write, so tens of seconds is ordinary. It deliberately sits well above the usual ~60 s gateway idle-timeout, because that timeout is a *cause* of abandonment (the cancelled request, §4.2) — a deadline equal to it would begin reclaiming exactly when a still-running apply first looks abandoned. Too short reclaims a live apply's rows mid-flight: survivable, since its guarded writes then roll back, but a spurious failure the admin must redo. |
-| Audit events (per platform instance, per year) | ≤ 50,000,000 | Aggregate across all tenants — mutations, applies, and machine secret-use combined (under ~2 events/s average with peak headroom; ≈ 500/tenant/year over 100,000 tenants). Settings mutations are infrequent administrative actions, so the bound is stated **per platform instance**, never per tenant — a per-tenant figure would imply an unrealistic platform-wide total. |
+| REST mutating requests (aggregate) | ≤ 50 req/s | Human-driven admin traffic; validates REST p95 ≤ 50 ms. |
+| Changes per bulk set | ≤ 500 | Bounds the per-change work in one request (§4.3 *Bulk Set Rules*); a larger body is rejected `422`. |
+| Audit events (per platform instance, per year) | ≤ 50,000,000 | Aggregate across all tenants — mutations and machine secret-use combined (under ~2 events/s average with peak headroom; ≈ 500/tenant/year over 100,000 tenants). Settings mutations are infrequent administrative actions, so the bound is stated **per platform instance**, never per tenant — a per-tenant figure would imply an unrealistic platform-wide total. |
 | Audit online retention window | ≥ 12 months (configurable) | Sizes the gear-local `audit_records` store the history read queries (§4.3, §4.7) and bounds the scoped-query p95; older records archived or purged per the platform retention/anonymization policy. |
-| JSONB value size per override | ≤ **64 KiB**, a single hard cap | Structured settings are config, not blobs. An unbounded value would break cache sizing and the search text-projection. Not a soft/hard pair: a larger value is rejected outright at staging by the Type Validator (`413`/`422 ValueTooLarge`, §4.2 *Type Validator*, §4.3), so nothing above the cap exists to plan capacity for. |
+| JSONB value size per override | ≤ **64 KiB**, a single hard cap | Structured settings are config, not blobs. An unbounded value would break cache sizing and the search text-projection. Not a soft/hard pair: a larger value is rejected outright at validation by the Type Validator (`413`/`422 ValueTooLarge`, §4.2 *Type Validator*, §4.3), so nothing above the cap exists to plan capacity for. |
 
 **Resolve latency is O(depth), not O(tenant-count).** The 100k-tenant bound sizes the cache and search index; a single `resolve` only walks ancestors (≤ 10, §4.2 *Value Resolver*), so read latency is insulated from tenant growth. The cache-miss/resolve p95 ≤ 15 ms target holds independent of tenant count.
 
@@ -2147,7 +1925,7 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 
 | Level | Database | Network | What is real | What is mocked |
 |---|---|---|---|---|
-| **Unit** | No DB — in-memory trait mocks | No network | Resolver cascade logic, Scope Class behaviour, staging/apply state machine, validation error mapping | All repositories (`InMemory*`), `MockGtsValidator`, `MockTenantResolver`, `MockAuthZ`, `MockApplyPublisher` |
+| **Unit** | No DB — in-memory trait mocks | No network | Resolver cascade logic, Scope Class behaviour, write path, validation error mapping | All repositories (`InMemory*`), `MockGtsValidator`, `MockTenantResolver`, `MockAuthZ`, `MockChangePublisher` |
 | **Integration** | Real PostgreSQL (testcontainers, per-test tx rollback) | No network — direct repo/service calls | Repositories, constraints, partial indexes, ancestor-id cascade queries, cascade resolution, migrations | External clients outside the gear boundary |
 | **API** | Real PostgreSQL (testcontainers) | In-process HTTP (`Router::oneshot`) | REST handlers, domain services, repositories, DB | `PolicyEnforcer` (Allow/Deny), `MockGtsValidator`, `MockTenantResolver`, IdP step-up verifier |
 | **E2E** | Real PostgreSQL (Docker/hosted) | Real HTTP to running service | Everything: AuthZ, DB, audit, network | Nothing — full production-like stack |
@@ -2162,10 +1940,9 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 |------|---------|---------|
 | `InMemoryDeclarationRepository` | HashMap store keyed by `id`/`key` | `with_declarations(vec![...])` |
 | `InMemoryValueRepository` | Store keyed by `(declaration_id, tenant_id)`, the root tenant's id being platform scope | `with_values(vec![...])` |
-| `InMemoryPendingRepository` | Pending changes keyed by `(declaration_id, scope)` | `with_pending(vec![...])` |
 | `MockGtsValidator` | Configurable validate/resolve-traits result | `.with_validate_result(Ok/Err)`, `.with_traits(...)` |
 | `MockTenantResolver` | Ancestry/subtree responses | `.with_ancestors(scope, vec![...])`, `.with_subtree(...)` |
-| `MockApplyPublisher` | Capture published `apply_notification` / `cache_invalidate` signals | assert on captured signals |
+| `MockChangePublisher` | Capture published `change_notification` / `cache_invalidate` signals | assert on captured signals |
 | `MockLicenseResolverClient` | feature/licence entitlement allow/deny (fail-closed) | `.with_decision(feature, Allow/Deny)`, `.with_error(...)` |
 | `MockSecretManager` | store/mask/resolve secret values | `.with_ref(...)`, `.with_resolve(Ok/Err)` |
 | `MockEventPublisher` | Capture published events | assert on captured events |
@@ -2178,27 +1955,24 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | `global` resolution — tenant read | repos, resolver | Returns platform value read-only; tenant override rejected |
 | `local` resolution — descendant | repos, resolver | No inheritance; descendant gets Schema Default |
 | Standalone descendant — inheritance still flows down | `MockTenantResolver` marking a descendant standalone | A `cascading` setting resolves into the standalone tenant from its parent chain exactly as into a non-standalone sibling: same value, same `source=inherited`, same trail (`cpt-cf-settings-service-fr-barrier-default-seam`) |
-| Standalone descendant — invisible to its ancestor | repos, resolver | The ancestor's administrator gets nothing of the standalone tenant's own state through any read path: single read, bulk read, listing, pending-changes view, apply history |
+| Standalone descendant — invisible to its ancestor | repos, resolver | The ancestor's administrator gets nothing of the standalone tenant's own state through any read path: single read, bulk read, listing, change history |
 | Standalone descendant — excluded from impact and search | `cascading_impact`, search | The descendant appears in neither `changed[]` **nor** `total_changed`, so the count itself discloses nothing; its stored values match nothing in the ancestor's search — no hit, no count, no snippet |
-| Standalone descendant — writes rejected with reads | `stage_set` / `stage_revert` / `clone_override` targeting the standalone tenant from its ancestor | Rejected by the subtree check, not silently applied: a caller that cannot read the tenant cannot blind-write it either |
+| Standalone descendant — writes rejected with reads | `set` / `revert` / `clone` targeting the standalone tenant from its ancestor | Rejected by the subtree check, not silently stored: a caller that cannot read the tenant cannot blind-write it either |
 | Subject-scoped identity — uniqueness across both shapes | repos | Rows with and without a subject coexist for one declaration and tenant, while a second row of the **same** shape violates that shape's partial unique index. Includes the case the subject `NULL`s make easy to miss: two subject-less rows for the same `(declaration, tenant)` must collide, which only the `subject_type IS NULL` index catches |
 | Subject-scoped identity — degenerate shapes rejected | repos | `subject_type` without `subject_id`, and the reverse, violate the both-or-neither `CHECK`. A subject row with `tenant_id IS NULL` is **accepted**: a subject may exist at platform scope |
 | Subject-scoped resolution — tracks are independent | repos, resolver | With a value set at tenant *T* and none for subject *H*: a request naming *H* resolves to the **Schema Default**, not to *T*'s value; a request naming no subject resolves to *T*'s value and never sees a subject row; with the subject type `cascading` and a row for *H* at an ancestor, the request naming *H* finds that row and still ignores *T*'s subject-less value |
 | Bulk effective read — per-key outcomes | repos, resolver | A key set mixing readable, hidden and non-existent keys returns one entry per key with its own outcome and **no** wholesale failure; masking, visibility and scope match the single read (`cpt-cf-settings-service-fr-bulk-effective-read`) |
-| Validation — invalid value | `MockGtsValidator` returns Err | `422` field-level error; not staged |
+| Validation — invalid value | `MockGtsValidator` returns Err | `422` field-level error; nothing stored |
+| Set — commit + publish | repos, `MockAuditSink`, `MockChangePublisher` | Value written; local cache invalidated; `change_notification` + `cache_invalidate` published, in that order |
+| Set — value write and audit record are one transaction | repos, commit fault injected between the two writes | Neither lands: no effective value, and no audit record for a value that is not there (§4.2 *Value Writer*) |
+| Set — stale `If-Match` | value changed since the caller read it | `412`; nothing stored, and the stored value is the other writer's (`cpt-cf-settings-service-nfr-reliability-validated-set`) |
+| Bulk set — one item fails | repos, one change invalid | The failing item stores nothing and reports its error; the others are stored; the response carries one entry per item (§4.3 *Bulk Set Rules*) |
+| Validate — read-only and repeatable | repos, `MockAuditSink` | Two identical `validate` calls return the same report; nothing is written and no audit record is emitted |
 | Validation — `format`/cron/regex trait assertion | `MockGtsValidator` | Hard-fail (not advisory) on bad format (`cpt-cf-settings-service-fr-typed-value-validation`) |
-| Staging — set override | repos | Pending created; running services unaffected (no applied value) (`cpt-cf-settings-service-fr-set-value`) |
-| Staging — override `global`/non-overridable | repos | Rejected `403`/`409` (`cpt-cf-settings-service-fr-setting-scope-class`, `cpt-cf-settings-service-fr-tenant-scope-enforcement`) |
+| Set — override stored | repos, `MockAuditSink` | Value and its audit record commit in one transaction; the effective value changes (`cpt-cf-settings-service-fr-set-value`) |
+| Set — override `global`/non-overridable | repos | Rejected `403`/`409` (`cpt-cf-settings-service-fr-setting-scope-class`, `cpt-cf-settings-service-fr-tenant-scope-enforcement`) |
 | Revert at tenant scope — fallback preview | resolver | Computes nearest-ancestor fallback before commit (`cpt-cf-settings-service-fr-defaults-revert`) |
 | Revert at platform scope — default intact | repos | Override cleared; Schema Default unchanged (`cpt-cf-settings-service-fr-defaults-revert`) |
-| Apply — commit + publish | repos, `MockAuditSink`, `MockApplyPublisher` | Applied value written; local cache invalidated; `apply_notification` + `cache_invalidate` published; pending cleared |
-| Apply — partial failure | repo write fails for one change | Unapplied changes stay **`pending`** — never `failed` — and reappear in the next `applies:preview`; the failure lands on the `apply_operation` (`partial_failed`) and on the per-change `ApplyChangeResult`, queryable via `apply_status` (`cpt-cf-settings-service-nfr-reliability-validated-set`) |
-| Apply — checksum drift | pending set changed after preview | `409 ApplyChecksumMismatch`; nothing applied (§4.2 *Apply Orchestrator*) |
-| Apply — retry after partial failure | repos, one change failing | Re-submitting the **original** `checksum` → `409 ApplyChecksumMismatch` (successes left the set, so it no longer hashes the same); a **fresh** `applies:preview` returns a `checksum` over the residue only, and the retry applies exactly that residue under a **new** `apply_id`, leaving the earlier successes untouched (§4.2 *Apply Orchestrator*) |
-| Apply — lost response disambiguated by re-read | repos | With no `apply_id` in hand, `applies:preview` for the scope discriminates all three outcomes: **empty** pending set ⇒ fully applied, **unchanged** ⇒ nothing applied, **smaller** ⇒ partial — no `Idempotency-Key` store consulted (§4.2 *Apply Orchestrator*, §4.3) |
-| Apply — value write and status transition are one transaction | repos, commit fault injected between the two writes | Neither lands: the value is not effective and the change is still `applying` — never a committed value on an unapplied-looking change (§4.2 *Apply Orchestrator* step 5) |
-| Apply — abandoned apply's rows reclaimed | `apply_operations` row forced to `running` with `started_at` past `apply_deadline_seconds`; separately, an apply whose request future is **dropped mid-batch** (client disconnect) | Next `applies:preview`/`apply` for the scope sets the operation `failed` with a timeout `failure_detail` and returns its `applying` rows to `pending`, where they appear in the new preview and retry normally; an operation **within** the deadline is left alone and its rows are not reclaimed (§4.2 *Apply Orchestrator*, §6) |
-| Apply — stalled applier loses the race to reclamation | rows reclaimed to `pending`, then the original applier resumes | Its guarded `applying → applied` update matches no row, so the transaction rolls back **including the value write**; no double apply and no orphaned committed value (§4.2 *Apply Orchestrator*, §7 *Concurrency Testing*) |
 | Declaration create — default mandatory | repos | An **omitted** `default_value` → `422 DefaultRequired`; an explicit JSON `null` on a type admitting `null` is **accepted**, stored as `'null'::jsonb`, and resolves with `source=schema_default` — the two are not the same input (§4.1) |
 | Declaration create — secret-trait type | `MockGtsValidator` resolves `secret` trait, `MockSecretManager` | `has_secret_trait=true`; a **non-empty** `default_value` → `422`; an **empty** placeholder is accepted and stored inline, with the Secret Manager **not** called for it; an **omitted** default → `422 DefaultRequired` like any other declaration (§4.2 *Secret Manager*) |
 | Secret masking on read | `MockSecretManager` | Read/search/list return the mask token, never plaintext (`cpt-cf-settings-service-fr-typed-value-validation`) |
@@ -2208,7 +1982,7 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | Category access — restricted and not granted | `MockAuthZClient` denying the restricted category | Its settings are absent from browse and search and give the not-visible response on a single read, while open categories are unaffected |
 | Category access — narrows only | an open category holding a declaration with `tenant_visible = false` | Still not returned to a tenant caller: an open category grants nothing by itself, it only declines to add a check |
 | File-valued setting — stored by reference, unvalidated | a reference naming a file id and version that do not exist | Accepted and stored inline in `value`; **no call leaves the service**; no bytes in the database, cache, search index, or audit record |
-| File-valued setting — a `bind` under a pinned reference changes nothing | `bind` swaps the file's current version while a setting pins the old one | No value change, no pending change, no activation signal; consumers keep reading the pinned version until the setting is repointed |
+| File-valued setting — a `bind` under a pinned reference changes nothing | `bind` swaps the file's current version while a setting pins the old one | No value change and no activation signal; consumers keep reading the pinned version until the setting is repointed |
 | File-valued setting — secret exclusivity | a type carrying both `secret` and `file-reference` | Rejected at declaration (`422`) |
 | File-valued setting — PII reference is masked | a `pii`-classified file reference read by an unauthorized caller | Reference metadata masked on the administrative read; unmasked for a caller authorized for unmasked PII |
 | File-valued setting — never searchable by content | a file whose name and content match the query | Not matched on either; still matched by key, description, and category |
@@ -2217,13 +1991,13 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | Classification-aware masking | `MockSecretManager`, `MockAuthZ` | `public` passes through; `pii` masked for a caller without PII entitlement and unmasked for one with it; `secret` masked for every administrative caller regardless of entitlement (§4.2 *Secret Manager*) |
 | Classification derivation on create | `MockGtsValidator` | `secret` trait ⇒ `data_classification = secret` (derived); an author-supplied `secret` on a non-secret type → `422`; absent class defaults to `public` (§4.2 *Declaration Management*) |
 | Hierarchy change invalidates cascading entries | `MockTenantResolver`, cache | A re-parent signal evicts the affected subtree's cached `(key, scope)` entries for `cascading` declarations; the next resolve reflects the new ancestor chain (§4.2 *Cache & Invalidation*) |
-| Clone of a secret is refused | `MockGtsValidator` resolves `secret` trait | `clone_override` on a secret-trait setting → `422 SecretNotCloneable`; nothing staged and no Credential-Store call is made |
-| Clone authorizes the source scope | `MockAuthZ`, `MockTenantResolver` | A clone whose `from` scope the caller may not read is rejected `403` and stages nothing; an authorized clone stages the value at the target (§4.2 *Staging Manager*) |
+| Clone of a secret is refused | `MockGtsValidator` resolves `secret` trait | `clone` on a secret-trait setting → `422 SecretNotCloneable`; nothing stored and no Credential-Store call is made |
+| Clone authorizes the source scope | `MockAuthZ`, `MockTenantResolver` | A clone whose `from` scope the caller may not read is rejected `403` and stores nothing; an authorized clone writes the value at the target (§4.2 *Value Writer*) |
 | Mode filter — Standard hides Advanced | repos | Advanced-only declarations/categories excluded; `hidden_advanced_count` reported (`cpt-cf-settings-service-fr-standard-advanced-mode`) |
 | Module contribution — namespaced key required | repos | `422 KeyNotNamespaced` for un-namespaced key (`cpt-cf-settings-service-fr-module-contributed-declarations`) |
 | Module contribution — compatible upgrade preserves values | repos | Declaration updated; admin values preserved (`cpt-cf-settings-service-fr-contributed-lifecycle`) |
-| Module contribution — breaking change flags values | repos | Affected overrides `needs-review`, excluded from apply |
-| Cascading impact — descendants listed | resolver subtree, capped (default 5,000 scanned; `limit` default 100/max 500) | Affected descendants with current vs new; bounded + `truncated` flag; non-blocking (`cpt-cf-settings-service-fr-cascading-inheritance`, §4.2 *Staging Manager*) |
+| Module contribution — breaking change flags values | repos | Affected overrides `needs-review`, and a write to one is refused until it is fixed |
+| Cascading impact — descendants listed | resolver subtree, capped (default 5,000 scanned; `limit` default 100/max 500) | Affected descendants with current vs new; bounded + `truncated` flag; non-blocking (`cpt-cf-settings-service-fr-cascading-inheritance`, §4.2 *Value Writer*) |
 | Licence/feature gating — entitled vs not | `MockLicenseResolverClient` (allow/deny/error) | Gated declaration excluded when denied; **fail-closed** on error (hidden); ungated visible (`cpt-cf-settings-service-fr-feature-license-gating`) |
 | Domain-affinity filtering | repos | Categories/settings filtered to the current domain; cross-domain hidden; declaration `domain_affinity` overrides category default |
 | Error mapping — domain → API variants | none | Every variant has a `From` impl, 100% coverage |
@@ -2240,14 +2014,13 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | Value uniqueness per tenant | Insert duplicate `(declaration_id, tenant_id)` for a non-null tenant | `uq_value_tenant` violation |
 | Platform-row uniqueness | Insert two rows for one declaration at the root tenant | `uq_value_scope` violation (NULLs collide via the partial index) |
 | `global` overridability | Insert `global` + `tenant_overridable=true` | `CHECK` violation |
-| Pending uniqueness | Two active pending for same `(declaration_id, scope)` | Partial unique `uq_pending_active` violation |
 | Ancestor-id cascade query | Seed a platform row (the root tenant) + rows for tenants `A` and `B`; resolve for `B` with ancestor ids `[root, A, B]` from `MockTenantResolver` | `WHERE declaration_id = ? AND tenant_id IN (ancestor ids)` returns nearest-ancestor override; no prefix/`LIKE` scan |
 | Partial active-declaration index | Mix `active`/`retired` | Index filters retired from active reads |
 | Tenant isolation | Seed tenant A values; query as tenant B | Empty result set (real WHERE generation) |
 | Pagination | Seed N declarations | Cursor traversal: all items, no duplicates, stable order |
 | OData list query | `GET /v1/declarations?$filter=…&$orderby=…&$select=…` | Allowed fields filter/sort/project (`toolkit_odata`); disallowed field → `UNSUPPORTED_FILTER_FIELD`/`UNSUPPORTED_ORDERBY_FIELD`; cursor locks `$filter`/`$orderby`/`$select` (guideline §4.4) |
 | Search trigram | Seed varied keys/descriptions | `pg_trgm` GIN returns expected substring matches |
-| Migration idempotency | Apply migrations twice | Second run is a no-op |
+| Migration idempotency | Run migrations twice | Second run is a no-op |
 
 #### Level 3: API Tests (REST Layer)
 
@@ -2262,8 +2035,8 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | Audit sink | `MockAuditSink` | Capture audit records to assert mutations are audited |
 | GTS Registry | `MockGtsValidator` | Deterministic type validation |
 | Tenant Resolver | `MockTenantResolver` | Deterministic ancestry |
-| IdP step-up | `MockStepUpVerifier` (pass/fail) | Exercise step-up gating on apply and on the behavior-affecting declaration actions retire/reactivate (§4.2 *Declaration Management*, *Apply Orchestrator*) |
-| Step-up verifier is a resolved binding | two `MockStepUpVerifier` instances standing in for different mechanisms | The verifier is ClientHub-resolved rather than hard-coded — swapping the binding changes **which** check runs, and apply is refused whenever the bound verifier rejects, whichever one is bound. No binding that always succeeds is exercised as a supported configuration: the requirement is not deployment-optional (§4.2 *Apply Orchestrator*) |
+| IdP step-up | `MockStepUpVerifier` (pass/fail) | Exercise step-up gating on a value write and on the behavior-affecting declaration actions retire/reactivate (§4.2 *Declaration Management*, *Value Writer*) |
+| Step-up verifier is a resolved binding | two `MockStepUpVerifier` instances standing in for different mechanisms | The verifier is ClientHub-resolved rather than hard-coded — swapping the binding changes **which** check runs, and the write is refused whenever the bound verifier rejects, whichever one is bound. No binding that always succeeds is exercised as a supported configuration: the requirement is not deployment-optional (§4.2 *Value Writer*) |
 | Credential Store | `MockSecretManager` | Deterministic store/mask/resolve without the credstore backend |
 | Event Broker | `MockEventPublisher` | Capture emitted events without a broker |
 | Database / domain services | Real | API layer delegates to real logic |
@@ -2281,23 +2054,21 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | PII excluded from the search corpus before matching | `GET /v1/search?q=` | A caller without PII entitlement gets **no match, no count, and no snippet** for content held only in a `pii` value — match existence itself does not leak; an entitled caller matches it. Secret content is never matched for anyone (§4.2 *Search*) |
 | Retire / reactivate require step-up | `DELETE /v1/declarations/{id}`, `POST /v1/declarations` (retired key) | Both succeed with a fresh step-up assertion and return `401`/`403` without one; `PATCH` of descriptive metadata needs none (§4.2 *Declaration Management*, §4.3) |
 | Classification loosening requires step-up | `PATCH /v1/declarations/{id}` | `public` → `pii` applies immediately; `pii` → `public` without step-up → `401`/`403` (§4.2 *Declaration Management*) |
+| Validate a value | `POST /v1/settings/{key}/validate` | Valid / invalid reported with the current effective value and source; for `cascading`, affected descendants paged; nothing stored and no step-up required |
+| Set value — valid/invalid/non-overridable | `PUT /v1/settings/{key}/value` | `200` / `422` / `403`–`409`; on success `old_value`, `new_value`, `scope` and a new `etag` |
+| Set value at subtree tenant — own / descendant / out-of-subtree | `PUT /v1/settings/{key}/value?tenant={tenant_id}` | Stored at own tenant and at a descendant (override created at target); out-of-subtree target (ancestor/sibling) → `403` (`cpt-cf-settings-service-fr-tenant-overrides`, `cpt-cf-settings-service-fr-tenant-scope-enforcement`) |
+| Set without step-up | `PUT /v1/settings/{key}/value` (step-up fails) | `401`/`403` with the RFC 9470 challenge; nothing stored |
+| Set with stale `If-Match` | `PUT /v1/settings/{key}/value` (value changed since read) | `412`; nothing stored |
+| Revert to default/inherited | `POST /v1/settings/{key}/value:revert` | `200` with the resolved fallback; platform → Schema Default, tenant → nearest ancestor else Schema Default (`cpt-cf-settings-service-fr-defaults-revert`) |
+| Read-your-write | `PUT /v1/settings/{key}/value` then `GET /v1/settings/{key}` | The read returns the value just written, with the `etag` the write returned |
+| Bulk set — mixed outcomes | `POST /v1/settings/batch` (one item invalid) | One entry per item; the invalid one carries its error and stored nothing, the others are stored; over 500 items → `422` |
 | Read secret setting — masked | `GET /v1/settings/{key}` | Mask token returned, never plaintext (`cpt-cf-settings-service-fr-typed-value-validation`) |
 | Read effective value — own/inherited/default | `GET /v1/settings/{key}` | Correct `source`, `source_scope`, `traits` |
 | Read not-visible setting | `GET /v1/settings/{key}` | `404` (no existence leak) (`cpt-cf-settings-service-nfr-scope-isolation`) |
-| Stage value — valid/invalid/non-overridable | `PUT /v1/pending/{key}` | `201` create / `200` replace / `422` / `403`–`409`; running services unaffected |
-| Stage value at subtree tenant — own / descendant / out-of-subtree | `PUT /v1/pending/{key}?tenant={tenant_id}` | staged at own tenant and at a descendant (override created at target); out-of-subtree target (ancestor/sibling) → `403` (`cpt-cf-settings-service-fr-tenant-overrides`, `cpt-cf-settings-service-fr-tenant-scope-enforcement`) |
-| Revert to default/inherited (staged) | `POST /v1/pending/{key}:revert` | `200` staged `PendingChange` with fallback preview; platform → Schema Default, tenant → nearest ancestor else Schema Default (`cpt-cf-settings-service-fr-defaults-revert`) |
-| Read-your-write on the pending plane | `PUT /v1/pending/{key}` then `GET /v1/pending/{key}` | `GET` reflects the staged draft; `GET /v1/settings/{key}` still returns the **live** value plus `has_pending`/`pending_id` |
-| Tenant scope enforcement | any with foreign `scope` | Forced to caller scope; cannot touch platform/sibling (`cpt-cf-settings-service-fr-tenant-scope-enforcement`) |
-| Pending list + discard | `GET /v1/pending`, `DELETE /v1/pending/{id}`, `POST /v1/pending:discard` | Correct rows; discard without apply |
-| Apply preview | `POST /v1/applies:preview` | Changes (old → new) + `checksum` returned |
-| Apply without step-up | `POST /v1/applies` (step-up fails) | `401`/`403` |
-| Apply with stale checksum | `POST /v1/applies` (pending changed after preview) | `409 ApplyChecksumMismatch` |
-| Apply partial failure | `POST /v1/applies` (bridge fails one) | `202` on submission; per-change results read from the commit facet; failed items remain `pending`/`failed`, queryable via `GET /v1/applies/{apply_id}/commit`; `event_apply_failed` emitted |
 | Search respects filters | `GET /v1/search` | Scope/visibility/mode honored (`cpt-cf-settings-service-fr-search-discoverability`) |
 | Licence/feature gating across read paths | `GET /v1/settings/{key}`, `GET /v1/search`, `GET /v1/categories`, `GET /v1/declarations` | Un-entitled caller (`MockLicenseResolverClient` deny) gets gated setting/category excluded on every read/search/list path; fail-closed on decision error (`cpt-cf-settings-service-fr-feature-license-gating`) |
 | Domain-affinity filtering | `GET /v1/categories`, `GET /v1/declarations` | Results filtered to the admin's current domain; cross-domain hidden; platform-admin "All domains" view returns all |
-| Audit written on every mutation | `POST`/`PATCH`/`PUT`/`DELETE` + `POST /v1/applies` | Each mutating call writes an audit record (actor, target, pre/post masked, request id) captured via `MockAuditSink` (`cpt-cf-settings-service-fr-audit-mutations`) |
+| Audit written on every mutation | `POST`/`PATCH`/`PUT`/`DELETE` | Each mutating call writes an audit record (actor, target, pre/post masked, request id) captured via `MockAuditSink` (`cpt-cf-settings-service-fr-audit-mutations`) |
 | Mode preferences round-trip | `GET`/`PUT /v1/me/preferences` | Persisted per user; mode filter applied to browse/search (`cpt-cf-settings-service-fr-standard-advanced-mode`) |
 | History per setting/scope | `GET /v1/settings/{key}/history` | Pre/post values returned (`cpt-cf-settings-service-fr-audit-mutations`) |
 | AuthZ deny / unauthenticated | any | `403` / `401` |
@@ -2311,14 +2082,13 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 
 | What to test | Marker | Verification target |
 |---|---|---|
-| Declaration → set → apply → read (pull) | `@pytest.mark.smoke` | Full lifecycle; effective value changes after apply via reader |
-| Cascading override + cross-instance re-resolution | `@pytest.mark.smoke` | Ancestor apply evicts locally and publishes `cache_invalidate`; peer instances converge; descendants re-resolve on next read |
-| Secret setting — set → apply → masked admin read → machine resolve | — | Plaintext never in any administrative read/search/audit; masked everywhere; `resolve_secret` through the reader returns plaintext to an authorized consumer and writes a masked secret-use audit record; no REST route yields plaintext |
+| Declaration → set → read (pull) | `@pytest.mark.smoke` | Full lifecycle; the effective value changes for the reader after the write |
+| Cascading override + cross-instance re-resolution | `@pytest.mark.smoke` | An ancestor write evicts locally and publishes `cache_invalidate`; peer instances converge; descendants re-resolve on next read |
+| Secret setting — set → masked admin read → machine resolve | — | Plaintext never in any administrative read/search/audit; masked everywhere; `resolve_secret` through the reader returns plaintext to an authorized consumer and writes a masked secret-use audit record; no REST route yields plaintext |
 | Tenant isolation — two tenants | — | Tenant A values invisible to tenant B; scope forced server-side |
 | Visibility — global read-only to tenant | — | Tenant sees value read-only; cannot override |
-| Step-up enforcement on apply | — | Apply blocked without step-up; allowed after |
+| Step-up enforcement on a write | — | The write is blocked without step-up; allowed after |
 | Module contribution lifecycle | — | Register/upgrade preserves values; retire excludes from resolution |
-| Pending discard + partial-failure retry | — | Discard without apply; retry of failed items via a **fresh** `applies:preview` + `POST /v1/applies` over the residue — the original `checksum` is rejected `409` (§4.2 *Apply Orchestrator*) |
 | Search & mode filters | — | Cross-field results honor scope/visibility; Standard mode hides Advanced |
 | Value search over applied overrides | — | Substring match on non-secret `setting_values.value` in the caller's subtree returns the `(setting, scope)` where set; an inherited/Schema-Default value is not a hit at the inheriting scope; secret values never matched (§4.2 *Search*, `cpt-cf-settings-service-fr-search-discoverability`) |
 | Value search matches a Schema Default | — | A setting whose matching content lives **only** in `default_value` is returned as a declaration-level hit carrying no scope — the default is in the corpus, it is simply not attributed to a tenant — under the same classification, visibility and licence rules as an override (§4.2 *Search*) |
@@ -2333,17 +2103,15 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | DB constraints (uniqueness, global check) | At-most-one and invariant enforcement are DB-level |
 | Tenant isolation scoping | Must verify the `WHERE` clauses `SecureConn` generates from a real `AccessScope`, not application-level filtering. The domain doubles above substitute the repository port and never reach `SecureConn`, so scope enforcement is exercised **only** from the persistence level upward — a unit test passing says nothing about isolation (§4.8 *The Data Path*) |
 | FK `ON DELETE RESTRICT`/`CASCADE` (categories, values) | No-orphan and cleanup invariants are DB-level |
-| Partial unique pending index | At-most-one active pending per setting+scope is DB-enforced |
-| Staged value representation | A `set`/`clone` with both or neither of `staged_value`/`staged_secret_ref` is rejected by the `CHECK`, as is a `revert`/`remove` carrying either; a `set` on a secret-trait declaration that stages `staged_value` instead of `staged_secret_ref` is rejected by the staging transaction (§4.6, §4.2 *Staging Manager*) |
 
 #### Concurrency Testing
 
-Concurrent state mutations exist (parallel staging/apply against the same setting+scope, and the partial unique pending index). Tests:
+Concurrent writes to the same setting and scope exist. Tests:
 
-1. **Operations needing protection:** concurrent `stage_set` on the same `(declaration_id, scope)`; concurrent `apply` of the same scope.
-2. **Policy:** the partial unique `uq_pending_active` serializes competing pending changes (one succeeds, the other gets conflict and retries against the now-current pending). Apply pins its batch by marking it `applying` (step 4), and each change's `applying → applied` transition is **guarded on `status = 'applying'`** and shares the value write's transaction, so a change applies once and a change reclaimed out from under a stalled applier rolls that applier's value write back with it (§4.2 *Apply Orchestrator*).
-3. **Test pattern:** seed a declaration + scope; spawn N tasks issuing `stage_set`/`apply` with a barrier-synchronized start; assert at most one active pending per setting+scope, each change applied at most once, no lost updates, and deterministic conflict errors. Observe `pg_stat_database.deadlocks` stays at zero.
-4. **Optimistic concurrency:** concurrent `PATCH`/`DELETE` on the same declaration/category with stale `If-Match` return `412`; a preview→apply race where the pending set changed returns `409 ApplyChecksumMismatch` (§4.3). The partial-unique pending index additionally bounds duplicate active pendings.
+1. **Operations needing protection:** concurrent `set` on the same `(declaration_id, scope)`.
+2. **Policy:** the commit is guarded on the `If-Match` the caller submitted, so of two concurrent writers one commits and the other is refused `412` — never a lost update (§4.2 *Value Writer*, *Stale-write rejection*).
+3. **Test pattern:** seed a declaration + scope; spawn N tasks issuing `set` with the **same** `If-Match` and a barrier-synchronized start; assert exactly one commits, the rest return `412`, the stored value is the winner's, and each stored change has exactly one audit record. Observe `pg_stat_database.deadlocks` stays at zero.
+4. **Optimistic concurrency elsewhere:** concurrent `PATCH`/`DELETE` on the same declaration/category with a stale `If-Match` return `412` (§4.3).
 
 #### NFR Verification Mapping
 
@@ -2352,8 +2120,8 @@ Concurrent state mutations exist (parallel staging/apply against the same settin
 | Effective read cache hit p95 ≤ 2 ms | `cpt-cf-settings-service-nfr-performance-read-cache` | Integration + micro-benchmark | Timed reader hot path on a warm cache |
 | Effective read resolve p95 ≤ 15 ms | `cpt-cf-settings-service-nfr-performance-read-cache` | Integration | Timed ancestry walk + DB read on seeded hierarchy |
 | REST p95 ≤ 50 ms / p99 ≤ 100 ms | `cpt-cf-settings-service-nfr-performance-read-cache` | API + load test | `settings_rest_request_duration_seconds` under offered load |
-| Cache hit ratio ≥ 0.95 | `cpt-cf-settings-service-nfr-performance-read-cache` | Integration | Invalidation only on apply; assert ratio over a read workload |
-| Apply success ≥ 99.9% | `cpt-cf-settings-service-nfr-reliability-validated-set` | API + E2E | Apply outcome counters; partial-failure retry path |
+| Cache hit ratio ≥ 0.95 | `cpt-cf-settings-service-nfr-performance-read-cache` | Integration | Invalidation only on a write; assert ratio over a read workload |
+| Write success ≥ 99.9% | `cpt-cf-settings-service-nfr-reliability-validated-set` | API + E2E | Write outcome counters; rejection and stale-write paths |
 | Availability 99.95% | `cpt-cf-settings-service-nfr-reliability-validated-set` | Ops / runtime | Aggregated `settings_service_up`; HA validated operationally |
 | Scope isolation — zero leaks | `cpt-cf-settings-service-fr-tenant-scope-enforcement`, `cpt-cf-settings-service-nfr-scope-isolation` | Integration + E2E | DB isolation tests + cross-tenant E2E scenarios |
 
