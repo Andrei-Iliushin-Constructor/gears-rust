@@ -504,6 +504,23 @@ impl GroupRepositoryTrait for GroupRepository {
             .map_err(|e| DomainError::database(e.to_string()))
     }
 
+    async fn find_model_by_id_for_update<C: DBRunner>(
+        &self,
+        db: &C,
+        id: Uuid,
+    ) -> Result<Option<rg_entity::Model>, DomainError> {
+        use sea_orm::QuerySelect;
+        let scope = system_scope();
+        ResourceGroupEntity::find()
+            .filter(rg_entity::Column::Id.eq(id))
+            .lock(sea_orm::sea_query::LockType::Update)
+            .secure()
+            .scope_with(&scope)
+            .one(db)
+            .await
+            .map_err(|e| DomainError::database(e.to_string()))
+    }
+
     /// Return the id of any existing root group (`parent_id IS NULL`) whose
     /// `gts_type.schema_id` starts with the given prefix, or `None` when no
     /// such root exists. Used to enforce tenant-root uniqueness.
@@ -733,6 +750,40 @@ impl GroupRepositoryTrait for GroupRepository {
             .map_err(|e| {
                 if e.is_unique_violation() {
                     DomainError::group_already_exists(id)
+                } else if e.is_foreign_key_violation() {
+                    // The parent this create read a moment ago is gone: a
+                    // concurrent non-force delete of it won the race, and
+                    // `fk_resource_group_parent` is `ON DELETE RESTRICT`, so
+                    // the loser learns about it here rather than from its own
+                    // read. That read is the caller's snapshot; the FK check
+                    // is not, which is exactly why this arm exists.
+                    //
+                    // It exists *now* because the non-force delete runs at the
+                    // backend default. Under SERIALIZABLE on both sides the
+                    // same race surfaced as a `40001` and the retry loop
+                    // re-read a clean answer; with the delete lowered, SSI has
+                    // no second serializable party to detect against and the
+                    // foreign key answers instead. Unmapped it was a 500.
+                    //
+                    // Which foreign key, though: this table has two, and
+                    // `fk_rg_gts_type` fails when a concurrent `delete_type`
+                    // removes the type between this transaction resolving it
+                    // and inserting. Answering *that* with "group not found,
+                    // id = parent" would name the wrong resource and the wrong
+                    // cause, so only the parent constraint maps. PostgreSQL
+                    // puts the constraint name in the message; SQLite says
+                    // only "FOREIGN KEY constraint failed", so there the
+                    // answer stays a database error -- unhelpful, but not a
+                    // confident lie, and the race needs concurrent writers
+                    // SQLite does not have.
+                    let msg = e.to_string();
+                    if msg.contains("fk_resource_group_parent")
+                        && let Some(parent_id) = parent_id
+                    {
+                        DomainError::group_not_found(parent_id)
+                    } else {
+                        DomainError::database(msg)
+                    }
                 } else {
                     DomainError::database(e.to_string())
                 }
@@ -828,7 +879,7 @@ impl GroupRepositoryTrait for GroupRepository {
         db: &C,
         child_id: Uuid,
         parent_id: Uuid,
-    ) -> Result<(), DomainError> {
+    ) -> Result<u64, DomainError> {
         // `Expr`'s combinators (`eq`, `add`) live on `ExprTrait` as of
         // sea-query 1.0. Imported here rather than file-wide: its `min`
         // would shadow `Ord::min` for the paginating methods above.
@@ -848,7 +899,7 @@ impl GroupRepositoryTrait for GroupRepository {
             .from(ClosureEntity)
             .and_where(Expr::col(closure_entity::Column::DescendantId).eq(parent_id));
 
-        toolkit_db::secure::secure_insert_from_select::<ClosureEntity, _>(
+        let written = toolkit_db::secure::secure_insert_from_select::<ClosureEntity, _>(
             [
                 closure_entity::Column::AncestorId,
                 closure_entity::Column::DescendantId,
@@ -867,7 +918,7 @@ impl GroupRepositoryTrait for GroupRepository {
             other => DomainError::database(other.to_string()),
         })?;
 
-        Ok(())
+        Ok(written)
     }
 
     /// Delete every group in `ids` in one statement per bind-parameter
@@ -962,6 +1013,120 @@ impl GroupRepositoryTrait for GroupRepository {
         Ok(())
     }
 
+    /// Distinct `(gts_type_id, resource_id)` membership keys touched by any
+    /// group in `group_ids`. See the trait doc for why callers collect this
+    /// before deleting those groups' memberships.
+    async fn get_distinct_membership_keys_for_groups<C: DBRunner>(
+        &self,
+        db: &C,
+        group_ids: &[Uuid],
+    ) -> Result<Vec<(i16, String)>, DomainError> {
+        use sea_orm::{FromQueryResult, QuerySelect};
+        use std::collections::BTreeSet;
+
+        #[derive(FromQueryResult)]
+        struct MembershipKey {
+            gts_type_id: i16,
+            resource_id: String,
+        }
+
+        if group_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let scope = system_scope();
+        let mut keys: BTreeSet<(i16, String)> = BTreeSet::new();
+
+        // Chunked for the same reason as the other batch operations in this
+        // file: one bind parameter per id, capped per backend.
+        for chunk in group_ids.chunks(toolkit_db::secure::max_bind_params_for(db)) {
+            let rows: Vec<MembershipKey> = MembershipEntity::find()
+                .filter(membership_entity::Column::GroupId.is_in(chunk.to_vec()))
+                .secure()
+                .scope_with(&scope)
+                .project_all(db, |q| {
+                    q.select_only()
+                        .column(membership_entity::Column::GtsTypeId)
+                        .column(membership_entity::Column::ResourceId)
+                        .distinct()
+                        .into_model::<MembershipKey>()
+                })
+                .await
+                .map_err(|e| DomainError::database(e.to_string()))?;
+
+            keys.extend(rows.into_iter().map(|r| (r.gts_type_id, r.resource_id)));
+        }
+
+        Ok(keys.into_iter().collect())
+    }
+
+    /// Delete `resource_membership_tenant` guard rows for every key in
+    /// `keys` whose `resource_group_membership` rows are all gone by the
+    /// time this runs. See the trait doc for the atomicity/ordering
+    /// contract this depends on.
+    async fn delete_orphaned_membership_guards<C: DBRunner>(
+        &self,
+        db: &C,
+        keys: &[(i16, String)],
+    ) -> Result<u64, DomainError> {
+        use crate::infra::storage::entity::resource_membership_tenant::{
+            self as guard_entity, Entity as GuardEntity,
+        };
+        use std::collections::BTreeMap;
+
+        if keys.is_empty() {
+            return Ok(0);
+        }
+
+        let scope = system_scope();
+
+        // Grouped by `gts_type_id` so the still-referenced check below is a
+        // plain single-column `NOT IN` subquery scoped to that type, not a
+        // tuple/row-value comparison -- portable across backends without
+        // depending on row-value `IN` support.
+        let mut by_type: BTreeMap<i16, Vec<String>> = BTreeMap::new();
+        for (type_id, resource_id) in keys {
+            by_type
+                .entry(*type_id)
+                .or_default()
+                .push(resource_id.clone());
+        }
+
+        let mut deleted = 0u64;
+        for (type_id, resource_ids) in by_type {
+            for chunk in resource_ids.chunks(toolkit_db::secure::max_bind_params_for(db)) {
+                // `Expr`'s combinators (`eq`) live on `ExprTrait` as of
+                // sea-query 1.0. Imported here rather than file-wide: its
+                // `eq` would shadow `PartialEq::eq` for the rest of the file.
+                use sea_orm::ExprTrait;
+
+                // `resource_id` is `NOT NULL` on `resource_group_membership`
+                // (both backend branches of the initial migration), so
+                // `NOT IN` here cannot silently degenerate to "no rows"
+                // the way it would if the subquery could produce a NULL.
+                let still_referenced = Query::select()
+                    .column(membership_entity::Column::ResourceId)
+                    .from(MembershipEntity)
+                    .and_where(Expr::col(membership_entity::Column::GtsTypeId).eq(type_id))
+                    .to_owned();
+
+                let result = GuardEntity::delete_many()
+                    .filter(guard_entity::Column::GtsTypeId.eq(type_id))
+                    .filter(guard_entity::Column::ResourceId.is_in(chunk.to_vec()))
+                    .filter(guard_entity::Column::ResourceId.not_in_subquery(still_referenced))
+                    .secure()
+                    .scope_with(&scope)
+                    .exec(db)
+                    .await
+                    .map_err(|e| DomainError::database(e.to_string()))?;
+
+                deleted += result.rows_affected;
+            }
+        }
+
+        Ok(deleted)
+    }
+
     /// Every descendant of `group_id` (the self-row excluded) with its depth
     /// relative to `group_id`, so callers don't re-derive the depth via a
     /// second per-row query (RG-05/RG-10). Ordered by depth ascending;
@@ -1003,6 +1168,53 @@ impl GroupRepositoryTrait for GroupRepository {
             .map_err(|e| DomainError::database(e.to_string()))?;
 
         Ok(rows.into_iter().map(|r| r.depth).max().unwrap_or(0))
+    }
+
+    /// Deepest descendant of `group_id` relative to it, or `0` when it has
+    /// none.
+    ///
+    /// One `MAX(depth)` aggregate over the closure table -- see
+    /// `count_children` above for the same `SecureSelect` pattern applied to
+    /// `COUNT` -- instead of `get_descendant_ids_with_depth`'s whole row set
+    /// pulled into this process only to be folded down to this one number.
+    async fn get_max_descendant_depth<C: DBRunner>(
+        &self,
+        db: &C,
+        group_id: Uuid,
+    ) -> Result<i32, DomainError> {
+        // `Expr::max` (the SQL aggregate) lives on `ExprTrait` as of
+        // sea-query 1.0. Imported here rather than file-wide: its `max`
+        // would shadow `Ord::max` for the paginating methods above.
+        use sea_orm::ExprTrait;
+        use sea_orm::{FromQueryResult, QuerySelect};
+
+        #[derive(FromQueryResult)]
+        struct MaxDepth {
+            max_depth: Option<i32>,
+        }
+
+        let scope = system_scope();
+        let rows: Vec<MaxDepth> = ClosureEntity::find()
+            .filter(closure_entity::Column::AncestorId.eq(group_id))
+            .filter(closure_entity::Column::Depth.ne(0))
+            .secure()
+            .scope_with(&scope)
+            .project_all(db, |q| {
+                q.select_only()
+                    .column_as(Expr::col(closure_entity::Column::Depth).max(), "max_depth")
+                    .into_model::<MaxDepth>()
+            })
+            .await
+            .map_err(|e| DomainError::database(e.to_string()))?;
+
+        // `MAX` over zero rows is one row holding NULL, not zero rows -- but
+        // falling back to `0` either way keeps this the same "no
+        // descendants" answer `get_descendant_ids_with_depth(...).max()` gave.
+        Ok(rows
+            .into_iter()
+            .next()
+            .and_then(|r| r.max_depth)
+            .unwrap_or(0))
     }
 
     /// Count direct children of a group.
@@ -1104,7 +1316,7 @@ impl GroupRepositoryTrait for GroupRepository {
         db: &C,
         group_id: Uuid,
         new_parent_id: Option<Uuid>,
-    ) -> Result<(), DomainError> {
+    ) -> Result<u64, DomainError> {
         // `Expr`'s combinators (`eq`, `add`) live on `ExprTrait` as of
         // sea-query 1.0. Imported here rather than file-wide: its `min`
         // would shadow `Ord::min` for the paginating methods above.
@@ -1172,17 +1384,18 @@ impl GroupRepositoryTrait for GroupRepository {
             )))
             .from_subquery(subtree_query, anc_alias)
             .to_owned();
-        ClosureEntity::delete_many()
+        let deleted = ClosureEntity::delete_many()
             .filter(closure_entity::Column::DescendantId.in_subquery(subtree_for_descendants))
             .filter(closure_entity::Column::AncestorId.not_in_subquery(subtree_for_ancestors))
             .secure()
             .scope_with(&scope)
             .exec(db)
             .await
-            .map_err(|e| DomainError::database(e.to_string()))?;
+            .map_err(|e| DomainError::database(e.to_string()))?
+            .rows_affected;
         // @cpt-end:cpt-cf-resource-group-algo-entity-hier-closure-rebuild:p1:inst-closure-rebuild-2
 
-        if let Some(parent_id) = new_parent_id {
+        let inserted = if let Some(parent_id) = new_parent_id {
             // @cpt-begin:cpt-cf-resource-group-algo-entity-hier-closure-rebuild:p1:inst-closure-rebuild-3
             // Compute new ancestor paths from new parent: the closure rows
             // whose descendant is the new parent, i.e. its ancestors and its
@@ -1233,7 +1446,7 @@ impl GroupRepositoryTrait for GroupRepository {
                 );
             // @cpt-end:cpt-cf-resource-group-algo-entity-hier-closure-rebuild:p1:inst-closure-rebuild-4a1
 
-            toolkit_db::secure::secure_insert_from_select::<ClosureEntity, _>(
+            let written = toolkit_db::secure::secure_insert_from_select::<ClosureEntity, _>(
                 [
                     closure_entity::Column::AncestorId,
                     closure_entity::Column::DescendantId,
@@ -1252,11 +1465,37 @@ impl GroupRepositoryTrait for GroupRepository {
                 other => DomainError::database(other.to_string()),
             })?;
             // @cpt-end:cpt-cf-resource-group-algo-entity-hier-closure-rebuild:p1:inst-closure-rebuild-4
-        }
+            written
+        } else {
+            // Moving to root attaches no external ancestors, so there is
+            // nothing to insert.
+            0
+        };
 
         // @cpt-begin:cpt-cf-resource-group-algo-entity-hier-closure-rebuild:p1:inst-closure-rebuild-5
         // RETURN: closure rows updated within transaction — commit handled by caller
-        Ok(())
+        tracing::debug!(%group_id, deleted, inserted, "closure subtree rebuilt");
+        if new_parent_id.is_some() && inserted == 0 {
+            // Mirrors the `NOT IN` + `NULL` silent-corruption mode the delete
+            // step's doc comment above describes: that one needs a null
+            // `descendant_id` to misfire, but the effect is the same shape --
+            // a reparent that looks like it succeeded while the closure table
+            // quietly keeps stale (or here, no new) ancestor rows. A `NULL`
+            // can't happen here (see that comment), but a parent with no
+            // closure rows of its own -- which should be unreachable, every
+            // group gets a self-row on create -- would leave this INSERT
+            // with nothing to insert, and the DELETE above would have
+            // already dropped the subtree's real ancestors on the strength of
+            // the reparent this claims to perform.
+            //
+            // Return an error so the transaction rolls back rather than
+            // committing a broken closure table.
+            return Err(DomainError::database(format!(
+                "closure rebuild for group {group_id} inserted no rows for reparent \
+                 (deleted {deleted}); parent has no closure rows"
+            )));
+        }
+        Ok(inserted)
         // @cpt-end:cpt-cf-resource-group-algo-entity-hier-closure-rebuild:p1:inst-closure-rebuild-5
     }
 

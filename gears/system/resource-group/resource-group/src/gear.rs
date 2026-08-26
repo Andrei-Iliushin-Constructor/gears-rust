@@ -5,7 +5,9 @@ use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
-use resource_group_sdk::{ResourceGroupClient, ResourceGroupReadHierarchy};
+use resource_group_sdk::{
+    ResourceGroupClient, ResourceGroupReadHierarchy, ResourceGroupTypeBootstrap,
+};
 use sea_orm_migration::MigrationTrait;
 use toolkit::api::OpenApiRegistry;
 use toolkit::{DatabaseCapability, Gear, GearCtx, RestApiCapability};
@@ -18,6 +20,7 @@ use crate::domain::group_service::{GroupService, QueryProfile};
 use crate::domain::membership_service::MembershipService;
 use crate::domain::read_service::RgReadService;
 use crate::domain::rg_service::RgService;
+use crate::domain::type_bootstrap_service::RgTypeBootstrapService;
 use crate::domain::type_service::TypeService;
 use crate::infra::storage::group_repo::GroupRepository;
 use crate::infra::storage::membership_repo::MembershipRepository;
@@ -72,7 +75,11 @@ impl Gear for ResourceGroup {
         let membership_repo = Arc::new(MembershipRepository);
 
         // Create TypeService
-        let type_service = Arc::new(TypeService::new(db.clone(), type_repo.clone()));
+        let type_service = Arc::new(TypeService::new(
+            db.clone(),
+            enforcer.clone(),
+            type_repo.clone(),
+        ));
 
         self.type_service
             .set(type_service)
@@ -86,14 +93,23 @@ impl Gear for ResourceGroup {
 
         // Create GroupService with default query profile and PolicyEnforcer
         let profile = QueryProfile::default();
-        let group_service = Arc::new(GroupService::new(
-            db.clone(),
-            profile,
-            enforcer.clone(),
-            group_repo.clone(),
-            type_repo.clone(),
-            types_registry,
-        ));
+        // The composition root is where the metrics recorder is chosen. The
+        // service itself defaults to the no-op one, so nothing that builds a
+        // `GroupService` outside this path -- tests, mostly -- records or
+        // pays for anything.
+        let group_service = Arc::new(
+            GroupService::new(
+                db.clone(),
+                profile,
+                enforcer.clone(),
+                group_repo.clone(),
+                type_repo.clone(),
+                types_registry,
+            )
+            .with_metrics(Arc::new(
+                crate::infra::metrics::RgMetricsMeter::from_global(),
+            )),
+        );
 
         self.group_service
             .set(group_service)
@@ -124,7 +140,7 @@ impl Gear for ResourceGroup {
             .clone();
 
         let rg_client: Arc<dyn ResourceGroupClient> = Arc::new(RgService::new(
-            type_svc,
+            type_svc.clone(),
             group_svc.clone(),
             membership_service.clone(),
         ));
@@ -136,8 +152,17 @@ impl Gear for ResourceGroup {
         ctx.client_hub()
             .register::<dyn ResourceGroupReadHierarchy>(read_client);
 
+        // TEMPORARY: bootstrap-only, un-gated surface for another gear's
+        // `init` to register RG types before AuthZ is reachable — see
+        // `ResourceGroupTypeBootstrap`'s doc comment ("Temporary — revisit
+        // when the type registry becomes its own gear").
+        let type_bootstrap_client: Arc<dyn ResourceGroupTypeBootstrap> =
+            Arc::new(RgTypeBootstrapService::new(type_svc));
+        ctx.client_hub()
+            .register::<dyn ResourceGroupTypeBootstrap>(type_bootstrap_client);
+
         info!(
-            "Resource Group gear initialized (ClientHub: ResourceGroupClient + ResourceGroupReadHierarchy)"
+            "Resource Group gear initialized (ClientHub: ResourceGroupClient + ResourceGroupReadHierarchy + ResourceGroupTypeBootstrap)"
         );
         Ok(())
     }

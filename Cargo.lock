@@ -2869,6 +2869,8 @@ dependencies = [
  "http-body-util",
  "inventory",
  "jsonschema",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "sea-orm",
  "sea-orm-migration",
  "serde",
@@ -2880,6 +2882,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "tracing-test",
  "utoipa",
  "uuid",
 ]

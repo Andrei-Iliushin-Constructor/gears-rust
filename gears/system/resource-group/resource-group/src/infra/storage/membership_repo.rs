@@ -8,11 +8,10 @@
 use async_trait::async_trait;
 use resource_group_sdk::models::ResourceGroupMembership;
 use resource_group_sdk::odata::MembershipFilterField;
-use sea_orm::ExprTrait;
-use sea_orm::sea_query::{Expr, Query};
+use sea_orm::sea_query::OnConflict;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 use toolkit_db::odata::{LimitCfg, paginate_odata};
-use toolkit_db::secure::{DBRunner, SecureDeleteExt, SecureEntityExt};
+use toolkit_db::secure::{DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt};
 use toolkit_odata::{ODataQuery, Page, SortDir};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
@@ -184,60 +183,153 @@ impl MembershipRepositoryTrait for MembershipRepository {
             .map_err(|e| DomainError::database(e.to_string()))
     }
 
-    /// Check existing membership tenants for a resource (for tenant compatibility).
-    /// Returns the set of distinct `tenant_ids` for groups that have this resource as a member.
-    async fn get_existing_membership_tenant_ids<C: DBRunner>(
+    async fn ensure_membership_guard<C: DBRunner>(
         &self,
         db: &C,
         gts_type_id: i16,
         resource_id: &str,
-    ) -> Result<Vec<Uuid>, DomainError> {
-        use crate::infra::storage::entity::resource_group::{
-            self as rg_entity, Entity as ResourceGroupEntity,
+        tenant_id: Uuid,
+    ) -> Result<Uuid, DomainError> {
+        use crate::infra::storage::entity::resource_membership_tenant::{
+            self as guard_entity, Entity as GuardEntity,
         };
 
-        let scope = system_scope();
+        let sc = system_scope();
 
-        // The group ids feeding the second query were exactly the first
-        // query's result, so the database can derive them: one statement with
-        // two bind parameters, not two statements the second of which bound
-        // one parameter per membership of the resource -- unbounded, and
-        // unchunked.
-        //
-        // The inner subquery over `resource_group_membership` is
-        // deliberately hand-built and unscoped, not an oversight: this is an
-        // integrity read (cross-tenant compatibility) and must see every
-        // membership row regardless of scope. `resource_group_membership`
-        // declares no scope columns, so a constrained `AccessScope` run
-        // through `build_scope_condition` against it does not degrade to
-        // "no filter" -- every constraint fails to resolve a column and the
-        // whole condition compiles to `WHERE false` (`cond.rs`,
-        // `build_constraint_condition`'s early return through
-        // `resolve_property`). Scoping this subquery under a constrained
-        // scope would make it silently see zero memberships and report the
-        // resource tenant-compatible with everything. This method builds
-        // `system_scope()` itself, precisely so no constrained scope can
-        // reach here; if it ever takes a caller-supplied scope instead,
-        // do not scope this subquery -- rethink what "existing membership
-        // tenants" is even supposed to mean under a partial view first.
-        let member_group_ids = Query::select()
-            .column(membership_entity::Column::GroupId)
-            .from(MembershipEntity)
-            .and_where(Expr::col(membership_entity::Column::GtsTypeId).eq(gts_type_id))
-            .and_where(Expr::col(membership_entity::Column::ResourceId).eq(resource_id))
-            .to_owned();
-
-        let groups = ResourceGroupEntity::find()
-            .filter(rg_entity::Column::Id.in_subquery(member_group_ids))
+        // @cpt-begin:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-1
+        // Optimistic: try to read first; if none exists, insert.
+        let existing = GuardEntity::find()
+            .filter(guard_entity::Column::GtsTypeId.eq(gts_type_id))
+            .filter(guard_entity::Column::ResourceId.eq(resource_id))
             .secure()
-            .scope_with(&scope)
-            .all(db)
+            .scope_with(&sc)
+            .one(db)
             .await
             .map_err(|e| DomainError::database(e.to_string()))?;
 
-        let mut tenant_ids: Vec<Uuid> = groups.into_iter().map(|g| g.tenant_id).collect();
-        tenant_ids.sort();
-        tenant_ids.dedup();
-        Ok(tenant_ids)
+        if let Some(guard) = existing {
+            return Ok(guard.tenant_id);
+        }
+        // @cpt-end:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-1
+
+        // @cpt-begin:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-2
+        // No guard row yet — try to claim this resource. `ON CONFLICT DO
+        // NOTHING` rather than a plain INSERT: this call now runs inside the
+        // same transaction as the membership insert it gates (RG-01), and on
+        // PostgreSQL a unique-violation error aborts that whole transaction
+        // (SQLSTATE 25P02) -- every later statement fails, including the
+        // recovery read below, until the transaction ends. A conflict that
+        // does nothing never raises that SQL-level error.
+        //
+        // It does still raise a *client-side* one: `sea_orm`'s `Insert::exec`
+        // appends `RETURNING` on a backend that supports it (PostgreSQL
+        // does), and treats an empty result set as `DbErr::RecordNotInserted`
+        // -- indistinguishable, from here, from "the INSERT ran and DO
+        // NOTHING skipped it". Nothing failed in Postgres; only `sea_orm`'s
+        // client code manufactured an error from a successful statement.
+        // That is safe to catch and fall through on: unlike a real
+        // unique-violation, it never touched the transaction's error state.
+        let model = guard_entity::ActiveModel {
+            gts_type_id: Set(gts_type_id),
+            resource_id: Set(resource_id.to_owned()),
+            tenant_id: Set(tenant_id),
+            created_at: Set(time::OffsetDateTime::now_utc()),
+        };
+
+        match GuardEntity::insert(model)
+            .secure()
+            .scope_unchecked(&sc)
+            .map_err(|e| DomainError::database(e.to_string()))?
+            .on_conflict_raw(
+                OnConflict::columns([
+                    guard_entity::Column::GtsTypeId,
+                    guard_entity::Column::ResourceId,
+                ])
+                .do_nothing()
+                .to_owned(),
+            )
+            .exec(db)
+            .await
+        {
+            Ok(_) | Err(ScopeError::Db(sea_orm::DbErr::RecordNotInserted)) => {}
+            Err(err) => return Err(DomainError::database(err.to_string())),
+        }
+        // @cpt-end:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-2
+
+        // @cpt-begin:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-3
+        // Whether the insert above won the claim or lost it to a concurrent
+        // one, this read returns whichever tenant is now on record.
+        GuardEntity::find()
+            .filter(guard_entity::Column::GtsTypeId.eq(gts_type_id))
+            .filter(guard_entity::Column::ResourceId.eq(resource_id))
+            .secure()
+            .scope_with(&sc)
+            .one(db)
+            .await
+            .map_err(|e| DomainError::database(e.to_string()))?
+            .ok_or_else(|| {
+                DomainError::database("Guard row missing after claim attempt".to_owned())
+            })
+            .map(|row| row.tenant_id)
+        // @cpt-end:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-3
+    }
+
+    /// Count memberships still referencing `(gts_type_id, resource_id)`.
+    ///
+    /// Used to decide whether the membership-tenant guard row can be
+    /// released after a removal, so it is an integrity read and builds
+    /// `system_scope()` itself rather than taking the caller's: the guard's
+    /// lifecycle must track the real data, not a partial view of it.
+    ///
+    /// A constrained scope here would not merely narrow the count, it would
+    /// zero it. `resource_group_membership` declares no scope columns, so
+    /// every constraint fails to resolve one and `build_scope_condition`
+    /// compiles the whole thing to `WHERE false` (`cond.rs`,
+    /// `build_constraint_condition`'s early return through
+    /// `resolve_property`) -- the release would then fire on a resource that
+    /// still has memberships. If this ever takes a caller-supplied scope, do
+    /// not scope this read; rethink what "still referenced" means under a
+    /// partial view first.
+    async fn count_memberships<C: DBRunner>(
+        &self,
+        db: &C,
+        gts_type_id: i16,
+        resource_id: &str,
+    ) -> Result<u64, DomainError> {
+        let scope = system_scope();
+        MembershipEntity::find()
+            .filter(membership_entity::Column::GtsTypeId.eq(gts_type_id))
+            .filter(membership_entity::Column::ResourceId.eq(resource_id))
+            .secure()
+            .scope_with(&scope)
+            .count(db)
+            .await
+            .map_err(|e| DomainError::database(e.to_string()))
+    }
+
+    /// Delete the membership-tenant guard row for `(gts_type_id, resource_id)`.
+    ///
+    /// Called once the last membership referencing the pair is gone, so the
+    /// tenant claim does not outlive every membership it was guarding.
+    async fn delete_membership_guard<C: DBRunner>(
+        &self,
+        db: &C,
+        gts_type_id: i16,
+        resource_id: &str,
+    ) -> Result<(), DomainError> {
+        use crate::infra::storage::entity::resource_membership_tenant::{
+            self as guard_entity, Entity as GuardEntity,
+        };
+
+        let scope = system_scope();
+        GuardEntity::delete_many()
+            .filter(guard_entity::Column::GtsTypeId.eq(gts_type_id))
+            .filter(guard_entity::Column::ResourceId.eq(resource_id))
+            .secure()
+            .scope_with(&scope)
+            .exec(db)
+            .await
+            .map_err(|e| DomainError::database(e.to_string()))?;
+        Ok(())
     }
 }

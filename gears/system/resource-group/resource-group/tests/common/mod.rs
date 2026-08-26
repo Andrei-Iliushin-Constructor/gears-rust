@@ -300,7 +300,7 @@ pub async fn create_root_type(
         suffix.to_ascii_lowercase(),
         Uuid::now_v7().as_simple()
     );
-    svc.create_type(CreateTypeRequest {
+    svc.create_type_unscoped(CreateTypeRequest {
         code,
         can_be_root: true,
         allowed_parent_types: vec![],
@@ -328,7 +328,7 @@ pub async fn create_child_type(
         suffix.to_ascii_lowercase(),
         Uuid::now_v7().as_simple()
     );
-    svc.create_type(CreateTypeRequest {
+    svc.create_type_unscoped(CreateTypeRequest {
         code,
         can_be_root: false,
         allowed_parent_types: parents.iter().map(|s| (*s).to_owned()).collect(),
@@ -356,6 +356,7 @@ pub async fn create_root_group(
             code: type_code.to_owned(),
             name: name.to_owned(),
             parent_id: None,
+            tenant_id: None,
             metadata: None,
         },
         tenant_id,
@@ -380,6 +381,7 @@ pub async fn create_child_group(
             code: type_code.to_owned(),
             name: name.to_owned(),
             parent_id: Some(parent_id),
+            tenant_id: None,
             metadata: None,
         },
         tenant_id,
@@ -555,7 +557,20 @@ pub fn assert_no_surrogate_ids(json: &serde_json::Value) {
 
 /// Build a `TypeService` from a DB provider.
 pub fn make_type_service(db: Arc<DBProvider<DbError>>) -> TypeService<TypeRepository> {
-    TypeService::new(db, Arc::new(TypeRepository))
+    TypeService::new(db, make_enforcer(), Arc::new(TypeRepository))
+}
+
+/// Build a `TypeService` wired with the deny-all enforcer. Scoped operations
+/// (`create_type` / `get_type` / `update_type`) would be rejected; an
+/// unscoped call that still succeeds proves it never consulted `PolicyEnforcer`
+/// -- used to pin the `ResourceGroupTypeBootstrap` bypass (see
+/// [`make_group_service_deny`] for the same pattern on the group side).
+pub fn make_type_service_deny(db: Arc<DBProvider<DbError>>) -> TypeService<TypeRepository> {
+    TypeService::new(
+        db,
+        PolicyEnforcer::new(Arc::new(DenyAllAuthZ)),
+        Arc::new(TypeRepository),
+    )
 }
 
 /// In-memory SQLite with migrations applied and a [`QueryRecorder`] attached,
