@@ -382,15 +382,54 @@ async fn sync_fills_all_twenty_six_tables_and_reads_serve_them() {
             result: Some(fetched()),
         }),
     );
-    let router = router_for(service, ctx);
+    let mut pump = common::SyncPump::take(&service).await;
+    let router = router_for(service.clone(), ctx);
 
     let response = post(
         router.clone(),
         "/github-mirror/v1/repos/rust-lang/rust/sync",
     )
     .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let summary = body_json(response).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let accepted = body_json(response).await;
+    let session_id = accepted["session_id"].as_str().expect("session_id");
+    assert_eq!(accepted["status"], "queued");
+    assert_eq!(pump.drain(&service).await, 1, "the worker must run the job");
+
+    let session = body_json(
+        get(
+            router.clone(),
+            &format!("/github-mirror/v1/sessions/{session_id}"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(session["status"], "complete");
+    assert_eq!(session["progress_percent"], 100);
+
+    let statuses = body_json(get(router.clone(), "/github-mirror/v1/sync-status").await).await;
+    let repo_status = &statuses["items"][0];
+    assert_eq!(
+        repo_status["status"], "complete",
+        "a completed run clears the repository's in_progress marker"
+    );
+    assert_eq!(repo_status["repository"], "rust-lang/rust");
+    assert!(repo_status["last_synced_at"].is_string());
+
+    let resumed = body_json(
+        post(
+            router.clone(),
+            "/github-mirror/v1/sync/resume?repo=rust-lang/rust",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        resumed["resumed"], 0,
+        "a completed repository has nothing to resume"
+    );
+
+    let summary = session["summary"].clone();
     assert_eq!(summary["repository"], "rust-lang/rust");
     assert_eq!(summary["issues_synced"], 1);
     assert_eq!(summary["pull_requests_synced"], 1);
@@ -603,14 +642,29 @@ async fn sync_fills_all_twenty_six_tables_and_reads_serve_them() {
 }
 
 #[tokio::test]
-async fn sync_of_unknown_repository_returns_404() {
+async fn sync_of_unknown_repository_fails_on_the_session_not_the_request() {
     let ctx = common::caller_in(Uuid::new_v4());
     let service = common::service("https://api.github.com").await;
-    let router = router_for(service, ctx);
+    let mut pump = common::SyncPump::take(&service).await;
+    let router = router_for(service.clone(), ctx);
 
-    let response = post(router, "/github-mirror/v1/repos/acme/nope/sync").await;
+    let response = post(router.clone(), "/github-mirror/v1/repos/acme/nope/sync").await;
+    assert_eq!(
+        response.status(),
+        StatusCode::ACCEPTED,
+        "queueing succeeds even for a repo GitHub will reject"
+    );
+    let session_id = body_json(response).await["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_owned();
+    pump.drain(&service).await;
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let session =
+        body_json(get(router, &format!("/github-mirror/v1/sessions/{session_id}")).await).await;
+    assert_eq!(session["status"], "failed");
+    assert!(session["error"].is_string(), "the 404 lands in the session");
+    assert!(session["summary"].is_null());
 }
 
 #[tokio::test]
@@ -624,20 +678,22 @@ async fn sync_is_idempotent() {
             result: Some(fetched()),
         }),
     );
-    let router = router_for(service, ctx);
+    let mut pump = common::SyncPump::take(&service).await;
+    let router = router_for(service.clone(), ctx);
 
     let first = post(
         router.clone(),
         "/github-mirror/v1/repos/rust-lang/rust/sync",
     )
     .await;
-    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
     let second = post(
         router.clone(),
         "/github-mirror/v1/repos/rust-lang/rust/sync",
     )
     .await;
-    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::ACCEPTED);
+    assert_eq!(pump.drain(&service).await, 2, "both jobs must run");
 
     let repos = body_json(get(router, "/github-mirror/v1/repos").await).await;
     assert_eq!(repos["items"].as_array().expect("items").len(), 1);

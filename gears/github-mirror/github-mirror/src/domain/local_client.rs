@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use github_mirror_sdk::{GithubMirrorClientV1, MirrorStatus, Repo, SyncSummary};
+
+use crate::domain::service::SyncProgress;
 use toolkit_canonical_errors::{CanonicalError, resource_error};
 use toolkit_macros::domain_model;
 use toolkit_odata::{ODataQuery, Page};
@@ -14,8 +16,8 @@ use crate::domain::repo::{
     DeploymentRepository, IssueEventRepository, IssueReactionRepository, IssueRepository,
     IssueTimelineRepository, LabelRepository, MilestoneRepository, PullRequestCommitRepository,
     PullRequestFileRepository, PullRequestRepository, ReleaseRepository, RepoRepository,
-    ReviewCommentRepository, ReviewRepository, ReviewThreadRepository, SyncSessionRepository,
-    TagRepository, WorkflowJobRepository, WorkflowRunRepository,
+    RepoSyncStatusRepository, ReviewCommentRepository, ReviewRepository, ReviewThreadRepository,
+    SyncSessionRepository, TagRepository, WorkflowJobRepository, WorkflowRunRepository,
 };
 use crate::domain::service::Service;
 
@@ -81,7 +83,10 @@ type SharedService<
     U,
     A,
     SS,
-> = Arc<Service<R, I, P, C, M, V, W, L, N, E, B, O, F, G, T, D, H, K, X, Y, Z, S, J, Q, U, A, SS>>;
+    RS,
+> = Arc<
+    Service<R, I, P, C, M, V, W, L, N, E, B, O, F, G, T, D, H, K, X, Y, Z, S, J, Q, U, A, SS, RS>,
+>;
 
 // One generic parameter per aggregate repository; the alias is as small
 // as the type gets.
@@ -115,6 +120,7 @@ pub struct LocalClient<
     U: CheckRunRepository + 'static,
     A: IssueTimelineRepository + 'static,
     SS: SyncSessionRepository + 'static,
+    RS: RepoSyncStatusRepository + 'static,
 > {
     service: SharedService<
         R,
@@ -144,6 +150,7 @@ pub struct LocalClient<
         U,
         A,
         SS,
+        RS,
     >,
 }
 
@@ -175,7 +182,38 @@ impl<
     U: CheckRunRepository + 'static,
     A: IssueTimelineRepository + 'static,
     SS: SyncSessionRepository + 'static,
-> LocalClient<R, I, P, C, M, V, W, L, N, E, B, O, F, G, T, D, H, K, X, Y, Z, S, J, Q, U, A, SS>
+    RS: RepoSyncStatusRepository + 'static,
+>
+    LocalClient<
+        R,
+        I,
+        P,
+        C,
+        M,
+        V,
+        W,
+        L,
+        N,
+        E,
+        B,
+        O,
+        F,
+        G,
+        T,
+        D,
+        H,
+        K,
+        X,
+        Y,
+        Z,
+        S,
+        J,
+        Q,
+        U,
+        A,
+        SS,
+        RS,
+    >
 {
     #[must_use]
     #[allow(clippy::type_complexity)]
@@ -208,6 +246,7 @@ impl<
             U,
             A,
             SS,
+            RS,
         >,
     ) -> Self {
         Self { service }
@@ -243,6 +282,7 @@ impl<
     U: CheckRunRepository + 'static,
     A: IssueTimelineRepository + 'static,
     SS: SyncSessionRepository + 'static,
+    RS: RepoSyncStatusRepository + 'static,
 > GithubMirrorClientV1
     for LocalClient<
         R,
@@ -272,6 +312,7 @@ impl<
         U,
         A,
         SS,
+        RS,
     >
 {
     async fn status(&self, _ctx: &SecurityContext) -> Result<MirrorStatus, CanonicalError> {
@@ -302,7 +343,7 @@ impl<
     ) -> Result<SyncSummary, CanonicalError> {
         let summary = self
             .service
-            .sync_repository(ctx, owner, name)
+            .sync_repository(ctx, owner, name, &SyncProgress::new())
             .await
             .map_err(CanonicalError::from)?;
         Ok(SyncSummary {

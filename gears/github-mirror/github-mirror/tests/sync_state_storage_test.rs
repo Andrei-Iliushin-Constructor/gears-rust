@@ -36,17 +36,18 @@ async fn scope_for(ctx: &SecurityContext) -> AccessScope {
         .expect("scope must resolve")
 }
 
-fn session_record(id: Uuid, state: &str, created_at: &str) -> SyncSessionRecord {
+fn session_record(id: Uuid, status: &str, created_at: &str) -> SyncSessionRecord {
     SyncSessionRecord {
         id,
         repo_full_name: "acme/widget".to_owned(),
         repo_id: None,
-        state: state.to_owned(),
+        status: status.to_owned(),
+        progress_percent: 0,
         error: None,
         summary_json: None,
         created_at: created_at.to_owned(),
         started_at: None,
-        finished_at: None,
+        ended_at: None,
     }
 }
 
@@ -79,9 +80,10 @@ async fn a_session_is_created_updated_and_listed_newest_first() {
     .await
     .expect("second insert");
 
-    let mut finished = session_record(first, "succeeded", "2026-08-25T10:00:00Z");
+    let mut finished = session_record(first, "complete", "2026-08-25T10:00:00Z");
     finished.started_at = Some("2026-08-25T10:00:01Z".to_owned());
-    finished.finished_at = Some("2026-08-25T10:00:30Z".to_owned());
+    finished.ended_at = Some("2026-08-25T10:00:30Z".to_owned());
+    finished.progress_percent = 100;
     finished.summary_json = Some(r#"{"issues_synced":2}"#.to_owned());
     repo.upsert(&conn, &scope, tenant, finished)
         .await
@@ -92,12 +94,13 @@ async fn a_session_is_created_updated_and_listed_newest_first() {
         .await
         .expect("find must succeed")
         .expect("session must exist");
-    assert_eq!(loaded.state, "succeeded");
+    assert_eq!(loaded.status, "complete");
+    assert_eq!(loaded.progress_percent, 100);
     assert_eq!(
         loaded.summary_json.as_deref(),
         Some(r#"{"issues_synced":2}"#)
     );
-    assert_eq!(loaded.finished_at.as_deref(), Some("2026-08-25T10:00:30Z"));
+    assert_eq!(loaded.ended_at.as_deref(), Some("2026-08-25T10:00:30Z"));
 
     let recent = repo
         .list_recent(&conn, &scope, 10)
@@ -122,7 +125,7 @@ async fn sessions_are_tenant_scoped() {
         &conn,
         &owner_scope,
         owner.subject_tenant_id(),
-        session_record(id, "running", "2026-08-25T10:00:00Z"),
+        session_record(id, "in_progress", "2026-08-25T10:00:00Z"),
     )
     .await
     .expect("owner insert");

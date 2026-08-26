@@ -21,12 +21,34 @@ use super::dto::{
     CommitDto, CommitFileDto, CommitStatsDto, CommitStatusDto, ContributorDto, DeploymentDto,
     GithubMirrorHealthDto, IssueDto, IssueEventDto, IssueReactionDto, IssueTimelineEventDto,
     LabelDto, MilestoneDto, PullRequestDto, PullRequestFileDto, ReleaseDto, RepoDto,
-    ReviewCommentDto, ReviewDto, ReviewThreadDto, SyncSessionDto, SyncSummaryDto, TagDto,
-    WorkflowJobDto, WorkflowJobsPageDto, WorkflowRunDto, WorkflowRunsPageDto,
+    RepoSyncStatusDto, ResumeAcceptedDto, ReviewCommentDto, ReviewDto, ReviewThreadDto,
+    SyncAcceptedDto, SyncSessionDto, TagDto, WorkflowJobDto, WorkflowJobsPageDto, WorkflowRunDto,
+    WorkflowRunsPageDto,
 };
 
 const DEFAULT_PER_PAGE: u64 = 30;
 const MAX_PER_PAGE: u64 = 100;
+
+/// `?force=true` bypasses the HTTP cache (PRD §5.2 force mode). Accepted and
+/// carried through, but inert until conditional requests land (#4630).
+#[derive(Debug, Default, Deserialize)]
+pub struct ForceQuery {
+    pub force: Option<bool>,
+}
+
+/// `?repo=owner/name` narrows a resume to one repository; omitting it resumes
+/// every repository the caller's tenant left `in_progress`.
+#[derive(Debug, Default, Deserialize)]
+pub struct ResumeQuery {
+    pub repo: Option<String>,
+    pub force: Option<bool>,
+}
+
+/// `?status=in_progress` narrows a run-status listing.
+#[derive(Debug, Default, Deserialize)]
+pub struct RunStatusQuery {
+    pub status: Option<String>,
+}
 
 /// GitHub-style pagination query (`?page=2&per_page=50`).
 #[derive(Debug, Deserialize)]
@@ -131,9 +153,19 @@ pub async fn sync_repository(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<ConcreteService>>,
     Path((owner, name)): Path<(String, String)>,
-) -> ApiResult<JsonBody<SyncSummaryDto>> {
-    let (session_id, summary) = svc.start_sync(&ctx, &owner, &name).await?;
-    Ok(Json(SyncSummaryDto::from_run(session_id, summary)))
+    Query(force): Query<ForceQuery>,
+) -> ApiResult<(StatusCode, JsonBody<SyncAcceptedDto>)> {
+    let session_id = svc
+        .enqueue_sync(&ctx, &owner, &name, force.force.unwrap_or(false))
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(SyncAcceptedDto {
+            session_id: session_id.to_string(),
+            repository: format!("{owner}/{name}"),
+            status: "queued".to_owned(),
+        }),
+    ))
 }
 
 pub async fn list_issues(
@@ -617,4 +649,33 @@ pub async fn list_sync_sessions(
 ) -> ApiResult<JsonPage<SyncSessionDto>> {
     let page: Page<_> = svc.list_sessions(&ctx, &query).await?;
     Ok(Json(page.map_items(SyncSessionDto::from)))
+}
+
+pub async fn resume_syncs(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(svc): Extension<Arc<ConcreteService>>,
+    Query(query): Query<ResumeQuery>,
+) -> ApiResult<(StatusCode, JsonBody<ResumeAcceptedDto>)> {
+    let ids = svc
+        .resume_incomplete_syncs(&ctx, query.repo.as_deref(), query.force.unwrap_or(false))
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ResumeAcceptedDto {
+            resumed: ids.len(),
+            session_ids: ids.iter().map(ToString::to_string).collect(),
+        }),
+    ))
+}
+
+pub async fn list_repo_sync_status(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(svc): Extension<Arc<ConcreteService>>,
+    OData(query): OData,
+    Query(filter): Query<RunStatusQuery>,
+) -> ApiResult<JsonPage<RepoSyncStatusDto>> {
+    let page: Page<_> = svc
+        .list_repo_sync_status(&ctx, &query, filter.status.as_deref())
+        .await?;
+    Ok(Json(page.map_items(RepoSyncStatusDto::from)))
 }

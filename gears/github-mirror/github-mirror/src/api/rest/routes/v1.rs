@@ -52,23 +52,67 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .operation_id("github_mirror.sync_repository")
         .summary("Sync a repository from GitHub into the mirror")
         .description(
-            "Fetches the repository plus the first page of its entities from GitHub and              upserts them into the caller's tenant mirror. First slice of the sync engine:              no pagination, conditional requests, or rate-limit budgeting yet.",
+            "Queues a sync of the repository and answers immediately with a session id.              The background worker fetches the repository plus the first page of its              entities from GitHub and upserts them into the caller's tenant mirror;              poll the session for the outcome. No pagination, conditional requests, or              rate-limit budgeting yet.",
         )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
         .path_param("owner", "Repo owner login")
         .path_param("name", "Repo name")
+        .query_param("force", false, "Bypass the HTTP cache (inert until #4630)")
         .handler(handlers::sync_repository)
-        .json_response_with_schema::<dto::SyncSummaryDto>(
+        .json_response_with_schema::<dto::SyncAcceptedDto>(
             openapi,
-            StatusCode::OK,
-            "Repo synced into the mirror; the body carries the session id",
+            StatusCode::ACCEPTED,
+            "Sync queued; the body carries the session id to poll",
         )
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)
+        .error_500(openapi)
+        .register(router, openapi);
+
+    router = OperationBuilder::post("/github-mirror/v1/sync/resume")
+        .operation_id("github_mirror.resume_syncs")
+        .summary("Re-run repositories still marked in_progress")
+        .description(
+            "PRD 5.2's resume operation. Resume is a re-run, not a restore: each              repository still marked `in_progress` is queued for a fresh sync, and the              cache plus change-detection state are what make that cheap. Answers              immediately with one session id per repository. Pass `repo=owner/name`              to resume a single repository; a repository that is not `in_progress`              has nothing to resume and comes back with `resumed: 0`.",
+        )
+        .tag(API_TAG)
+        .authenticated()
+        .require_license_features::<License>([])
+        .query_param("repo", false, "Resume only this `owner/name` repository")
+        .query_param("force", false, "Bypass the HTTP cache (inert until #4630)")
+        .handler(handlers::resume_syncs)
+        .json_response_with_schema::<dto::ResumeAcceptedDto>(
+            openapi,
+            StatusCode::ACCEPTED,
+            "Resume queued; the body carries one session id per repository",
+        )
+        .error_400(openapi)
+        .error_401(openapi)
+        .error_403(openapi)
+        .error_500(openapi)
+        .register(router, openapi);
+
+    router = OperationBuilder::get("/github-mirror/v1/sync-status")
+        .operation_id("github_mirror.list_repo_sync_status")
+        .summary("Per-repository run status and last-sync time")
+        .tag(API_TAG)
+        .authenticated()
+        .require_license_features::<License>([])
+        .query_param("status", false, "Only `in_progress` or only `complete`")
+        .query_param("limit", false, "Maximum number of repositories to return")
+        .handler(handlers::list_repo_sync_status)
+        .json_response_with_schema::<dto::RepoSyncStatusDto>(
+            openapi,
+            StatusCode::OK,
+            "Paginated per-repository run statuses",
+        )
+        .error_400(openapi)
+        .error_401(openapi)
+        .error_403(openapi)
         .error_500(openapi)
         .register(router, openapi);
 
@@ -102,7 +146,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .json_response_with_schema::<dto::SyncSessionDto>(
             openapi,
             StatusCode::OK,
-            "The session's current state",
+            "The session's current status, progress and duration",
         )
         .error_400(openapi)
         .error_401(openapi)

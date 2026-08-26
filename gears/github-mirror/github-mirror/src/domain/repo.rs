@@ -962,23 +962,70 @@ pub trait IssueTimelineRepository: Send + Sync {
     ) -> Result<Vec<IssueTimelineEvent>, DomainError>;
 }
 
+/// Per-repository run status: is this repository mid-sync, and when did a run
+/// last finish it?
+///
+/// Sessions record individual runs; this records the repository. A run that
+/// dies leaves `in_progress` here, and the resume operation re-runs every
+/// repository still marked so (PRD §5.2).
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoSyncStatusRecord {
+    pub repo_full_name: String,
+    pub repo_id: Option<i64>,
+    pub status: String,
+    pub last_session_id: Option<Uuid>,
+    pub last_synced_at: Option<String>,
+}
+
+#[async_trait]
+pub trait RepoSyncStatusRepository: Send + Sync {
+    async fn upsert<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        record: RepoSyncStatusRecord,
+    ) -> Result<RepoSyncStatusRecord, DomainError>;
+
+    async fn find<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_full_name: &str,
+    ) -> Result<Option<RepoSyncStatusRecord>, DomainError>;
+
+    /// Every repository the scope can see, newest slug order, optionally
+    /// narrowed to one status.
+    async fn list<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        status: Option<&str>,
+        limit: u64,
+    ) -> Result<Vec<RepoSyncStatusRecord>, DomainError>;
+}
+
 /// Durable face of one sync run. Unlike the mirrored records above, this is
 /// the gear's own vocabulary — GitHub knows nothing about sessions.
 ///
-/// `state` holds one of `queued`, `running`, `succeeded`, `failed`,
+/// `status` holds one of `queued`, `in_progress`, `complete`, `failed`,
 /// `interrupted`; the sync engine owns the transitions (gears-rust#4632).
+/// The middle three come from DESIGN §3.7's `sync_sessions` table; the
+/// other two are additions the background worker needs.
 #[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncSessionRecord {
     pub id: Uuid,
     pub repo_full_name: String,
     pub repo_id: Option<i64>,
-    pub state: String,
+    pub status: String,
+    pub progress_percent: i32,
     pub error: Option<String>,
     pub summary_json: Option<String>,
     pub created_at: String,
     pub started_at: Option<String>,
-    pub finished_at: Option<String>,
+    pub ended_at: Option<String>,
 }
 
 #[async_trait]
@@ -1004,6 +1051,18 @@ pub trait SyncSessionRepository: Send + Sync {
         scope: &AccessScope,
         limit: u64,
     ) -> Result<Vec<SyncSessionRecord>, DomainError>;
+
+    /// Sessions in any of `statuses`, paired with the tenant that owns them.
+    ///
+    /// The tenant id comes back because the caller needs it to write the row
+    /// again — the record itself does not carry one. Used by the startup
+    /// sweep, which runs across every tenant under an unconstrained scope.
+    async fn list_by_statuses<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        statuses: &[&str],
+    ) -> Result<Vec<(Uuid, SyncSessionRecord)>, DomainError>;
 }
 
 /// Incremental-sweep watermark for one `(repository, endpoint family)` pair.

@@ -1,10 +1,13 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use axum::Router;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use toolkit::api::OpenApiRegistry;
+use toolkit::contracts::RunnableCapability;
 use toolkit::{Gear, GearCtx, RestApiCapability};
-use tracing::info;
+use tracing::{info, warn};
 
 use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
 use github_mirror_sdk::GithubMirrorClientV1;
@@ -23,9 +26,9 @@ use crate::infra::storage::sea_orm_repo::{
     SeaOrmIssueTimelineRepository, SeaOrmLabelRepository, SeaOrmMilestoneRepository,
     SeaOrmPullRequestCommitRepository, SeaOrmPullRequestFileRepository,
     SeaOrmPullRequestRepository, SeaOrmReleaseRepository, SeaOrmRepoRepository,
-    SeaOrmReviewCommentRepository, SeaOrmReviewRepository, SeaOrmReviewThreadRepository,
-    SeaOrmSyncSessionRepository, SeaOrmTagRepository, SeaOrmWorkflowJobRepository,
-    SeaOrmWorkflowRunRepository,
+    SeaOrmRepoSyncStatusRepository, SeaOrmReviewCommentRepository, SeaOrmReviewRepository,
+    SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository, SeaOrmTagRepository,
+    SeaOrmWorkflowJobRepository, SeaOrmWorkflowRunRepository,
 };
 
 type ConcreteService = Service<
@@ -56,21 +59,26 @@ type ConcreteService = Service<
     SeaOrmCheckRunRepository,
     SeaOrmIssueTimelineRepository,
     SeaOrmSyncSessionRepository,
+    SeaOrmRepoSyncStatusRepository,
 >;
 
 #[toolkit::gear(
     name = "github-mirror",
     deps = [authz_resolver],
-    capabilities = [rest, db]
+    capabilities = [rest, db, stateful]
 )]
 pub struct GithubMirrorGear {
     service: OnceLock<Arc<ConcreteService>>,
+    sync_cancel: Mutex<Option<CancellationToken>>,
+    sync_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Default for GithubMirrorGear {
     fn default() -> Self {
         Self {
             service: OnceLock::new(),
+            sync_cancel: Mutex::new(None),
+            sync_handle: Mutex::new(None),
         }
     }
 }
@@ -116,6 +124,7 @@ impl Gear for GithubMirrorGear {
         let check_runs = Arc::new(SeaOrmCheckRunRepository::new());
         let issue_timeline = Arc::new(SeaOrmIssueTimelineRepository::new());
         let sync_sessions = Arc::new(SeaOrmSyncSessionRepository::new());
+        let repo_sync_status = Arc::new(SeaOrmRepoSyncStatusRepository::new());
         let github: Arc<dyn GithubPort> = Arc::new(GithubClient::new(
             cfg.api_base_url.clone(),
             cfg.resolved_token()?,
@@ -156,6 +165,7 @@ impl Gear for GithubMirrorGear {
             check_runs,
             issue_timeline,
             sync_sessions,
+            repo_sync_status,
             github,
             policy_enforcer,
             ServiceConfig {
@@ -171,6 +181,133 @@ impl Gear for GithubMirrorGear {
         ctx.client_hub()
             .register::<dyn GithubMirrorClientV1>(client);
 
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl RunnableCapability for GithubMirrorGear {
+    /// Start the sync worker: one task draining the service's job queue.
+    ///
+    /// Before it starts, sessions left `queued` or `running` by a previous
+    /// process are closed out as `interrupted` — the queue lives in memory, so
+    /// nothing will ever pick them up again. The sweep happens here rather
+    /// than in [`Self::stop`] because a killed process never reaches `stop`.
+    async fn start(&self, cancel: CancellationToken) -> anyhow::Result<()> {
+        let service = self
+            .service
+            .get()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} service not initialized - init() must run before start()",
+                    Self::MODULE_NAME
+                )
+            })?
+            .clone();
+
+        match service.sweep_interrupted_sessions().await {
+            Ok(0) => {}
+            Ok(swept) => info!(sessions = swept, "closed out interrupted sync sessions"),
+            Err(e) => warn!(error = %e, "could not sweep interrupted sync sessions"),
+        }
+
+        let Some(mut jobs) = service.take_sync_receiver().await else {
+            anyhow::bail!("{} sync worker already started", Self::MODULE_NAME);
+        };
+
+        let worker_cancel = cancel.child_token();
+        let loop_cancel = worker_cancel.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = loop_cancel.cancelled() => {
+                        info!("github-mirror sync worker stopped");
+                        break;
+                    }
+                    job = jobs.recv() => {
+                        let Some(job) = job else {
+                            info!("github-mirror sync queue closed");
+                            break;
+                        };
+                        if let Err(e) = service.run_sync_job(&job).await {
+                            warn!(
+                                session_id = %job.session_id,
+                                repository = %format!("{}/{}", job.owner, job.name),
+                                error = %e,
+                                "sync outcome could not be recorded"
+                            );
+                        }
+                    }
+                }
+            }
+        });
+
+        let already_started = {
+            let mut guard = self
+                .sync_cancel
+                .lock()
+                .map_err(|e| anyhow::anyhow!("sync_cancel lock: {e}"))?;
+            if guard.is_some() {
+                true
+            } else {
+                *guard = Some(worker_cancel);
+                false
+            }
+        };
+        if already_started {
+            handle.abort();
+            anyhow::bail!("{} sync worker already started", Self::MODULE_NAME);
+        }
+
+        match self.sync_handle.lock() {
+            Ok(mut guard) => *guard = Some(handle),
+            Err(e) => {
+                handle.abort();
+                if let Ok(mut cancel_guard) = self.sync_cancel.lock()
+                    && let Some(token) = cancel_guard.take()
+                {
+                    token.cancel();
+                }
+                anyhow::bail!("{} sync_handle lock: {e}", Self::MODULE_NAME);
+            }
+        }
+
+        info!("github-mirror sync worker started");
+        Ok(())
+    }
+
+    /// Stop the worker. A sync already in flight is dropped, not awaited — its
+    /// session row stays `running` and the next startup sweep marks it
+    /// `interrupted`. Resuming that work is #4632 slice 6.
+    async fn stop(&self, deadline_token: CancellationToken) -> anyhow::Result<()> {
+        if let Some(token) = self
+            .sync_cancel
+            .lock()
+            .map_err(|e| anyhow::anyhow!("sync_cancel lock: {e}"))?
+            .take()
+        {
+            token.cancel();
+        }
+
+        let handle = self
+            .sync_handle
+            .lock()
+            .map_err(|e| anyhow::anyhow!("sync_handle lock: {e}"))?
+            .take();
+        if let Some(handle) = handle {
+            tokio::select! {
+                result = handle => {
+                    if let Err(e) = result
+                        && !e.is_cancelled()
+                    {
+                        warn!(error = ?e, "github-mirror sync worker task failed");
+                    }
+                }
+                () = deadline_token.cancelled() => {
+                    info!("github-mirror sync worker stop cancelled by framework deadline");
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -208,6 +345,6 @@ mod tests {
     fn gear_provides_all_migrations() {
         use toolkit::contracts::DatabaseCapability;
         let gear = GithubMirrorGear::default();
-        assert_eq!(gear.migrations().len(), 31);
+        assert_eq!(gear.migrations().len(), 32);
     }
 }

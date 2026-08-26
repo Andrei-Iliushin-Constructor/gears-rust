@@ -29,8 +29,9 @@ use crate::domain::repo::{
     WorkflowRunRepository,
 };
 use crate::domain::repo::{
-    EntityFingerprintRecord, EntityFingerprintRepository, SyncSessionRecord, SyncSessionRepository,
-    SyncWatermarkRecord, SyncWatermarkRepository,
+    EntityFingerprintRecord, EntityFingerprintRepository, RepoSyncStatusRecord,
+    RepoSyncStatusRepository, SyncSessionRecord, SyncSessionRepository, SyncWatermarkRecord,
+    SyncWatermarkRepository,
 };
 
 use super::entity::branches::{self, Entity as BranchEntity};
@@ -53,6 +54,7 @@ use super::entity::pull_request_commits::{self, Entity as PullRequestCommitEntit
 use super::entity::pull_request_files::{self, Entity as PullRequestFileEntity};
 use super::entity::pull_requests::{self, Entity as PullRequestEntity};
 use super::entity::releases::{self, Entity as ReleaseEntity};
+use super::entity::repo_sync_status::{self, Entity as RepoSyncStatusEntity};
 use super::entity::repositories::{self, Entity as RepoEntity};
 use super::entity::review_comments::{self, Entity as ReviewCommentEntity};
 use super::entity::review_threads::{self, Entity as ReviewThreadEntity};
@@ -2852,6 +2854,126 @@ impl IssueTimelineRepository for SeaOrmIssueTimelineRepository {
     }
 }
 
+pub struct SeaOrmRepoSyncStatusRepository;
+
+impl SeaOrmRepoSyncStatusRepository {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for SeaOrmRepoSyncStatusRepository {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn repo_sync_status_active_model(
+    tenant_id: Uuid,
+    r: &RepoSyncStatusRecord,
+) -> repo_sync_status::ActiveModel {
+    repo_sync_status::ActiveModel {
+        tenant_id: ActiveValue::Set(tenant_id),
+        repo_full_name: ActiveValue::Set(r.repo_full_name.clone()),
+        repo_id: ActiveValue::Set(r.repo_id),
+        status: ActiveValue::Set(r.status.clone()),
+        last_session_id: ActiveValue::Set(r.last_session_id),
+        last_synced_at: ActiveValue::Set(r.last_synced_at.clone()),
+    }
+}
+
+impl From<repo_sync_status::Model> for RepoSyncStatusRecord {
+    fn from(m: repo_sync_status::Model) -> Self {
+        Self {
+            repo_full_name: m.repo_full_name,
+            repo_id: m.repo_id,
+            status: m.status,
+            last_session_id: m.last_session_id,
+            last_synced_at: m.last_synced_at,
+        }
+    }
+}
+
+#[async_trait]
+impl RepoSyncStatusRepository for SeaOrmRepoSyncStatusRepository {
+    async fn upsert<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        record: RepoSyncStatusRecord,
+    ) -> Result<RepoSyncStatusRecord, DomainError> {
+        let on_conflict = SecureOnConflict::<RepoSyncStatusEntity>::columns([
+            repo_sync_status::Column::TenantId,
+            repo_sync_status::Column::RepoFullName,
+        ])
+        .update_columns([
+            repo_sync_status::Column::RepoId,
+            repo_sync_status::Column::Status,
+            repo_sync_status::Column::LastSessionId,
+            repo_sync_status::Column::LastSyncedAt,
+        ])
+        .map_err(map_scope_error)?;
+
+        RepoSyncStatusEntity::insert(repo_sync_status_active_model(tenant_id, &record))
+            .secure()
+            .scope_with_model(scope, &repo_sync_status_active_model(tenant_id, &record))
+            .map_err(map_scope_error)?
+            .on_conflict(on_conflict)
+            .exec(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(record)
+    }
+
+    async fn find<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_full_name: &str,
+    ) -> Result<Option<RepoSyncStatusRecord>, DomainError> {
+        let row = RepoSyncStatusEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(repo_sync_status::Column::RepoFullName.eq(repo_full_name)),
+            )
+            .one(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(row.map(Into::into))
+    }
+
+    async fn list<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        status: Option<&str>,
+        limit: u64,
+    ) -> Result<Vec<RepoSyncStatusRecord>, DomainError> {
+        let mut condition = sea_orm::Condition::all();
+        if let Some(status) = status {
+            condition = condition.add(repo_sync_status::Column::Status.eq(status));
+        }
+
+        let rows = RepoSyncStatusEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(condition)
+            .order_by(repo_sync_status::Column::RepoFullName, Order::Asc)
+            .limit(limit)
+            .all(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+}
+
 pub struct SeaOrmSyncSessionRepository;
 
 impl SeaOrmSyncSessionRepository {
@@ -2873,12 +2995,13 @@ fn sync_session_active_model(tenant_id: Uuid, r: &SyncSessionRecord) -> sync_ses
         id: ActiveValue::Set(r.id),
         repo_full_name: ActiveValue::Set(r.repo_full_name.clone()),
         repo_id: ActiveValue::Set(r.repo_id),
-        state: ActiveValue::Set(r.state.clone()),
+        status: ActiveValue::Set(r.status.clone()),
+        progress_percent: ActiveValue::Set(r.progress_percent),
         error: ActiveValue::Set(r.error.clone()),
         summary_json: ActiveValue::Set(r.summary_json.clone()),
         created_at: ActiveValue::Set(r.created_at.clone()),
         started_at: ActiveValue::Set(r.started_at.clone()),
-        finished_at: ActiveValue::Set(r.finished_at.clone()),
+        ended_at: ActiveValue::Set(r.ended_at.clone()),
     }
 }
 
@@ -2888,12 +3011,13 @@ impl From<sync_sessions::Model> for SyncSessionRecord {
             id: m.id,
             repo_full_name: m.repo_full_name,
             repo_id: m.repo_id,
-            state: m.state,
+            status: m.status,
+            progress_percent: m.progress_percent,
             error: m.error,
             summary_json: m.summary_json,
             created_at: m.created_at,
             started_at: m.started_at,
-            finished_at: m.finished_at,
+            ended_at: m.ended_at,
         }
     }
 }
@@ -2914,12 +3038,13 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
         .update_columns([
             sync_sessions::Column::RepoFullName,
             sync_sessions::Column::RepoId,
-            sync_sessions::Column::State,
+            sync_sessions::Column::Status,
+            sync_sessions::Column::ProgressPercent,
             sync_sessions::Column::Error,
             sync_sessions::Column::SummaryJson,
             sync_sessions::Column::CreatedAt,
             sync_sessions::Column::StartedAt,
-            sync_sessions::Column::FinishedAt,
+            sync_sessions::Column::EndedAt,
         ])
         .map_err(map_scope_error)?;
 
@@ -2968,6 +3093,24 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
             .map_err(map_scope_error)?;
 
         Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn list_by_statuses<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        statuses: &[&str],
+    ) -> Result<Vec<(Uuid, SyncSessionRecord)>, DomainError> {
+        let wanted: Vec<String> = statuses.iter().map(|s| (*s).to_owned()).collect();
+        let rows = SyncSessionEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(sea_orm::Condition::all().add(sync_sessions::Column::Status.is_in(wanted)))
+            .all(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(rows.into_iter().map(|m| (m.tenant_id, m.into())).collect())
     }
 }
 

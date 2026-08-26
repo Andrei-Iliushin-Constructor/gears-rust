@@ -13,61 +13,46 @@ impl MigrationTrait for Migration {
         let sql = match backend {
             sea_orm::DatabaseBackend::Postgres => {
                 r"
-CREATE TABLE IF NOT EXISTS gm_sync_sessions (
+CREATE TABLE IF NOT EXISTS gm_repo_sync_status (
     tenant_id UUID NOT NULL,
-    id UUID NOT NULL,
     repo_full_name VARCHAR(512) NOT NULL,
     repo_id BIGINT,
     status VARCHAR(32) NOT NULL,
-    progress_percent INTEGER NOT NULL DEFAULT 0,
-    error TEXT,
-    summary_json TEXT,
-    created_at VARCHAR(64) NOT NULL,
-    started_at VARCHAR(64),
-    ended_at VARCHAR(64),
-    PRIMARY KEY (tenant_id, id)
+    last_session_id UUID,
+    last_synced_at VARCHAR(64),
+    PRIMARY KEY (tenant_id, repo_full_name)
 );
-CREATE INDEX IF NOT EXISTS idx_gm_sync_sessions_tenant_created
-    ON gm_sync_sessions (tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_gm_repo_sync_status_tenant_status
+    ON gm_repo_sync_status (tenant_id, status);
                 "
             }
             sea_orm::DatabaseBackend::MySql => {
                 r"
-CREATE TABLE IF NOT EXISTS gm_sync_sessions (
+CREATE TABLE IF NOT EXISTS gm_repo_sync_status (
     tenant_id VARCHAR(36) NOT NULL,
-    id VARCHAR(36) NOT NULL,
     repo_full_name VARCHAR(512) NOT NULL,
     repo_id BIGINT,
     status VARCHAR(32) NOT NULL,
-    progress_percent INTEGER NOT NULL DEFAULT 0,
-    error TEXT,
-    summary_json TEXT,
-    created_at VARCHAR(64) NOT NULL,
-    started_at VARCHAR(64),
-    ended_at VARCHAR(64),
-    PRIMARY KEY (tenant_id, id),
-    KEY idx_gm_sync_sessions_tenant_created (tenant_id, created_at)
+    last_session_id VARCHAR(36),
+    last_synced_at VARCHAR(64),
+    PRIMARY KEY (tenant_id, repo_full_name),
+    KEY idx_gm_repo_sync_status_tenant_status (tenant_id, status)
 );
                 "
             }
             sea_orm::DatabaseBackend::Sqlite => {
                 r"
-CREATE TABLE IF NOT EXISTS gm_sync_sessions (
+CREATE TABLE IF NOT EXISTS gm_repo_sync_status (
     tenant_id TEXT NOT NULL,
-    id TEXT NOT NULL,
     repo_full_name TEXT NOT NULL,
     repo_id INTEGER,
     status TEXT NOT NULL,
-    progress_percent INTEGER NOT NULL DEFAULT 0,
-    error TEXT,
-    summary_json TEXT,
-    created_at TEXT NOT NULL,
-    started_at TEXT,
-    ended_at TEXT,
-    PRIMARY KEY (tenant_id, id)
+    last_session_id TEXT,
+    last_synced_at TEXT,
+    PRIMARY KEY (tenant_id, repo_full_name)
 );
-CREATE INDEX IF NOT EXISTS idx_gm_sync_sessions_tenant_created
-    ON gm_sync_sessions (tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_gm_repo_sync_status_tenant_status
+    ON gm_repo_sync_status (tenant_id, status);
                 "
             }
             other => {
@@ -83,7 +68,7 @@ CREATE INDEX IF NOT EXISTS idx_gm_sync_sessions_tenant_created
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
-        conn.execute_unprepared("DROP TABLE IF EXISTS gm_sync_sessions;")
+        conn.execute_unprepared("DROP TABLE IF EXISTS gm_repo_sync_status;")
             .await?;
         Ok(())
     }

@@ -13,7 +13,7 @@ use github_mirror_sdk::{
     ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
 
-use crate::domain::repo::SyncSessionRecord;
+use crate::domain::repo::{RepoSyncStatusRecord, SyncSessionRecord};
 use crate::domain::service::{MirrorStatus, SyncSummary};
 
 #[derive(Debug)]
@@ -600,9 +600,6 @@ impl From<Contributor> for ContributorDto {
 #[derive(Debug)]
 #[toolkit_macros::api_dto(response)]
 pub struct SyncSummaryDto {
-    /// Id of the `gm_sync_sessions` row this run wrote; poll it via
-    /// `GET /github-mirror/v1/sessions/{id}`.
-    pub session_id: String,
     pub repository: String,
     pub issues_synced: u64,
     pub pull_requests_synced: u64,
@@ -631,11 +628,9 @@ pub struct SyncSummaryDto {
     pub issue_timeline_synced: u64,
 }
 
-impl SyncSummaryDto {
-    #[must_use]
-    pub fn from_run(session_id: uuid::Uuid, s: SyncSummary) -> Self {
+impl From<SyncSummary> for SyncSummaryDto {
+    fn from(s: SyncSummary) -> Self {
         Self {
-            session_id: session_id.to_string(),
             repository: s.repository,
             issues_synced: s.issues_synced,
             pull_requests_synced: s.pull_requests_synced,
@@ -662,6 +657,59 @@ impl SyncSummaryDto {
             issue_reactions_synced: s.issue_reactions_synced,
             check_runs_synced: s.check_runs_synced,
             issue_timeline_synced: s.issue_timeline_synced,
+        }
+    }
+}
+
+/// Acknowledgement of an accepted sync request.
+///
+/// The work has not started yet — only the session row is durable at this
+/// point. Poll `GET /github-mirror/v1/sessions/{id}` for the outcome.
+#[derive(Debug)]
+#[toolkit_macros::api_dto(response)]
+pub struct SyncAcceptedDto {
+    /// Id of the `gm_sync_sessions` row tracking this request.
+    pub session_id: String,
+    /// `owner/name` slug the session will sync.
+    pub repository: String,
+    /// Always `queued` — the status the session starts in.
+    pub status: String,
+}
+
+/// Sessions queued by one resume call.
+#[derive(Debug)]
+#[toolkit_macros::api_dto(response)]
+pub struct ResumeAcceptedDto {
+    /// How many repositories were re-queued.
+    pub resumed: usize,
+    /// One session id per re-queued repository, in slug order.
+    pub session_ids: Vec<String>,
+}
+
+/// Per-repository run status: the durable record resume works from.
+#[derive(Debug)]
+#[toolkit_macros::api_dto(response)]
+pub struct RepoSyncStatusDto {
+    /// `owner/name` slug.
+    pub repository: String,
+    /// GitHub repository id, once a run has fetched it.
+    pub repo_id: Option<i64>,
+    /// `in_progress` or `complete`.
+    pub status: String,
+    /// The run that last wrote this row.
+    pub last_session_id: Option<String>,
+    /// RFC3339 time of the last run that completed.
+    pub last_synced_at: Option<String>,
+}
+
+impl From<RepoSyncStatusRecord> for RepoSyncStatusDto {
+    fn from(r: RepoSyncStatusRecord) -> Self {
+        Self {
+            repository: r.repo_full_name,
+            repo_id: r.repo_id,
+            status: r.status,
+            last_session_id: r.last_session_id.map(|id| id.to_string()),
+            last_synced_at: r.last_synced_at,
         }
     }
 }
@@ -1082,16 +1130,33 @@ pub struct SyncSessionDto {
     pub id: String,
     /// `owner/name` slug the session synced.
     pub repository: String,
-    /// `queued`, `running`, `succeeded`, `failed`, or `interrupted`.
-    pub state: String,
-    /// Failure detail when `state = failed`.
+    /// `queued`, `in_progress`, `complete`, `failed`, or `interrupted`.
+    pub status: String,
+    /// 0-100, monotonically non-decreasing while the run works.
+    pub progress_percent: i32,
+    /// Failure detail when `status = failed`.
     pub error: Option<String>,
     /// The run's counters, replayed from the stored JSON; absent until the
-    /// session succeeds.
-    pub summary: Option<serde_json::Value>,
+    /// session completes.
+    pub summary: Option<SyncSummaryDto>,
     pub created_at: String,
     pub started_at: Option<String>,
-    pub finished_at: Option<String>,
+    /// Re-stamped by every heartbeat, so it is readable mid-run.
+    pub ended_at: Option<String>,
+    /// `ended_at - started_at` in milliseconds, once both are known.
+    pub duration_ms: Option<i64>,
+}
+
+/// Milliseconds between two RFC3339 stamps, when both parse and the span is
+/// not negative.
+fn elapsed_ms(from: Option<&str>, to: Option<&str>) -> Option<i64> {
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    let start = OffsetDateTime::parse(from?, &Rfc3339).ok()?;
+    let end = OffsetDateTime::parse(to?, &Rfc3339).ok()?;
+    let millis = (end - start).whole_milliseconds();
+    i64::try_from(millis).ok().filter(|ms| *ms >= 0)
 }
 
 impl From<SyncSessionRecord> for SyncSessionDto {
@@ -1099,17 +1164,21 @@ impl From<SyncSessionRecord> for SyncSessionDto {
         let summary = s
             .summary_json
             .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            .and_then(|raw| serde_json::from_str::<SyncSummary>(raw).ok())
+            .map(SyncSummaryDto::from);
+        let duration_ms = elapsed_ms(s.started_at.as_deref(), s.ended_at.as_deref());
 
         Self {
             id: s.id.to_string(),
             repository: s.repo_full_name,
-            state: s.state,
+            status: s.status,
+            progress_percent: s.progress_percent,
             error: s.error,
             summary,
             created_at: s.created_at,
             started_at: s.started_at,
-            finished_at: s.finished_at,
+            ended_at: s.ended_at,
+            duration_ms,
         }
     }
 }

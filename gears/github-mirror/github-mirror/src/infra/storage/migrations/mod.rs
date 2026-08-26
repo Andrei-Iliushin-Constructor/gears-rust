@@ -23,6 +23,7 @@ pub mod pull_requests_003;
 pub mod pull_requests_refs_028;
 pub mod releases_010;
 pub mod repo_clone_url_027;
+pub mod repo_sync_status_032;
 pub mod review_comments_006;
 pub mod review_threads_017;
 pub mod reviews_007;
@@ -69,6 +70,7 @@ impl MigratorTrait for Migrator {
             Box::new(sync_sessions_029::Migration),
             Box::new(sync_watermarks_030::Migration),
             Box::new(entity_fingerprints_031::Migration),
+            Box::new(repo_sync_status_032::Migration),
         ]
     }
 }

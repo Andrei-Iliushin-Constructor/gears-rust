@@ -621,6 +621,47 @@ pub mod pull_request_files {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod repo_sync_status {
+    use super::{DeriveEntityModel, DerivePrimaryKey, DeriveRelation, EnumIter, Scopable, Uuid};
+    use sea_orm::entity::prelude::*;
+
+    /// Per-repository run status — the durable half of resume-by-rescan
+    /// (DESIGN §2 "recoverability comes from ... per-repo run-status rows").
+    ///
+    /// Keyed by the slug rather than the GitHub id because the row is written
+    /// when a sync is requested, before anything about the repository is
+    /// known. A run that never completes leaves `in_progress` behind, which is
+    /// what the resume operation looks for.
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Scopable)]
+    #[sea_orm(table_name = "gm_repo_sync_status")]
+    #[secure(
+        tenant_col = "tenant_id",
+        resource_col = "repo_full_name",
+        no_owner,
+        no_type
+    )]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub tenant_id: Uuid,
+        /// `owner/name` slug.
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repo_full_name: String,
+        /// GitHub repository id, filled once a run has fetched it.
+        pub repo_id: Option<i64>,
+        /// `in_progress` or `complete` (PRD §5.2).
+        pub status: String,
+        /// The run that last wrote this row.
+        pub last_session_id: Option<Uuid>,
+        /// RFC3339 time of the last run that completed.
+        pub last_synced_at: Option<String>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod sync_sessions {
     use super::{DeriveEntityModel, DerivePrimaryKey, DeriveRelation, EnumIter, Scopable, Uuid};
     use sea_orm::entity::prelude::*;
@@ -640,16 +681,22 @@ pub mod sync_sessions {
         pub repo_full_name: String,
         /// GitHub repository id, filled once the repository row exists.
         pub repo_id: Option<i64>,
-        /// `queued`, `running`, `succeeded`, `failed`, or `interrupted`.
-        pub state: String,
-        /// Failure detail when `state = failed`.
+        /// `queued`, `in_progress`, `complete`, `failed`, or `interrupted`.
+        /// The middle three are DESIGN §3.7's vocabulary; `queued` and
+        /// `interrupted` are additions the background worker needs.
+        pub status: String,
+        /// 0-100, monotonically non-decreasing, written by the run's
+        /// heartbeat (DESIGN §4 "Progress").
+        pub progress_percent: i32,
+        /// Failure detail when `status = failed`.
         pub error: Option<String>,
-        /// The run's `SyncSummary` as raw JSON, when it succeeded.
+        /// The run's `SyncSummary` as raw JSON, when it completed.
         pub summary_json: Option<String>,
         /// RFC3339 timestamps kept as text (engine-agnostic), as elsewhere.
         pub created_at: String,
         pub started_at: Option<String>,
-        pub finished_at: Option<String>,
+        /// Stamped by every heartbeat, so duration is readable mid-run.
+        pub ended_at: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

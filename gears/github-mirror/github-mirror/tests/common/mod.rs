@@ -10,7 +10,7 @@ use authz_resolver_sdk::{
 };
 use github_mirror::domain::error::DomainError;
 use github_mirror::domain::ports::github::{FetchedRepository, GithubPort};
-use github_mirror::domain::service::{Service, ServiceConfig};
+use github_mirror::domain::service::{Service, ServiceConfig, SyncJob};
 use github_mirror::infra::storage::migrations::Migrator;
 use github_mirror::infra::storage::sea_orm_repo::{
     SeaOrmBranchRepository, SeaOrmCheckRunRepository, SeaOrmCommentRepository,
@@ -20,9 +20,9 @@ use github_mirror::infra::storage::sea_orm_repo::{
     SeaOrmIssueTimelineRepository, SeaOrmLabelRepository, SeaOrmMilestoneRepository,
     SeaOrmPullRequestCommitRepository, SeaOrmPullRequestFileRepository,
     SeaOrmPullRequestRepository, SeaOrmReleaseRepository, SeaOrmRepoRepository,
-    SeaOrmReviewCommentRepository, SeaOrmReviewRepository, SeaOrmReviewThreadRepository,
-    SeaOrmSyncSessionRepository, SeaOrmTagRepository, SeaOrmWorkflowJobRepository,
-    SeaOrmWorkflowRunRepository,
+    SeaOrmRepoSyncStatusRepository, SeaOrmReviewCommentRepository, SeaOrmReviewRepository,
+    SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository, SeaOrmTagRepository,
+    SeaOrmWorkflowJobRepository, SeaOrmWorkflowRunRepository,
 };
 use toolkit::{ClientHub, ConfigProvider, GearCtx};
 use toolkit_db::migration_runner::run_migrations_for_testing;
@@ -58,6 +58,7 @@ pub type ConcreteService = Service<
     SeaOrmCheckRunRepository,
     SeaOrmIssueTimelineRepository,
     SeaOrmSyncSessionRepository,
+    SeaOrmRepoSyncStatusRepository,
 >;
 
 /// PDP fake: allows everything, constrained to the caller's tenant.
@@ -173,6 +174,7 @@ pub fn service_with_github(
         Arc::new(SeaOrmCheckRunRepository::new()),
         Arc::new(SeaOrmIssueTimelineRepository::new()),
         Arc::new(SeaOrmSyncSessionRepository::new()),
+        Arc::new(SeaOrmRepoSyncStatusRepository::new()),
         github,
         enforcer(),
         ServiceConfig {
@@ -217,6 +219,41 @@ pub async fn gear_ctx(hub: Arc<ClientHub>, section: Option<serde_json::Value>) -
         tokio_util::sync::CancellationToken::new(),
     )
     .with_db(DBProvider::new(inmem_db().await))
+}
+
+/// Stands in for the gear's background sync worker.
+///
+/// `POST /sync` only queues work now, so a test that wants the sync to have
+/// happened takes the pump once and drains it after each request — the same
+/// `run_sync_job` call the real worker makes, minus the task and the select
+/// loop.
+pub struct SyncPump {
+    rx: tokio::sync::mpsc::Receiver<SyncJob>,
+}
+
+impl SyncPump {
+    /// Claim the job stream. Panics if something already took it.
+    pub async fn take(service: &ConcreteService) -> Self {
+        Self {
+            rx: service
+                .take_sync_receiver()
+                .await
+                .expect("the job receiver must still be available"),
+        }
+    }
+
+    /// Run every job queued so far, in order, and report how many there were.
+    pub async fn drain(&mut self, service: &ConcreteService) -> usize {
+        let mut ran = 0;
+        while let Ok(job) = self.rx.try_recv() {
+            service
+                .run_sync_job(&job)
+                .await
+                .expect("the session outcome must be recorded");
+            ran += 1;
+        }
+        ran
+    }
 }
 
 pub fn caller_in(tenant_id: Uuid) -> SecurityContext {

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use authz_resolver_sdk::PolicyEnforcer;
 use authz_resolver_sdk::pep::{AccessRequest, ResourceType};
@@ -8,9 +9,10 @@ use github_mirror_sdk::{
     PullRequest, PullRequestCommit, PullRequestFile, Release, Repo, Review, ReviewComment,
     ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
+use tokio::sync::{Mutex, mpsc};
 use toolkit_macros::domain_model;
 use toolkit_odata::{ODataQuery, Page, PageInfo};
-use toolkit_security::{SecurityContext, pep_properties};
+use toolkit_security::{AccessScope, SecurityContext, pep_properties};
 use uuid::Uuid;
 
 use super::error::DomainError;
@@ -25,10 +27,11 @@ use super::repo::{
     IssueTimelineRepository, LabelRecord, LabelRepository, MilestoneRecord, MilestoneRepository,
     PullRequestCommitRecord, PullRequestCommitRepository, PullRequestFileRecord,
     PullRequestFileRepository, PullRequestRecord, PullRequestRepository, ReleaseRecord,
-    ReleaseRepository, RepoRecord, RepoRepository, ReviewCommentRecord, ReviewCommentRepository,
-    ReviewRecord, ReviewRepository, ReviewThreadRecord, ReviewThreadRepository, SyncSessionRecord,
-    SyncSessionRepository, TagRecord, TagRepository, WorkflowJobRecord, WorkflowJobRepository,
-    WorkflowRunRecord, WorkflowRunRepository,
+    ReleaseRepository, RepoRecord, RepoRepository, RepoSyncStatusRecord, RepoSyncStatusRepository,
+    ReviewCommentRecord, ReviewCommentRepository, ReviewRecord, ReviewRepository,
+    ReviewThreadRecord, ReviewThreadRepository, SyncSessionRecord, SyncSessionRepository,
+    TagRecord, TagRepository, WorkflowJobRecord, WorkflowJobRepository, WorkflowRunRecord,
+    WorkflowRunRepository,
 };
 
 pub const GEAR_NAME: &str = "github-mirror";
@@ -189,11 +192,126 @@ fn now_rfc3339() -> String {
 }
 
 /// Session lifecycle vocabulary, written into `gm_sync_sessions.state`.
+/// Session lifecycle vocabulary, written into `gm_sync_sessions.status`.
+///
+/// `IN_PROGRESS`, `COMPLETE` and `FAILED` are DESIGN §3.7's three states.
+/// `QUEUED` and `INTERRUPTED` are additions the background worker needs:
+/// the design assumed a synchronous library call, where neither can occur.
 pub(crate) mod session_states {
-    pub const RUNNING: &str = "running";
-    pub const SUCCEEDED: &str = "succeeded";
+    pub const QUEUED: &str = "queued";
+    pub const IN_PROGRESS: &str = "in_progress";
+    pub const COMPLETE: &str = "complete";
     pub const FAILED: &str = "failed";
+    pub const INTERRUPTED: &str = "interrupted";
 }
+
+/// Progress reached once the GitHub fetch has returned. The fetch is the
+/// whole network leg of a sync, so it carries most of the wall-clock time
+/// but reports nothing while it runs.
+const PROGRESS_FETCHED: u8 = 20;
+/// Progress once every mirrored table has been written.
+const PROGRESS_STORED: u8 = 95;
+/// How often the run persists its progress while it is working.
+const HEARTBEAT_SECS: u64 = 2;
+
+/// Most repositories one resume call will re-queue.
+const RESUME_LIMIT: u64 = 500;
+
+/// Phase progress of one sync, published through a shared atomic so the
+/// heartbeat can read it without touching the running fetch (DESIGN §4
+/// "Progress"). Values are clamped monotonically non-decreasing.
+///
+/// The milestones are coarse — queued, fetched, stored, done — because
+/// today's sync has two stages and the fetch, which dominates the wall
+/// clock, reports nothing while it runs. DESIGN's phase-weighted split
+/// (Discovery 2 / Indexing 10 / `ChangeDetection` 3 / Refinement 80 /
+/// Verification 5) arrives with the 5-phase runner in #4632 slice 6.
+#[derive(Debug)]
+pub struct SyncProgress {
+    percent: Arc<AtomicU8>,
+}
+
+impl Default for SyncProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SyncProgress {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            percent: Arc::new(AtomicU8::new(0)),
+        }
+    }
+
+    /// A second handle on the same counter, for the heartbeat to read.
+    #[must_use]
+    pub fn handle(&self) -> Arc<AtomicU8> {
+        Arc::clone(&self.percent)
+    }
+
+    #[must_use]
+    pub fn percent(&self) -> u8 {
+        self.percent.load(Ordering::Relaxed)
+    }
+
+    fn raise_to(&self, value: u8) {
+        self.percent.fetch_max(value, Ordering::Relaxed);
+    }
+
+    /// The GitHub fetch has returned; storage is about to begin.
+    pub(crate) fn fetched(&self) {
+        self.raise_to(PROGRESS_FETCHED);
+    }
+
+    /// Every mirrored table has been written.
+    pub(crate) fn stored(&self) {
+        self.raise_to(PROGRESS_STORED);
+    }
+
+    /// The run is over, whatever its outcome.
+    pub(crate) fn finished(&self) {
+        self.raise_to(100);
+    }
+}
+
+/// How many enqueued syncs may wait for the worker before `POST /sync` starts
+/// rejecting. One repository at a time is the current worker concurrency, so
+/// this is the depth of the backlog, not of the parallelism.
+const SYNC_QUEUE_DEPTH: usize = 64;
+
+/// One unit of background work: sync `owner/name` on behalf of `ctx`, and
+/// record the outcome against the session row created at enqueue time.
+///
+/// The caller's [`SecurityContext`] travels with the job because the work
+/// outlives the request that asked for it, and every write it makes is still
+/// tenant-scoped through the same policy enforcer.
+#[derive(Debug, Clone)]
+pub struct SyncJob {
+    pub session_id: Uuid,
+    pub ctx: SecurityContext,
+    pub owner: String,
+    pub name: String,
+    /// Bypass the HTTP cache entirely (PRD §5.2 force mode).
+    ///
+    /// Carried end to end but **not yet honoured**: the gear has no `ETag` or
+    /// `Last-Modified` cache to bypass, so every sync is already a full fetch.
+    /// It starts having an effect when conditional requests land (#4630).
+    pub force: bool,
+}
+
+/// Per-repository run status, the durable half of resume-by-rescan.
+/// PRD §5.2 defines exactly two values.
+pub(crate) mod repo_run_states {
+    pub const IN_PROGRESS: &str = "in_progress";
+    pub const COMPLETE: &str = "complete";
+}
+
+pub(crate) const REPO_SYNC_STATUS_RESOURCE: ResourceType = ResourceType::from_static(
+    "github_mirror.repo_sync_status",
+    &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
+);
 
 pub(crate) const SYNC_SESSION_RESOURCE: ResourceType = ResourceType::from_static(
     "github_mirror.sync_session",
@@ -226,7 +344,7 @@ pub struct MirrorStatus {
 
 /// What one sync pass wrote, returned to the caller.
 #[domain_model]
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SyncSummary {
     pub repository: String,
     pub issues_synced: u64,
@@ -285,6 +403,7 @@ pub struct Service<
     U: CheckRunRepository,
     A: IssueTimelineRepository,
     SS: SyncSessionRepository,
+    RS: RepoSyncStatusRepository,
 > {
     db: Arc<DbProvider>,
     repo: Arc<R>,
@@ -314,9 +433,12 @@ pub struct Service<
     check_runs: Arc<U>,
     issue_timeline: Arc<A>,
     sync_sessions: Arc<SS>,
+    repo_sync_status: Arc<RS>,
     github: Arc<dyn GithubPort>,
     policy_enforcer: PolicyEnforcer,
     config: ServiceConfig,
+    sync_tx: mpsc::Sender<SyncJob>,
+    sync_rx: Mutex<Option<mpsc::Receiver<SyncJob>>>,
 }
 
 impl<
@@ -347,7 +469,8 @@ impl<
     U: CheckRunRepository,
     A: IssueTimelineRepository,
     SS: SyncSessionRepository,
-> Service<R, I, P, C, M, V, W, L, N, E, B, O, F, G, T, D, H, K, X, Y, Z, S, J, Q, U, A, SS>
+    RS: RepoSyncStatusRepository,
+> Service<R, I, P, C, M, V, W, L, N, E, B, O, F, G, T, D, H, K, X, Y, Z, S, J, Q, U, A, SS, RS>
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -379,10 +502,12 @@ impl<
         check_runs: Arc<U>,
         issue_timeline: Arc<A>,
         sync_sessions: Arc<SS>,
+        repo_sync_status: Arc<RS>,
         github: Arc<dyn GithubPort>,
         policy_enforcer: PolicyEnforcer,
         config: ServiceConfig,
     ) -> Self {
+        let (sync_tx, sync_rx) = mpsc::channel(SYNC_QUEUE_DEPTH);
         Self {
             db,
             repo,
@@ -412,9 +537,12 @@ impl<
             check_runs,
             issue_timeline,
             sync_sessions,
+            repo_sync_status,
             github,
             policy_enforcer,
             config,
+            sync_tx,
+            sync_rx: Mutex::new(Some(sync_rx)),
         }
     }
 
@@ -2919,62 +3047,398 @@ impl<
     /// # Errors
     /// Whatever [`Self::sync_repository`] returns; the session row records
     /// the failure before the error propagates.
-    pub async fn start_sync(
+    /// Scope for writing this tenant's session rows.
+    async fn session_scope(
         &self,
         ctx: &SecurityContext,
-        owner: &str,
-        name: &str,
-    ) -> Result<(Uuid, SyncSummary), DomainError> {
+        action: &str,
+    ) -> Result<AccessScope, DomainError> {
         let tenant_id = ctx.subject_tenant_id();
-        let scope = self
+        Ok(self
             .policy_enforcer
             .access_scope_with(
                 ctx,
                 &SYNC_SESSION_RESOURCE,
-                actions::UPSERT,
+                action,
                 None,
                 &AccessRequest::new().resource_property(pep_properties::OWNER_TENANT_ID, tenant_id),
             )
+            .await?)
+    }
+
+    /// Scope for this tenant's per-repository run-status rows.
+    async fn repo_status_scope(
+        &self,
+        ctx: &SecurityContext,
+        action: &str,
+    ) -> Result<AccessScope, DomainError> {
+        let tenant_id = ctx.subject_tenant_id();
+        Ok(self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &REPO_SYNC_STATUS_RESOURCE,
+                action,
+                None,
+                &AccessRequest::new().resource_property(pep_properties::OWNER_TENANT_ID, tenant_id),
+            )
+            .await?)
+    }
+
+    /// Write the repository's run status, preserving whatever a previous run
+    /// recorded in the fields this transition does not own.
+    async fn mark_repo_status(
+        &self,
+        ctx: &SecurityContext,
+        repo_full_name: &str,
+        session_id: Uuid,
+        status: &str,
+        synced_at: Option<String>,
+    ) -> Result<(), DomainError> {
+        let tenant_id = ctx.subject_tenant_id();
+        let scope = self.repo_status_scope(ctx, actions::UPSERT).await?;
+        let conn = self.db.conn()?;
+
+        let previous = self
+            .repo_sync_status
+            .find(&conn, &scope, repo_full_name)
             .await?;
+        let record = RepoSyncStatusRecord {
+            repo_full_name: repo_full_name.to_owned(),
+            repo_id: previous.as_ref().and_then(|p| p.repo_id),
+            status: status.to_owned(),
+            last_session_id: Some(session_id),
+            last_synced_at: synced_at.or_else(|| previous.and_then(|p| p.last_synced_at)),
+        };
+        self.repo_sync_status
+            .upsert(&conn, &scope, tenant_id, record)
+            .await?;
+        Ok(())
+    }
+
+    /// The tenant's per-repository run statuses, optionally one status only.
+    ///
+    /// # Errors
+    /// `Forbidden`/`Database`/`Internal` as usual.
+    pub async fn list_repo_sync_status(
+        &self,
+        ctx: &SecurityContext,
+        query: &ODataQuery,
+        status: Option<&str>,
+    ) -> Result<Page<RepoSyncStatusRecord>, DomainError> {
+        let scope = self.repo_status_scope(ctx, actions::LIST).await?;
+        let conn = self.db.conn()?;
+
+        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
+        let items = self
+            .repo_sync_status
+            .list(&conn, &scope, status, limit)
+            .await?;
+
+        Ok(Page::new(
+            items,
+            PageInfo {
+                next_cursor: None,
+                prev_cursor: None,
+                limit,
+            },
+        ))
+    }
+
+    /// The repositories a resume should re-run: one named slug, or every
+    /// repository the scope can see that is still `in_progress`.
+    async fn repos_awaiting_resume(
+        &self,
+        ctx: &SecurityContext,
+        only: Option<&str>,
+    ) -> Result<Vec<RepoSyncStatusRecord>, DomainError> {
+        let scope = self.repo_status_scope(ctx, actions::LIST).await?;
+        let conn = self.db.conn()?;
+
+        let Some(slug) = only else {
+            return self
+                .repo_sync_status
+                .list(
+                    &conn,
+                    &scope,
+                    Some(repo_run_states::IN_PROGRESS),
+                    RESUME_LIMIT,
+                )
+                .await;
+        };
+
+        Ok(self
+            .repo_sync_status
+            .find(&conn, &scope, slug)
+            .await?
+            .filter(|r| r.status == repo_run_states::IN_PROGRESS)
+            .map_or_else(Vec::new, |r| vec![r]))
+    }
+
+    /// Re-run every repository this tenant still has marked `in_progress`.
+    ///
+    /// This is PRD §5.2's resume operation. Resume is a re-run, not a restore:
+    /// nothing about the interrupted run is replayed, and re-running is cheap
+    /// only once the `ETag` cache and change-detection state exist (#4630 and
+    /// #4632 slice 6) — until then it costs a full sync.
+    ///
+    /// `only` narrows the operation to one `owner/name` slug, matching the
+    /// documented CLI's `resume <ORG/REPO>`. A repository that is not
+    /// `in_progress` has nothing to resume and yields an empty result rather
+    /// than a fresh sync — asking for that is what `POST /sync` is for.
+    ///
+    /// # Errors
+    /// `Forbidden`/`Database` as usual. A repository that cannot be queued is
+    /// skipped, so one full queue does not abandon the rest.
+    pub async fn resume_incomplete_syncs(
+        &self,
+        ctx: &SecurityContext,
+        only: Option<&str>,
+        force: bool,
+    ) -> Result<Vec<Uuid>, DomainError> {
+        let pending = self.repos_awaiting_resume(ctx, only).await?;
+
+        let mut resumed = Vec::with_capacity(pending.len());
+        for repo in pending {
+            let Some((owner, name)) = repo.repo_full_name.split_once('/') else {
+                tracing::warn!(
+                    repository = %repo.repo_full_name,
+                    "run-status row has no owner/name slug; skipping"
+                );
+                continue;
+            };
+            match self.enqueue_sync(ctx, owner, name, force).await {
+                Ok(session_id) => resumed.push(session_id),
+                Err(e) => tracing::warn!(
+                    repository = %repo.repo_full_name,
+                    error = %e,
+                    "could not queue a resume for this repository"
+                ),
+            }
+        }
+
+        Ok(resumed)
+    }
+
+    /// Record a sync request and hand it to the background worker.
+    ///
+    /// Returns as soon as the `queued` row is durable — the fetch itself
+    /// happens later, on the gear's background task. Poll
+    /// [`Self::get_session`] with the returned id to watch it finish.
+    ///
+    /// # Errors
+    /// `Forbidden`/`Database` as usual, or `Internal` when the queue is full
+    /// or the background worker is not running; in both cases the session is
+    /// left behind in `failed` rather than silently dropped.
+    pub async fn enqueue_sync(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name: &str,
+        force: bool,
+    ) -> Result<Uuid, DomainError> {
+        let tenant_id = ctx.subject_tenant_id();
+        let scope = self.session_scope(ctx, actions::UPSERT).await?;
         let conn = self.db.conn()?;
 
         let id = Uuid::new_v4();
-        let now = now_rfc3339();
         let mut session = SyncSessionRecord {
             id,
             repo_full_name: format!("{owner}/{name}"),
             repo_id: None,
-            state: session_states::RUNNING.to_owned(),
+            status: session_states::QUEUED.to_owned(),
+            progress_percent: 0,
             error: None,
             summary_json: None,
-            created_at: now.clone(),
-            started_at: Some(now),
-            finished_at: None,
+            created_at: now_rfc3339(),
+            started_at: None,
+            ended_at: None,
         };
         self.sync_sessions
             .upsert(&conn, &scope, tenant_id, session.clone())
             .await?;
+        self.mark_repo_status(
+            ctx,
+            &session.repo_full_name,
+            id,
+            repo_run_states::IN_PROGRESS,
+            None,
+        )
+        .await?;
+        let conn = self.db.conn()?;
 
-        match self.sync_repository(ctx, owner, name).await {
+        let job = SyncJob {
+            session_id: id,
+            ctx: ctx.clone(),
+            owner: owner.to_owned(),
+            name: name.to_owned(),
+            force,
+        };
+        if let Err(e) = self.sync_tx.try_send(job) {
+            let reason = format!("sync could not be queued: {e}");
+            session_states::FAILED.clone_into(&mut session.status);
+            session.ended_at = Some(now_rfc3339());
+            session.error = Some(reason.clone());
+            self.sync_sessions
+                .upsert(&conn, &scope, tenant_id, session)
+                .await?;
+            return Err(DomainError::internal(reason));
+        }
+
+        Ok(id)
+    }
+
+    /// Take sole ownership of the job stream. The gear's background task calls
+    /// this once at startup; every later call sees `None`.
+    pub async fn take_sync_receiver(&self) -> Option<mpsc::Receiver<SyncJob>> {
+        self.sync_rx.lock().await.take()
+    }
+
+    /// Run one queued job to completion and record the outcome on its session.
+    ///
+    /// Errors from the sync land in the session row rather than propagating —
+    /// nobody is waiting on the return value, so a failed run must still be
+    /// visible through the sessions API.
+    ///
+    /// # Errors
+    /// Only failures to *persist* the outcome, which the caller logs.
+    pub async fn run_sync_job(&self, job: &SyncJob) -> Result<(), DomainError> {
+        let tenant_id = job.ctx.subject_tenant_id();
+        let scope = self.session_scope(&job.ctx, actions::UPSERT).await?;
+        let conn = self.db.conn()?;
+
+        let mut session = self
+            .sync_sessions
+            .find_by_id(&conn, &scope, job.session_id)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+        session_states::IN_PROGRESS.clone_into(&mut session.status);
+        session.started_at = Some(now_rfc3339());
+        self.sync_sessions
+            .upsert(&conn, &scope, tenant_id, session.clone())
+            .await?;
+
+        let progress = SyncProgress::new();
+        let outcome = self.sync_with_heartbeat(job, &progress, &session).await;
+        progress.finished();
+
+        let completed = outcome.is_ok();
+        match outcome {
             Ok(summary) => {
-                session_states::SUCCEEDED.clone_into(&mut session.state);
-                session.finished_at = Some(now_rfc3339());
+                session_states::COMPLETE.clone_into(&mut session.status);
                 session.summary_json = serde_json::to_string(&summary).ok();
-                self.sync_sessions
-                    .upsert(&conn, &scope, tenant_id, session)
-                    .await?;
-                Ok((id, summary))
             }
             Err(e) => {
-                session_states::FAILED.clone_into(&mut session.state);
-                session.finished_at = Some(now_rfc3339());
+                session_states::FAILED.clone_into(&mut session.status);
                 session.error = Some(e.to_string());
-                self.sync_sessions
-                    .upsert(&conn, &scope, tenant_id, session)
-                    .await?;
-                Err(e)
             }
         }
+        session.progress_percent = i32::from(progress.percent());
+        session.ended_at = Some(now_rfc3339());
+        let repo_full_name = session.repo_full_name.clone();
+        self.sync_sessions
+            .upsert(&conn, &scope, tenant_id, session)
+            .await?;
+
+        // A run that failed leaves the repository `in_progress` on purpose:
+        // that is the marker the resume operation looks for (PRD §5.2).
+        if completed {
+            self.mark_repo_status(
+                &job.ctx,
+                &repo_full_name,
+                job.session_id,
+                repo_run_states::COMPLETE,
+                Some(now_rfc3339()),
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Run the sync while a ticker writes its progress to the session row.
+    ///
+    /// DESIGN §4 has progress "published via a shared atomic" and persisted
+    /// "incrementally ... via a heartbeat (also stamping `ended_at`)", so a
+    /// caller polling the session sees the run advance and can compute its
+    /// duration before it ends. A heartbeat that fails to write is logged and
+    /// skipped — losing a progress sample must not fail the sync.
+    async fn sync_with_heartbeat(
+        &self,
+        job: &SyncJob,
+        progress: &SyncProgress,
+        session: &SyncSessionRecord,
+    ) -> Result<SyncSummary, DomainError> {
+        let percent = progress.handle();
+        let sync = self.sync_repository(&job.ctx, &job.owner, &job.name, progress);
+        let mut sync = std::pin::pin!(sync);
+
+        loop {
+            tokio::select! {
+                outcome = &mut sync => return outcome,
+                () = tokio::time::sleep(std::time::Duration::from_secs(HEARTBEAT_SECS)) => {
+                    let mut beat = session.clone();
+                    beat.progress_percent = i32::from(percent.load(Ordering::Relaxed));
+                    beat.ended_at = Some(now_rfc3339());
+                    if let Err(e) = self.save_session_progress(&job.ctx, beat).await {
+                        tracing::warn!(
+                            session_id = %job.session_id,
+                            error = %e,
+                            "sync heartbeat could not persist progress"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// One heartbeat write, on its own connection and scope.
+    async fn save_session_progress(
+        &self,
+        ctx: &SecurityContext,
+        session: SyncSessionRecord,
+    ) -> Result<(), DomainError> {
+        let scope = self.session_scope(ctx, actions::UPSERT).await?;
+        let conn = self.db.conn()?;
+        self.sync_sessions
+            .upsert(&conn, &scope, ctx.subject_tenant_id(), session)
+            .await?;
+        Ok(())
+    }
+
+    /// Close out sessions left mid-flight by a previous process.
+    ///
+    /// The queue is in-memory, so a `queued` or `in_progress` row that survives a
+    /// restart has no worker behind it and never will. Called once at startup,
+    /// across every tenant — hence the unconstrained scope, which is why this
+    /// takes no [`SecurityContext`] and is not reachable from the API.
+    ///
+    /// # Errors
+    /// `Database` when the sweep cannot read or write the session table.
+    pub async fn sweep_interrupted_sessions(&self) -> Result<usize, DomainError> {
+        let scope = AccessScope::allow_all();
+        let conn = self.db.conn()?;
+
+        let stale = self
+            .sync_sessions
+            .list_by_statuses(
+                &conn,
+                &scope,
+                &[session_states::QUEUED, session_states::IN_PROGRESS],
+            )
+            .await?;
+
+        let count = stale.len();
+        for (tenant_id, mut session) in stale {
+            session_states::INTERRUPTED.clone_into(&mut session.status);
+            session.ended_at = Some(now_rfc3339());
+            session.error = Some("the server restarted while this sync was in flight".to_owned());
+            self.sync_sessions
+                .upsert(&conn, &scope, tenant_id, session)
+                .await?;
+        }
+
+        Ok(count)
     }
 
     /// One sync session by id, tenant-scoped.
@@ -3058,6 +3522,7 @@ impl<
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
+        progress: &SyncProgress,
     ) -> Result<SyncSummary, DomainError> {
         let tenant_id = ctx.subject_tenant_id();
 
@@ -3073,6 +3538,7 @@ impl<
             .await?;
 
         let fetched = self.github.fetch_repository(owner, name).await?;
+        progress.fetched();
 
         let conn = self.db.conn()?;
         let repository = self
@@ -3250,6 +3716,7 @@ impl<
             issue_timeline,
             fetched.issue_timeline
         );
+        progress.stored();
 
         Ok(SyncSummary {
             repository: repository.full_name,

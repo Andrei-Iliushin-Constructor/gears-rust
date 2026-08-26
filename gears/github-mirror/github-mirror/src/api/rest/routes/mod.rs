@@ -20,9 +20,9 @@ use crate::infra::storage::sea_orm_repo::{
     SeaOrmIssueTimelineRepository, SeaOrmLabelRepository, SeaOrmMilestoneRepository,
     SeaOrmPullRequestCommitRepository, SeaOrmPullRequestFileRepository,
     SeaOrmPullRequestRepository, SeaOrmReleaseRepository, SeaOrmRepoRepository,
-    SeaOrmReviewCommentRepository, SeaOrmReviewRepository, SeaOrmReviewThreadRepository,
-    SeaOrmSyncSessionRepository, SeaOrmTagRepository, SeaOrmWorkflowJobRepository,
-    SeaOrmWorkflowRunRepository,
+    SeaOrmRepoSyncStatusRepository, SeaOrmReviewCommentRepository, SeaOrmReviewRepository,
+    SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository, SeaOrmTagRepository,
+    SeaOrmWorkflowJobRepository, SeaOrmWorkflowRunRepository,
 };
 
 pub mod github;
@@ -56,6 +56,7 @@ pub type ConcreteService = Service<
     SeaOrmCheckRunRepository,
     SeaOrmIssueTimelineRepository,
     SeaOrmSyncSessionRepository,
+    SeaOrmRepoSyncStatusRepository,
 >;
 
 pub(crate) const API_TAG: &str = "GitHub Mirror";
