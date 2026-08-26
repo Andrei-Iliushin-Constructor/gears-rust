@@ -114,17 +114,17 @@ This design owns the **signal** and the **reaction contract**. It does not own v
 |-------------|-----------------|
 | `cpt-cf-settings-service-fr-consumer-activation` | **The requirement this document exists to serve.** A consumer registers per-`key` interest (§4.1 `Subscription`); the Apply Publisher emits a **per-subscriber filtered** `apply_notification` carrying only the keys that subscriber watches, and only ones it is entitled to read; the payload carries **identifiers only, never a value**, so the signal stream cannot disclose `secret`- or PII-classified content — the consumer re-reads through its ordinary authorization. Confirmation and accounting are the back-response and the per-(apply, subscription) await-record (§4.1 `AwaitRecord`, §4.2 *Apply Outcome Tracker*). |
 | `cpt-cf-settings-service-fr-replica-coherence` | The `cache_invalidate` broadcast (§4.2 *Cache Invalidation Broadcast*) converges the **other** replicas — the applying replica evicts inside the apply itself. Published inline and best-effort; a missed broadcast is bounded by the reader's `cache_ttl_seconds` backstop, which is what makes the staleness window bounded rather than open-ended. For a `cascading` setting the eviction covers the descendant scopes the change altered. |
-| `cpt-cf-settings-service-fr-apply-effect-resolution` | Two-signal split: a per-subscriber filtered `apply_notification` for consumer activation and an unfiltered `cache_invalidate` broadcast for replica cache coherence; consumers re-read and self-react |
+| `cpt-cf-settings-service-fr-live-read-activation` | Two-signal split: a per-subscriber filtered `apply_notification` for consumer activation and an unfiltered `cache_invalidate` broadcast for replica cache coherence; consumers re-read and self-react |
 | `cpt-cf-settings-service-nfr-efficiency-live-read` | Activation never reloads or restarts a consumer; a heavier reaction is the consumer's own, performed in its handler on the signal |
-| `cpt-cf-settings-service-nfr-reliability-fail-safe-staged` | Durable `apply_await_records` are the delivery queue — deliver-until-ack, with wait-for-all outcome resolution and no deadline |
+| `cpt-cf-settings-service-nfr-reliability-validated-set` | Durable `apply_await_records` are the delivery queue — deliver-until-ack, with wait-for-all outcome resolution and no deadline |
 | `cpt-cf-settings-service-nfr-performance-read-cache` | `cache_invalidate` is published inline and best-effort; a missed broadcast self-heals inside `cache_ttl_seconds`, so coherence never depends on durable delivery |
-| `cpt-cf-settings-service-nfr-ops-apply-monitoring` | Per-administrator failure surfaces through the back-response and `event_apply_failed`; the aggregate operator signal stays with DESIGN.md |
+| `cpt-cf-settings-service-nfr-ops-set-monitoring` | Per-administrator failure surfaces through the back-response and `event_apply_failed`; the aggregate operator signal stays with DESIGN.md |
 
 #### NFR Allocation
 
 | NFR ID | NFR Summary | Allocated To | Design Response | Verification Approach |
 |--------|-------------|--------------|-----------------|----------------------|
-| `cpt-cf-settings-service-nfr-reliability-fail-safe-staged` | No consumer activation is lost | Apply Publisher + await-records | Deliver-until-ack from durable records; idempotent per `(apply_id, subscriber, key)`; terminal states immutable | Integration redelivery and restart tests |
+| `cpt-cf-settings-service-nfr-reliability-validated-set` | No consumer activation is lost | Apply Publisher + await-records | Deliver-until-ack from durable records; idempotent per `(apply_id, subscriber, key)`; terminal states immutable | Integration redelivery and restart tests |
 | `cpt-cf-settings-service-nfr-performance-read-cache` | Replica staleness is bounded | Cache Invalidation Broadcast | Inline best-effort broadcast plus the `cache_ttl_seconds` backstop owned by the cache components in DESIGN.md | Timed multi-replica convergence test |
 | `cpt-cf-settings-service-nfr-security-baseline` | No secret leaves in the signal stream | Event payloads | Notification events carry identifiers only; back-responses carry a hash for secret-valued settings | Subscribed-observer test asserting no plaintext |
 

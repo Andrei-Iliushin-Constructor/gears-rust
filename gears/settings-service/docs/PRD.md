@@ -371,7 +371,7 @@ The system **MUST** maintain an independent Schema Default per setting that is n
 
 #### Setting a Value
 
-- [ ] `p1` - **ID**: `cpt-cf-settings-service-fr-staged-change-pending`
+- [ ] `p1` - **ID**: `cpt-cf-settings-service-fr-set-value`
 
 A **value** operation on a setting — set, revert, remove-value, or clone (at platform or any tenant scope) — **MUST** take effect when the caller sets it. The service **MUST NOT** keep the change in a pending state first, and there **MUST NOT** be a separate step that activates it later. A client that lets an administrator collect several changes before sending them **MUST** keep that collection on its own side.
 
@@ -386,7 +386,7 @@ Operations on a **setting Declaration itself** follow a different rule, and **MU
 
 #### Validate Before Setting; Step-Up on Set
 
-- [ ] `p1` - **ID**: `cpt-cf-settings-service-fr-apply-preview-stepup`
+- [ ] `p1` - **ID**: `cpt-cf-settings-service-fr-validate-before-set`
 
 The system **MUST** let a caller ask what a value would do before setting it. This check **MUST** report whether the value is valid, the current effective value and where it comes from, and which descendant scopes the change would affect, in pages rather than all at once. It **MUST** change nothing, **MUST** give the same answer every time, and **MUST NOT** be required before setting: a caller may set a value directly, and the same validation runs inside the set anyway.
 
@@ -397,7 +397,7 @@ Setting a value **MUST** require credential re-verification (step-up).
 
 #### A Value Activates via Live-Read; Consumers Self-React
 
-- [ ] `p1` - **ID**: `cpt-cf-settings-service-fr-apply-effect-resolution`
+- [ ] `p1` - **ID**: `cpt-cf-settings-service-fr-live-read-activation`
 
 Activating a change **MUST NOT** require the Settings Service to reload or restart any consumer: the new value becomes effective and each consumer reads it **on next read (live-read / pull)** via the settings SDK, with cache invalidation. The Settings Service **MUST NOT** declare or resolve a per-setting "effect"; live-read is the platform's activation mechanism. A consumer that must do more than re-read a changed value (rebuild a pool, re-render its config file, or restart) **MUST** perform that reaction **itself**, triggered by the change signal, reacting only to the settings it consumes (per setting, not a blanket per-category restart); the Settings Service **MUST NOT** reload or restart a consumer on its behalf, and a consumer that cannot apply a change in place restarts **itself** and reads the current value on start. Coordinated rolling restart across a gear's replicas is a deployment/rollout concern, out of scope. The set result **MUST** report per setting: old → new value, scope, and success or failure.
 
@@ -418,7 +418,7 @@ Convergence **MUST** be reached by a **coherence signal carried over the platfor
 
 **No actor may invoke replica coherence.** It is an internal property of the service, not an operation: there is no request — administrative, tenant-facing, or service-to-service — by which any actor can trigger, target, or observe it. This is stated as a prohibition because the alternative was previously specified as a callable inter-service endpoint, and re-introducing one would create a surface whose only legitimate caller is the service itself.
 
-- **Rationale**: A single-replica deployment is coherent by construction; every real deployment is not. Without this requirement `cpt-cf-settings-service-fr-apply-effect-resolution`'s guarantee — that a consumer reads the new value on its next read — holds only for consumers that happen to reach the replica that handled the set, which is not a guarantee at all. Making the bound independent of signal delivery is what stops a transient broker outage from turning into permanently divergent configuration.
+- **Rationale**: A single-replica deployment is coherent by construction; every real deployment is not. Without this requirement `cpt-cf-settings-service-fr-live-read-activation`'s guarantee — that a consumer reads the new value on its next read — holds only for consumers that happen to reach the replica that handled the set, which is not a guarantee at all. Making the bound independent of signal delivery is what stops a transient broker outage from turning into permanently divergent configuration.
 - **Actors**: `cpt-cf-settings-service-actor-event-broker`
 
 #### Consumer Activation: Notify, Confirm, and Account
@@ -433,16 +433,16 @@ Delivery **MUST** continue until a consumer confirms: an outstanding activation 
 
 Permissions are exact: **only** the registered consuming gear itself may register its own interest and report its own outcomes; it **MUST NOT** be able to register on another gear's behalf or confirm another gear's activation. An administrator and platform operations may **read** the activation account but **MUST NOT** be able to write, forge, or clear a confirmation.
 
-- **Rationale**: `cpt-cf-settings-service-nfr-reliability-fail-safe-staged` requires that no consumer activation be lost, and the companion activation design allocates its entire delivery-until-confirmed mechanism to that NFR — but no functional requirement described the capability the NFR constrains, so the notify/confirm/account behaviour existed in the design with nothing above it. The accounting half is what turns "the value was written" into "the platform is actually running on it", which is the question an administrator is really asking after making a change.
+- **Rationale**: `cpt-cf-settings-service-nfr-reliability-validated-set` requires that no consumer activation be lost, and the companion activation design allocates its entire delivery-until-confirmed mechanism to that NFR — but no functional requirement described the capability the NFR constrains, so the notify/confirm/account behaviour existed in the design with nothing above it. The accounting half is what turns "the value was written" into "the platform is actually running on it", which is the question an administrator is really asking after making a change.
 - **Actors**: `cpt-cf-settings-service-actor-internal-caller`, `cpt-cf-settings-service-actor-event-broker`, `cpt-cf-settings-service-actor-platform-admin`
 
 #### Dependency Group and Cross-Setting Constraint Declaration
 
 - [ ] `p3` - **ID**: `cpt-cf-settings-service-fr-dependency-group-declaration`
 
-The system **MUST** let a declaration author declare a **Dependency Group** — a named set of interdependent settings with an associated **cross-setting constraint** over their combined values — so that the all-or-nothing set and resulting-configuration validation required by `cpt-cf-settings-service-fr-apply-effect-resolution` have an explicit definition to enforce. A Dependency Group over **admin-authored** settings **MUST** be declarable by a platform administrator; a Dependency Group over a gear's **contributed** settings **MUST** be declarable by that owning gear on install/upgrade ([§5.8](#58-module-contributed-settings)). A Dependency Group definition and its cross-setting constraint are **behavior-affecting**: they **MUST** follow the same immutability rule as other behavior-affecting declaration fields ([§5.1](#51-settings--category-model)) — changed only via a replacement declaration, never edited in place — so a live scope's validity rules cannot change through an ungated edit. A setting not in any Dependency Group is set as an independent unit.
+The system **MUST** let a declaration author declare a **Dependency Group** — a named set of interdependent settings with an associated **cross-setting constraint** over their combined values — so that the all-or-nothing set and resulting-configuration validation required by `cpt-cf-settings-service-fr-live-read-activation` have an explicit definition to enforce. A Dependency Group over **admin-authored** settings **MUST** be declarable by a platform administrator; a Dependency Group over a gear's **contributed** settings **MUST** be declarable by that owning gear on install/upgrade ([§5.8](#58-module-contributed-settings)). A Dependency Group definition and its cross-setting constraint are **behavior-affecting**: they **MUST** follow the same immutability rule as other behavior-affecting declaration fields ([§5.1](#51-settings--category-model)) — changed only via a replacement declaration, never edited in place — so a live scope's validity rules cannot change through an ungated edit. A setting not in any Dependency Group is set as an independent unit.
 
-- **Rationale**: The all-or-nothing and invalid-combination-rejection guarantees in `cpt-cf-settings-service-fr-apply-effect-resolution` are only enforceable if the interdependencies and constraints they check are explicitly declared and owned; leaving the authoring side undefined would make the atomicity requirement unenforceable.
+- **Rationale**: The all-or-nothing and invalid-combination-rejection guarantees in `cpt-cf-settings-service-fr-live-read-activation` are only enforceable if the interdependencies and constraints they check are explicitly declared and owned; leaving the authoring side undefined would make the atomicity requirement unenforceable.
 - **Actors**: `cpt-cf-settings-service-actor-platform-admin`, `cpt-cf-settings-service-actor-contributing-module`
 
 ### 5.6 Multi-Tenant Overrides & Cascading Inheritance
@@ -621,7 +621,7 @@ The system **MUST** activate every stored value via live-read (pull) with no ser
 
 #### Reliability: Validate, and Refuse a Stale Set
 
-- [ ] `p1` - **ID**: `cpt-cf-settings-service-nfr-reliability-fail-safe-staged`
+- [ ] `p1` - **ID**: `cpt-cf-settings-service-nfr-reliability-validated-set`
 
 Given the platform is live and serving traffic, a set **MUST** validate the value first and **MUST** reject an invalid one before storing anything. A setting that fails **MUST** leave no value behind and **MUST** report why, in the response and — for an administrator — through a durable notification channel. A set **MUST** be rejected if the value changed since the caller read it, so one administrator cannot silently overwrite another's change. Detection mechanics are owned by DESIGN.
 
@@ -630,7 +630,7 @@ Given the platform is live and serving traffic, a set **MUST** validate the valu
 
 #### Operational Visibility: Set Failure Monitoring
 
-- [ ] `p2` - **ID**: `cpt-cf-settings-service-nfr-ops-apply-monitoring`
+- [ ] `p2` - **ID**: `cpt-cf-settings-service-nfr-ops-set-monitoring`
 
 Beyond the per-change durable notification to the acting administrator, platform operations **MUST** have an aggregate view of set health: a set-failure-rate metric integrated into shared platform dashboards, with alert routing for platform-wide set failure conditions (e.g., a bad GTS type rollout causing failures across many settings/services).
 
@@ -727,7 +727,7 @@ The system **MUST** support at least 100,000 tenants in the tenant scope hierarc
 
 #### Review and Set Changes
 
-- [ ] `p1` - **ID**: `cpt-cf-settings-service-usecase-stage-review-apply`
+- [ ] `p1` - **ID**: `cpt-cf-settings-service-usecase-review-and-set`
 
 **Actor**: `cpt-cf-settings-service-actor-platform-admin`
 
@@ -745,7 +745,7 @@ The system **MUST** support at least 100,000 tenants in the tenant scope hierarc
 
 - **A value is invalid**: That setting is rejected with the reason and stores nothing; the others are stored. The response says which failed, and the client keeps them for correction.
 - **Credential step-up fails**: Nothing is set.
-- **Another administrator got there first**: The set is rejected because the value moved since it was read, and reported per `cpt-cf-settings-service-nfr-reliability-fail-safe-staged`. Mechanics are owned by DESIGN.
+- **Another administrator got there first**: The set is rejected because the value moved since it was read, and reported per `cpt-cf-settings-service-nfr-reliability-validated-set`. Mechanics are owned by DESIGN.
 - **Required dependency unavailable**: Tenant-resolution, authentication, authorization, and type dependencies fail closed per their availability expectations ([§2.2 System Actors](#22-system-actors)); nothing is set.
 
 #### Resolve Effective Value via Inheritance
@@ -831,22 +831,22 @@ Each criterion validates the referenced FR/NFR; the full normative statement liv
 - [ ] Value search covers only defaults/overrides the caller may read in scope; `secret` values are never indexed or matched (no leakage via match existence, count, snippet, or timing); PII authorization is applied before matching so unauthorized callers cannot match PII content; structured-value search matches leaf values under the same rules (`cpt-cf-settings-service-fr-search-discoverability`)
 - [ ] Tenant-scope revert clears the local override and falls back to the nearest ancestor's override or the platform default; the resulting fallback is communicated before commit (`cpt-cf-settings-service-fr-defaults-revert`)
 - [ ] Platform-scope revert clears the override and falls back to the Schema Default, which remains intact and independent throughout (`cpt-cf-settings-service-fr-defaults-revert`)
-- [ ] A value operation (set/revert/remove-value/clone) takes effect when the caller sets it; the service keeps no pending state before it and has no separate activation step (`cpt-cf-settings-service-fr-staged-change-pending`)
-- [ ] Remove-value clears only the explicit override at the target scope (`cpt-cf-settings-service-fr-staged-change-pending`)
-- [ ] Descriptive-metadata declaration edits (description, Mode, Domain Affinity) apply immediately and change no effective value (`cpt-cf-settings-service-fr-staged-change-pending`)
-- [ ] Behavior-affecting declaration fields (Schema Default, GTS type, Scope Class) are immutable: an in-place edit is rejected, and the change is expressible only via a replacement declaration or a new major GTS type version (`cpt-cf-settings-service-fr-settings-category-model`, `cpt-cf-settings-service-fr-staged-change-pending`)
-- [ ] Setting removal is a step-up-gated soft-delete (retire) that drops the setting from resolution at once; values are retained and recoverable by reactivation, which is likewise step-up-gated (`cpt-cf-settings-service-fr-settings-category-model`, `cpt-cf-settings-service-fr-staged-change-pending`)
-- [ ] A set validates each value against its GTS type before storing it, may carry several settings with a per-setting result, and is rejected if the value changed since the caller read it (`cpt-cf-settings-service-fr-staged-change-pending`)
-- [ ] A caller can check a value before setting it — validity, current effective value and source, affected descendants in pages — with no side effects and the same answer every time; the check is not required, and setting a value needs credential step-up (`cpt-cf-settings-service-fr-apply-preview-stepup`)
-- [ ] A stored value activates via live-read (pull) through the settings SDK with cache invalidation; the Settings Service never reloads or restarts a consumer (`cpt-cf-settings-service-fr-apply-effect-resolution`)
-- [ ] A consumer needing more than a live re-read self-reacts on the change signal (rebuild, re-render, or restart itself), reacting only to the settings it consumes, not a blanket per-category restart (`cpt-cf-settings-service-fr-apply-effect-resolution`)
-- [ ] The set result reports per setting old → new value, scope, and success or failure; a setting that fails leaves no value behind (`cpt-cf-settings-service-fr-apply-effect-resolution`)
-- [ ] Interdependent settings are set all-or-nothing as a Dependency Group; a group that would leave the scope in an invalid combination is rejected whole, never partially committed (`cpt-cf-settings-service-fr-apply-effect-resolution`)
+- [ ] A value operation (set/revert/remove-value/clone) takes effect when the caller sets it; the service keeps no pending state before it and has no separate activation step (`cpt-cf-settings-service-fr-set-value`)
+- [ ] Remove-value clears only the explicit override at the target scope (`cpt-cf-settings-service-fr-set-value`)
+- [ ] Descriptive-metadata declaration edits (description, Mode, Domain Affinity) apply immediately and change no effective value (`cpt-cf-settings-service-fr-set-value`)
+- [ ] Behavior-affecting declaration fields (Schema Default, GTS type, Scope Class) are immutable: an in-place edit is rejected, and the change is expressible only via a replacement declaration or a new major GTS type version (`cpt-cf-settings-service-fr-settings-category-model`, `cpt-cf-settings-service-fr-set-value`)
+- [ ] Setting removal is a step-up-gated soft-delete (retire) that drops the setting from resolution at once; values are retained and recoverable by reactivation, which is likewise step-up-gated (`cpt-cf-settings-service-fr-settings-category-model`, `cpt-cf-settings-service-fr-set-value`)
+- [ ] A set validates each value against its GTS type before storing it, may carry several settings with a per-setting result, and is rejected if the value changed since the caller read it (`cpt-cf-settings-service-fr-set-value`)
+- [ ] A caller can check a value before setting it — validity, current effective value and source, affected descendants in pages — with no side effects and the same answer every time; the check is not required, and setting a value needs credential step-up (`cpt-cf-settings-service-fr-validate-before-set`)
+- [ ] A stored value activates via live-read (pull) through the settings SDK with cache invalidation; the Settings Service never reloads or restarts a consumer (`cpt-cf-settings-service-fr-live-read-activation`)
+- [ ] A consumer needing more than a live re-read self-reacts on the change signal (rebuild, re-render, or restart itself), reacting only to the settings it consumes, not a blanket per-category restart (`cpt-cf-settings-service-fr-live-read-activation`)
+- [ ] The set result reports per setting old → new value, scope, and success or failure; a setting that fails leaves no value behind (`cpt-cf-settings-service-fr-live-read-activation`)
+- [ ] Interdependent settings are set all-or-nothing as a Dependency Group; a group that would leave the scope in an invalid combination is rejected whole, never partially committed (`cpt-cf-settings-service-fr-live-read-activation`)
 - [ ] A Dependency Group and its cross-setting constraint can be declared over admin-authored settings by a platform administrator and over contributed settings by the owning gear; the definition is behavior-affecting and immutable in place, changed only via a replacement declaration (`cpt-cf-settings-service-fr-dependency-group-declaration`)
-- [ ] A change is **set** only when durably persisted and its target-scope cache-invalidation issued (descendant invalidation emitted for cascading settings); persistence commits before cache-invalidation/consumer signaling (`cpt-cf-settings-service-fr-apply-effect-resolution`)
-- [ ] A set against a value that changed since the caller read it is rejected and reported, never silently overwriting another administrator's change; mechanics owned by DESIGN (`cpt-cf-settings-service-nfr-reliability-fail-safe-staged`)
+- [ ] A change is **set** only when durably persisted and its target-scope cache-invalidation issued (descendant invalidation emitted for cascading settings); persistence commits before cache-invalidation/consumer signaling (`cpt-cf-settings-service-fr-live-read-activation`)
+- [ ] A set against a value that changed since the caller read it is rejected and reported, never silently overwriting another administrator's change; mechanics owned by DESIGN (`cpt-cf-settings-service-nfr-reliability-validated-set`)
 - [ ] Tenant-scoped value of a `cascading` setting overrides the inherited value at the target tenant (caller's own tenant or a descendant within its subtree) and its non-overriding descendants; set/clone/remove-value follow the same validation rules (`cpt-cf-settings-service-fr-tenant-overrides`)
-- [ ] Clone requires authorization to read and use the source effective value and to mutate the target scope; it creates an independent explicit override at that authorized target scope without copying the Setting Declaration or linking future source changes to the target override (`cpt-cf-settings-service-fr-staged-change-pending`, `cpt-cf-settings-service-fr-tenant-overrides`)
+- [ ] Clone requires authorization to read and use the source effective value and to mutate the target scope; it creates an independent explicit override at that authorized target scope without copying the Setting Declaration or linking future source changes to the target override (`cpt-cf-settings-service-fr-set-value`, `cpt-cf-settings-service-fr-tenant-overrides`)
 - [ ] Effective value resolved by walking up the hierarchy to the first override, else the platform default; read API exposes the effective source / inheritance trail (`cpt-cf-settings-service-fr-cascading-inheritance`)
 - [ ] Changing a cascading setting reports a non-blocking warning listing affected descendants with current vs. new effective values; the administrator can proceed (`cpt-cf-settings-service-fr-cascading-inheritance`)
 - [ ] Every setting declares a Scope Class; cascade/override behaviour derives deterministically from it (global / cascading / local semantics), never from independently-set booleans (`cpt-cf-settings-service-fr-setting-scope-class`)
@@ -858,7 +858,7 @@ Each criterion validates the referenced FR/NFR; the full normative statement liv
 - [ ] Every mutation writes an audit record (actor, target, pre/post values with secrets masked, timestamp, outcome, request id); audit history queryable globally and per (setting, scope) with no reveal path (`cpt-cf-settings-service-fr-audit-mutations`)
 - [ ] Audit-record actor identities are classified as public or PII; unauthorized administrative audit reads and audit/report outputs mask actor-identity PII, only callers authorized for unmasked PII can observe it, and retention/anonymization policy remains enforced (`cpt-cf-settings-service-fr-audit-mutations`)
 - [ ] Licence/feature-gated settings are excluded server-side for callers without the entitlement, consistently across all administrative read paths; the internal in-process settings reader is not licence-gated (`cpt-cf-settings-service-fr-feature-license-gating`)
-- [ ] An invalid value is rejected before anything is stored; a setting that fails leaves no value behind and its failure reaches the caller and a durable notification channel (`cpt-cf-settings-service-nfr-reliability-fail-safe-staged`)
+- [ ] An invalid value is rejected before anything is stored; a setting that fails leaves no value behind and its failure reaches the caller and a durable notification channel (`cpt-cf-settings-service-nfr-reliability-validated-set`)
 - [ ] Cache-served effective-value reads complete within 50ms at p95 at the SDK boundary while sustaining at least 1,000 reads/second for 15 minutes against 5,000 settings, 100,000 tenants, and hierarchy depth up to 10, distributed across settings and tenant depths rather than one hot key or scope; cache invalidated on the set; secrets never cached or returned in plaintext (`cpt-cf-settings-service-nfr-performance-read-cache`)
 - [ ] No cross-scope leakage through any read path (single get, bulk get, search, list-by-category); isolation enforced server-side (`cpt-cf-settings-service-nfr-scope-isolation`)
 - [ ] Gears contribute namespaced Setting Declarations on install/upgrade; administrators change contributed values only (subject to permissions and Scope Class), never the Declarations (`cpt-cf-settings-service-fr-module-contributed-declarations`)
@@ -867,7 +867,7 @@ Each criterion validates the referenced FR/NFR; the full normative statement liv
 - [ ] Security baseline enforced on every operation: authentication + access gating, secrets encrypted and masked on all administrative/human paths with no human reveal path (including audit; plaintext only via the audited machine-only runtime path), step-up before setting a value, all mutations audited, server-side scope isolation (`cpt-cf-settings-service-nfr-security-baseline`)
 - [ ] Scalar and structured values supported via GTS types + traits; multi-level overrides governed by Scope Class; new types and gear-contributed declarations require no core service changes (`cpt-cf-settings-service-nfr-versatility-gts-scope-class`)
 - [ ] 99.9% monthly availability maintained for effective-value reads via the Settings read SDK (`cpt-cf-settings-service-nfr-availability`)
-- [ ] Set-failure-rate metric present in shared platform dashboards with an alert-routing rule for platform-wide set failure conditions (`cpt-cf-settings-service-nfr-ops-apply-monitoring`)
+- [ ] Set-failure-rate metric present in shared platform dashboards with an alert-routing rule for platform-wide set failure conditions (`cpt-cf-settings-service-nfr-ops-set-monitoring`)
 - [ ] 100,000 tenants, 10-level cascade depth, 5,000 settings per platform instance, and ≥ 50,000,000 audit events per platform instance per year (aggregate) with ≥ 12-month configurable online retention and scoped audit query ≤ 2s p95, sustained without degrading the read-latency or set thresholds (`cpt-cf-settings-service-nfr-scale-growth`)
 - [ ] Hub categories filtered by the administrator's current Domain Affinity; cross-domain settings hidden by default; platform administrators can switch to "All domains"; orthogonal to Standard/Advanced mode (`cpt-cf-settings-service-fr-domain-affinity-filtering`)
 - [ ] After a set, every replica converges on the new effective value within the stated staleness bound — including when the coherence signal is dropped — and no actor can invoke, target, or observe that convergence as an operation (`cpt-cf-settings-service-fr-replica-coherence`)
@@ -897,7 +897,7 @@ Several mandatory acceptance criteria depend on platform capabilities that **do 
 | **Credential step-up (re-authentication) primitive** — gates every value set and every behavior-affecting declaration action (retire/reactivate); consumed as a **pluggable behaviour** behind a stable step-up contract | `authn-resolver` exposes only `authenticate(bearer_token)` (ADR-0003); no re-authentication method | Platform Security / `authn-resolver` owners | DESIGN defines the step-up contract; the default second-authentication gear delivered; **GA** | A default second-authentication gear provided by the platform, or an integrator-supplied implementation behind the same contract |
 | **View / owner-admin access-level model** — backs the view-vs-mutate distinction in `cpt-cf-settings-service-fr-authn-role-gating` | `authz-resolver` is an AuthZEN PDP with no built-in role storage/hierarchy; binding deferred to a future AuthZ Management Gear | Platform AuthZ owners | DESIGN can specify access gating; **GA** | An approved interim role→permission mapping consumed via the existing PDP |
 | **Platform audit subsystem** — records mutations and machine secret-use events (`cpt-cf-settings-service-fr-audit-mutations`) | Aspirational per `docs/GEARS.md`; not yet implemented | Platform Core (Audit) | Audit FRs/NFRs can be realized; **GA** | A DESIGN-owned interim audit sink meeting the same masking/retention guarantees |
-| **Events & Notifications** — durable set-failure notifications (`cpt-cf-settings-service-nfr-reliability-fail-safe-staged`, `cpt-cf-settings-service-nfr-ops-apply-monitoring`) | Aspirational; not yet implemented | Platform Core (Events/Notifications) | Durable failure-notification behavior can be delivered; **GA** | An interim notification channel/stub, if approved |
+| **Events & Notifications** — durable set-failure notifications (`cpt-cf-settings-service-nfr-reliability-validated-set`, `cpt-cf-settings-service-nfr-ops-set-monitoring`) | Aspirational; not yet implemented | Platform Core (Events/Notifications) | Durable failure-notification behavior can be delivered; **GA** | An interim notification channel/stub, if approved |
 
 ## 11. Assumptions
 
@@ -915,8 +915,8 @@ Several mandatory acceptance criteria depend on platform capabilities that **do 
 | Retired-value lifecycle (module retire or admin soft-delete) undefined | Administrator-set values for a retired setting — via gear removal or an admin's soft-delete of the setting — may be orphaned indefinitely | Resolve retention/purge/archive policy in DESIGN before GA                                                                                                           |
 | Audit, Policy Manager, and Events/Notifications gears do not exist yet | This service's audit-trail and notification FRs/NFRs cannot be fully realized until those platform capabilities ship                      | Track as aspirational dependencies ([§10](#10-dependencies)); DESIGN may need an interim audit sink/notification stub until the platform-wide gear ships             |
 | Tenant Resolver outage | Cold tenant reads and hierarchy-changing/mutation operations cannot establish the target hierarchy or enforce scope isolation; warm cached reads are unaffected | Warm reads continue from the local hierarchy snapshot; only cold reads and hierarchy-changing/mutation operations fail closed per the Tenant Resolver availability expectation ([§2.2](#22-system-actors)); snapshot freshness bound, outage detection, and surfacing to platform operations are owned by DESIGN |
-| Concurrent sets against the same scope | One administrator's change may be silently overwritten by another's | Rejecting a set against a value that moved since it was read is required by `cpt-cf-settings-service-nfr-reliability-fail-safe-staged`; mechanics are owned by DESIGN |
-| Incomplete descendant invalidation after setting a cascading value | Descendants may continue receiving stale inherited values | Descendant cache-invalidation on the set is required by `cpt-cf-settings-service-fr-apply-effect-resolution`; bounding stale-value exposure and verifying invalidation coverage are owned by DESIGN |
+| Concurrent sets against the same scope | One administrator's change may be silently overwritten by another's | Rejecting a set against a value that moved since it was read is required by `cpt-cf-settings-service-nfr-reliability-validated-set`; mechanics are owned by DESIGN |
+| Incomplete descendant invalidation after setting a cascading value | Descendants may continue receiving stale inherited values | Descendant cache-invalidation on the set is required by `cpt-cf-settings-service-fr-live-read-activation`; bounding stale-value exposure and verifying invalidation coverage are owned by DESIGN |
 | Audit volume exceeds retention or storage capacity | Required audit evidence may become unavailable, or storage growth may disrupt service operation | Capacity for the declared audit volume is required by `cpt-cf-settings-service-nfr-scale-growth`, with retention/anonymization governed by the [§5.2](#52-typed-values--validation) classification model; storage and retention mechanics are owned by DESIGN |
 
 
