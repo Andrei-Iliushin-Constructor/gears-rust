@@ -118,7 +118,7 @@ This design owns the **signal** and the **reaction contract**. It does not own v
 | `cpt-cf-settings-service-nfr-efficiency-live-read` | Activation never reloads or restarts a consumer; a heavier reaction is the consumer's own, performed in its handler on the signal |
 | `cpt-cf-settings-service-nfr-reliability-validated-set` | Durable `change_set_await_records` are the delivery queue — deliver-until-ack, with wait-for-all outcome resolution and no deadline |
 | `cpt-cf-settings-service-nfr-performance-read-cache` | `cache_invalidate` is published inline and best-effort; a missed broadcast self-heals inside `cache_ttl_seconds`, so coherence never depends on durable delivery |
-| `cpt-cf-settings-service-nfr-ops-set-monitoring` | Per-administrator failure surfaces through the back-response and `event_activation_failed`; the aggregate operator signal stays with DESIGN.md |
+| `cpt-cf-settings-service-nfr-ops-set-monitoring` | Per-administrator failure surfaces through the back-response and `event_value_change_failed`; the aggregate operator signal stays with DESIGN.md |
 
 #### NFR Allocation
 
@@ -203,7 +203,7 @@ C4Container
 
 ### 2.1 Goals
 
-- **Consumer notification per change set (filtered)** — `change_notification { change_set_id, tenant, changed_keys: [key] }`, delivered **per subscriber**, carrying **only the changed keys that subscriber is subscribed to** (never the full change set). One message per change set per subscriber, so a consumer batch-reacts without re-subscribing or polling. `tenant` absent ⇒ platform-wide. Keys are the settings' GTS **instance** ids `<value-type>~<instance-id>` — referenceable by construction; **only the value type (left half) is registered**, the setting itself is not (DESIGN.md §4.7). No `change_kind` — consumers re-read anyway.
+- **Consumer notification per change set (filtered)** — `change_notification { change_set_id, tenant, changed_keys: [key] }`, delivered **per subscriber**, carrying **only the changed keys that subscriber is subscribed to** (never the full change set). One message per change set per subscriber, so a consumer batch-reacts without re-subscribing or polling. `tenant` is always present — the root tenant's id at platform scope (DESIGN.md §4.7). Keys are the settings' GTS **instance** ids `<value-type>~<instance-id>` — referenceable by construction; **only the value type (left half) is registered**, the setting itself is not (DESIGN.md §4.7). No `change_kind` — consumers re-read anyway.
 - **Replica cache invalidation (broadcast)** — `cache_invalidate { change_set_id, tenant, changed_keys: [key] }`, published once per change set to **all** Settings Service replicas (no subscription, no ack), carrying the full changed-key set so every replica evicts its cached `(key, tenant)` entries (§4.2 *Cache Invalidation Broadcast*).
 - **Immutable change set** — the settings changed by a single `set` are stored immediately (effective on read) and then reconciled as one unit. The bundle's expected values are **fixed at write time**; to change a value the administrator sets it again, producing a **new** change set.
 - **Per-setting subscription** — a consumer subscribes, in its own name, to the **specific setting keys** it must actively activate (not merely pull). Subscription implies **acknowledged delivery** for those keys (§4.2 *Subscription Manager*).
@@ -285,7 +285,7 @@ An `change_notification` carries **only the subscriber's own subscribed changed 
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-constraint-activation-tenant-in-payload`
 
-Both events include the `tenant` the change applies to (absent ⇒ platform-wide), so consumers can correctly resolve tenant lineage if they care about cascading, and replicas evict the right scope.
+Both events include the `tenant` the change applies to, so consumers can correctly resolve tenant lineage if they care about cascading, and replicas evict the right scope. It is **always present**: platform scope is the **root tenant's id**, an ordinary tenant id, not an absent one (DESIGN.md §4.7).
 
 #### No settings value in a notification payload
 
@@ -314,7 +314,7 @@ Reconciliation waits until **every** await-record resolves; there is **no TTL**.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `change_set_id` | UUID | Yes | The `set` request (DESIGN.md §4.2 *Value Writer*) whose changes these are — correlates the signal to its cause and to response reports. |
-| `tenant` | string | No | The tenant the change applies to (`/tenants/{id}`). **Absent ⇒ the change is platform-wide.** The consumer re-reads and change sets for this tenant; it is responsible for resolving affected descendant tenants if it cares about cascading. |
+| `tenant` | string | Yes | The tenant the change applies to (`/tenants/{id}`); the **root tenant's id** for a platform-wide change (DESIGN.md §4.7). The consumer re-reads for this tenant and is responsible for resolving affected descendant tenants if it cares about cascading. |
 | `changed_keys` | `[key]` | Yes | **Only the changed setting keys that the receiving subscriber is subscribed to** (GTS instance ids; no operation type) — never the full change set. Delivered per subscriber, so each consumer sees a bundle scoped to its own subscriptions. Consumer already re-reads; operation type is not needed. |
 
 **Invariant:** the payload never contains values or secrets, and never keys the subscriber did not subscribe to. A consumer that needs values re-reads them via `SettingsReaderClient` (DESIGN.md §4.5), which resolves effective values for the given `tenant`.
@@ -324,7 +324,7 @@ Reconciliation waits until **every** await-record resolves; there is **no TTL**.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `change_set_id` | UUID | Yes | The change set that changed the values. |
-| `tenant` | string | No | The tenant of the change (absent ⇒ platform-wide). Replicas evict this scope and, for `cascading` keys, affected descendant tenants. |
+| `tenant` | string | Yes | The tenant of the change; the **root tenant's id** for a platform-wide change (DESIGN.md §4.7). Replicas evict this scope and, for `cascading` keys, affected descendant tenants. |
 | `changed_keys` | `[key]` | Yes | The **full** set of changed keys for the change set. Sent only to the trusted Settings Service replica set (§4.2 *Cache Invalidation Broadcast*) — never to external consumers. |
 
 **Invariant:** carries identifiers only (no values/secrets). Consumed unconditionally by every replica; there is no subscription and no acknowledgement.
@@ -336,7 +336,7 @@ Reconciliation waits until **every** await-record resolves; there is **no TTL**.
 | `change_set_id` | UUID | Yes | The change set this response answers. |
 | `subscriber` | string | Yes | Consumer identity (gear/module namespace) that reacted. |
 | `key` | string | Yes | The changed setting (GTS instance id) this response answers. Together with `subscriber` and `change_set_id` it identifies the **await-record**; a consumer emits one response per changed setting it is subscribed to. |
-| `tenant` | string | No | The tenant the consumer applied the change for (echoed from the notification; absent ⇒ platform-wide). Lets the system verify against the tenant-scoped effective value. |
+| `tenant` | string | Yes | The tenant the consumer applied the change for, echoed from the notification. Lets the system verify against the tenant-scoped effective value. |
 | `status` | `ResponseStatus` | Yes | `success` / `failed`. |
 | `applied_value` | string | Conditional | **Required when `status = success`**; absent when `status = failed`. The value the consumer applied for `key` at `tenant` — the **plaintext value** for non-secret settings, or a **hash** for secret-valued settings (plaintext never leaves the consumer). The Settings Service verifies it against the expected value **snapshotted at write time** for the await-record (§4.2 *Change Set Publisher*; comparing hashes for secrets); a value that does **not** match makes the record **failed** even when `status = success`, and a `success` that omits it cannot be verified at all, so it resolves the record **failed** too (§4.2 *Change Set Outcome Tracker*). |
 | `detail` | string | No | Failure detail when `status = failed` (e.g., which specific reason the setting failed to apply). |
@@ -377,7 +377,7 @@ One row per **(change set, subscriber, key)** the change set must hear back on. 
 |-------|------|----------|-------------|
 | `id` | UUID | Yes | Tracker id (UUIDv7). |
 | `change_set_id` | UUID | Yes | The change set being tracked. |
-| `tenant` | string | No | The tenant of the change set (absent ⇒ platform-wide). |
+| `tenant` | string | Yes | The tenant of the change set; the **root tenant's id** for a platform-wide change set (DESIGN.md §4.7). |
 | `subscribers_at_publish_time` | `[subscriber]` | Yes | List of subscribers to the changed keys (resolved at publish time; captured for auditability). |
 | `expected_records` | integer | Yes | Count of **await-records** the change set must hear back on (changed keys × subscribers subscribed to those keys). Computed on demand. |
 | `resolved_records` | integer | Yes | Count of await-records in a **terminal** state (`succeeded` / `failed` / `superseded` / `cancelled`) — a `superseded` record (like a `cancelled` one) is resolved without its own response. Computed on demand (see the note above), not stored. |
@@ -610,7 +610,7 @@ Canonical definitions; the [Settings Service](./DESIGN.md) publishes and consume
 
 | Event | Attributes | Notes |
 |-------|-----------|-------|
-| `settings.change_notification` | `change_set_id`, `tenant`, `subject_type?`, `subject_id?`, `changed_keys: [key]` | Published **per subscriber** with **only that subscriber's subscribed changed keys** — never the full change set. `tenant` absent ⇒ platform-wide. **No values, no secrets.** (Re-)delivered from a subscriber's `awaiting` await-records until acked by the delivery loop (§4.2 *Event Broker Client*), which subsumes restart re-publish. Drives consumer re-read + per-setting ack. |
+| `settings.change_notification` | `change_set_id`, `tenant`, `subject_type?`, `subject_id?`, `changed_keys: [key]` | Published **per subscriber** with **only that subscriber's subscribed changed keys** — never the full change set. `tenant` is always present (the root tenant's id at platform scope). **No values, no secrets.** (Re-)delivered from a subscriber's `awaiting` await-records until acked by the delivery loop (§4.2 *Event Broker Client*), which subsumes restart re-publish. Drives consumer re-read + per-setting ack. |
 | `settings.cache_invalidate` | `change_set_id`, `tenant`, `subject_type?`, `subject_id?`, `changed_keys: [key]` | Published **inline at the write, best-effort**, as a broadcast to every Settings Service replica, carrying the **full** changed-key set. **No values, no secrets.** No subscription, no acknowledgement, **no durable queue** — every replica evicts; a miss self-heals within `cache_ttl_seconds` (§4.2 *Cache Invalidation Broadcast*, §7 *NFR Mapping*). Internal/trusted recipients only. |
 | `settings.activation_success` / `settings.activation_failed` | `change_set_id`, `tenant`, `subject_type?`, `subject_id?`, `subscriber`, `key`, `applied_value`, `detail?` | Emitted by consumers **per changed setting** after reacting, carrying the **applied value (hash for secrets)**. Resolves the await-record and drives the `success`/`failed`/`superseded` bundle outcome (wait-for-all); verified against the expected value **snapshotted at write time** (§4.2 *Change Set Publisher*) (a mismatch is a failure even on `activation_success`). |
 
@@ -728,7 +728,7 @@ Per-change-set metadata only. **No stored counters and no stored `overall_status
 | `id` | UUID | No | auto | **PK** |
 | `change_set_id` | UUID | No | — | Correlation id → the `set` request (no DB FK) |
 | `settle_seq` | BIGSERIAL | No | auto | **Monotonic settle order** — the ordering key for supersession (§4.1, §4.2 *Change Set Outcome Tracker*). Assigned in the bookkeeping transaction, i.e. after the change set has settled |
-| `tenant` | text | Yes | — | Null ⇒ platform-wide |
+| `tenant` | text | No | — | The change set's tenant; the **root tenant's id** for a platform-wide change set (DESIGN.md §4.7), never `NULL` |
 | `subscribers_at_publish_time` | JSONB | No | — | Snapshot of the subscribers resolved at publish (audit) |
 | `created_at` | timestamptz | No | now | |
 
@@ -755,7 +755,7 @@ The load-bearing per-`(change_set_id, subscriber, key)` state. Created at publis
 | `last_notified_at` | timestamptz | Yes | — | When the delivery loop last published `change_notification` for this record; drives the `redeliver_interval_seconds` backoff (§4.2 *Event Broker Client*). `NULL` until first delivery. Written by the replica holding the scan's advisory lock, so no second replica is reading it concurrently and the read-then-write is not a race (*Why only one replica scans at a time*) |
 | `created_at` | timestamptz | No | now | |
 
-**Indexes:** unique `uq_await_record` on **`(change_set_id, subscriber, key)`** — `tenant` is **not a column here** (it lives on the per-change-set row), so there is no nullable column in the unique key and PostgreSQL's NULL-distinct duplicate-row trap cannot occur; `idx_await_change_set` on `change_set_id`; partial `idx_await_awaiting` on `(subscriber, key)` `WHERE status = 'awaiting'` (supersession / value-match lookup **and the delivery-loop scan**; `tenant` is applied by joining `change_set_tracker` on `change_set_id`).
+**Indexes:** unique `uq_await_record` on **`(change_set_id, subscriber, key)`** — `tenant` is **not a column here** — it lives on the per-change-set row, so it is stored once per change set rather than repeated on every await-record; `idx_await_change_set` on `change_set_id`; partial `idx_await_awaiting` on `(subscriber, key)` `WHERE status = 'awaiting'` (supersession / value-match lookup **and the delivery-loop scan**; `tenant` is applied by joining `change_set_tracker` on `change_set_id`).
 
 ### 4.8 Security & Authorization
 
@@ -843,7 +843,7 @@ All metrics exposed as Prometheus scrape targets.
 - **Cache staleness bound:** ≤ `cache_ttl_seconds` (owned by the cache components — DESIGN.md §4.2 *Cache & Invalidation* / DESIGN.md §4.5 — not by this design; default 30s) even if a `cache_invalidate` broadcast is missed.
 - **Multi-replica coherence:** no replica serves a value staler than TTL after a change set.
 - **Signal ordering:** every signal is published **after** the value's durable commit (§4.2 *Cache Invalidation Broadcast*; DESIGN.md §4.2 *Value Writer* commit → evict → publish), so no recipient ever observes a signal for an unstored value.
-- **Write-failure visibility:** per-administrator failure notification is this design's back-response/`event_activation_failed` path; the **aggregate** operator-facing signal — write-failure-rate on the shared platform dashboards plus an alert-routing rule for platform-wide conditions — is owned by the settings-service design (§7 *Feature Metrics* / DESIGN.md §7 *NFR Mapping & Scale Model* there), since it derives from write outcomes rather than activation outcomes.
+- **Write-failure visibility:** per-administrator failure notification is this design's back-response/`event_value_change_failed` path (DESIGN.md §4.4); the **aggregate** operator-facing signal — write-failure-rate on the shared platform dashboards plus an alert-routing rule for platform-wide conditions — is owned by the settings-service design (§7 *Feature Metrics* / DESIGN.md §7 *NFR Mapping & Scale Model* there), since it derives from write outcomes rather than activation outcomes.
 
 ### Testing Architecture
 
@@ -896,7 +896,7 @@ All metrics exposed as Prometheus scrape targets.
 | Concurrent replicas do not duplicate | Two loops attempt the same tick at once | One acquires the advisory lock and scans; the other's attempt returns contention and it skips the tick without waiting. Each record is published **exactly once** per interval |
 | Bundle tracker creation | Change set published | One await-record per (change set, subscription); `expected_records` = record count |
 | Per-record response tracking | Seed change set + responses | `succeeded_records` / `failed_records` / `superseded_records` reflect the record statuses; `overall_status` computed on demand (wait-for-all) |
-| Response idempotency | Duplicate back-response (incl. platform-wide `tenant = NULL`) | `uq_await_record` on `(change_set_id, subscriber, key)` — at-most-once; NULL-tenant duplicates blocked |
+| Response idempotency | Duplicate back-response (including one at platform scope) | `uq_await_record` on `(change_set_id, subscriber, key)` — at-most-once |
 | Subscription idempotency | Re-register same `(subscriber, key)` | `uq_sub_subscriber_key` — no duplicate |
 
 #### Level 3: API Tests (REST Layer)
