@@ -9,6 +9,84 @@ release-plz updates this file in the Release PR.
 
 ## [Unreleased]
 
+## [0.2.30](https://github.com/constructorfabric/gears-rust/compare/cf-gears-authn-resolver-v0.2.29...cf-gears-authn-resolver-v0.2.30) - 2026-08-26
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit-security, cf-gears-toolkit, cf-gears-types-registry, cf-gears-authn-resolver-sdk
+
+## [0.3.30](https://github.com/constructorfabric/gears-rust/compare/cf-gears-authn-resolver-sdk-v0.3.29...cf-gears-authn-resolver-sdk-v0.3.30) - 2026-08-26
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit-security, cf-gears-toolkit
+
+## [0.4.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-oagw-v0.4.1...cf-gears-oagw-v0.4.2) - 2026-08-26
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit-security, cf-gears-toolkit, cf-gears-toolkit, cf-gears-toolkit-http, cf-gears-tenant-resolver-sdk, cf-gears-authz-resolver-sdk, cf-gears-types-registry, cf-gears-authz-resolver, cf-gears-tenant-resolver, cf-gears-credstore-sdk, cf-gears-credstore-sdk, cf-gears-credstore, cf-gears-oagw-sdk, cf-gears-toolkit-auth
+
+## [0.5.10](https://github.com/constructorfabric/gears-rust/compare/cf-gears-oagw-sdk-v0.5.9...cf-gears-oagw-sdk-v0.5.10) - 2026-08-26
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit-security
+
+## [0.3.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-credstore-v0.3.1...cf-gears-credstore-v0.3.2) - 2026-08-26
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit-security, cf-gears-toolkit-db, cf-gears-toolkit-db, cf-gears-toolkit, cf-gears-tenant-resolver-sdk, cf-gears-authz-resolver-sdk, cf-gears-types-registry, cf-gears-authz-resolver, cf-gears-tenant-resolver, cf-gears-credstore-sdk
+
+## [0.2.10](https://github.com/constructorfabric/gears-rust/compare/cf-gears-credstore-sdk-v0.2.9...cf-gears-credstore-sdk-v0.2.10) - 2026-08-26
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit-security, cf-gears-toolkit, cf-gears-tenant-resolver-sdk
+
+## [0.1.34](https://github.com/constructorfabric/gears-rust/compare/cf-gears-tenant-resolver-v0.1.33...cf-gears-tenant-resolver-v0.1.34) - 2026-08-26
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit-security, cf-gears-toolkit, cf-gears-tenant-resolver-sdk, cf-gears-types-registry
+
+## [0.2.8](https://github.com/constructorfabric/gears-rust/compare/cf-gears-resource-group-sdk-v0.2.7...cf-gears-resource-group-sdk-v0.2.8) - 2026-08-26
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit-security
+
+## [0.1.38](https://github.com/constructorfabric/gears-rust/compare/cf-gears-authz-resolver-v0.1.37...cf-gears-authz-resolver-v0.1.38) - 2026-08-26
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit, cf-gears-authz-resolver-sdk, cf-gears-types-registry
+
+## [0.1.36](https://github.com/constructorfabric/gears-rust/compare/cf-gears-types-registry-v0.1.35...cf-gears-types-registry-v0.1.36) - 2026-08-26
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit
+
+## [0.3.22](https://github.com/constructorfabric/gears-rust/compare/cf-gears-authz-resolver-sdk-v0.3.21...cf-gears-authz-resolver-sdk-v0.3.22) - 2026-08-26
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit-security, cf-gears-toolkit, cf-gears-tenant-resolver-sdk
+
+## [0.6.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-account-management-sdk-v0.6.0...cf-gears-account-management-sdk-v0.6.1) - 2026-08-26
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit-security, cf-gears-toolkit, cf-gears-tenant-resolver-sdk
+
+## [0.3.22](https://github.com/constructorfabric/gears-rust/compare/cf-gears-tenant-resolver-sdk-v0.3.21...cf-gears-tenant-resolver-sdk-v0.3.22) - 2026-08-26
+
+### Other
+
+- updated the following local packages: cf-gears-toolkit-security, cf-gears-toolkit
+
 ### Fixed
 
 - Documented that OoP HTTP bootstrap `oop_http.allow_loopback_advertise` **defaults to `false`**. A loopback
