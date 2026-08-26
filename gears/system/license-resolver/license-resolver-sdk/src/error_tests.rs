@@ -104,18 +104,32 @@ fn unauthorized_maps_to_permission_denied() {
 #[test]
 fn invalid_request_maps_to_invalid_argument_400() {
     let err = LicenseResolverError::InvalidRequest {
-        violations: vec![FieldViolation::new(
-            "subject/type",
-            "contract type is required",
-            "MISSING_DOMAIN_TYPE",
-        )],
+        violations: vec![
+            FieldViolation::new(
+                "subject/type",
+                "contract type is required",
+                "MISSING_DOMAIN_TYPE",
+            ),
+            FieldViolation::new(
+                "resource/type",
+                "contract type is required",
+                "MISSING_DOMAIN_TYPE",
+            ),
+        ],
     };
     let canonical: CanonicalError = err.into();
     assert_eq!(canonical.status_code(), 400);
     assert!(canonical.gts_type().contains("invalid_argument"));
 
     let problem = Problem::from_error(&canonical).expect("problem renders");
-    assert_eq!(problem.status, 400);
+    assert_eq!(problem.status, Some(400));
+    let wire = serde_json::to_value(&problem).unwrap();
+    assert_eq!(
+        wire.pointer("/context/field_violations/1/field")
+            .and_then(|v| v.as_str()),
+        Some("resource/type"),
+        "violations after the first must be folded onto the builder: {wire:#}"
+    );
 }
 
 #[test]

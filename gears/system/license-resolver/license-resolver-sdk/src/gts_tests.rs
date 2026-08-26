@@ -84,6 +84,44 @@ fn plugin_spec_derives_from_toolkit_plugin_base() {
     );
 }
 
+/// Exercises the inventory `schema_fn` closures the macro registers — the
+/// registry path a Gear host reads, distinct from the direct accessors the
+/// other tests call.
+#[test]
+fn inventory_registers_a_valid_schema_for_every_sdk_type() {
+    let schemas = toolkit_gts::all_inventory_type_schemas()
+        .expect("every registered schema_fn must render valid JSON");
+    let ids: Vec<&str> = toolkit_gts::inventory::iter::<toolkit_gts::InventoryTypeSchema>
+        .into_iter()
+        .map(|e| e.type_id)
+        .collect();
+    for type_id in [
+        LicenseSubjectV1::<()>::TYPE_ID,
+        LicenseResourceV1::<()>::TYPE_ID,
+        LicenseResolverPluginSpecV1::TYPE_ID,
+    ] {
+        assert!(
+            ids.contains(&type_id),
+            "{type_id} not registered; got ids: {ids:?}"
+        );
+    }
+    assert_eq!(
+        schemas.len(),
+        ids.len(),
+        "every registered entry must render a schema"
+    );
+}
+
+/// The GTS store rejects an `x-gts-traits-schema` with no values in the
+/// derivation chain, so the abstract base must declare the trait defaults.
+#[test]
+fn resource_base_declares_empty_admitted_subjects_trait_default() {
+    assert_eq!(
+        LicenseResourceV1::<()>::gts_traits(),
+        Some(json!({ "admitted_subjects": [] }))
+    );
+}
+
 #[test]
 fn base_types_are_abstract() {
     for schema in [subject_schema(), resource_schema()] {
