@@ -2898,6 +2898,7 @@ impl HttpCache for SeaOrmHttpCache {
             body: m.body,
             etag: m.etag,
             last_modified: m.last_modified,
+            next_page: m.next_page,
         }))
     }
 
@@ -2918,6 +2919,7 @@ impl HttpCache for SeaOrmHttpCache {
             etag: ActiveValue::Set(entry.etag.clone()),
             last_modified: ActiveValue::Set(entry.last_modified.clone()),
             body: ActiveValue::Set(entry.body.clone()),
+            next_page: ActiveValue::Set(entry.next_page.clone()),
             fetched_at: ActiveValue::Set(now_rfc3339()),
         };
 
@@ -2930,6 +2932,7 @@ impl HttpCache for SeaOrmHttpCache {
             http_cache::Column::Etag,
             http_cache::Column::LastModified,
             http_cache::Column::Body,
+            http_cache::Column::NextPage,
             http_cache::Column::FetchedAt,
         ])
         .map_err(map_scope_error)?;

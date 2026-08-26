@@ -1089,3 +1089,53 @@ async fn a_stored_etag_turns_the_next_sync_into_a_free_304() {
         .expect("forced fetch");
     first.assert_calls_async(2).await;
 }
+
+#[tokio::test]
+async fn a_listing_follows_the_link_header_past_the_first_page() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/rust-lang/rust");
+            then.status(200).json_body(gh_repo_json());
+        })
+        .await;
+
+    let page_two = format!("{}/repos/rust-lang/rust/labels?page=2", server.base_url());
+    let first = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/labels")
+                .query_param_exists("per_page");
+            then.status(200)
+                .header("link", format!("<{page_two}>; rel=\"next\""))
+                .json_body(gh_labels_json());
+        })
+        .await;
+    let second = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/labels")
+                .query_param("page", "2");
+            then.status(200).json_body(json!([{
+                "id": 9_001, "name": "from-page-two", "color": "ffffff", "description": null
+            }]));
+        })
+        .await;
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let mut scope = repo_only_scope();
+    scope.objects.labels = true;
+
+    let fetched = client
+        .fetch_repository("rust-lang", "rust", &opts(scope))
+        .await
+        .expect("fetch must succeed");
+
+    first.assert_calls_async(1).await;
+    second.assert_calls_async(1).await;
+    assert!(
+        fetched.labels.iter().any(|l| l.name == "from-page-two"),
+        "the second page must be merged into the result, got {:?}",
+        fetched.labels.iter().map(|l| &l.name).collect::<Vec<_>>()
+    );
+}

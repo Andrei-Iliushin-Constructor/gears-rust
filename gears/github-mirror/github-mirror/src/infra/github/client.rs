@@ -15,8 +15,11 @@ use crate::domain::repo::{
 };
 use crate::domain::scope::CollectionMode;
 use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache, NoCache};
+use crate::infra::github::pagination::parse_link_next;
 
-const FIRST_PAGE_SIZE: u32 = 50;
+/// Items asked for per request. GitHub's maximum, so a listing of a given
+/// size costs the fewest requests.
+const FIRST_PAGE_SIZE: u32 = 100;
 /// GitHub serves reviews and changed files only per pull request, so
 /// sync-lite fetches them for the first few pulls of the page to keep the
 /// call count bounded.
@@ -32,13 +35,22 @@ const PER_RUN_SYNC_CAP: usize = 10;
 const PER_ISSUE_SYNC_CAP: usize = 10;
 const ACCEPT_JSON: &str = "application/vnd.github+json";
 
+/// Most pages one listing will walk before giving up.
+///
+/// A stopgap: the sync is still a single inline pass, so an unbounded walk of
+/// a large repository would run for hours. The scheduler replaces this with
+/// per-task budgeting (#4632 slice 5).
+const MAX_PAGES: usize = 10;
+
 const USER_AGENT: &str = concat!("cf-gears-github-mirror/", env!("CARGO_PKG_VERSION"));
 
-/// Minimal GitHub REST client — increment 1 of gears-rust#4630.
-///
-/// No conditional requests, pagination, or rate-limit admission yet; those
-/// arrive as #4630 completes. The token comes from gear config as a temporary
-/// shortcut until credstore integration (#4534).
+/// The `rel="next"` URL from a response's `Link` header, if it advertises one.
+fn next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    header_string(headers, "link")
+        .as_deref()
+        .and_then(parse_link_next)
+}
+
 /// One response header as an owned string, when it is present and printable.
 fn header_string(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
     headers
@@ -47,6 +59,11 @@ fn header_string(headers: &reqwest::header::HeaderMap, name: &str) -> Option<Str
         .map(ToOwned::to_owned)
 }
 
+/// GitHub REST client for the mirror (gears-rust#4630).
+///
+/// Conditional requests and `Link`-header pagination are in; per-token
+/// rate-limit admission is not. The token comes from gear config as a
+/// temporary shortcut until credstore integration (#4534).
 pub struct GithubClient {
     http: reqwest::Client,
     api_base_url: String,
@@ -128,6 +145,79 @@ impl GithubClient {
         }
     }
 
+    /// One response: what it parsed to, plus the `rel="next"` URL if the list
+    /// continues.
+    async fn get_page<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        options: &FetchOptions,
+    ) -> Result<(T, Option<String>), DomainError> {
+        let key = CacheKey::compute("GET", url, ACCEPT_JSON);
+        let cached = self.cached_entry(options, url, &key).await;
+        let request = self.conditional_request(url, cached.as_ref());
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| DomainError::internal(format!("GitHub request failed: {e}")))?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_MODIFIED {
+            return Self::serve_from_cache(url, cached.as_ref(), response.headers());
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(DomainError::NotFound);
+        }
+        if !status.is_success() {
+            return Err(DomainError::internal(format!(
+                "GitHub responded with {status} for {url}"
+            )));
+        }
+
+        let etag = header_string(response.headers(), "etag");
+        let last_modified = header_string(response.headers(), "last-modified");
+        let next_page = next_link(response.headers());
+        let entry = CachedResponse {
+            body: response
+                .text()
+                .await
+                .map_err(|e| DomainError::internal(format!("GitHub response read failed: {e}")))?,
+            etag,
+            last_modified,
+            next_page,
+        };
+
+        let parsed = serde_json::from_str(&entry.body)
+            .map_err(|e| DomainError::internal(format!("GitHub response decode failed: {e}")))?;
+        let next = entry.next_page.clone();
+        self.remember(options, url, &key, entry).await;
+        Ok((parsed, next))
+    }
+
+    /// Serve a `304` from the stored entry.
+    ///
+    /// The `Link` header on the `304` wins when GitHub sends one; otherwise the
+    /// entry's stored `next` is used, because losing it would silently truncate
+    /// the listing to the pages already walked.
+    fn serve_from_cache<T: serde::de::DeserializeOwned>(
+        url: &str,
+        cached: Option<&CachedResponse>,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Result<(T, Option<String>), DomainError> {
+        let entry = cached.ok_or_else(|| {
+            DomainError::internal(format!("GitHub answered 304 for {url} with nothing cached"))
+        })?;
+        tracing::debug!(%url, "304 Not Modified - served from cache, no quota spent");
+
+        let parsed = serde_json::from_str(&entry.body).map_err(|e| {
+            DomainError::internal(format!(
+                "cached GitHub body for {url} no longer parses: {e}"
+            ))
+        })?;
+        let next = next_link(headers).or_else(|| entry.next_page.clone());
+        Ok((parsed, next))
+    }
+
     /// GET `path`, revalidating against the cache when possible.
     ///
     /// A stored `ETag` is replayed as `If-None-Match`; GitHub answers `304`
@@ -139,54 +229,43 @@ impl GithubClient {
         options: &FetchOptions,
     ) -> Result<T, DomainError> {
         let url = format!("{}{path}", self.api_base_url.trim_end_matches('/'));
-        let key = CacheKey::compute("GET", &url, ACCEPT_JSON);
-
-        let cached = self.cached_entry(options, &url, &key).await;
-        let request = self.conditional_request(&url, cached.as_ref());
-
-        let response = request
-            .send()
-            .await
-            .map_err(|e| DomainError::internal(format!("GitHub request failed: {e}")))?;
-
-        let status = response.status();
-        if status == reqwest::StatusCode::NOT_MODIFIED {
-            let entry = cached.ok_or_else(|| {
-                DomainError::internal(format!(
-                    "GitHub answered 304 for {path} with nothing cached"
-                ))
-            })?;
-            tracing::debug!(%url, "304 Not Modified - served from cache, no quota spent");
-            return serde_json::from_str(&entry.body).map_err(|e| {
-                DomainError::internal(format!(
-                    "cached GitHub body for {path} no longer parses: {e}"
-                ))
-            });
-        }
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(DomainError::NotFound);
-        }
-        if !status.is_success() {
-            return Err(DomainError::internal(format!(
-                "GitHub responded with {status} for {path}"
-            )));
-        }
-
-        let etag = header_string(response.headers(), "etag");
-        let last_modified = header_string(response.headers(), "last-modified");
-        let entry = CachedResponse {
-            body: response
-                .text()
-                .await
-                .map_err(|e| DomainError::internal(format!("GitHub response read failed: {e}")))?,
-            etag,
-            last_modified,
-        };
-
-        let parsed = serde_json::from_str(&entry.body)
-            .map_err(|e| DomainError::internal(format!("GitHub response decode failed: {e}")))?;
-        self.remember(options, &url, &key, entry).await;
+        let (parsed, _) = self.get_page(&url, options).await?;
         Ok(parsed)
+    }
+
+    /// GET `path` and every page after it, concatenated.
+    ///
+    /// Follows the `Link` header's `rel="next"` until it stops appearing or
+    /// [`MAX_PAGES`] is reached. Without this a listing is silently truncated
+    /// to whatever fits in one page, which is the single most misleading way a
+    /// mirror can be wrong.
+    async fn get_json_all<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        options: &FetchOptions,
+    ) -> Result<Vec<T>, DomainError> {
+        let mut url = format!("{}{path}", self.api_base_url.trim_end_matches('/'));
+        let mut items: Vec<T> = Vec::new();
+
+        for page in 1..=MAX_PAGES {
+            let (mut batch, next): (Vec<T>, _) = self.get_page(&url, options).await?;
+            items.append(&mut batch);
+
+            let Some(next) = next else {
+                return Ok(items);
+            };
+            if page == MAX_PAGES {
+                tracing::warn!(
+                    %url,
+                    pages = MAX_PAGES,
+                    "page cap reached; the listing is truncated"
+                );
+                return Ok(items);
+            }
+            url = next;
+        }
+
+        Ok(items)
     }
 
     /// Store a fresh response so the next request can revalidate it.
@@ -1211,7 +1290,7 @@ impl GithubClient {
             }
 
             let statuses: Vec<GhCommitStatus> = self
-                .get_json(
+                .get_json_all(
                     &format!(
                         "/repos/{owner}/{name}/commits/{}/statuses?per_page={FIRST_PAGE_SIZE}",
                         commit.sha
@@ -1262,7 +1341,7 @@ impl GithubClient {
         let mut timeline: Vec<IssueTimelineEventRecord> = Vec::new();
         for issue in issues.iter().take(PER_ISSUE_SYNC_CAP) {
             let entries: Vec<serde_json::Value> = self
-                .get_json(
+                .get_json_all(
                     &format!(
                         "/repos/{owner}/{name}/issues/{}/timeline?per_page={FIRST_PAGE_SIZE}",
                         issue.number
@@ -1291,7 +1370,7 @@ impl GithubClient {
         let mut reactions: Vec<IssueReactionRecord> = Vec::new();
         for issue in issues.iter().take(PER_ISSUE_SYNC_CAP) {
             let page: Vec<GhIssueReaction> = self
-                .get_json(
+                .get_json_all(
                     &format!(
                         "/repos/{owner}/{name}/issues/{}/reactions?per_page={FIRST_PAGE_SIZE}",
                         issue.number
@@ -1359,19 +1438,19 @@ impl GithubClient {
         }
 
         let issues: Vec<GhIssue> = self
-            .get_json(
+            .get_json_all(
                 &format!("/repos/{owner}/{name}/issues?state=all&per_page={FIRST_PAGE_SIZE}"),
                 options,
             )
             .await?;
         let comments: Vec<GhComment> = self
-            .get_json(
+            .get_json_all(
                 &format!("/repos/{owner}/{name}/issues/comments?per_page={FIRST_PAGE_SIZE}"),
                 options,
             )
             .await?;
         let issue_events: Vec<GhIssueEvent> = self
-            .get_json(
+            .get_json_all(
                 &format!("/repos/{owner}/{name}/issues/events?per_page={FIRST_PAGE_SIZE}"),
                 options,
             )
@@ -1420,13 +1499,13 @@ impl GithubClient {
         }
 
         let pulls: Vec<GhPullRequest> = self
-            .get_json(
+            .get_json_all(
                 &format!("/repos/{owner}/{name}/pulls?state=all&per_page={FIRST_PAGE_SIZE}"),
                 options,
             )
             .await?;
         let review_comments: Vec<GhReviewComment> = self
-            .get_json(
+            .get_json_all(
                 &format!("/repos/{owner}/{name}/pulls/comments?per_page={FIRST_PAGE_SIZE}"),
                 options,
             )
@@ -1475,13 +1554,13 @@ impl GithubClient {
         }
 
         let commits: Vec<GhCommit> = self
-            .get_json(
+            .get_json_all(
                 &format!("/repos/{owner}/{name}/commits?per_page={FIRST_PAGE_SIZE}"),
                 options,
             )
             .await?;
         let commit_comments: Vec<GhCommitComment> = self
-            .get_json(
+            .get_json_all(
                 &format!("/repos/{owner}/{name}/comments?per_page={FIRST_PAGE_SIZE}"),
                 options,
             )
@@ -1525,7 +1604,7 @@ impl GithubClient {
 
         if options.scope.objects.labels {
             let labels: Vec<GhLabel> = self
-                .get_json(
+                .get_json_all(
                     &format!("/repos/{owner}/{name}/labels?per_page={FIRST_PAGE_SIZE}"),
                     options,
                 )
@@ -1538,7 +1617,7 @@ impl GithubClient {
 
         if options.scope.objects.milestones {
             let milestones: Vec<GhMilestone> = self
-                .get_json(
+                .get_json_all(
                     &format!(
                         "/repos/{owner}/{name}/milestones?state=all&per_page={FIRST_PAGE_SIZE}"
                     ),
@@ -1553,7 +1632,7 @@ impl GithubClient {
 
         if options.scope.objects.releases {
             let releases: Vec<GhRelease> = self
-                .get_json(
+                .get_json_all(
                     &format!("/repos/{owner}/{name}/releases?per_page={FIRST_PAGE_SIZE}"),
                     options,
                 )
@@ -1566,7 +1645,7 @@ impl GithubClient {
 
         if options.scope.objects.branches {
             let branches: Vec<GhBranch> = self
-                .get_json(
+                .get_json_all(
                     &format!("/repos/{owner}/{name}/branches?per_page={FIRST_PAGE_SIZE}"),
                     options,
                 )
@@ -1577,7 +1656,7 @@ impl GithubClient {
                 .collect();
 
             let tags: Vec<GhTag> = self
-                .get_json(
+                .get_json_all(
                     &format!("/repos/{owner}/{name}/tags?per_page={FIRST_PAGE_SIZE}"),
                     options,
                 )
@@ -1587,7 +1666,7 @@ impl GithubClient {
 
         if options.scope.objects.contributors {
             let contributors: Vec<GhContributor> = self
-                .get_json(
+                .get_json_all(
                     &format!("/repos/{owner}/{name}/contributors?per_page={FIRST_PAGE_SIZE}"),
                     options,
                 )
@@ -1620,7 +1699,7 @@ impl GithubClient {
             )
             .await?;
         let deployments: Vec<GhDeployment> = self
-            .get_json(
+            .get_json_all(
                 &format!("/repos/{owner}/{name}/deployments?per_page={FIRST_PAGE_SIZE}"),
                 options,
             )
@@ -1661,7 +1740,7 @@ impl GithubClient {
         let mut pull_request_commits: Vec<PullRequestCommitRecord> = Vec::new();
         for pull in pull_records.iter_mut().take(PER_PULL_SYNC_CAP) {
             let page: Vec<GhReview> = self
-                .get_json(
+                .get_json_all(
                     &format!(
                         "/repos/{owner}/{name}/pulls/{}/reviews?per_page={FIRST_PAGE_SIZE}",
                         pull.number
@@ -1675,7 +1754,7 @@ impl GithubClient {
             );
 
             let files: Vec<GhPullFile> = self
-                .get_json(
+                .get_json_all(
                     &format!(
                         "/repos/{owner}/{name}/pulls/{}/files?per_page={FIRST_PAGE_SIZE}",
                         pull.number
@@ -1692,7 +1771,7 @@ impl GithubClient {
             );
 
             let pull_commits: Vec<GhCommit> = self
-                .get_json(
+                .get_json_all(
                     &format!(
                         "/repos/{owner}/{name}/pulls/{}/commits?per_page={FIRST_PAGE_SIZE}",
                         pull.number

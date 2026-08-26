@@ -57,6 +57,11 @@ pub struct CachedResponse {
     pub body: String,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
+    /// `rel="next"` from the `Link` header, when the list had more pages.
+    ///
+    /// Stored because GitHub may answer a revalidation with a `304` that omits
+    /// the header, and a lost `next` link would silently truncate the listing.
+    pub next_page: Option<String>,
 }
 
 impl CachedResponse {
@@ -170,6 +175,7 @@ mod tests {
             body: "{}".to_owned(),
             etag: None,
             last_modified: None,
+            next_page: None,
         };
         assert!(!bare.is_revalidatable());
 

@@ -73,6 +73,9 @@ pub mod http_cache {
         pub last_modified: Option<String>,
         /// The response body as GitHub returned it.
         pub body: String,
+        /// `rel="next"` from the `Link` header, when the list has more pages.
+        /// Kept because a `304` may omit the header.
+        pub next_page: Option<String>,
         pub fetched_at: String,
     }
 
