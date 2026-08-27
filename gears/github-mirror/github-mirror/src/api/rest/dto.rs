@@ -264,6 +264,12 @@ pub struct ReviewCommentDto {
     pub created_at: String,
     pub updated_at: String,
     pub html_url: Option<String>,
+    /// Line position in the current diff; absent once GitHub considers the
+    /// commented-on line outdated.
+    pub position: Option<i64>,
+    /// Line position at comment-creation time — the stable anchor across
+    /// later force-pushes.
+    pub original_position: Option<i64>,
 }
 
 impl From<ReviewComment> for ReviewCommentDto {
@@ -279,6 +285,8 @@ impl From<ReviewComment> for ReviewCommentDto {
             created_at: c.created_at,
             updated_at: c.updated_at,
             html_url: c.html_url,
+            position: c.position,
+            original_position: c.original_position,
         }
     }
 }

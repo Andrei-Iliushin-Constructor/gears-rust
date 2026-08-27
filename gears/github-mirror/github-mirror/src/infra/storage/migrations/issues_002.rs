@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS gm_issues (
     repo_id BIGINT NOT NULL,
     number BIGINT NOT NULL,
     title VARCHAR(1024) NOT NULL,
-    body TEXT,
+    body MEDIUMTEXT,
     state VARCHAR(32) NOT NULL,
     is_pull_request BOOLEAN NOT NULL,
     created_at VARCHAR(64) NOT NULL,

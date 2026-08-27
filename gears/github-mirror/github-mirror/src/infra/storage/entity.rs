@@ -330,6 +330,12 @@ pub mod review_comments {
         pub created_at: String,
         pub updated_at: String,
         pub html_url: Option<String>,
+        /// Line position in the current diff. GitHub omits this once the
+        /// commented-on line is outdated by a later push.
+        pub position: Option<i64>,
+        /// Line position at comment-creation time — the stable anchor for
+        /// re-resolving where a comment pointed before later force-pushes.
+        pub original_position: Option<i64>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

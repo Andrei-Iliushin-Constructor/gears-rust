@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS gm_pull_requests (
     repo_id BIGINT NOT NULL,
     number BIGINT NOT NULL,
     title VARCHAR(1024) NOT NULL,
-    body TEXT,
+    body MEDIUMTEXT,
     state VARCHAR(32) NOT NULL,
     draft BOOLEAN NOT NULL,
     merged BOOLEAN NOT NULL,

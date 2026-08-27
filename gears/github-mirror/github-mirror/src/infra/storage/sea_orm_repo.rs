@@ -712,6 +712,8 @@ fn review_comment_active_model(
         created_at: ActiveValue::Set(r.created_at.clone()),
         updated_at: ActiveValue::Set(r.updated_at.clone()),
         html_url: ActiveValue::Set(r.html_url.clone()),
+        position: ActiveValue::Set(r.position),
+        original_position: ActiveValue::Set(r.original_position),
     }
 }
 
@@ -740,6 +742,8 @@ impl ReviewCommentRepository for SeaOrmReviewCommentRepository {
             review_comments::Column::CreatedAt,
             review_comments::Column::UpdatedAt,
             review_comments::Column::HtmlUrl,
+            review_comments::Column::Position,
+            review_comments::Column::OriginalPosition,
         ])
         .map_err(map_scope_error)?;
 
@@ -765,6 +769,8 @@ impl ReviewCommentRepository for SeaOrmReviewCommentRepository {
             created_at: record.created_at,
             updated_at: record.updated_at,
             html_url: record.html_url,
+            position: record.position,
+            original_position: record.original_position,
         })
     }
 

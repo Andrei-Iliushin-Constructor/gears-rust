@@ -120,6 +120,8 @@ impl From<review_comments::Model> for ReviewComment {
             created_at: m.created_at,
             updated_at: m.updated_at,
             html_url: m.html_url,
+            position: m.position,
+            original_position: m.original_position,
         }
     }
 }

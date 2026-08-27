@@ -177,6 +177,12 @@ pub struct ReviewComment {
     pub created_at: String,
     pub updated_at: String,
     pub html_url: Option<String>,
+    /// Line position in the current diff. `None` once GitHub considers the
+    /// commented-on line outdated (superseded by a later push).
+    pub position: Option<i64>,
+    /// Line position at comment-creation time — GitHub's own stable anchor
+    /// for resolving where a comment pointed before later force-pushes.
+    pub original_position: Option<i64>,
 }
 
 /// A mirrored GitHub pull-request review (the verdict object).

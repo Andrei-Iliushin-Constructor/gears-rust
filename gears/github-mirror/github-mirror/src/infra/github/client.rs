@@ -27,6 +27,13 @@ const PER_RUN_SYNC_CAP: usize = 10;
 /// issues of the page for the same reason.
 const PER_ISSUE_SYNC_CAP: usize = 10;
 const USER_AGENT: &str = concat!("cf-gears-github-mirror/", env!("CARGO_PKG_VERSION"));
+/// Time to establish the TCP/TLS connection to GitHub.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Time budget for one REST/GraphQL call. A sync makes ~115 of these, so an
+/// unbounded client would let one hung request stall the whole sync — this is
+/// independent of any edge-level (e.g. api-gateway) timeout the gear does not
+/// control.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(1);
 
 /// Minimal GitHub REST client — increment 1 of gears-rust#4630.
 ///
@@ -46,6 +53,8 @@ impl GithubClient {
     pub fn new(api_base_url: String, token: Option<String>) -> Result<Self, DomainError> {
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|e| DomainError::internal(format!("failed to build HTTP client: {e}")))?;
         Ok(Self {
@@ -278,6 +287,9 @@ struct GhReviewComment {
     updated_at: String,
     html_url: Option<String>,
     pull_request_url: Option<String>,
+    /// Absent once GitHub considers the commented-on line outdated.
+    position: Option<i64>,
+    original_position: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -615,6 +627,8 @@ fn review_comment_record(repo_id: i64, c: GhReviewComment) -> ReviewCommentRecor
         created_at: c.created_at,
         updated_at: c.updated_at,
         html_url: c.html_url,
+        position: c.position,
+        original_position: c.original_position,
     }
 }
 
@@ -1175,18 +1189,37 @@ impl GithubClient {
                     .map(|c| pull_request_commit_record(repo_id, pull.number, c)),
             );
 
-            let threads = self
+            // A GraphQL failure here must not veto everything already fetched for
+            // this repo (REST issues, commits, other pulls' reviews/files/commits,
+            // ...): review threads are one supplementary dataset among many, so a
+            // failure is logged and this pull's threads are left empty rather than
+            // propagated with `?`.
+            match self
                 .post_graphql(&review_threads_query(owner, name, pull.number))
-                .await?;
-            let nodes = threads["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            review_threads.extend(
-                nodes
-                    .iter()
-                    .filter_map(|n| review_thread_record(repo_id, pull.number, n)),
-            );
+                .await
+            {
+                Ok(threads) => {
+                    let nodes =
+                        threads["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                    review_threads.extend(
+                        nodes
+                            .iter()
+                            .filter_map(|n| review_thread_record(repo_id, pull.number, n)),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        owner,
+                        name,
+                        pull_number = pull.number,
+                        error = %e,
+                        "review threads (GraphQL) failed for this pull request; sync continues without them"
+                    );
+                }
+            }
         }
         Ok(PullDetails {
             reviews,

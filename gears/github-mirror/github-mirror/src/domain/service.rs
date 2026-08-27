@@ -295,6 +295,78 @@ pub struct Service<
     config: ServiceConfig,
 }
 
+/// Manual `Clone`: every field is an `Arc` (cheap refcount bump) or already
+/// `Clone` (`PolicyEnforcer`, `ServiceConfig`). A `#[derive(Clone)]` would add
+/// a spurious `T: Clone` bound to each of the 26 repository generics even
+/// though `Arc<T>: Clone` never needs one, so it is written out by hand.
+///
+/// Exists so a caller can obtain an owned handle to hand into a `'static`
+/// closure (e.g. a DB transaction) without borrowing `&self` across it.
+impl<
+    R: RepoRepository,
+    I: IssueRepository,
+    P: PullRequestRepository,
+    C: CommitRepository,
+    M: CommentRepository,
+    V: ReviewCommentRepository,
+    W: ReviewRepository,
+    L: LabelRepository,
+    N: MilestoneRepository,
+    E: ReleaseRepository,
+    B: BranchRepository,
+    O: ContributorRepository,
+    F: WorkflowRunRepository,
+    G: PullRequestFileRepository,
+    T: TagRepository,
+    D: CommitFileRepository,
+    H: ReviewThreadRepository,
+    K: CommitCommentRepository,
+    X: IssueEventRepository,
+    Y: DeploymentRepository,
+    Z: PullRequestCommitRepository,
+    S: CommitStatusRepository,
+    J: WorkflowJobRepository,
+    Q: IssueReactionRepository,
+    U: CheckRunRepository,
+    A: IssueTimelineRepository,
+> Clone for Service<R, I, P, C, M, V, W, L, N, E, B, O, F, G, T, D, H, K, X, Y, Z, S, J, Q, U, A>
+{
+    fn clone(&self) -> Self {
+        Self {
+            db: Arc::clone(&self.db),
+            repo: Arc::clone(&self.repo),
+            issues: Arc::clone(&self.issues),
+            pull_requests: Arc::clone(&self.pull_requests),
+            commits: Arc::clone(&self.commits),
+            comments: Arc::clone(&self.comments),
+            review_comments: Arc::clone(&self.review_comments),
+            reviews: Arc::clone(&self.reviews),
+            labels: Arc::clone(&self.labels),
+            milestones: Arc::clone(&self.milestones),
+            releases: Arc::clone(&self.releases),
+            branches: Arc::clone(&self.branches),
+            contributors: Arc::clone(&self.contributors),
+            workflow_runs: Arc::clone(&self.workflow_runs),
+            pull_request_files: Arc::clone(&self.pull_request_files),
+            tags: Arc::clone(&self.tags),
+            commit_files: Arc::clone(&self.commit_files),
+            review_threads: Arc::clone(&self.review_threads),
+            commit_comments: Arc::clone(&self.commit_comments),
+            issue_events: Arc::clone(&self.issue_events),
+            deployments: Arc::clone(&self.deployments),
+            pull_request_commits: Arc::clone(&self.pull_request_commits),
+            commit_statuses: Arc::clone(&self.commit_statuses),
+            workflow_jobs: Arc::clone(&self.workflow_jobs),
+            issue_reactions: Arc::clone(&self.issue_reactions),
+            check_runs: Arc::clone(&self.check_runs),
+            issue_timeline: Arc::clone(&self.issue_timeline),
+            github: Arc::clone(&self.github),
+            policy_enforcer: self.policy_enforcer.clone(),
+            config: self.config.clone(),
+        }
+    }
+}
+
 impl<
     R: RepoRepository,
     I: IssueRepository,
@@ -2883,6 +2955,15 @@ impl<
             .await
     }
 
+    /// Cheap DB reachability probe for the platform's readiness aggregation
+    /// (`RestApiCapability::healthcheck`): acquiring a pooled connection, no
+    /// query, so a routine `/readyz` poll costs nothing beyond a pool-handle
+    /// acquisition.
+    #[must_use]
+    pub(crate) fn db_reachable(&self) -> bool {
+        self.db.conn().is_ok()
+    }
+
     /// Fetch one repository from GitHub (first slice: repo + first page of
     /// issues, pull requests, and commits) and upsert it into the mirror.
     ///
@@ -2894,14 +2975,47 @@ impl<
     /// `DomainError::NotFound` when GitHub does not know the repository,
     /// `Forbidden` on PDP denial, `Internal` on GitHub/storage failures.
     // One `sync_table!` pass per mirrored table, in the order the PRD
-    // lists them.
-    #[allow(clippy::cast_possible_truncation, clippy::cognitive_complexity)]
+    // lists them. `too_many_lines` is the 26 mechanical `T: 'static` bounds
+    // the transaction closure needs below, not additional real logic.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cognitive_complexity,
+        clippy::too_many_lines
+    )]
     pub async fn sync_repository(
         &self,
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
-    ) -> Result<SyncSummary, DomainError> {
+    ) -> Result<SyncSummary, DomainError>
+    where
+        R: 'static,
+        I: 'static,
+        P: 'static,
+        C: 'static,
+        M: 'static,
+        V: 'static,
+        W: 'static,
+        L: 'static,
+        N: 'static,
+        E: 'static,
+        B: 'static,
+        O: 'static,
+        F: 'static,
+        G: 'static,
+        T: 'static,
+        D: 'static,
+        H: 'static,
+        K: 'static,
+        X: 'static,
+        Y: 'static,
+        Z: 'static,
+        S: 'static,
+        J: 'static,
+        Q: 'static,
+        U: 'static,
+        A: 'static,
+    {
         let tenant_id = ctx.subject_tenant_id();
 
         let scope = self
@@ -2915,212 +3029,251 @@ impl<
             )
             .await?;
 
+        // Two uncoordinated syncs of the same repo would interleave two
+        // different GitHub snapshots across the 26 tables, so the whole run
+        // holds a per-repo advisory lock (one non-blocking attempt): the
+        // second caller gets a conflict instead of racing. The key is
+        // tenant-scoped — tenants have separate rows, so they never contend.
+        let lock_key = format!("sync/{tenant_id}/{owner}/{name}");
+        let sync_lock = match self.db.db().lock(GEAR_NAME, &lock_key).await {
+            Ok(guard) => guard,
+            Err(toolkit_db::DbError::Lock(toolkit_db::DbLockError::AlreadyHeld { .. })) => {
+                return Err(DomainError::Conflict(format!(
+                    "a sync for {owner}/{name} is already running"
+                )));
+            }
+            Err(e) => return Err(DomainError::Database(e)),
+        };
+
         let fetched = self.github.fetch_repository(owner, name).await?;
 
-        let conn = self.db.conn()?;
-        let repository = self
-            .repo
-            .upsert(&conn, &scope, tenant_id, fetched.repository)
-            .await?;
+        // All ~26 tables are written as one transaction: a failure partway
+        // through must not leave some tables current and others stale.
+        let service = self.clone();
+        let summary = self
+            .db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    let repository = service
+                        .repo
+                        .upsert(tx, &scope, tenant_id, fetched.repository)
+                        .await?;
 
-        let issues_synced = sync_table!(self, &conn, &scope, tenant_id, issues, fetched.issues);
+                    let issues_synced =
+                        sync_table!(service, tx, &scope, tenant_id, issues, fetched.issues);
 
-        let pull_requests_synced = sync_table!(
-            self,
-            &conn,
-            &scope,
-            tenant_id,
-            pull_requests,
-            fetched.pull_requests
-        );
+                    let pull_requests_synced = sync_table!(
+                        service,
+                        tx,
+                        &scope,
+                        tenant_id,
+                        pull_requests,
+                        fetched.pull_requests
+                    );
 
-        let commits_synced = sync_table!(self, &conn, &scope, tenant_id, commits, fetched.commits);
+                    let commits_synced =
+                        sync_table!(service, tx, &scope, tenant_id, commits, fetched.commits);
 
-        let comments_synced =
-            sync_table!(self, &conn, &scope, tenant_id, comments, fetched.comments);
+                    let comments_synced =
+                        sync_table!(service, tx, &scope, tenant_id, comments, fetched.comments);
 
-        let review_comments_synced = sync_table!(
-            self,
-            &conn,
-            &scope,
-            tenant_id,
-            review_comments,
-            fetched.review_comments
-        );
+                    let review_comments_synced = sync_table!(
+                        service,
+                        tx,
+                        &scope,
+                        tenant_id,
+                        review_comments,
+                        fetched.review_comments
+                    );
 
-        let reviews_synced = sync_table!(self, &conn, &scope, tenant_id, reviews, fetched.reviews);
+                    let reviews_synced =
+                        sync_table!(service, tx, &scope, tenant_id, reviews, fetched.reviews);
 
-        let labels_synced = sync_table!(self, &conn, &scope, tenant_id, labels, fetched.labels);
+                    let labels_synced =
+                        sync_table!(service, tx, &scope, tenant_id, labels, fetched.labels);
 
-        let milestones_synced = sync_table!(
-            self,
-            &conn,
-            &scope,
-            tenant_id,
-            milestones,
-            fetched.milestones
-        );
+                    let milestones_synced = sync_table!(
+                        service,
+                        tx,
+                        &scope,
+                        tenant_id,
+                        milestones,
+                        fetched.milestones
+                    );
 
-        let releases_synced =
-            sync_table!(self, &conn, &scope, tenant_id, releases, fetched.releases);
+                    let releases_synced =
+                        sync_table!(service, tx, &scope, tenant_id, releases, fetched.releases);
 
-        let branches_synced =
-            sync_table!(self, &conn, &scope, tenant_id, branches, fetched.branches);
+                    let branches_synced =
+                        sync_table!(service, tx, &scope, tenant_id, branches, fetched.branches);
 
-        let contributors_synced = sync_table!(
-            self,
-            &conn,
-            &scope,
-            tenant_id,
-            contributors,
-            fetched.contributors
-        );
+                    let contributors_synced = sync_table!(
+                        service,
+                        tx,
+                        &scope,
+                        tenant_id,
+                        contributors,
+                        fetched.contributors
+                    );
 
-        let workflow_runs_synced = sync_table!(
-            self,
-            &conn,
-            &scope,
-            tenant_id,
-            workflow_runs,
-            fetched.workflow_runs
-        );
+                    let workflow_runs_synced = sync_table!(
+                        service,
+                        tx,
+                        &scope,
+                        tenant_id,
+                        workflow_runs,
+                        fetched.workflow_runs
+                    );
 
-        let pull_request_files_synced = sync_table!(
-            self,
-            &conn,
-            &scope,
-            tenant_id,
-            pull_request_files,
-            fetched.pull_request_files
-        );
+                    let pull_request_files_synced = sync_table!(
+                        service,
+                        tx,
+                        &scope,
+                        tenant_id,
+                        pull_request_files,
+                        fetched.pull_request_files
+                    );
 
-        let tags_synced = sync_table!(self, &conn, &scope, tenant_id, tags, fetched.tags);
+                    let tags_synced =
+                        sync_table!(service, tx, &scope, tenant_id, tags, fetched.tags);
 
-        let commit_files_synced = sync_table!(
-            self,
-            &conn,
-            &scope,
-            tenant_id,
-            commit_files,
-            fetched.commit_files
-        );
+                    let commit_files_synced = sync_table!(
+                        service,
+                        tx,
+                        &scope,
+                        tenant_id,
+                        commit_files,
+                        fetched.commit_files
+                    );
 
-        let review_threads_synced = sync_table!(
-            self,
-            &conn,
-            &scope,
-            tenant_id,
-            review_threads,
-            fetched.review_threads
-        );
+                    let review_threads_synced = sync_table!(
+                        service,
+                        tx,
+                        &scope,
+                        tenant_id,
+                        review_threads,
+                        fetched.review_threads
+                    );
 
-        let commit_comments_synced = sync_table!(
-            self,
-            &conn,
-            &scope,
-            tenant_id,
-            commit_comments,
-            fetched.commit_comments
-        );
+                    let commit_comments_synced = sync_table!(
+                        service,
+                        tx,
+                        &scope,
+                        tenant_id,
+                        commit_comments,
+                        fetched.commit_comments
+                    );
 
-        let issue_events_synced = sync_table!(
-            self,
-            &conn,
-            &scope,
-            tenant_id,
-            issue_events,
-            fetched.issue_events
-        );
+                    let issue_events_synced = sync_table!(
+                        service,
+                        tx,
+                        &scope,
+                        tenant_id,
+                        issue_events,
+                        fetched.issue_events
+                    );
 
-        let deployments_synced = sync_table!(
-            self,
-            &conn,
-            &scope,
-            tenant_id,
-            deployments,
-            fetched.deployments
-        );
+                    let deployments_synced = sync_table!(
+                        service,
+                        tx,
+                        &scope,
+                        tenant_id,
+                        deployments,
+                        fetched.deployments
+                    );
 
-        let pull_request_commits_synced = sync_table!(
-            self,
-            &conn,
-            &scope,
-            tenant_id,
-            pull_request_commits,
-            fetched.pull_request_commits
-        );
+                    let pull_request_commits_synced = sync_table!(
+                        service,
+                        tx,
+                        &scope,
+                        tenant_id,
+                        pull_request_commits,
+                        fetched.pull_request_commits
+                    );
 
-        let commit_statuses_synced = sync_table!(
-            self,
-            &conn,
-            &scope,
-            tenant_id,
-            commit_statuses,
-            fetched.commit_statuses
-        );
+                    let commit_statuses_synced = sync_table!(
+                        service,
+                        tx,
+                        &scope,
+                        tenant_id,
+                        commit_statuses,
+                        fetched.commit_statuses
+                    );
 
-        let workflow_jobs_synced = sync_table!(
-            self,
-            &conn,
-            &scope,
-            tenant_id,
-            workflow_jobs,
-            fetched.workflow_jobs
-        );
+                    let workflow_jobs_synced = sync_table!(
+                        service,
+                        tx,
+                        &scope,
+                        tenant_id,
+                        workflow_jobs,
+                        fetched.workflow_jobs
+                    );
 
-        let issue_reactions_synced = sync_table!(
-            self,
-            &conn,
-            &scope,
-            tenant_id,
-            issue_reactions,
-            fetched.issue_reactions
-        );
+                    let issue_reactions_synced = sync_table!(
+                        service,
+                        tx,
+                        &scope,
+                        tenant_id,
+                        issue_reactions,
+                        fetched.issue_reactions
+                    );
 
-        let check_runs_synced = sync_table!(
-            self,
-            &conn,
-            &scope,
-            tenant_id,
-            check_runs,
-            fetched.check_runs
-        );
-        let issue_timeline_synced = sync_table!(
-            self,
-            &conn,
-            &scope,
-            tenant_id,
-            issue_timeline,
-            fetched.issue_timeline
-        );
+                    let check_runs_synced = sync_table!(
+                        service,
+                        tx,
+                        &scope,
+                        tenant_id,
+                        check_runs,
+                        fetched.check_runs
+                    );
+                    let issue_timeline_synced = sync_table!(
+                        service,
+                        tx,
+                        &scope,
+                        tenant_id,
+                        issue_timeline,
+                        fetched.issue_timeline
+                    );
 
-        Ok(SyncSummary {
-            repository: repository.full_name,
-            issues_synced,
-            pull_requests_synced,
-            commits_synced,
-            comments_synced,
-            review_comments_synced,
-            reviews_synced,
-            labels_synced,
-            milestones_synced,
-            releases_synced,
-            branches_synced,
-            contributors_synced,
-            workflow_runs_synced,
-            pull_request_files_synced,
-            tags_synced,
-            commit_files_synced,
-            review_threads_synced,
-            commit_comments_synced,
-            issue_events_synced,
-            deployments_synced,
-            pull_request_commits_synced,
-            commit_statuses_synced,
-            workflow_jobs_synced,
-            issue_reactions_synced,
-            check_runs_synced,
-            issue_timeline_synced,
-        })
+                    Ok(SyncSummary {
+                        repository: repository.full_name,
+                        issues_synced,
+                        pull_requests_synced,
+                        commits_synced,
+                        comments_synced,
+                        review_comments_synced,
+                        reviews_synced,
+                        labels_synced,
+                        milestones_synced,
+                        releases_synced,
+                        branches_synced,
+                        contributors_synced,
+                        workflow_runs_synced,
+                        pull_request_files_synced,
+                        tags_synced,
+                        commit_files_synced,
+                        review_threads_synced,
+                        commit_comments_synced,
+                        issue_events_synced,
+                        deployments_synced,
+                        pull_request_commits_synced,
+                        commit_statuses_synced,
+                        workflow_jobs_synced,
+                        issue_reactions_synced,
+                        check_runs_synced,
+                        issue_timeline_synced,
+                    })
+                })
+            })
+            .await;
+
+        // Deterministic unlock on the way out; a failed release is only
+        // logged — the guard's Drop already queued a best-effort release,
+        // and the sync itself succeeded or failed on its own merits.
+        if let Err(e) = sync_lock.release().await {
+            tracing::warn!(lock_key, error = %e, "sync advisory lock release failed");
+        }
+        summary
     }
 }

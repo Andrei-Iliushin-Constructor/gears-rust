@@ -12,6 +12,9 @@ pub enum DomainError {
     #[error("Access forbidden: {0}")]
     Forbidden(String),
 
+    #[error("Conflict: {0}")]
+    Conflict(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 

@@ -69,6 +69,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)
+        .error_409(openapi)
         .error_500(openapi)
         .register(router, openapi);
 

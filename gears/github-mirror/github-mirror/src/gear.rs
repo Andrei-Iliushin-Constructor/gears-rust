@@ -3,7 +3,7 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use axum::Router;
 use toolkit::api::OpenApiRegistry;
-use toolkit::{Gear, GearCtx, RestApiCapability};
+use toolkit::{Gear, GearCtx, Healthcheck, HealthcheckResult, RestApiCapability};
 use tracing::info;
 
 use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
@@ -188,6 +188,36 @@ impl RestApiCapability for GithubMirrorGear {
         info!("github-mirror REST routes registered");
         Ok(router)
     }
+
+    /// Reports through the platform's aggregated `/readyz`/`/health` rather
+    /// than only the gear's own always-200 `GET /health` endpoint. `None`
+    /// before `init()` runs mirrors `register_rest`'s own defensive check —
+    /// in practice this method is only ever called afterward.
+    fn healthcheck(&self, _ctx: &GearCtx) -> Option<Arc<dyn Healthcheck>> {
+        let service = self.service.get()?.clone();
+        Some(Arc::new(GithubMirrorHealthcheck { service }))
+    }
+}
+
+struct GithubMirrorHealthcheck {
+    service: Arc<ConcreteService>,
+}
+
+#[async_trait]
+impl Healthcheck for GithubMirrorHealthcheck {
+    fn name(&self) -> &'static str {
+        "github-mirror"
+    }
+
+    /// A pooled-connection acquisition, no query — enough to catch the DB
+    /// being unreachable without adding load for every readiness probe.
+    async fn check(&self) -> HealthcheckResult {
+        if self.service.db_reachable() {
+            HealthcheckResult::healthy()
+        } else {
+            HealthcheckResult::unhealthy("database unreachable")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -204,6 +234,6 @@ mod tests {
     fn gear_provides_all_migrations() {
         use toolkit::contracts::DatabaseCapability;
         let gear = GithubMirrorGear::default();
-        assert_eq!(gear.migrations().len(), 28);
+        assert_eq!(gear.migrations().len(), 29);
     }
 }

@@ -14464,9 +14464,25 @@
               "null"
             ]
           },
+          "original_position": {
+            "description": "Line position at comment-creation time — the stable anchor across\nlater force-pushes.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "path": {
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "position": {
+            "description": "Line position in the current diff; absent once GitHub considers the\ncommented-on line outdated.",
+            "format": "int64",
+            "type": [
+              "integer",
               "null"
             ]
           },
@@ -40348,6 +40364,16 @@
               }
             },
             "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "500": {
             "content": {

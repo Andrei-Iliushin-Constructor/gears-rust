@@ -35,6 +35,9 @@ impl From<DomainError> for CanonicalError {
             DomainError::Validation { field, message } => RepositoryError::invalid_argument()
                 .with_field_violation(field, message, "VALIDATION_ERROR")
                 .create(),
+            DomainError::Conflict(msg) => RepositoryError::already_exists(msg)
+                .with_resource("repository")
+                .create(),
             DomainError::Forbidden(msg) => {
                 tracing::warn!(msg = %msg, "github-mirror access forbidden");
                 RepositoryError::not_found("Repo not found or not accessible")

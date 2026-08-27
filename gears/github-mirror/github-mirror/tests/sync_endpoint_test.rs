@@ -118,6 +118,8 @@ fn fetched() -> FetchedRepository {
             created_at: "2026-08-20T00:00:00Z".to_owned(),
             updated_at: "2026-08-20T00:00:00Z".to_owned(),
             html_url: None,
+            position: Some(7),
+            original_position: Some(4),
         }],
         reviews: vec![ReviewRecord {
             id: 31,
@@ -641,4 +643,52 @@ async fn sync_is_idempotent() {
 
     let repos = body_json(get(router, "/github-mirror/v1/repos").await).await;
     assert_eq!(repos["items"].as_array().expect("items").len(), 1);
+}
+
+#[tokio::test]
+async fn a_concurrent_sync_for_the_same_repo_is_rejected_with_a_conflict() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let tenant_id = ctx.subject_tenant_id();
+    let db = common::inmem_db().await;
+    let service = common::service_with_github(
+        db.clone(),
+        "https://api.github.com",
+        Arc::new(common::FakeGithub {
+            result: Some(fetched()),
+        }),
+    );
+
+    // Stand in for a sync already mid-flight: hold the exact per-repo
+    // advisory lock the service takes, then ask for another sync of the
+    // same repo.
+    let held = db
+        .lock("github-mirror", &format!("sync/{tenant_id}/rust-lang/rust"))
+        .await
+        .expect("test must be able to hold the sync lock");
+
+    let router = router_for(service, ctx);
+    let response = post(
+        router.clone(),
+        "/github-mirror/v1/repos/rust-lang/rust/sync",
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "the second sync must be told a sync is already running, not race it"
+    );
+
+    // A different repo is not blocked by this repo's lock.
+    let other = post(
+        router.clone(),
+        "/github-mirror/v1/repos/rust-lang/cargo/sync",
+    )
+    .await;
+    assert_eq!(other.status(), StatusCode::OK);
+
+    held.release().await.expect("release must succeed");
+
+    // Once the first sync finishes, the repo can be synced again.
+    let retry = post(router, "/github-mirror/v1/repos/rust-lang/rust/sync").await;
+    assert_eq!(retry.status(), StatusCode::OK);
 }
