@@ -44,6 +44,8 @@ fn review_comment_record(id: i64, pull_number: i64, created_at: &str) -> ReviewC
         created_at: created_at.to_owned(),
         updated_at: created_at.to_owned(),
         html_url: None,
+        position: Some(5),
+        original_position: Some(3),
     }
 }
 
@@ -108,6 +110,11 @@ async fn review_comments_are_listed_oldest_first_for_their_pull() {
     assert_eq!(items[0]["id"], 1);
     assert_eq!(items[1]["id"], 2);
     assert_eq!(items[0]["path"], "src/lib.rs");
+    assert_eq!(
+        items[0]["position"], 5,
+        "diff-anchoring fields must round-trip through the GitHub-compatible surface"
+    );
+    assert_eq!(items[0]["original_position"], 3);
 }
 
 #[tokio::test]

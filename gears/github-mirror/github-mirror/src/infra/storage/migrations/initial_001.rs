@@ -38,7 +38,13 @@ CREATE TABLE IF NOT EXISTS gm_repositories (
     id BIGINT NOT NULL,
     owner VARCHAR(255) NOT NULL,
     name VARCHAR(255) NOT NULL,
-    full_name VARCHAR(512) NOT NULL,
+    -- 191 = 39 (GitHub's max login length) + 1 ('/') + 100 (max repo name),
+    -- with headroom. Kept short enough to index in full on MySQL (191 chars
+    -- x 4 bytes/char for utf8mb4 = 764 bytes, under the 767-byte InnoDB
+    -- prefix-index limit); Postgres/SQLite use the full 512 since they have
+    -- no such limit. A 255-char prefix index (the previous approach) let two
+    -- full_name values that agree on their first 255 characters collide.
+    full_name VARCHAR(191) NOT NULL,
     default_branch VARCHAR(255) NOT NULL,
     private BOOLEAN NOT NULL,
     pushed_at VARCHAR(64),
@@ -46,7 +52,7 @@ CREATE TABLE IF NOT EXISTS gm_repositories (
     forks BIGINT NOT NULL DEFAULT 0,
     description TEXT,
     PRIMARY KEY (tenant_id, id),
-    UNIQUE KEY idx_gm_repositories_tenant_full_name (tenant_id, full_name(255))
+    UNIQUE KEY idx_gm_repositories_tenant_full_name (tenant_id, full_name)
 );
                 "
             }

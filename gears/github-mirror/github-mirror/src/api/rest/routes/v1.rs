@@ -11,7 +11,7 @@ use crate::api::rest::{dto, handlers};
 
 pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     router = OperationBuilder::get("/github-mirror/v1/health")
-        .operation_id("github_mirror.health")
+        .operation_id("github_mirror.v1.health")
         .summary("GitHub Mirror health")
         .description("Reports that the github-mirror gear is loaded and serving requests")
         .tag(API_TAG)
@@ -26,7 +26,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .register(router, openapi);
 
     router = OperationBuilder::get("/github-mirror/v1/repos")
-        .operation_id("github_mirror.list_repos")
+        .operation_id("github_mirror.v1.list_repos")
         .summary("List mirrored repositories")
         .description(
             "Returns the GitHub repositories held in the local mirror for the caller's tenant",
@@ -49,7 +49,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .register(router, openapi);
 
     router = OperationBuilder::post("/github-mirror/v1/repos/{owner}/{name}/sync")
-        .operation_id("github_mirror.sync_repository")
+        .operation_id("github_mirror.v1.sync_repository")
         .summary("Sync a repository from GitHub into the mirror")
         .description(
             "Queues a sync of the repository and answers immediately with a session id.              The background worker fetches the repository plus the first page of its              entities from GitHub and upserts them into the caller's tenant mirror;              poll the session for the outcome. No pagination, conditional requests, or              rate-limit budgeting yet.",
@@ -82,7 +82,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .register(router, openapi);
 
     router = OperationBuilder::delete("/github-mirror/v1/cache")
-        .operation_id("github_mirror.clear_cache")
+        .operation_id("github_mirror.v1.clear_cache")
         .summary("Drop cached GitHub responses for an owner or a repository")
         .description(
             "DESIGN 4's `clear_cache`. Removes raw cached responses so the next sync              re-fetches instead of revalidating; the mirrored rows themselves are left              untouched. Give `repo=owner/name` for one repository or `owner=X` for              everything mirrored under that owner.",
@@ -105,7 +105,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .register(router, openapi);
 
     router = OperationBuilder::post("/github-mirror/v1/sync/resume")
-        .operation_id("github_mirror.resume_syncs")
+        .operation_id("github_mirror.v1.resume_syncs")
         .summary("Re-run repositories still marked in_progress")
         .description(
             "PRD 5.2's resume operation. Resume is a re-run, not a restore: each              repository still marked `in_progress` is queued for a fresh sync, and the              cache plus change-detection state are what make that cheap. Answers              immediately with one session id per repository. Pass `repo=owner/name`              to resume a single repository; a repository that is not `in_progress`              has nothing to resume and comes back with `resumed: 0`.",
@@ -128,7 +128,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .register(router, openapi);
 
     router = OperationBuilder::get("/github-mirror/v1/sync-status")
-        .operation_id("github_mirror.list_repo_sync_status")
+        .operation_id("github_mirror.v1.list_repo_sync_status")
         .summary("Per-repository run status and last-sync time")
         .tag(API_TAG)
         .authenticated()
@@ -156,7 +156,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
 /// halves are one registration pass.
 fn register_session_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     router = OperationBuilder::get("/github-mirror/v1/sessions")
-        .operation_id("github_mirror.list_sync_sessions")
+        .operation_id("github_mirror.v1.list_sync_sessions")
         .summary("List sync sessions, newest first")
         .tag(API_TAG)
         .authenticated()
@@ -175,7 +175,7 @@ fn register_session_routes(mut router: Router, openapi: &dyn OpenApiRegistry) ->
         .register(router, openapi);
 
     router = OperationBuilder::get("/github-mirror/v1/sessions/{id}")
-        .operation_id("github_mirror.get_sync_session")
+        .operation_id("github_mirror.v1.get_sync_session")
         .summary("One sync session by id")
         .tag(API_TAG)
         .authenticated()
@@ -191,11 +191,12 @@ fn register_session_routes(mut router: Router, openapi: &dyn OpenApiRegistry) ->
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)
+        .error_409(openapi)
         .error_500(openapi)
         .register(router, openapi);
 
     router = OperationBuilder::get("/github-mirror/v1/repos/{owner}/{name}/commits/{sha}/files")
-        .operation_id("github_mirror.list_commit_files")
+        .operation_id("github_mirror.v1.list_commit_files")
         .summary("List mirrored changed files of a commit")
         .description(
             "Returns the changed files held in the local mirror for the tenant, by file name",
@@ -221,7 +222,7 @@ fn register_session_routes(mut router: Router, openapi: &dyn OpenApiRegistry) ->
         .register(router, openapi);
 
     router = OperationBuilder::get("/github-mirror/v1/repos/{owner}/{name}/pulls/{number}/threads")
-        .operation_id("github_mirror.list_review_threads")
+        .operation_id("github_mirror.v1.list_review_threads")
         .summary("List mirrored review threads of a pull request")
         .description(
             "Returns review conversation threads (resolved state included) held in the local              mirror for the tenant",

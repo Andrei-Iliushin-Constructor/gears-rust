@@ -8,7 +8,7 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use github_mirror::api::rest::routes::{ConcreteService, register_routes};
-use github_mirror::domain::ports::github::FetchedRepository;
+use github_mirror::domain::ports::github::{FetchedRepository, ListingCompleteness};
 use github_mirror::domain::repo::RepoRecord;
 use toolkit::api::OpenApiRegistryImpl;
 use toolkit_security::SecurityContext;
@@ -18,6 +18,7 @@ use uuid::Uuid;
 /// The smallest fetch result the sync accepts: one repository, nothing else.
 fn fetched() -> FetchedRepository {
     FetchedRepository {
+        complete: ListingCompleteness::all_complete(),
         repository: RepoRecord {
             id: 42,
             owner: "acme".to_owned(),

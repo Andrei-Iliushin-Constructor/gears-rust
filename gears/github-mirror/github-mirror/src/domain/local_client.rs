@@ -39,6 +39,15 @@ impl From<DomainError> for CanonicalError {
             DomainError::Validation { field, message } => RepositoryError::invalid_argument()
                 .with_field_violation(field, message, "VALIDATION_ERROR")
                 .create(),
+            DomainError::AccessLost(msg) => {
+                tracing::warn!(msg = %msg, "github-mirror upstream access lost");
+                RepositoryError::not_found("Repo not found or not accessible")
+                    .with_resource("repository")
+                    .create()
+            }
+            DomainError::Conflict(msg) => RepositoryError::already_exists(msg)
+                .with_resource("repository")
+                .create(),
             DomainError::Forbidden(msg) => {
                 tracing::warn!(msg = %msg, "github-mirror access forbidden");
                 RepositoryError::not_found("Repo not found or not accessible")
@@ -385,6 +394,47 @@ impl<
             issue_reactions_synced: summary.issue_reactions_synced,
             check_runs_synced: summary.check_runs_synced,
             issue_timeline_synced: summary.issue_timeline_synced,
+            stale_rows_deleted: summary.stale_rows_deleted,
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn status_of(e: DomainError) -> u16 {
+        CanonicalError::from(e).status_code()
+    }
+
+    #[test]
+    fn every_domain_error_maps_to_its_canonical_status() {
+        assert_eq!(status_of(DomainError::NotFound), 404);
+        assert_eq!(
+            status_of(DomainError::Validation {
+                field: "owner".to_owned(),
+                message: "empty".to_owned(),
+            }),
+            400
+        );
+        // Both "caller lacks rights" and "the mirror's own upstream access
+        // is gone" must read as 404: a 403 would confirm the repo exists.
+        assert_eq!(status_of(DomainError::forbidden("no scope")), 404);
+        assert_eq!(
+            status_of(DomainError::AccessLost("token revoked".to_owned())),
+            404
+        );
+        assert_eq!(
+            status_of(DomainError::Conflict("sync already running".to_owned())),
+            409
+        );
+        assert_eq!(status_of(DomainError::internal("boom")), 500);
+        assert_eq!(
+            status_of(DomainError::Database(toolkit_db::DbError::InvalidConfig(
+                "bad dsn".to_owned()
+            ))),
+            500
+        );
     }
 }

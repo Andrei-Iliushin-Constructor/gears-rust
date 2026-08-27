@@ -53,6 +53,7 @@ const REPO_ACTIONS_RUNS_ITEM_JOBS: &str = "/repos/{owner}/{name}/actions/runs/{r
 pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     router = register_user_routes(router, openapi);
     router = register_repo_routes(router, openapi);
+    router = register_issue_activity_routes(router, openapi);
     router = register_commit_routes(router, openapi);
     router = register_item_routes(router, openapi);
     router = register_pull_routes(router, openapi);
@@ -63,8 +64,11 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
 
 fn register_user_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     router = OperationBuilder::get(USER)
-        .operation_id("github_mirror.get_authenticated_user")
+        .operation_id("github_mirror.compat.get_authenticated_user")
         .summary("Get the authenticated user (GitHub-compatible)")
+        .description(
+            "Get the authenticated user, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -80,8 +84,11 @@ fn register_user_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
         .register(router, openapi);
 
     router = OperationBuilder::get(USER_REPOS)
-        .operation_id("github_mirror.list_user_repos")
+        .operation_id("github_mirror.compat.list_user_repos")
         .summary("List the caller's repositories (GitHub-compatible)")
+        .description(
+            "List the caller's repositories, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -104,8 +111,11 @@ fn register_user_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
 
 fn register_repo_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     router = OperationBuilder::get(REPO_ISSUES)
-        .operation_id("github_mirror.list_issues")
+        .operation_id("github_mirror.compat.list_issues")
         .summary("List issues (GitHub-compatible)")
+        .description(
+            "List issues, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -127,8 +137,11 @@ fn register_repo_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_ISSUES_ITEM_COMMENTS)
-        .operation_id("github_mirror.list_comments")
+        .operation_id("github_mirror.compat.list_comments")
         .summary("List issue comments (GitHub-compatible)")
+        .description(
+            "List issue comments, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -151,8 +164,11 @@ fn register_repo_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_BRANCHES)
-        .operation_id("github_mirror.list_branches")
+        .operation_id("github_mirror.compat.list_branches")
         .summary("List branches (GitHub-compatible)")
+        .description(
+            "List branches, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -174,8 +190,11 @@ fn register_repo_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_CONTRIBUTORS)
-        .operation_id("github_mirror.list_contributors")
+        .operation_id("github_mirror.compat.list_contributors")
         .summary("List contributors (GitHub-compatible)")
+        .description(
+            "List contributors, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -196,9 +215,16 @@ fn register_repo_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
         .error_500(openapi)
         .register(router, openapi);
 
+    router
+}
+
+fn register_issue_activity_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     router = OperationBuilder::get(REPO_ISSUES_ITEM_EVENTS)
-        .operation_id("github_mirror.list_issue_events")
+        .operation_id("github_mirror.compat.list_issue_events")
         .summary("List issue events (GitHub-compatible)")
+        .description(
+            "List issue events, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -221,8 +247,11 @@ fn register_repo_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_ISSUES_ITEM_REACTIONS)
-        .operation_id("github_mirror.list_issue_reactions")
+        .operation_id("github_mirror.compat.list_issue_reactions")
         .summary("List issue reactions (GitHub-compatible)")
+        .description(
+            "List issue reactions, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -245,8 +274,11 @@ fn register_repo_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_ISSUES_ITEM_TIMELINE)
-        .operation_id("github_mirror.list_issue_timeline")
+        .operation_id("github_mirror.compat.list_issue_timeline")
         .summary("List issue timeline (GitHub-compatible)")
+        .description(
+            "List issue timeline, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -269,8 +301,11 @@ fn register_repo_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_DEPLOYMENTS)
-        .operation_id("github_mirror.list_deployments")
+        .operation_id("github_mirror.compat.list_deployments")
         .summary("List deployments (GitHub-compatible)")
+        .description(
+            "List deployments, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -296,8 +331,11 @@ fn register_repo_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
 
 fn register_commit_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     router = OperationBuilder::get(REPO_COMMITS)
-        .operation_id("github_mirror.list_commits")
+        .operation_id("github_mirror.compat.list_commits")
         .summary("List commits (GitHub-compatible)")
+        .description(
+            "List commits, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -319,8 +357,11 @@ fn register_commit_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> 
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_COMMITS_ITEM_COMMENTS)
-        .operation_id("github_mirror.list_commit_comments")
+        .operation_id("github_mirror.compat.list_commit_comments")
         .summary("List commit comments (GitHub-compatible)")
+        .description(
+            "List commit comments, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -343,8 +384,11 @@ fn register_commit_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> 
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_COMMITS_ITEM_CHECK_RUNS)
-        .operation_id("github_mirror.list_check_runs")
+        .operation_id("github_mirror.compat.list_check_runs")
         .summary("List commit check runs (GitHub-compatible)")
+        .description(
+            "List commit check runs, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -367,8 +411,11 @@ fn register_commit_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> 
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_COMMITS_ITEM_STATUSES)
-        .operation_id("github_mirror.list_commit_statuses")
+        .operation_id("github_mirror.compat.list_commit_statuses")
         .summary("List commit statuses (GitHub-compatible)")
+        .description(
+            "List commit statuses, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -395,8 +442,11 @@ fn register_commit_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> 
 
 fn register_item_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     router = OperationBuilder::get(REPO)
-        .operation_id("github_mirror.get_repo")
+        .operation_id("github_mirror.compat.get_repo")
         .summary("Get a repository (GitHub-compatible)")
+        .description(
+            "Get a repository, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -416,8 +466,11 @@ fn register_item_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_ISSUES_ITEM)
-        .operation_id("github_mirror.get_issue")
+        .operation_id("github_mirror.compat.get_issue")
         .summary("Get an issue (GitHub-compatible)")
+        .description(
+            "Get an issue, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -434,8 +487,11 @@ fn register_item_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_PULLS_ITEM)
-        .operation_id("github_mirror.get_pull_request")
+        .operation_id("github_mirror.compat.get_pull_request")
         .summary("Get a pull request (GitHub-compatible)")
+        .description(
+            "Get a pull request, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -456,8 +512,11 @@ fn register_item_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_COMMITS_ITEM)
-        .operation_id("github_mirror.get_commit")
+        .operation_id("github_mirror.compat.get_commit")
         .summary("Get a commit (GitHub-compatible)")
+        .description(
+            "Get a commit, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -482,8 +541,11 @@ fn register_item_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
 
 fn register_pull_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     router = OperationBuilder::get(REPO_PULLS)
-        .operation_id("github_mirror.list_pull_requests")
+        .operation_id("github_mirror.compat.list_pull_requests")
         .summary("List pull requests (GitHub-compatible)")
+        .description(
+            "List pull requests, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -505,8 +567,11 @@ fn register_pull_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_PULLS_ITEM_REVIEWS)
-        .operation_id("github_mirror.list_reviews")
+        .operation_id("github_mirror.compat.list_reviews")
         .summary("List pull request reviews (GitHub-compatible)")
+        .description(
+            "List pull request reviews, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -529,8 +594,11 @@ fn register_pull_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_PULLS_ITEM_COMMENTS)
-        .operation_id("github_mirror.list_review_comments")
+        .operation_id("github_mirror.compat.list_review_comments")
         .summary("List pull request review comments (GitHub-compatible)")
+        .description(
+            "List pull request review comments, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -553,8 +621,11 @@ fn register_pull_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_PULLS_ITEM_FILES)
-        .operation_id("github_mirror.list_pull_request_files")
+        .operation_id("github_mirror.compat.list_pull_request_files")
         .summary("List pull request files (GitHub-compatible)")
+        .description(
+            "List pull request files, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -577,8 +648,11 @@ fn register_pull_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_PULLS_ITEM_COMMITS)
-        .operation_id("github_mirror.list_pull_request_commits")
+        .operation_id("github_mirror.compat.list_pull_request_commits")
         .summary("List pull request commits (GitHub-compatible)")
+        .description(
+            "List pull request commits, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -605,8 +679,11 @@ fn register_pull_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
 
 fn register_metadata_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     router = OperationBuilder::get(REPO_TAGS)
-        .operation_id("github_mirror.list_tags")
+        .operation_id("github_mirror.compat.list_tags")
         .summary("List tags (GitHub-compatible)")
+        .description(
+            "List tags, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -628,8 +705,11 @@ fn register_metadata_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_RELEASES)
-        .operation_id("github_mirror.list_releases")
+        .operation_id("github_mirror.compat.list_releases")
         .summary("List releases (GitHub-compatible)")
+        .description(
+            "List releases, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -651,8 +731,11 @@ fn register_metadata_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_MILESTONES)
-        .operation_id("github_mirror.list_milestones")
+        .operation_id("github_mirror.compat.list_milestones")
         .summary("List milestones (GitHub-compatible)")
+        .description(
+            "List milestones, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -674,8 +757,11 @@ fn register_metadata_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_LABELS)
-        .operation_id("github_mirror.list_labels")
+        .operation_id("github_mirror.compat.list_labels")
         .summary("List labels (GitHub-compatible)")
+        .description(
+            "List labels, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -697,8 +783,11 @@ fn register_metadata_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_ACTIONS_RUNS)
-        .operation_id("github_mirror.list_workflow_runs")
+        .operation_id("github_mirror.compat.list_workflow_runs")
         .summary("List workflow runs (GitHub-compatible)")
+        .description(
+            "List workflow runs, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -720,8 +809,11 @@ fn register_metadata_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -
         .register(router, openapi);
 
     router = OperationBuilder::get(REPO_ACTIONS_RUNS_ITEM_JOBS)
-        .operation_id("github_mirror.list_workflow_jobs")
+        .operation_id("github_mirror.compat.list_workflow_jobs")
         .summary("List workflow run jobs (GitHub-compatible)")
+        .description(
+            "List workflow run jobs, served entirely from the locally mirrored store in GitHub's JSON shape - the mirror never calls live GitHub to answer. List responses paginate with `page`/`per_page` and a `Link` header, exactly as GitHub's API does. Data is as fresh as the repository's last sync.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])

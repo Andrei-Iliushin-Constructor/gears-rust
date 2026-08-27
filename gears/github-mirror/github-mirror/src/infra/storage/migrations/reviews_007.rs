@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS gm_reviews (
     pull_number BIGINT NOT NULL,
     author_login VARCHAR(255),
     state VARCHAR(32) NOT NULL,
-    body TEXT,
+    body MEDIUMTEXT,
     commit_id VARCHAR(64),
     submitted_at VARCHAR(64),
     html_url VARCHAR(1024),

@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS gm_issue_timeline (
     event VARCHAR(64) NOT NULL,
     created_at VARCHAR(64),
     actor_login VARCHAR(255),
-    payload_json TEXT NOT NULL,
+    payload_json MEDIUMTEXT NOT NULL,
     PRIMARY KEY (tenant_id, repo_id, issue_number, position)
 );
                 "

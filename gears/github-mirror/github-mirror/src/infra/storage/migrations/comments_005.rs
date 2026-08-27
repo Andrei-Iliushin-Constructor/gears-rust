@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS gm_comments (
     repo_id BIGINT NOT NULL,
     issue_number BIGINT NOT NULL,
     author_login VARCHAR(255),
-    body TEXT,
+    body MEDIUMTEXT,
     created_at VARCHAR(64) NOT NULL,
     updated_at VARCHAR(64) NOT NULL,
     html_url VARCHAR(1024),

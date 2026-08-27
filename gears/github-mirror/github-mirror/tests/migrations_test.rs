@@ -52,6 +52,42 @@ async fn migrations_apply_and_roll_back_on_a_clean_database() {
         );
     }
 
+    // The two additive-column migrations that predate this test, plus the
+    // one added alongside review-comment diff anchoring: `up`/`down` for
+    // these never touched a whole table, so the table-existence loop above
+    // cannot tell a working migration from a no-op one — only checking the
+    // column itself can.
+    for (table, column) in [
+        ("gm_repositories", "clone_url"),
+        ("gm_pull_requests", "html_url"),
+        ("gm_pull_requests", "head_ref"),
+        ("gm_pull_requests", "base_ref"),
+        ("gm_review_comments", "position"),
+        ("gm_review_comments", "original_position"),
+    ] {
+        assert!(
+            manager.has_column(table, column).await.unwrap(),
+            "{table}.{column} must exist after up()"
+        );
+    }
+
+    // The 26-table extracted_at migration is column-additive: only checking
+    // the column itself proves its up() did anything.
+    for table in ["gm_issues", "gm_pull_requests", "gm_commits", "gm_labels"] {
+        assert!(
+            manager.has_column(table, "extracted_at").await.unwrap(),
+            "{table}.extracted_at must exist after up()"
+        );
+    }
+
+    assert!(
+        manager
+            .has_column("gm_releases", "assets_json")
+            .await
+            .unwrap(),
+        "gm_releases.assets_json must exist after up()"
+    );
+
     for migration in Migrator::migrations().iter().rev() {
         migration.down(&manager).await.expect("down must succeed");
     }
@@ -94,4 +130,7 @@ async fn migrations_apply_and_roll_back_on_a_clean_database() {
             "{table} must be gone after down()"
         );
     }
+    // The additive migrations roll back to no table at all (down() for the
+    // 26 CREATE TABLE migrations already dropped these tables by this point),
+    // so there is nothing further to assert for the individual columns.
 }

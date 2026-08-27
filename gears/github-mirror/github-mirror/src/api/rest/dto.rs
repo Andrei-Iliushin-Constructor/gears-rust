@@ -94,9 +94,7 @@ pub struct RepoDto {
 
 impl From<Repo> for RepoDto {
     fn from(repo: Repo) -> Self {
-        let clone_url = repo
-            .clone_url
-            .unwrap_or_else(|| format!("https://github.com/{}.git", repo.full_name));
+        let clone_url = repo.clone_url_or_default();
 
         Self {
             id: repo.id,
@@ -265,6 +263,12 @@ pub struct ReviewCommentDto {
     pub created_at: String,
     pub updated_at: String,
     pub html_url: Option<String>,
+    /// Line position in the current diff; absent once GitHub considers the
+    /// commented-on line outdated.
+    pub position: Option<i64>,
+    /// Line position at comment-creation time — the stable anchor across
+    /// later force-pushes.
+    pub original_position: Option<i64>,
 }
 
 impl From<ReviewComment> for ReviewCommentDto {
@@ -280,6 +284,8 @@ impl From<ReviewComment> for ReviewCommentDto {
             created_at: c.created_at,
             updated_at: c.updated_at,
             html_url: c.html_url,
+            position: c.position,
+            original_position: c.original_position,
         }
     }
 }
@@ -441,10 +447,18 @@ pub struct ReleaseDto {
     pub created_at: String,
     pub published_at: Option<String>,
     pub html_url: Option<String>,
+    /// The stored asset slice (`name`, `browser_download_url`, `size` per
+    /// asset), passed through as JSON; `[]` when the release has none.
+    pub assets: serde_json::Value,
 }
 
 impl From<Release> for ReleaseDto {
     fn from(r: Release) -> Self {
+        let assets = r
+            .assets_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
         Self {
             id: r.id,
             tag_name: r.tag_name,
@@ -456,6 +470,7 @@ impl From<Release> for ReleaseDto {
             created_at: r.created_at,
             published_at: r.published_at,
             html_url: r.html_url,
+            assets,
         }
     }
 }
@@ -575,7 +590,9 @@ pub struct WorkflowRunsPageDto {
 #[toolkit_macros::api_dto(response)]
 pub struct ContributorDto {
     pub id: i64,
-    pub login: String,
+    /// Omitted for anonymous contributors, matching GitHub's shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
     #[serde(rename = "type")]
     pub user_type: String,
     pub contributions: i64,
@@ -626,6 +643,8 @@ pub struct SyncSummaryDto {
     pub issue_reactions_synced: u64,
     pub check_runs_synced: u64,
     pub issue_timeline_synced: u64,
+    /// Rows hard-deleted because a complete listing no longer contained them.
+    pub stale_rows_deleted: u64,
 }
 
 impl From<SyncSummary> for SyncSummaryDto {
@@ -657,6 +676,7 @@ impl From<SyncSummary> for SyncSummaryDto {
             issue_reactions_synced: s.issue_reactions_synced,
             check_runs_synced: s.check_runs_synced,
             issue_timeline_synced: s.issue_timeline_synced,
+            stale_rows_deleted: s.stale_rows_deleted,
         }
     }
 }
@@ -1063,7 +1083,7 @@ pub struct CheckRunDto {
 
 impl From<CheckRun> for CheckRunDto {
     fn from(c: CheckRun) -> Self {
-        let has_app = c.app_slug.is_some() || c.app_name.is_some();
+        let has_app = c.has_app();
         let app = has_app.then_some(CheckAppDto {
             slug: c.app_slug,
             name: c.app_name,

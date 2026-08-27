@@ -217,6 +217,9 @@ fn respond<D>(page: &GithubPage, path: &str, items: Vec<D>) -> (HeaderMap, JsonB
     (headers, Json(items))
 }
 
+// The signature must be `async` for axum's `Handler` impl even though the
+// status read is synchronous.
+#[allow(clippy::unused_async)]
 pub async fn health(
     Extension(svc): Extension<Arc<ConcreteService>>,
 ) -> ApiResult<JsonBody<GithubMirrorHealthDto>> {

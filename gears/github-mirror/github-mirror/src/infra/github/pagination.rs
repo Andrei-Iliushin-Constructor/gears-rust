@@ -9,6 +9,10 @@
 //!
 //! Following `rel="next"` until it disappears is the only way to see past the
 //! first page; without it the mirror silently stores whatever fits in one.
+//!
+//! The same signal answers the other question the sync needs: a listing whose
+//! last response advertises no `rel="next"` was walked to its end, and only
+//! such a complete listing may be used to reconcile upstream deletions.
 
 /// The URL marked `rel="next"`, if the header advertises one.
 ///

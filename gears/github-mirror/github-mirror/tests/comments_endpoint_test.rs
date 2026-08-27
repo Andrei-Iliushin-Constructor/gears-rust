@@ -8,7 +8,7 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use github_mirror::api::rest::routes::{ConcreteService, register_routes};
-use github_mirror::domain::repo::{ContributorRecord, RepoRecord};
+use github_mirror::domain::repo::{CommentRecord, RepoRecord};
 use toolkit::api::OpenApiRegistryImpl;
 use toolkit_security::SecurityContext;
 use tower::ServiceExt;
@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 fn repo_record() -> RepoRecord {
     RepoRecord {
-        id: 997,
+        id: 4101,
         owner: "acme".to_owned(),
         name: "widget".to_owned(),
         full_name: "acme/widget".to_owned(),
@@ -30,14 +30,15 @@ fn repo_record() -> RepoRecord {
     }
 }
 
-fn contributor_record(user_id: i64, login: &str, contributions: i64) -> ContributorRecord {
-    ContributorRecord {
+fn comment_record(id: i64, issue_number: i64, created_at: &str) -> CommentRecord {
+    CommentRecord {
+        id,
         repo_id: 0,
-        user_id,
-        login: Some(login.to_owned()),
-        contributions,
-        user_type: "User".to_owned(),
-        avatar_url: None,
+        issue_number,
+        author_login: Some("frank".to_owned()),
+        body: Some("looks good".to_owned()),
+        created_at: created_at.to_owned(),
+        updated_at: created_at.to_owned(),
         html_url: None,
     }
 }
@@ -58,7 +59,7 @@ async fn get(router: Router, uri: &str) -> axum::http::Response<Body> {
 }
 
 #[tokio::test]
-async fn contributors_are_listed_most_contributions_first() {
+async fn issue_comments_are_listed_oldest_first_for_their_issue() {
     let ctx = common::caller_in(Uuid::new_v4());
     let service = common::service("https://api.github.com").await;
     service
@@ -66,39 +67,58 @@ async fn contributors_are_listed_most_contributions_first() {
         .await
         .expect("repo seed must succeed");
     service
-        .upsert_contributor(&ctx, "acme", "widget", contributor_record(1, "bob", 5))
+        .upsert_comment(
+            &ctx,
+            "acme",
+            "widget",
+            comment_record(2, 7, "2026-08-20T00:00:00Z"),
+        )
         .await
-        .expect("contributor seed must succeed");
+        .expect("comment seed must succeed");
     service
-        .upsert_contributor(&ctx, "acme", "widget", contributor_record(2, "alice", 120))
+        .upsert_comment(
+            &ctx,
+            "acme",
+            "widget",
+            comment_record(1, 7, "2026-08-18T00:00:00Z"),
+        )
         .await
-        .expect("contributor seed must succeed");
+        .expect("comment seed must succeed");
+    service
+        .upsert_comment(
+            &ctx,
+            "acme",
+            "widget",
+            comment_record(3, 8, "2026-08-19T00:00:00Z"),
+        )
+        .await
+        .expect("comment seed must succeed");
 
     let router = router_for(service, ctx);
-    let response = get(router, "/repos/acme/widget/contributors").await;
+    let response = get(router, "/repos/acme/widget/issues/7/comments").await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
     let items = json.as_array().expect("items");
-    assert_eq!(items.len(), 2);
-    assert_eq!(items[0]["login"], "alice");
-    assert_eq!(items[0]["contributions"], 120);
-    assert_eq!(items[1]["login"], "bob");
+    assert_eq!(items.len(), 2, "only issue 7 comments must be returned");
+    assert_eq!(items[0]["id"], 1);
+    assert_eq!(items[1]["id"], 2);
+    assert_eq!(items[0]["user"]["login"], "frank");
 }
 
 #[tokio::test]
-async fn contributors_of_unknown_repository_return_404() {
+async fn issue_comments_of_unknown_repository_return_404() {
     let ctx = common::caller_in(Uuid::new_v4());
     let service = common::service("https://api.github.com").await;
 
     let router = router_for(service, ctx);
-    let response = get(router, "/repos/acme/nope/contributors").await;
+    let response = get(router, "/repos/acme/nope/issues/7/comments").await;
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn contributors_are_tenant_scoped() {
+async fn issue_comments_are_tenant_scoped() {
     let owner = common::caller_in(Uuid::new_v4());
     let db = common::inmem_db().await;
     let service = common::service_over(db.clone(), "https://api.github.com");
@@ -107,44 +127,22 @@ async fn contributors_are_tenant_scoped() {
         .await
         .expect("repo seed must succeed");
     service
-        .upsert_contributor(&owner, "acme", "widget", contributor_record(3, "carol", 9))
+        .upsert_comment(
+            &owner,
+            "acme",
+            "widget",
+            comment_record(4, 7, "2026-08-20T00:00:00Z"),
+        )
         .await
-        .expect("contributor seed must succeed");
+        .expect("comment seed must succeed");
 
     let stranger = common::caller_in(Uuid::new_v4());
     let router = router_for(service, stranger);
-    let response = get(router, "/repos/acme/widget/contributors").await;
+    let response = get(router, "/repos/acme/widget/issues/7/comments").await;
 
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
         "another tenant must not even learn the repository is mirrored"
     );
-}
-
-#[tokio::test]
-async fn contributor_upsert_is_idempotent_by_user() {
-    let ctx = common::caller_in(Uuid::new_v4());
-    let service = common::service("https://api.github.com").await;
-    service
-        .upsert_repo(&ctx, repo_record())
-        .await
-        .expect("repo seed must succeed");
-    service
-        .upsert_contributor(&ctx, "acme", "widget", contributor_record(4, "dave", 10))
-        .await
-        .expect("first upsert must succeed");
-
-    let updated = contributor_record(4, "dave", 25);
-    service
-        .upsert_contributor(&ctx, "acme", "widget", updated)
-        .await
-        .expect("second upsert must succeed");
-
-    let router = router_for(service, ctx);
-    let response = get(router, "/repos/acme/widget/contributors").await;
-    let json = body_json(response).await;
-    let items = json.as_array().expect("items");
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["contributions"], 25);
 }

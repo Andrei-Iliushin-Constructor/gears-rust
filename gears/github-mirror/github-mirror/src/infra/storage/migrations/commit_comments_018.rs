@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS gm_commit_comments (
     path VARCHAR(1024),
     position BIGINT,
     author_login VARCHAR(255),
-    body TEXT,
+    body MEDIUMTEXT,
     created_at VARCHAR(64) NOT NULL,
     updated_at VARCHAR(64) NOT NULL,
     html_url VARCHAR(1024),

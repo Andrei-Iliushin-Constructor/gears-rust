@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use toolkit::api::OpenApiRegistry;
 use toolkit::contracts::RunnableCapability;
-use toolkit::{Gear, GearCtx, RestApiCapability};
+use toolkit::{Gear, GearCtx, Healthcheck, HealthcheckResult, RestApiCapability};
 use tracing::{info, warn};
 
 use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
@@ -62,25 +62,19 @@ type ConcreteService = Service<
     SeaOrmRepoSyncStatusRepository,
 >;
 
+// The macro requires a literal, so the name cannot reference
+// `service::GEAR_NAME` directly; `gear_name_matches_the_domain_constant`
+// below pins the two together.
 #[toolkit::gear(
     name = "github-mirror",
     deps = [authz_resolver],
     capabilities = [rest, db, stateful]
 )]
+#[derive(Default)]
 pub struct GithubMirrorGear {
     service: OnceLock<Arc<ConcreteService>>,
     sync_cancel: Mutex<Option<CancellationToken>>,
     sync_handle: Mutex<Option<JoinHandle<()>>>,
-}
-
-impl Default for GithubMirrorGear {
-    fn default() -> Self {
-        Self {
-            service: OnceLock::new(),
-            sync_cancel: Mutex::new(None),
-            sync_handle: Mutex::new(None),
-        }
-    }
 }
 
 impl toolkit::contracts::DatabaseCapability for GithubMirrorGear {
@@ -94,6 +88,10 @@ impl toolkit::contracts::DatabaseCapability for GithubMirrorGear {
 impl Gear for GithubMirrorGear {
     async fn init(&self, ctx: &GearCtx) -> anyhow::Result<()> {
         let cfg: GithubMirrorConfig = ctx.config_or_default()?;
+        // Fails startup on a malformed or non-HTTP base URL rather than
+        // letting every later fetch build garbage requests from it.
+        cfg.resolved_api_base_url()
+            .map_err(|e| anyhow::anyhow!("invalid github-mirror config: {e}"))?;
         info!(api_base_url = %cfg.api_base_url, "Initializing github-mirror gear");
 
         let db = Arc::new(ctx.db_required()?);
@@ -338,6 +336,36 @@ impl RestApiCapability for GithubMirrorGear {
         info!("github-mirror REST routes registered");
         Ok(router)
     }
+
+    /// Reports through the platform's aggregated `/readyz`/`/health` rather
+    /// than only the gear's own always-200 `GET /health` endpoint. `None`
+    /// before `init()` runs mirrors `register_rest`'s own defensive check —
+    /// in practice this method is only ever called afterward.
+    fn healthcheck(&self, _ctx: &GearCtx) -> Option<Arc<dyn Healthcheck>> {
+        let service = self.service.get()?.clone();
+        Some(Arc::new(GithubMirrorHealthcheck { service }))
+    }
+}
+
+struct GithubMirrorHealthcheck {
+    service: Arc<ConcreteService>,
+}
+
+#[async_trait]
+impl Healthcheck for GithubMirrorHealthcheck {
+    fn name(&self) -> &'static str {
+        "github-mirror"
+    }
+
+    /// A pooled-connection acquisition, no query — enough to catch the DB
+    /// being unreachable without adding load for every readiness probe.
+    async fn check(&self) -> HealthcheckResult {
+        if self.service.db_reachable() {
+            HealthcheckResult::healthy()
+        } else {
+            HealthcheckResult::unhealthy("database unreachable")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -351,9 +379,17 @@ mod tests {
     }
 
     #[test]
+    fn gear_name_matches_the_domain_constant() {
+        assert_eq!(
+            GithubMirrorGear::MODULE_NAME,
+            crate::domain::service::GEAR_NAME
+        );
+    }
+
+    #[test]
     fn gear_provides_all_migrations() {
         use toolkit::contracts::DatabaseCapability;
         let gear = GithubMirrorGear::default();
-        assert_eq!(gear.migrations().len(), 35);
+        assert_eq!(gear.migrations().len(), 38);
     }
 }

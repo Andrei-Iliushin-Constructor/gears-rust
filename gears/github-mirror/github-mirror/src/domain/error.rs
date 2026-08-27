@@ -12,6 +12,16 @@ pub enum DomainError {
     #[error("Access forbidden: {0}")]
     Forbidden(String),
 
+    /// GitHub refused the mirror's own credentials for an upstream resource
+    /// (401, or 403 that is not a rate limit) - the repo went private, the
+    /// token was revoked, or its scopes shrank. Distinct from [`Self::Forbidden`]
+    /// (the *caller* lacks rights) so operators can tell which side lost access.
+    #[error("GitHub access lost: {0}")]
+    AccessLost(String),
+
+    #[error("Conflict: {0}")]
+    Conflict(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 

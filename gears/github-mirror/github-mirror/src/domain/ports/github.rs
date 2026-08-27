@@ -25,11 +25,64 @@ pub struct FetchOptions {
     pub force: bool,
 }
 
+/// Which top-level listings this fetch walked to their final page.
+///
+/// Deletion reconciliation may only run against a listing that is provably
+/// complete: "absent from a truncated page" says nothing about existence. A
+/// listing counts as complete when the client followed `rel="next"` until it
+/// stopped appearing — not when the walk stopped because the page cap was
+/// reached or the sync scope switched that family off.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ListingCompleteness {
+    pub issues: bool,
+    pub pull_requests: bool,
+    pub commits: bool,
+    pub comments: bool,
+    pub review_comments: bool,
+    pub labels: bool,
+    pub milestones: bool,
+    pub releases: bool,
+    pub branches: bool,
+    pub tags: bool,
+    pub contributors: bool,
+    pub issue_events: bool,
+    pub commit_comments: bool,
+    pub deployments: bool,
+}
+
+impl ListingCompleteness {
+    /// Every listing complete — what a fake in tests reports.
+    #[must_use]
+    pub fn all_complete() -> Self {
+        Self {
+            issues: true,
+            pull_requests: true,
+            commits: true,
+            comments: true,
+            review_comments: true,
+            labels: true,
+            milestones: true,
+            releases: true,
+            branches: true,
+            tags: true,
+            contributors: true,
+            issue_events: true,
+            commit_comments: true,
+            deployments: true,
+        }
+    }
+}
+
 /// What one sync-lite pass fetched from GitHub for a repository.
 #[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchedRepository {
     pub repository: RepoRecord,
+    /// Which listings below are complete and therefore safe to reconcile
+    /// deletions against.
+    pub complete: ListingCompleteness,
     pub issues: Vec<IssueRecord>,
     pub pull_requests: Vec<PullRequestRecord>,
     pub commits: Vec<CommitRecord>,

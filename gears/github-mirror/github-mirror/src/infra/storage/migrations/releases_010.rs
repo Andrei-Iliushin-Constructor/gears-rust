@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS gm_releases (
     name VARCHAR(1024),
     draft BOOLEAN NOT NULL,
     prerelease BOOLEAN NOT NULL,
-    body TEXT,
+    body MEDIUMTEXT,
     author_login VARCHAR(255),
     created_at VARCHAR(64) NOT NULL,
     published_at VARCHAR(64),
