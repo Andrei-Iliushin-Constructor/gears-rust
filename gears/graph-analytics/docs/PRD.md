@@ -447,6 +447,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 | authz-resolver gear | PDP decisions for the analytics permission and job ownership | Blocking |
 | types-registry gear | Permission instances registered as GTS instances | Blocking at startup |
 | Rust graph and algorithm crates (petgraph-family) | Algorithm implementations behind the metric contracts | Blocking for extended metrics |
+| Task Engine gear ([PR #4545](https://github.com/constructorfabric/gears-rust/pull/4545)) | Target owner of the job control plane — lifecycle, claim/lease, queue dispatch, retry, history and the management API. This gear ships its own job table first and migrates once the Task Engine lands and its fencing and cross-store terminal-transition contracts are settled (ADR-0003 § Migration to the platform Task Engine) | Not blocking — adoption path, not a prerequisite |
 
 ## 11. Assumptions
 
@@ -466,6 +467,8 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 | Client polls, times out and resubmits | The most expensive operation in the platform multiplied | Deduplication on the full job identity; a duplicate joins the in-flight job |
 
 ## 13. Open Questions
+
+- When does the job control plane move to the Task Engine, and does its lease carry a fencing token that rejects a superseded worker's write? A terminal transition that must commit together with a metrics-cache row in this gear's database becomes a two-store commit once the task row lives elsewhere; the likely shape is a local terminal record as the publication authority reporting outcome to the Task Engine, but it needs agreeing. Owner: Task Engine and this gear jointly. **Does not block implementation** — the local job table is the v1 authority and the migration is additive.
 
 - Should resource-scoped analytics over an induced authorized subgraph be supported, and if so what goes into the cache identity? A normalized scope fingerprint is the obvious candidate, but two scopes that differ textually and coincide semantically would then miss each other's cache entries. Owner: this gear plus authorization; not blocking v1, which rejects constrained scopes outright.
 - Do any consumers need incrementally maintained metrics rather than recomputation per revision? Incremental PageRank and community maintenance are well studied but change the determinism story completely, so this needs a concrete consumer before it is considered.

@@ -12,6 +12,7 @@ decision-makers: Graph Analytics design review
 - [Decision Drivers](#decision-drivers)
 - [Considered Options](#considered-options)
 - [Decision Outcome](#decision-outcome)
+  - [Migration to the platform Task Engine](#migration-to-the-platform-task-engine)
   - [Consequences](#consequences)
   - [Confirmation](#confirmation)
 - [Pros and Cons of the Options](#pros-and-cons-of-the-options)
@@ -110,6 +111,53 @@ involved: a value outside a documented hard range is `out_of_range`, an
 internally inconsistent request is `invalid_argument`, and only transient queue,
 concurrency or memory pressure is `resource_exhausted` with a retry hint.
 Termination by time or cancellation is `deadline_exceeded` or `cancelled`.
+
+### Migration to the platform Task Engine
+
+The [Task Engine](https://github.com/constructorfabric/gears-rust/pull/4545) is
+specifying exactly the control plane elements 1, 2 and 4 describe — durable task
+lifecycle, atomic claim with lease and heartbeat, priority-ordered dispatch with
+queue and per-type concurrency limits, retry and dead-letter handling, event
+history, and a REST surface so a UI can schedule, pause, observe and cancel.
+Building a second one here and keeping it is waste, so the decision above is
+sequenced rather than permanent: this gear implements its own job table first,
+because the Task Engine is a PRD in review with no DESIGN or implementation yet
+and analytics cannot wait on it, and moves the control plane there once it
+lands.
+
+What transfers: the job row's lifecycle and terminal states, claim and lease,
+heartbeat and restart reclamation, queue admission and per-tenant fairness,
+cancellation signalling, retention of job history, and the management API. This
+gear registers its metric-job types as GTS task types and implements workers.
+
+What stays here regardless, because it is about graphs rather than about tasks:
+
+| Element | Why it does not move |
+|---|---|
+| Estimate-and-reserve against a process-wide **memory** pool (3) | A generic engine bounds *how many* tasks run, not how many gigabytes they hold. An analytics job's peak is a function of node and edge counts, knowable only here, and the failure it prevents — the process being the wrong size before an allocation fails — is not a scheduling failure |
+| Revision supersession inside deduplication (5) | The Task Engine's idempotency key is caller-supplied and returns the existing task. Ours is derived from graph state, and a *newer* graph revision must **cancel** an in-flight job rather than join it. That is a domain predicate on task identity, not a duplicate-submission rule |
+| Conditional publication (6) and the metrics cache | The result is a graph artifact keyed by `(source_epoch, graph_revision, metric, parameters, contract version)`, and it is bigger than a task payload should be — the Task Engine caps payloads at 64 KiB and refers larger artifacts out by URI, while `metrics_max_entry_bytes` is 4 MiB |
+
+Two questions the Task Engine's contract has to answer before the control plane
+can move, both raised on that PR:
+
+1. **Is the lease fenced?** Claim, heartbeat and reassignment are specified;
+   what is not is whether a reclaimed task carries a monotonic token that makes
+   the superseded worker's *write* fail. Without one, reassignment prevents
+   double-dispatch but not a late write landing after a reclaim — and for this
+   gear that write is a cache publication.
+2. **How does a terminal transition compose with a write in another database?**
+   Publication here is one transaction: the cache row, the result reference and
+   the `succeeded` transition commit together, because any split leaves a cache
+   row nothing references or a `succeeded` job whose result resolves to nothing.
+   With the task row in the Task Engine's store that becomes a two-store commit.
+   The likely answer is that this gear keeps a local terminal record as the
+   authority for publication and reports outcome to the Task Engine, but that
+   shape needs agreeing rather than assuming.
+
+Until both are answered, the local job table stays the authority; the Task
+Engine adoption is tracked as a dependency rather than as a decision already
+taken.
 
 ### Consequences
 
