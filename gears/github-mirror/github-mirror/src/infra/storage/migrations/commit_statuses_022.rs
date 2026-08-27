@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS gm_commit_statuses (
     commit_sha VARCHAR(64) NOT NULL,
     state VARCHAR(32) NOT NULL,
     context VARCHAR(512) NOT NULL,
-    description TEXT,
+    description MEDIUMTEXT,
     target_url VARCHAR(1024),
     creator_login VARCHAR(255),
     created_at VARCHAR(64) NOT NULL,

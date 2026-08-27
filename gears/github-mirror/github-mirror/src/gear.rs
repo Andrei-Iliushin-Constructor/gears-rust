@@ -56,9 +56,8 @@ type ConcreteService = Service<
     SeaOrmIssueTimelineRepository,
 >;
 
-// The macro requires a literal, so the name cannot reference
-// `service::GEAR_NAME` directly; `gear_name_matches_the_domain_constant`
-// below pins the two together.
+// This attribute is the one place the gear's name is written:
+// `service::GEAR_NAME` aliases the `MODULE_NAME` const it generates.
 #[toolkit::gear(
     name = "github-mirror",
     deps = [authz_resolver],
@@ -228,14 +227,6 @@ mod tests {
     fn default_gear_has_no_service_until_init() {
         let gear = GithubMirrorGear::default();
         assert!(gear.service.get().is_none());
-    }
-
-    #[test]
-    fn gear_name_matches_the_domain_constant() {
-        assert_eq!(
-            GithubMirrorGear::MODULE_NAME,
-            crate::domain::service::GEAR_NAME
-        );
     }
 
     #[test]

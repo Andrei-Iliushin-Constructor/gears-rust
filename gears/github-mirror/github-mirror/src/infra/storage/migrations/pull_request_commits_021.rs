@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS gm_pull_request_commits (
     repo_id BIGINT NOT NULL,
     pull_number BIGINT NOT NULL,
     sha VARCHAR(64) NOT NULL,
-    message TEXT NOT NULL,
+    message MEDIUMTEXT NOT NULL,
     author_login VARCHAR(255),
     committer_login VARCHAR(255),
     authored_at VARCHAR(64),

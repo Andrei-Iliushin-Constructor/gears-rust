@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS gm_milestones (
     number BIGINT NOT NULL,
     title VARCHAR(1024) NOT NULL,
     state VARCHAR(32) NOT NULL,
-    description TEXT,
+    description MEDIUMTEXT,
     open_issues BIGINT NOT NULL,
     closed_issues BIGINT NOT NULL,
     due_on VARCHAR(64),

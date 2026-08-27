@@ -30,7 +30,9 @@ use super::repo::{
     WorkflowRunRepository,
 };
 
-pub const GEAR_NAME: &str = "github-mirror";
+/// The gear's name, taken from the `#[toolkit::gear]` attribute so the
+/// literal exists in exactly one place.
+pub const GEAR_NAME: &str = crate::gear::GithubMirrorGear::MODULE_NAME;
 
 /// The current instant as RFC3339 text, matching how every other timestamp
 /// in the mirror is stored.

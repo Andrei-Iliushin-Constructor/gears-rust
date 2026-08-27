@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS gm_deployments (
     sha VARCHAR(64) NOT NULL,
     environment VARCHAR(255) NOT NULL,
     task VARCHAR(255) NOT NULL,
-    description TEXT,
+    description MEDIUMTEXT,
     creator_login VARCHAR(255),
     created_at VARCHAR(64) NOT NULL,
     updated_at VARCHAR(64) NOT NULL,
