@@ -1,11 +1,11 @@
 {
-  "$id": "gts://gts.cf.core.graph_storage.attribute.v1~cf.core.graph_storage.provenance.v1~",
+  "$id": "gts://gts.cf.core.graph.attribute.v1~cf.core.graph.provenance.v1~",
   "$schema": "http://json-schema.org/draft-07/schema#",
   "description": "Who asserted a derived fact, with what, and how confidently. Retained across scope replacement together with the edge that carries it.",
   "type": "object",
   "allOf": [
     {
-      "$ref": "gts://gts.cf.core.graph_storage.attribute.v1~"
+      "$ref": "gts://gts.cf.core.graph.attribute.v1~"
     },
     {
       "type": "object",

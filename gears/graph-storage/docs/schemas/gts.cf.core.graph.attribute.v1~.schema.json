@@ -1,0 +1,8 @@
+{
+  "$id": "gts://gts.cf.core.graph.attribute.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Base attribute type: a reusable payload fragment embedded by node and edge types at a statically declared JSON pointer. It is not a graph element -- it has no row, no identity and no lifetime of its own, so it carries no tenant or timestamps: it is created, updated and deleted with the element that embeds it, and duplicating the owner's tenant into the fragment would create a second place for it to be wrong. The embedding schema names the exact attribute type by $ref, so an instance needs no type discriminator either. Declares no traits of its own -- index, full-text and vector paths are JSON pointers relative to the embedding object, so only that object can declare them.",
+  "x-gts-abstract": true,
+  "type": "object",
+  "additionalProperties": true
+}

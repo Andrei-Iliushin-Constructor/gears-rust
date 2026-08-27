@@ -1,5 +1,5 @@
 {
-  "$id": "gts://gts.cf.core.graph_storage.edge.v1~",
+  "$id": "gts://gts.cf.core.graph.edge.v1~",
   "$schema": "http://json-schema.org/draft-07/schema#",
   "description": "Base graph edge. id is derived by the gear from type, endpoints and discriminator, so a producer supplies the endpoints and the gear completes the envelope.",
   "x-gts-abstract": true,
@@ -19,10 +19,10 @@
         "type": "array",
         "items": {
           "type": "string",
-          "x-gts-ref": "gts.cf.core.graph_storage.node.v1~"
+          "x-gts-ref": "gts.cf.core.graph.node.v1~"
         },
         "default": [
-          "gts.cf.core.graph_storage.node.v1~"
+          "gts.cf.core.graph.node.v1~"
         ],
         "minItems": 1,
         "description": "Admissible source node types, as GTS patterns."
@@ -31,10 +31,10 @@
         "type": "array",
         "items": {
           "type": "string",
-          "x-gts-ref": "gts.cf.core.graph_storage.node.v1~"
+          "x-gts-ref": "gts.cf.core.graph.node.v1~"
         },
         "default": [
-          "gts.cf.core.graph_storage.node.v1~"
+          "gts.cf.core.graph.node.v1~"
         ],
         "minItems": 1,
         "description": "Admissible target node types, as GTS patterns."
@@ -61,7 +61,34 @@
     "type": {
       "type": "string",
       "format": "gts-type-id",
-      "x-gts-ref": "gts.cf.core.graph_storage.edge.v1~"
+      "x-gts-ref": "gts.cf.core.graph.edge.v1~"
+    },
+    "tenant_id": {
+      "description": "Tenant that owns the element. Server-assigned from the security context on write; present on read and on export so an instance is self-describing outside its request.",
+      "type": "string",
+      "format": "uuid",
+      "readOnly": true
+    },
+    "created_at": {
+      "description": "First write. Server-assigned.",
+      "type": "string",
+      "format": "date-time",
+      "readOnly": true
+    },
+    "updated_at": {
+      "description": "Most recent write. Server-assigned.",
+      "type": "string",
+      "format": "date-time",
+      "readOnly": true
+    },
+    "deleted_at": {
+      "description": "Soft-delete tombstone; absent or null on live elements. Server-assigned (Soft Delete Contract).",
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "readOnly": true
     },
     "src_node_key": {
       "type": "string",

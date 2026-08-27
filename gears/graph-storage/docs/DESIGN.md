@@ -267,7 +267,7 @@ classDiagram
         type_uuid: Uuid
         type_id: GtsId
         kind: node | edge | attribute
-        json_schema: JsonSchema
+        type_schema: JsonSchema
         effective_traits: JsonObject
     }
     class Node {
@@ -364,7 +364,7 @@ no fields of its own beyond what the family genuinely requires.
 
 ```jsonc
 {
-  "$id": "gts://gts.cf.core.graph_storage.node.v1~",
+  "$id": "gts://gts.cf.core.graph.node.v1~",
   "$schema": "http://json-schema.org/draft-07/schema#",
   "x-gts-abstract": true,
   "x-gts-traits-schema": {
@@ -383,11 +383,15 @@ no fields of its own beyond what the family genuinely requires.
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "id":      { "type": "string", "minLength": 1, "maxLength": 512 },
-    "type":    { "type": "string", "format": "gts-type-id", "x-gts-ref": "gts.cf.core.graph_storage.node.v1~" },
-    "name":    { "type": "string", "maxLength": 1024 },
-    "payload": { "type": "object", "additionalProperties": true },
-    "content": { "type": "string" }
+    "id":         { "type": "string", "minLength": 1, "maxLength": 512 },
+    "type":       { "type": "string", "format": "gts-type-id", "x-gts-ref": "gts.cf.core.graph.node.v1~" },
+    "tenant_id":  { "type": "string", "format": "uuid", "readOnly": true },
+    "created_at": { "type": "string", "format": "date-time", "readOnly": true },
+    "updated_at": { "type": "string", "format": "date-time", "readOnly": true },
+    "deleted_at": { "type": ["string", "null"], "format": "date-time", "readOnly": true },
+    "name":       { "type": "string", "maxLength": 1024 },
+    "payload":    { "type": "object", "additionalProperties": true },
+    "content":    { "type": "string" }
   },
   "required": ["id", "type"]
 }
@@ -396,6 +400,17 @@ no fields of its own beyond what the family genuinely requires.
 `id` is the producer-supplied stable key — what the rest of this document calls
 `node_key` and what the `node.node_key` column stores. `content` is the
 long-form text that chunking consumes, bounded by `content_max_bytes`.
+
+The four `readOnly` fields are the **element envelope**, carried by the node and
+edge bases alike. They are server-assigned — `tenant_id` from the security
+context, the timestamps by the write path — and a producer that sends them has
+them ignored, not honoured. They are in the *schema* rather than only in the
+table because an instance leaves the request that produced it: an export, an
+event payload, a cross-tenant administrative read or a debugging dump has to say
+which tenant a node belongs to and when it was written, and a schema that omits
+them makes those instances ambiguous. This follows the platform's own envelope
+convention — `gts.cf.core.events.event.v1~` carries `tenant_id`, and
+`gts.cf.core.events.topic.v1~` carries `created_at` as `readOnly`.
 
 | Node trait | Default | Meaning |
 |---|---|---|
@@ -414,7 +429,7 @@ is frequently the wrong field to embed.
 
 ```jsonc
 {
-  "$id": "gts://gts.cf.core.graph_storage.edge.v1~",
+  "$id": "gts://gts.cf.core.graph.edge.v1~",
   "$schema": "http://json-schema.org/draft-07/schema#",
   "x-gts-abstract": true,
   "x-gts-traits-schema": {
@@ -423,11 +438,11 @@ is frequently the wrong field to embed.
     "properties": {
       "family":      { "type": "string", "enum": ["static", "analysis"] },
       "src_types":   { "type": "array", "minItems": 1,
-                       "items": { "type": "string", "x-gts-ref": "gts.cf.core.graph_storage.node.v1~" },
-                       "default": ["gts.cf.core.graph_storage.node.v1~"] },
+                       "items": { "type": "string", "x-gts-ref": "gts.cf.core.graph.node.v1~" },
+                       "default": ["gts.cf.core.graph.node.v1~"] },
       "dst_types":   { "type": "array", "minItems": 1,
-                       "items": { "type": "string", "x-gts-ref": "gts.cf.core.graph_storage.node.v1~" },
-                       "default": ["gts.cf.core.graph_storage.node.v1~"] },
+                       "items": { "type": "string", "x-gts-ref": "gts.cf.core.graph.node.v1~" },
+                       "default": ["gts.cf.core.graph.node.v1~"] },
       "emit_events": { "type": "boolean", "default": false }
     },
     "required": ["family", "src_types", "dst_types"]
@@ -436,7 +451,7 @@ is frequently the wrong field to embed.
   "additionalProperties": false,
   "properties": {
     "id":            { "type": "string", "minLength": 1 },
-    "type":          { "type": "string", "format": "gts-type-id", "x-gts-ref": "gts.cf.core.graph_storage.edge.v1~" },
+    "type":          { "type": "string", "format": "gts-type-id", "x-gts-ref": "gts.cf.core.graph.edge.v1~" },
     "src_node_key":  { "type": "string", "minLength": 1, "maxLength": 512 },
     "dst_node_key":  { "type": "string", "minLength": 1, "maxLength": 512 },
     "discriminator": { "type": "string", "maxLength": 256 },
@@ -453,14 +468,14 @@ checks the endpoint's registered type inside the ingest transaction, under the
 endpoint locks the Concurrent Ingest Protocol already takes. The default value is
 the node base identifier itself: a zero-wildcard GTS pattern already covers
 everything derived from it (spec §3.6 implicit derived-type coverage), so
-`["gts.cf.core.graph_storage.node.v1~"]` reads as "any node type" without a
+`["gts.cf.core.graph.node.v1~"]` reads as "any node type" without a
 wildcard token.
 
 ##### Attribute base
 
 ```jsonc
 {
-  "$id": "gts://gts.cf.core.graph_storage.attribute.v1~",
+  "$id": "gts://gts.cf.core.graph.attribute.v1~",
   "$schema": "http://json-schema.org/draft-07/schema#",
   "x-gts-abstract": true,
   "type": "object",
@@ -469,7 +484,18 @@ wildcard token.
 ```
 
 An attribute type is a reusable payload fragment embedded by node and edge types,
-never a standalone instance — hence no envelope. It declares **no** traits schema:
+never a standalone instance — hence no envelope, and deliberately so. A fragment
+has no row, no identity and no lifetime of its own: it is created, updated and
+deleted with the element that embeds it, so `tenant_id` and timestamps on it
+would duplicate the owner's values into a second place they could disagree. It
+needs no `type` discriminator either, because the embedding schema names the
+exact attribute type by `$ref` at a statically declared pointer — `analysis_edge`
+requires `payload.provenance` to be exactly the provenance type. If a later
+requirement introduces a *polymorphic* attribute slot — a payload position that
+may hold any attribute type — that slot needs a discriminator, and the right
+place for it is a new base with one, not a `type` on every fragment.
+
+It declares **no** traits schema:
 `index`, `full_text_search` and `vector_search` are JSON pointers rooted at the
 instance, so only the embedding node or edge type knows where the fragment sits
 and can therefore declare paths into it.
@@ -478,19 +504,19 @@ and can therefore declare paths into it.
 
 ```jsonc
 // Owned node — the graph is the system of record. Adds no fields; fixes the family.
-{ "$id": "gts://gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~",
+{ "$id": "gts://gts.cf.core.graph.node.v1~cf.core.graph.owned_node.v1~",
   "x-gts-abstract": true,
   "x-gts-traits": { "family": "owned", "scope_managed": true },
   "type": "object",
-  "allOf": [{ "$ref": "gts://gts.cf.core.graph_storage.node.v1~" }] }
+  "allOf": [{ "$ref": "gts://gts.cf.core.graph.node.v1~" }] }
 
 // Reference node — projection of an object owned elsewhere. Requires canonical identity.
-{ "$id": "gts://gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.reference_node.v1~",
+{ "$id": "gts://gts.cf.core.graph.node.v1~cf.core.graph.reference_node.v1~",
   "x-gts-abstract": true,
   "x-gts-traits": { "family": "reference", "scope_managed": true },
   "type": "object",
   "allOf": [
-    { "$ref": "gts://gts.cf.core.graph_storage.node.v1~" },
+    { "$ref": "gts://gts.cf.core.graph.node.v1~" },
     { "type": "object", "required": ["payload"], "properties": { "payload": {
         "type": "object", "required": ["source"], "properties": { "source": {
           "type": "object", "required": ["system", "kind", "native_id"],
@@ -501,39 +527,39 @@ and can therefore declare paths into it.
   ] }
 
 // Phantom — created by the gear for an unresolved endpoint. Final: never derived from.
-{ "$id": "gts://gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.phantom_node.v1~",
+{ "$id": "gts://gts.cf.core.graph.node.v1~cf.core.graph.phantom_node.v1~",
   "x-gts-final": true,
   "x-gts-traits": { "family": "phantom", "scope_managed": false, "emit_events": false },
   "type": "object",
   "allOf": [
-    { "$ref": "gts://gts.cf.core.graph_storage.node.v1~" },
+    { "$ref": "gts://gts.cf.core.graph.node.v1~" },
     { "type": "object", "properties": { "payload": { "type": "object", "maxProperties": 0 } } }
   ] }
 
 // Static edge — producer-asserted, replaced by scope re-sync.
-{ "$id": "gts://gts.cf.core.graph_storage.edge.v1~cf.core.graph_storage.static_edge.v1~",
+{ "$id": "gts://gts.cf.core.graph.edge.v1~cf.core.graph.static_edge.v1~",
   "x-gts-abstract": true,
   "x-gts-traits": { "family": "static" },
   "type": "object",
-  "allOf": [{ "$ref": "gts://gts.cf.core.graph_storage.edge.v1~" }] }
+  "allOf": [{ "$ref": "gts://gts.cf.core.graph.edge.v1~" }] }
 
 // Analysis edge — survives scope re-sync, and therefore must say what produced it.
-{ "$id": "gts://gts.cf.core.graph_storage.edge.v1~cf.core.graph_storage.analysis_edge.v1~",
+{ "$id": "gts://gts.cf.core.graph.edge.v1~cf.core.graph.analysis_edge.v1~",
   "x-gts-abstract": true,
   "x-gts-traits": { "family": "analysis" },
   "type": "object",
   "allOf": [
-    { "$ref": "gts://gts.cf.core.graph_storage.edge.v1~" },
+    { "$ref": "gts://gts.cf.core.graph.edge.v1~" },
     { "type": "object", "required": ["payload"], "properties": { "payload": {
         "type": "object", "required": ["provenance"], "properties": { "provenance": {
-          "$ref": "gts://gts.cf.core.graph_storage.attribute.v1~cf.core.graph_storage.provenance.v1~" } } } } }
+          "$ref": "gts://gts.cf.core.graph.attribute.v1~cf.core.graph.provenance.v1~" } } } } }
   ] }
 
 // Provenance attribute — embedded by every analysis edge, retained across re-sync.
-{ "$id": "gts://gts.cf.core.graph_storage.attribute.v1~cf.core.graph_storage.provenance.v1~",
+{ "$id": "gts://gts.cf.core.graph.attribute.v1~cf.core.graph.provenance.v1~",
   "type": "object",
   "allOf": [
-    { "$ref": "gts://gts.cf.core.graph_storage.attribute.v1~" },
+    { "$ref": "gts://gts.cf.core.graph.attribute.v1~" },
     { "type": "object", "required": ["produced_by", "produced_at"], "properties": {
         "produced_by": { "type": "string", "minLength": 1 },
         "method":      { "type": "string" },
@@ -545,12 +571,12 @@ and can therefore declare paths into it.
 
 | Family | Identifier (chain after `gts.`) | Abstract / final | Traits it fixes |
 |---|---|---|---|
-| Owned node | `cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~` | abstract | `family: owned` |
-| Reference node | `…node.v1~cf.core.graph_storage.reference_node.v1~` | abstract | `family: reference` |
-| Phantom | `…node.v1~cf.core.graph_storage.phantom_node.v1~` | **final** | `family: phantom`, `scope_managed: false` |
-| Static edge | `cf.core.graph_storage.edge.v1~cf.core.graph_storage.static_edge.v1~` | abstract | `family: static` |
-| Analysis edge | `…edge.v1~cf.core.graph_storage.analysis_edge.v1~` | abstract | `family: analysis` |
-| Provenance attribute | `cf.core.graph_storage.attribute.v1~cf.core.graph_storage.provenance.v1~` | concrete | — |
+| Owned node | `cf.core.graph.node.v1~cf.core.graph.owned_node.v1~` | abstract | `family: owned` |
+| Reference node | `…node.v1~cf.core.graph.reference_node.v1~` | abstract | `family: reference` |
+| Phantom | `…node.v1~cf.core.graph.phantom_node.v1~` | **final** | `family: phantom`, `scope_managed: false` |
+| Static edge | `cf.core.graph.edge.v1~cf.core.graph.static_edge.v1~` | abstract | `family: static` |
+| Analysis edge | `…edge.v1~cf.core.graph.analysis_edge.v1~` | abstract | `family: analysis` |
+| Provenance attribute | `cf.core.graph.attribute.v1~cf.core.graph.provenance.v1~` | concrete | — |
 
 ##### Worked producer example
 
@@ -559,7 +585,7 @@ edge attributing one to the other:
 
 ```jsonc
 // Finding: closes its payload, declares what is indexed, searchable and embedded.
-{ "$id": "gts://gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~acme.sec._.finding.v1~",
+{ "$id": "gts://gts.cf.core.graph.node.v1~cf.core.graph.owned_node.v1~acme.sec._.finding.v1~",
   "x-gts-traits": {
     "emit_events": true,
     "index":            ["/payload/severity", "/payload/repository", "/payload/rule_id"],
@@ -568,7 +594,7 @@ edge attributing one to the other:
   },
   "type": "object",
   "allOf": [
-    { "$ref": "gts://gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~" },
+    { "$ref": "gts://gts.cf.core.graph.node.v1~cf.core.graph.owned_node.v1~" },
     { "type": "object", "required": ["payload"], "properties": { "payload": {
         "type": "object", "additionalProperties": false,
         "required": ["severity", "rule_id", "title"],
@@ -581,14 +607,14 @@ edge attributing one to the other:
   ] }
 
 // Commit: payload stays open -- see the additionalProperties rule below.
-{ "$id": "gts://gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.reference_node.v1~acme.scm._.commit.v1~",
+{ "$id": "gts://gts.cf.core.graph.node.v1~cf.core.graph.reference_node.v1~acme.scm._.commit.v1~",
   "x-gts-traits": {
     "index":            ["/payload/repository", "/payload/authored_at"],
     "full_text_search": ["/payload/message"]
   },
   "type": "object",
   "allOf": [
-    { "$ref": "gts://gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.reference_node.v1~" },
+    { "$ref": "gts://gts.cf.core.graph.node.v1~cf.core.graph.reference_node.v1~" },
     { "type": "object", "properties": { "payload": {
         "type": "object", "required": ["repository"], "properties": {
           "repository":  { "type": "string" },
@@ -597,13 +623,13 @@ edge attributing one to the other:
   ] }
 
 // introduced_by: narrows the inherited any-node endpoint default to one pair.
-{ "$id": "gts://gts.cf.core.graph_storage.edge.v1~cf.core.graph_storage.analysis_edge.v1~acme.sec._.introduced_by.v1~",
+{ "$id": "gts://gts.cf.core.graph.edge.v1~cf.core.graph.analysis_edge.v1~acme.sec._.introduced_by.v1~",
   "x-gts-traits": {
-    "src_types": ["gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~acme.sec._.finding.v1~"],
-    "dst_types": ["gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.reference_node.v1~acme.scm._.commit.v1~"]
+    "src_types": ["gts.cf.core.graph.node.v1~cf.core.graph.owned_node.v1~acme.sec._.finding.v1~"],
+    "dst_types": ["gts.cf.core.graph.node.v1~cf.core.graph.reference_node.v1~acme.scm._.commit.v1~"]
   },
   "type": "object",
-  "allOf": [{ "$ref": "gts://gts.cf.core.graph_storage.edge.v1~cf.core.graph_storage.analysis_edge.v1~" }] }
+  "allOf": [{ "$ref": "gts://gts.cf.core.graph.edge.v1~cf.core.graph.analysis_edge.v1~" }] }
 ```
 
 Effective traits the registry resolves for `…acme.sec._.finding.v1~`, merged
@@ -618,7 +644,9 @@ reproduced against the reference implementation.
 
 1. **The envelope must be declared by the base.** `additionalProperties: false`
    at the top level applies to the whole instance, so a base that closes itself
-   and omits `id` / `type` rejects every instance the platform constructs.
+   and omits any envelope field rejects every instance carrying it. The envelope
+   is six fields — `id`, `type`, `tenant_id`, `created_at`, `updated_at`,
+   `deleted_at` — of which the last four are `readOnly` and server-assigned.
 2. **Derived types extend `payload`, nothing else.** The top level is closed by
    the base, so a family or producer type that needs a new field puts it under
    `payload`. This is why reference identity is `payload.source` and not a
@@ -650,7 +678,7 @@ by name, so a producer moving to this ontology changes three things at once, and
 none of them fails until registration is attempted:
 
 - **The identifier gains its chain.** `gts.cf.studio.kg.file.v1~` becomes
-  `gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~cf.studio.kg.file.v1~`.
+  `gts.cf.core.graph.node.v1~cf.core.graph.owned_node.v1~cf.studio.kg.file.v1~`.
   Every stored reference to the old identifier — in a producer's own tables, in
   fixtures, in dashboards — is stale.
 - **The schema gains an `allOf`.** A document with no `$ref` to a family has no
@@ -686,7 +714,7 @@ rather than read for correctness:
 
 ```bash
 gts --path gears/graph-storage/docs/schemas \
-    validate-type-schema --type-id 'gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~'
+    validate-type-schema --type-id 'gts.cf.core.graph.node.v1~cf.core.graph.owned_node.v1~'
 ```
 
 All nine derived schemas pass OP#12 chain validation and the positive and
@@ -1376,7 +1404,7 @@ Content-Type: application/json
   "nodes": [
     {
       "node_key": "finding:acme:SEC-014:a1b2c3",
-      "type": "gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~acme.sec._.finding.v1~",
+      "type": "gts.cf.core.graph.node.v1~cf.core.graph.owned_node.v1~acme.sec._.finding.v1~",
       "name": "Hardcoded credential in deploy script",
       "expected_version": 3,     // optional compare-and-set; a mismatch rejects the batch
       "payload": {
@@ -1390,7 +1418,7 @@ Content-Type: application/json
   ],
   "edges": [
     {
-      "type": "gts.cf.core.graph_storage.edge.v1~cf.core.graph_storage.analysis_edge.v1~acme.sec._.introduced_by.v1~",
+      "type": "gts.cf.core.graph.edge.v1~cf.core.graph.analysis_edge.v1~acme.sec._.introduced_by.v1~",
       "src_node_key": "finding:acme:SEC-014:a1b2c3",
       "dst_node_key": "commit:github:acme/infra:a1b2c3",
       "payload": {
@@ -1476,7 +1504,7 @@ And a validation failure, RFC 9457 with the per-item list:
 
 ```jsonc
 {
-  "type": "gts.cf.core.graph_storage.err.v1~cf.core.graph_storage.validation_failed.v1~",
+  "type": "gts.cf.core.graph.err.v1~cf.core.graph.validation_failed.v1~",
   "title": "Ingest batch rejected",
   "status": 422,
   "detail": "2 of 1 nodes and 1 edges failed validation; no part of the batch was applied",
@@ -1487,14 +1515,14 @@ And a validation failure, RFC 9457 with the per-item list:
       "kind": "node",
       "index": 0,
       "key": "finding:acme:SEC-014:a1b2c3",
-      "gts_type": "gts.cf.core.graph_storage.node.v1~cf.core.graph_storage.owned_node.v1~acme.sec._.finding.v1~",
+      "gts_type": "gts.cf.core.graph.node.v1~cf.core.graph.owned_node.v1~acme.sec._.finding.v1~",
       "pointer": "/payload/severity",
       "message": "\"critical-ish\" is not one of \"low\", \"medium\", \"high\", \"critical\""
     },
     {
       "kind": "edge",
       "index": 0,
-      "gts_type": "gts.cf.core.graph_storage.edge.v1~cf.core.graph_storage.analysis_edge.v1~acme.sec._.introduced_by.v1~",
+      "gts_type": "gts.cf.core.graph.edge.v1~cf.core.graph.analysis_edge.v1~acme.sec._.introduced_by.v1~",
       "pointer": "/payload/provenance/produced_at",
       "message": "required property missing"
     }
@@ -2307,7 +2335,7 @@ The full graph-engine evaluation behind this strategy (12-engine scoreboard, Fal
 
 The platform baseline (PluginV1, types-registry registration, scoped ClientHub clients) supplies the mechanics; this section owns the Graph Storage-specific contracts, defined separately for graph stores, graph engines and embedding providers:
 
-- **GTS plugin schemas**: three siblings off the platform plugin base — `gts.cf.toolkit.plugins.plugin.v1~cf.core.graph_storage.embedding_provider.v1~`, `gts.cf.toolkit.plugins.plugin.v1~cf.core.graph_storage.graph_engine.v1~` and `gts.cf.toolkit.plugins.plugin.v1~cf.core.graph_storage.graph_store.v1~`. A derived type carries its ancestry in the identifier, as every other gear's plugin does (`…~cf.core.credstore.plugin.v1~`, `…~cf.llmgw.provider.plugin.v1~`). Validated properties — provider/engine identity, declared capabilities and authorization predicates, embedding-space identity or projection characteristics, priority.
+- **GTS plugin schemas**: three siblings off the platform plugin base — `gts.cf.toolkit.plugins.plugin.v1~cf.core.graph.embedding_provider.v1~`, `gts.cf.toolkit.plugins.plugin.v1~cf.core.graph.graph_engine.v1~` and `gts.cf.toolkit.plugins.plugin.v1~cf.core.graph.graph_store.v1~`. A derived type carries its ancestry in the identifier, as every other gear's plugin does (`…~cf.core.credstore.plugin.v1~`, `…~cf.llmgw.provider.plugin.v1~`). Validated properties — provider/engine identity, declared capabilities and authorization predicates, embedding-space identity or projection characteristics, priority.
 - **Versioned SDK traits** (`GraphStoreV1`, `GraphEngineV1`, `EmbeddingProviderV1`) with typed request/result/error models; the schema major maps one-to-one to the trait version, and a registered instance resolves to a scoped ClientHub client of the matching trait version — an incompatible version is a deterministic selection error, never a silent downgrade.
 - **Selection**: with no selector configured, the built-in default is used (built-in PostgreSQL store, built-in PostgreSQL engine, in-process ONNX provider); ties break deterministically on (priority, instance id). An **explicitly configured selector that matches nothing compatible never falls back** — it is a deterministic selection error and a readiness failure, because silently substituting a different embedding space or engine semantics would hide a deployment error.
 - **Readiness and churn**: a selected plugin participates in readiness; cached selections are invalidated on instance disappearance or re-registration, and re-selection follows the same deterministic rules.

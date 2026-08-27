@@ -1,5 +1,5 @@
 {
-  "$id": "gts://gts.cf.core.graph_storage.node.v1~",
+  "$id": "gts://gts.cf.core.graph.node.v1~",
   "$schema": "http://json-schema.org/draft-07/schema#",
   "description": "Base graph node. Carries the GTS instance envelope (id, type) plus the producer-authored fields; tenant, timestamps, actor and revision are gear-assigned and are deliberately not part of the type.",
   "x-gts-abstract": true,
@@ -70,8 +70,35 @@
     "type": {
       "type": "string",
       "format": "gts-type-id",
-      "x-gts-ref": "gts.cf.core.graph_storage.node.v1~",
+      "x-gts-ref": "gts.cf.core.graph.node.v1~",
       "description": "The node's registered GTS type."
+    },
+    "tenant_id": {
+      "description": "Tenant that owns the element. Server-assigned from the security context on write; present on read and on export so an instance is self-describing outside its request.",
+      "type": "string",
+      "format": "uuid",
+      "readOnly": true
+    },
+    "created_at": {
+      "description": "First write. Server-assigned.",
+      "type": "string",
+      "format": "date-time",
+      "readOnly": true
+    },
+    "updated_at": {
+      "description": "Most recent write. Server-assigned.",
+      "type": "string",
+      "format": "date-time",
+      "readOnly": true
+    },
+    "deleted_at": {
+      "description": "Soft-delete tombstone; absent or null on live elements. Server-assigned (Soft Delete Contract).",
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "readOnly": true
     },
     "name": {
       "type": "string",
