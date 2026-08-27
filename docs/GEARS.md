@@ -112,7 +112,7 @@ Provide conversational capabilities (chat messages, conversation history) as a c
 #### More details
 - [PRD](../gears/chat-engine/docs/PRD.md)
 - [Design](../gears/chat-engine/docs/DESIGN.md)
-- [API](../gears/chat-engine/api/README.md)
+- [Webhook protocol](../gears/chat-engine/docs/WEBHOOK-PROTOCOL.md)
 - TODO: SDK link
 
 ### Models Registry
