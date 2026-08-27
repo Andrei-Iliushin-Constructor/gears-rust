@@ -790,7 +790,9 @@ The CLI **MUST** support a TOML configuration file for all synchronization, cach
 
 - [ ] `p1` - **ID**: `cpt-cf-github-mirror-fr-cli-global-opts`
 
-The CLI **MUST** support: `--token <TOKEN>` (falls back to `GITHUB_TOKEN` env var, then `~/.github-mirror/gh_token.txt`), `-v`/`-vv`/`-vvv` (log verbosity), `--log-level <LEVEL>`, `-q`/`--quiet` (suppress progress output)
+The CLI **MUST** support: `--token-file <PATH>` or `--token-fd <FD>` for the GitHub token (falling back to the `GITHUB_TOKEN` env var, then `~/.github-mirror/gh_token.txt`, and once credstore integration lands, a credential-store reference), `-v`/`-vv`/`-vvv` (log verbosity), `--log-level <LEVEL>`, `-q`/`--quiet` (suppress progress output)
+
+The CLI **MUST NOT** accept the token as a plain `--token <TOKEN>` argument: command-line arguments are visible in process listings, shell history and CI logs, which contradicts the zero-exposure requirement above.
 
 - **Rationale**: Standard CLI options for token resolution, verbosity, and configuration.
 - **Actors**: `cpt-cf-github-mirror-actor-cli-operator`
