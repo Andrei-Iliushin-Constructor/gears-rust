@@ -4,7 +4,7 @@ date: 2026-08-13
 decision-makers: Graph Storage design review
 ---
 
-# ADR-0001: Graph persistence uses a single PostgreSQL 19 store with SQL/PGQ active from v1
+# ADR-0001: Graph persistence uses a single PostgreSQL store, with SQL/PGQ as a probed capability
 
 <!-- toc -->
 
@@ -17,7 +17,7 @@ decision-makers: Graph Storage design review
 - [Pros and Cons of the Options](#pros-and-cons-of-the-options)
   - [A. PostgreSQL source of truth plus Apache AGE traversal mirror](#a-postgresql-source-of-truth-plus-apache-age-traversal-mirror)
   - [B. Dedicated graph database as the primary store](#b-dedicated-graph-database-as-the-primary-store)
-  - [C. Single PostgreSQL 19 with SQL/PGQ from v1 and a CTE variable-depth backend](#c-single-postgresql-19-with-sqlpgq-from-v1-and-a-cte-variable-depth-backend)
+  - [C. Single PostgreSQL behind a store port, SQL/PGQ where the server provides it](#c-single-postgresql-behind-a-store-port-sqlpgq-where-the-server-provides-it)
   - [D. Single PostgreSQL with recursive-CTE traversal only](#d-single-postgresql-with-recursive-cte-traversal-only)
 - [More Information](#more-information)
 - [Traceability](#traceability)
@@ -37,7 +37,7 @@ The decision is which storage and traversal topology the productized Rust gear c
 ## Decision Drivers
 
 - Graph-query capability must survive beyond currently known scenarios; a design with no declarative graph-query path is not acceptable.
-- `cpt-cf-graph-storage-fr-tenant-isolation` requires tenant scoping through the platform's secure ORM (and RLS-compatible SQL) on every query path; AGE Cypher executes outside both, so tenant predicates would be hand-written and separately audited in a second dialect.
+- `cpt-cf-graph-storage-fr-tenant-isolation` requires tenant scoping through the platform's secure ORM on every query path; AGE Cypher executes outside both, so tenant predicates would be hand-written and separately audited in a second dialect.
 - `cpt-cf-graph-storage-fr-graph-traversal` and `cpt-cf-graph-storage-fr-neighborhood-projection` are fixed-depth, bounded queries (reference scenario depth <= 3) — the workload shape SQL/PGQ covers in its initial release (variable-length paths are expected in PG20+).
 - Platform query policy decides which of these shapes gear code may actually build. Gears may not write raw SQL, so every traversal statement has to be expressible through the secure ORM. Until August 2026 the secure ORM had no CTE support at all, and the platform's own CTE policy ([ADR 0001: Safe CTE Support in the Secure ORM](../../../../docs/arch/secure-orm/ADR/0001-secure-cte-policy.md)) explicitly rejected `WITH RECURSIVE` for gear code on the grounds that scope cannot be embedded into a recursive step. The recursive backend named below was therefore a design intent with no legal implementation path — a fact this ADR previously understated. That policy is now being reversed; see the Decision Outcome.
 - Timeline: the gear is expected to ship before PostgreSQL 19 GA (September/October 2026), so waiting for GA is not an option — but neither is a temporary AGE phase. The PG19 validation spike ([SPIKE-pg19-sqlpgq.md](../SPIKE-pg19-sqlpgq.md)) proved the target stack is usable today: pgvector builds and runs against PG19 beta2 (upstream support landed July 2026), HNSW and GRAPH_TABLE work end to end. The gear therefore starts directly on PG19, and an AGE bridge would be built, audited, and torn down within the same release window for no benefit.
@@ -51,7 +51,7 @@ The decision is which storage and traversal topology the productized Rust gear c
 
 - A. PostgreSQL source of truth plus Apache AGE traversal mirror (prototype topology)
 - B. Dedicated graph database (ArcadeDB / FalkorDB class) as the primary store
-- C. Single PostgreSQL 19 instance with graph queries behind a port: SQL/PGQ backend active from v1, iterative-CTE backend for variable depth and fallback
+- C. Single PostgreSQL instance with graph queries behind a port: SQL/PGQ backend where the server provides it, iterative-CTE and two-query backends for variable depth, fallback and older majors
 - D. Single PostgreSQL instance with recursive-CTE traversal only, no graph-query language path
 
 ## Decision Outcome
@@ -62,7 +62,7 @@ Concretely:
 
 1. Relational tables remain the single source of truth; no dual writes, no mirror.
 2. **The gear's baseline database is PostgreSQL 16 or later; PostgreSQL 19 is a backend capability, not a gear requirement.** Only the SQL/PGQ backend needs 19 — the iterative-CTE and two-query backends run on any supported major. The property-graph DDL is applied conditionally on the server major, and an operator who explicitly configures the SQL/PGQ backend on a server that cannot provide it gets a failure naming the required major rather than a silent substitution. **Found while building the prototype:** a gear probes this by *attempting*, not by asking. It has no statement API — the secure ORM's runner is sealed on purpose — so it cannot read `server_version_num` or `pg_catalog`. It does not need to: at startup it runs the same pattern every hop uses, under a scope matching no rows, and takes the outcome as the answer. Getting this wrong is not academic — the first cut assumed the capability and classified a missing property graph as an internal error, so every traversal on the baseline configuration answered 500 while the data sat there reachable by the other backend. What the attempt cannot report is the server major itself, which this point promises: naming the required major in a readiness failure needs a narrow read-only capability surface on the platform DB provider that does not exist today. Declaring 19 as a gear-wide baseline was an over-claim: it excluded deployments that have no objection to the gear, only to running a beta PostgreSQL, and it put a pinned beta image on the critical path of every installation. Graph queries execute behind a `GraphQueryPort` in the domain layer with two engine-native backends, both shipped in v1, over a two-query scoped hop that serves whenever neither can (see Consequences):
-   - **SQL/PGQ backend** (active from v1 for fixed-depth query shapes): `CREATE PROPERTY GRAPH` over the node and edge tables; `GRAPH_TABLE` pattern queries that compose with pgvector KNN and full-text predicates in a single SQL statement, inherit normal indexes, `EXPLAIN`, RLS, and secure-ORM scoping. Readiness verifies the server major version and property-graph presence.
+   - **SQL/PGQ backend** (selected for fixed-depth query shapes where the server provides the property graph): `CREATE PROPERTY GRAPH` over the node and edge tables; `GRAPH_TABLE` pattern queries that compose with pgvector KNN and full-text predicates in a single SQL statement, inherit normal indexes, `EXPLAIN`, RLS, and secure-ORM scoping. Readiness verifies the server major version and property-graph presence.
    - **Iterative-CTE backend**: depth-bounded expansion over the indexed edge table, one scoped hop per statement with the frontier deduplicated between hops; serves bounded variable-depth expansion until SQL/PGQ gains variable-length paths (expected PG20+) and remains available as a configuration-selected fallback. In the spike's kernel timings it measured about 2x faster than the PGQ hop chain, but that comparison set a single query against a single statement and understated what the iterative shape pays: a round trip per hop, and an intermediate frontier crossing the process boundary. Measured end to end on the stand the ordering is CTE first, SQL/PGQ close behind, two-query last (see Confirmation). Both are far inside the latency budget either way, so the fixed-depth default still rests on composition and declarativity rather than on speed. This backend is deliberately iterative rather than a single `WITH RECURSIVE` statement; the reasoning is in Consequences.
 
 The single-statement paths depend on the secure ORM being able to scope a CTE body. Until that exists, the port's shipped implementation is a two-query scoped hop (see DESIGN § Traversal Backend Sketch): one scoped query for incident edges, then one scoped query for the authorized endpoints. That is an implementation detail behind the port, not a change to this decision — the store, the schema and the query shapes are unchanged, and callers see the same contract.
@@ -127,7 +127,7 @@ The prototype topology: every node/edge is dual-written to an AGE graph used for
 - Good, because openCypher is available immediately, including variable-length paths.
 - Good, because the pattern is proven by the prototype and AGE now supports PostgreSQL 16–18.
 - Bad, because Rust has no mature agtype driver — the gear would own custom agtype parsing and Cypher passthrough code destined for removal.
-- Bad, because Cypher executes outside SecureORM and RLS, so tenant isolation must be re-implemented and re-audited in a second query dialect.
+- Bad, because Cypher executes outside SecureORM, so tenant isolation must be re-implemented and re-audited in a second query dialect.
 - Bad, because dual-writing doubles the write path and demands bridge identifiers and drift repair in new ingest code.
 - Bad, because it requires a custom database image (no published image ships AGE plus pgvector) and couples PostgreSQL major upgrades to AGE's historically late release cadence — including the planned PG19 move.
 - Bad, because with PG19 GA arriving before the gear's production date, the AGE phase would be built, audited, and then immediately scheduled for teardown.
@@ -142,13 +142,13 @@ ArcadeDB- or FalkorDB-class engine holds the graph; PostgreSQL is not the system
 - Bad, because full-text and hybrid search would need re-verification against a Lucene-class engine, and vector + relational + graph consistency crosses engine boundaries.
 - Bad, because there is no independent evidence for either candidate above a few million nodes, against a 1M–500M requirement.
 
-### C. Single PostgreSQL 19 with SQL/PGQ from v1 and a CTE variable-depth backend
+### C. Single PostgreSQL behind a store port, SQL/PGQ where the server provides it
 
-Relational node/edge/chunk tables with tsvector, JSONB GIN, and pgvector indexes; graph queries behind a port with engine-native backends, SQL/PGQ active from the first release.
+Relational node/edge/chunk tables with tsvector, JSONB GIN, and pgvector indexes; graph queries behind a port with engine-native backends, SQL/PGQ selected where the server provides it.
 
 - Good, because one engine serves lexical, vector, attribute, and graph queries over the same consistent rows, and graph+vector+FTS compose in a single SQL statement under SQL/PGQ — verified by the spike at ~20-40 ms end to end.
-- Good, because tenant scoping stays in the single secure-ORM/RLS enforcement path for every query shape, in both backends.
-- Good, because the declarative, standards-track graph-query language (SQL/PGQ) — the flexibility requirement — is available from v1, without a second engine or extension.
+- Good, because tenant scoping stays in the single secure-ORM enforcement path for every query shape, in both backends: the scope is compiled into the statement rather than re-implemented per backend. No RLS policy is claimed — the gear defines none, and adding one later would be defence in depth, not the mechanism.
+- Good, because the declarative, standards-track graph-query language (SQL/PGQ) — the flexibility requirement — is available without a second engine or extension wherever the server major provides it.
 - Good, because ingest writes once, and the port makes the traversal engine swappable: a dedicated mirror can be added later per the contingency plan without touching the system of record.
 - Neutral, because PG19 is beta until roughly October 2026: the gear ships on a pinned beta image with pgvector built from source, re-pinned to stock at GA — a time-boxed operational cost the spike and the prototype have already de-risked.
 - Bad, because SQL/PGQ's initial release lacks variable-length paths and shortest-path (expected PG20+); bounded variable-depth stays on the CTE backend until then.
