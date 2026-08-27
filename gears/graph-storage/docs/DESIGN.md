@@ -402,7 +402,7 @@ long-form text that chunking consumes, bounded by `content_max_bytes`.
 | `family` | required, no default | `owned` / `reference` / `phantom`. Drives which node model applies (ADR-0002). |
 | `scope_managed` | `true` | Whether rows of this type are deleted by producer-scoped replacement when absent from the submitted batch. |
 | `emit_events` | `false` | Whether CREATE/UPDATE/DELETE events are published for this type. |
-| `index` | `[]` | Payload paths backed by a JSONB index and therefore admissible in `$filter` (ADR-0003). |
+| `index` | `[]` | Payload paths backed by a B-tree over the path's extraction expression, and therefore admissible in `$filter` and `$orderby`. Each pointer must resolve to a scalar in the type's own schema; one that does not is rejected at registration (ADR-0003). |
 | `full_text_search` | `[]` | Paths composed into the node tsvector. |
 | `vector_search` | `[]` | Paths composed into the embedding input. |
 
