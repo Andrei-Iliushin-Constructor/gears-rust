@@ -175,7 +175,7 @@ Rust" stands, "in the graph-storage runtime" is superseded here.
 ## More Information
 
 - ADR-0001 (`cpt-cf-graph-analytics-adr-rust-determinism`) — what analytics is; narrowed by this ADR on where it runs.
-- ADR-0001 (`cpt-cf-graph-storage-adr-single-postgres-store`) — single source of truth; rule 3 preserves single-writer-per-table.
+- graph-storage ADR-0001 (`cpt-cf-graph-storage-adr-single-postgres-store`) — single source of truth; rule 3 preserves single-writer-per-table.
 
 ## Traceability
 

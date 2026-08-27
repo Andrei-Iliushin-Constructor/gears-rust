@@ -79,7 +79,7 @@ publication because a graph can change while a job is thinking about it.
 
 | ADR | Decision | Realized by |
 |---|---|---|
-| [`cpt-cf-graph-analytics-adr-rust-determinism`](./ADR/0001-cpt-cf-graph-analytics-adr-rust-determinism.md) | Algorithm set, canonical ordering, determinism classes and `algorithm_contract_version` adopted from graph-storage ADR-0001 unchanged; ownership transfers here | `cpt-cf-graph-analytics-component-metric-engine` |
+| [`cpt-cf-graph-analytics-adr-rust-determinism`](./ADR/0001-cpt-cf-graph-analytics-adr-rust-determinism.md) | Algorithm set, canonical ordering, determinism classes and `algorithm_contract_version`; ownership transfers here | `cpt-cf-graph-analytics-component-metric-engine` |
 | [`cpt-cf-graph-analytics-adr-own-gear-boundary`](./ADR/0002-cpt-cf-graph-analytics-adr-own-gear-boundary.md) | Analytics is its own deployment unit reading the graph schema over a read-only role; graph-storage keeps DDL, the revision and the topology grant | Storage Layer (read-only role), Topology Loader, the whole gear boundary |
 | [`cpt-cf-graph-analytics-adr-execution-model`](./ADR/0003-cpt-cf-graph-analytics-adr-execution-model.md) | Durable job table, leases with fencing epoch, estimate-and-reserve admission, bounded queue, deduplication, conditional publication | `cpt-cf-graph-analytics-component-job-scheduler` |
 
@@ -772,7 +772,7 @@ its commit.
 
 ### Determinism Contract
 
-Adopted unchanged from graph-storage ADR-0001 (see
+Defined by ADR-0001 (see
 [`cpt-cf-graph-analytics-adr-rust-determinism`](./ADR/0001-cpt-cf-graph-analytics-adr-rust-determinism.md)).
 
 | Metric | Determinism class | Contract covers |

@@ -901,7 +901,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 | Types Registry gear | Platform registration of the gear's GTS base types and permission instances | p1 |
 | Embedding provider | In-process ONNX runtime or remote inference endpoint producing fixed-dimension vectors | p1 |
 | File Storage gear | Blob storage for heavy content referenced from node payloads | p2 |
-| ToolKit `toolkit-db` safe-CTE API | Secure execution path for single-statement traversal (scoped CTE, `GRAPH_TABLE`) under a compiled access scope. Not required for correctness — bounded traversal ships as two scoped queries per hop — but required for single-statement composition of vector, graph and full-text retrieval. Delivered in two halves: the scoped-CTE half merged as `toolkit-db` PR #4584 (ADR-0001), the SQL/PGQ half in review as PR #4639 (ADR-0002, `SecureGraphSelect`). The gear's hop has been rebuilt against both and renders as one scoped statement | p2 |
+| ToolKit `toolkit-db` safe-CTE API | Secure execution path for single-statement traversal (scoped CTE, `GRAPH_TABLE`) under a compiled access scope. Not required for correctness — bounded traversal ships as two scoped queries per hop — but required for single-statement composition of vector, graph and full-text retrieval. Delivered in two halves: the scoped-CTE half merged as `toolkit-db` PR #4584 (secure-orm ADR-0001), the SQL/PGQ half in review as PR #4639 (secure-orm ADR-0002, `SecureGraphSelect`). The gear's hop has been rebuilt against both and renders as one scoped statement | p2 |
 
 ## 11. Assumptions
 
