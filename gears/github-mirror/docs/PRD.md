@@ -253,6 +253,10 @@ so the unchecked boxes below read as "not yet", not "abandoned".
   [gears-rust#4534](https://github.com/constructorfabric/gears-rust/issues/4534)
 - Write-back operations, Python bindings, CLI tool, state-change events: later
   increments of this PRD, not yet scheduled
+- Annotated-tag metadata: tags are mirrored as list-tags returns them (`name` plus
+  the resolved commit SHA), so lightweight and annotated tags are indistinguishable
+  and the annotated tag object's message/tagger/SHA are not captured — the Git Data
+  API is not called in this increment
 
 **Decisions recorded for the current increment**:
 
