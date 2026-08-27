@@ -4,7 +4,7 @@ date: 2026-08-13
 decision-makers: Graph Storage design review
 ---
 
-# ADR-0005: Embeddings come from a pluggable provider with an in-process ONNX default
+# ADR-0004: Embeddings come from a pluggable provider with an in-process ONNX default
 
 <!-- toc -->
 

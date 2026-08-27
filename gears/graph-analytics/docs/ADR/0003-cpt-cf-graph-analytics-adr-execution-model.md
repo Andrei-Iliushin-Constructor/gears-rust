@@ -4,7 +4,7 @@ date: 2026-08-24
 decision-makers: Graph Analytics design review
 ---
 
-# ADR-0002: Jobs are durable, leased, memory-reserved, and admitted through a bounded queue
+# ADR-0003: Jobs are durable, leased, memory-reserved, and admitted through a bounded queue
 
 <!-- toc -->
 
@@ -36,7 +36,7 @@ deduplication, because the natural client behaviour — poll, time out, resubmit
 otherwise multiplies exactly the wrong thing.
 
 Isolating analytics into its own gear
-([`cpt-cf-graph-storage-adr-analytics-own-gear`](../../../graph-storage/docs/ADR/0007-cpt-cf-graph-storage-adr-analytics-own-gear.md))
+([`cpt-cf-graph-analytics-adr-own-gear-boundary`](./0002-cpt-cf-graph-analytics-adr-own-gear-boundary.md))
 bounds the blast radius to this gear, but does not decide how work is admitted,
 scheduled, or recovered inside it. That is what this ADR settles.
 

@@ -4,7 +4,7 @@ date: 2026-08-19
 decision-makers: Graph Storage design review
 ---
 
-# ADR-0006: SQL/PGQ is emitted from typed input, and a graph pattern proposes candidates rather than authorizing them
+# ADR-0005: SQL/PGQ is emitted from typed input, and a graph pattern proposes candidates rather than authorizing them
 
 
 <!-- toc -->
@@ -37,7 +37,7 @@ decision-makers: Graph Storage design review
 
 [ADR-0001](./0001-cpt-cf-graph-storage-adr-single-postgres-store.md) commits this gear to SQL/PGQ from its first release. It does not say how a gear *emits* `GRAPH_TABLE`, because when it was written nobody knew whether a gear could. Two obstacles looked structural.
 
-`sea_query`, the builder every gear query goes through, has no AST node for `GRAPH_TABLE`. And the platform forbids raw SQL outside migration infrastructure ([11_database_patterns.md](../../../docs/toolkit_unified_system/11_database_patterns.md)), so the obvious workaround — assemble the statement as a string — is not available either. Between them, the ADR-0001 decision had no implementation path, and the shipped traversal was the two-query scoped hop.
+`sea_query`, the builder every gear query goes through, has no AST node for `GRAPH_TABLE`. And the platform forbids raw SQL outside migration infrastructure ([11_database_patterns.md](../../../../docs/toolkit_unified_system/11_database_patterns.md)), so the obvious workaround — assemble the statement as a string — is not available either. Between them, the ADR-0001 decision had no implementation path, and the shipped traversal was the two-query scoped hop.
 
 A development stand has since built the backend and measured it, which turns the question from "can this be done" into "on what terms". Three things need settling, and none of them is answered by ADR-0001:
 
@@ -147,7 +147,7 @@ Concretely:
 
 ## More Information
 
-The measurements behind every number here are in [SPIKE-pg19-sqlpgq.md](../SPIKE-pg19-sqlpgq.md) and in the development stand's findings log. The platform's rule on raw SQL is [11_database_patterns.md](../../../docs/toolkit_unified_system/11_database_patterns.md); the platform's CTE policy, which exempts dialect-specific assembly inside `toolkit-db` itself, is [ADR 0001: Safe CTE Support in the Secure ORM](../../../docs/arch/secure-orm/ADR/0001-secure-cte-policy.md).
+The measurements behind every number here are in [SPIKE-pg19-sqlpgq.md](../SPIKE-pg19-sqlpgq.md) and in the development stand's findings log. The platform's rule on raw SQL is [11_database_patterns.md](../../../../docs/toolkit_unified_system/11_database_patterns.md); the platform's CTE policy, which exempts dialect-specific assembly inside `toolkit-db` itself, is [ADR 0001: Safe CTE Support in the Secure ORM](../../../../docs/arch/secure-orm/ADR/0001-secure-cte-policy.md).
 
 ## What full SQL/PGQ support needs from the platform
 

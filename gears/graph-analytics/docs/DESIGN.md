@@ -56,8 +56,8 @@ publication because a graph can change while a job is thinking about it.
 | `p1` | `cpt-cf-graph-analytics-fr-core-metrics` | Metric Engine over the canonicalized topology; degree, PageRank, components with edge-type exclusion |
 | `p2` | `cpt-cf-graph-analytics-fr-extended-metrics` | Seeded sampled Brandes betweenness and seeded community detection with stable ordering (ADR-0001) |
 | `p1` | `cpt-cf-graph-analytics-fr-determinism` | Canonical input ordering before any seeded run; per-metric contract and immutable `algorithm_contract_version` in cache identity (ADR-0001) |
-| `p1` | `cpt-cf-graph-analytics-fr-async-jobs` | Durable job table, leases with fencing epoch, atomic terminal transitions, cooperative cancellation (ADR-0002) |
-| `p1` | `cpt-cf-graph-analytics-fr-scheduling` | Bounded queue, per-tenant fairness, estimate-and-reserve against a process-wide pool, deduplication on full job identity (ADR-0002) |
+| `p1` | `cpt-cf-graph-analytics-fr-async-jobs` | Durable job table, leases with fencing epoch, atomic terminal transitions, cooperative cancellation (ADR-0003) |
+| `p1` | `cpt-cf-graph-analytics-fr-scheduling` | Bounded queue, per-tenant fairness, estimate-and-reserve against a process-wide pool, deduplication on full job identity (ADR-0003) |
 | `p1` | `cpt-cf-graph-analytics-fr-metrics-cache` | Conditional single-flight publication keyed by revision, parameters and contract version; bounded retention with race-safe cleanup |
 | `p1` | `cpt-cf-graph-analytics-fr-tenant-isolation` | Every query scoped through SecureORM; one in-memory topology never spans tenants |
 | `p1` | `cpt-cf-graph-analytics-fr-access-control` | Shared PolicyEnforcer for REST and ClientHub; whole-tenant permission, constrained scopes rejected; ownership tuple re-authorized per call |
@@ -79,8 +79,9 @@ publication because a graph can change while a job is thinking about it.
 
 | ADR | Decision | Realized by |
 |---|---|---|
-| [`cpt-cf-graph-analytics-adr-inherited-determinism`](./ADR/0001-cpt-cf-graph-analytics-adr-inherited-determinism.md) | Algorithm set, canonical ordering, determinism classes and `algorithm_contract_version` adopted from graph-storage ADR-0004 unchanged; ownership transfers here | `cpt-cf-graph-analytics-component-metric-engine` |
-| [`cpt-cf-graph-analytics-adr-execution-model`](./ADR/0002-cpt-cf-graph-analytics-adr-execution-model.md) | Durable job table, leases with fencing epoch, estimate-and-reserve admission, bounded queue, deduplication, conditional publication | `cpt-cf-graph-analytics-component-job-scheduler` |
+| [`cpt-cf-graph-analytics-adr-rust-determinism`](./ADR/0001-cpt-cf-graph-analytics-adr-rust-determinism.md) | Algorithm set, canonical ordering, determinism classes and `algorithm_contract_version` adopted from graph-storage ADR-0001 unchanged; ownership transfers here | `cpt-cf-graph-analytics-component-metric-engine` |
+| [`cpt-cf-graph-analytics-adr-own-gear-boundary`](./ADR/0002-cpt-cf-graph-analytics-adr-own-gear-boundary.md) | Analytics is its own deployment unit reading the graph schema over a read-only role; graph-storage keeps DDL, the revision and the topology grant | Storage Layer (read-only role), Topology Loader, the whole gear boundary |
+| [`cpt-cf-graph-analytics-adr-execution-model`](./ADR/0003-cpt-cf-graph-analytics-adr-execution-model.md) | Durable job table, leases with fencing epoch, estimate-and-reserve admission, bounded queue, deduplication, conditional publication | `cpt-cf-graph-analytics-component-job-scheduler` |
 
 ### 1.3 Architecture Layers
 
@@ -163,7 +164,7 @@ change bumps the contract version rather than reinterpreting old rows.
 A seed does not make an algorithm repeatable when row order, hash-map iteration
 or adjacency layout vary. Inputs are canonicalized before any seeded algorithm
 runs, and every tie-break is defined on node keys. ADR:
-[`cpt-cf-graph-analytics-adr-inherited-determinism`](./ADR/0001-cpt-cf-graph-analytics-adr-inherited-determinism.md).
+[`cpt-cf-graph-analytics-adr-rust-determinism`](./ADR/0001-cpt-cf-graph-analytics-adr-rust-determinism.md).
 
 ### 2.2 Constraints
 
@@ -281,7 +282,7 @@ the in-flight job; the durable state machine with atomic terminal transitions;
 lease acquisition, heartbeat, expiry and reclaim with a fencing epoch; release of
 reservations on success, failure, cancellation and lease expiry alike;
 cooperative cancellation including cancellation of jobs superseded by a newer
-revision; and lease recovery before workers report ready (ADR-0002).
+revision; and lease recovery before workers report ready (ADR-0003).
 
 ##### Responsibility boundaries
 
@@ -649,7 +650,7 @@ carrying a stale epoch are quarantined rather than resumed.
 
 ### Execution and Concurrency Contract
 
-The four failures worth naming, and what answers each (ADR-0002):
+The four failures worth naming, and what answers each (ADR-0003):
 
 **1. A computation outliving its request.** The HTTP response cannot be the
 result, so job state exists whether or not it is designed. Therefore: a durable
@@ -771,8 +772,8 @@ its commit.
 
 ### Determinism Contract
 
-Adopted unchanged from graph-storage ADR-0004 (see
-[`cpt-cf-graph-analytics-adr-inherited-determinism`](./ADR/0001-cpt-cf-graph-analytics-adr-inherited-determinism.md)).
+Adopted unchanged from graph-storage ADR-0001 (see
+[`cpt-cf-graph-analytics-adr-rust-determinism`](./ADR/0001-cpt-cf-graph-analytics-adr-rust-determinism.md)).
 
 | Metric | Determinism class | Contract covers |
 |---|---|---|
@@ -876,4 +877,4 @@ computed over them is not.
 
 - **PRD**: [PRD.md](./PRD.md)
 - **ADRs**: [ADR/](./ADR/)
-- **Upstream decision**: [`cpt-cf-graph-storage-adr-analytics-own-gear`](../../graph-storage/docs/ADR/0007-cpt-cf-graph-storage-adr-analytics-own-gear.md)
+- **Graph schema this gear reads**: [graph-storage DESIGN](../../graph-storage/docs/DESIGN.md) § 3.7 — owned there, read here over the read-only role

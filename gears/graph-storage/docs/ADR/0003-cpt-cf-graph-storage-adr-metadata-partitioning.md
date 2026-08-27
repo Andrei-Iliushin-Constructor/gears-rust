@@ -142,7 +142,7 @@ Annotations in the GTS schema drive indexing and embedding; size ceiling forces 
 
 **What it would change.** This is the narrower of the two and is useful beyond payload filtering — any field whose storage shape is a computed expression rather than a stored column needs it.
 
-**Status of these asks.** Not yet raised with the platform. The index-activation lifecycle this ADR specifies is unimplemented, so there is no consumer to measure a proposed signature against; these are recorded at the precision a reading of the binding supports, and are to be raised with a working prototype behind them — as ADR-0006's asks were — when the lifecycle lands.
+**Status of these asks.** Not yet raised with the platform. The index-activation lifecycle this ADR specifies is unimplemented, so there is no consumer to measure a proposed signature against; these are recorded at the precision a reading of the binding supports, and are to be raised with a working prototype behind them — as ADR-0005's asks were — when the lifecycle lands.
 
 **The alternative is refused.** A gear can parse `$filter` itself and emit its own `Condition` carrying a custom expression; that compiles today. It is the second query dialect the architecture lints exist to prevent (DE0802/DE0803), and it would forfeit the ordering and cursor integration that make the projection a contract rather than a query endpoint — solving a quarter of the problem at the cost of the rule that keeps every gear's `$filter` meaning the same thing.
 

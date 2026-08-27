@@ -62,7 +62,7 @@ analytics jobs degrades ingest, while no volume of ingest degrades analytics the
 same way. Isolation rested on an obligation on the code ("must not starve request
 handling"), which is not a boundary.
 
-The decision to move the computation here (recorded as graph-storage ADR-0007)
+The decision to move the computation here (recorded as graph-storage ADR-0002)
 also fixed the seam: a read-only database role over topology columns only,
 graph-storage owning all DDL and the graph revision, and this gear owning the
 metrics cache and the job state machine.
@@ -478,4 +478,4 @@ Links to related specification artifacts.
 
 - **Design**: [DESIGN.md](./DESIGN.md)
 - **ADRs**: [ADR/](./ADR/)
-- **Upstream decision**: [graph-storage ADR-0007](../../graph-storage/docs/ADR/0007-cpt-cf-graph-storage-adr-analytics-own-gear.md), which moved this computation into its own gear
+- **Upstream decision**: [graph-storage ADR-0002](./ADR/0002-cpt-cf-graph-analytics-adr-own-gear-boundary.md), which moved this computation into its own gear

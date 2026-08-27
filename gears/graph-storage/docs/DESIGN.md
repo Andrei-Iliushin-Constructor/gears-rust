@@ -42,11 +42,11 @@
 
 ### 1.1 Architectural Vision
 
-Graph Storage is a **stateless gateway** over a pluggable store: it holds no graph state of its own, and every byte it serves comes from a `GraphStoreV1` implementation behind the port. It stores one typed, multi-tenant knowledge graph and serves three query shapes over it: lexical/vector/hybrid search, depth-limited traversal, and bounded projections. One store is the source of truth for everything — nodes, edges, chunks, types, vectors, labels, and the graph revision — so consistency, tenancy, and authorization are enforced in exactly one place. The built-in implementation is a single PostgreSQL schema, registered through the same plugin path an external store would use; nothing in the API surface, the authorization model or the error contract depends on it being PostgreSQL. Whole-graph analytics reads that store through a topology-only role from its own gear (ADR-0007).
+Graph Storage is a **stateless gateway** over a pluggable store: it holds no graph state of its own, and every byte it serves comes from a `GraphStoreV1` implementation behind the port. It stores one typed, multi-tenant knowledge graph and serves three query shapes over it: lexical/vector/hybrid search, depth-limited traversal, and bounded projections. One store is the source of truth for everything — nodes, edges, chunks, types, vectors, labels, and the graph revision — so consistency, tenancy, and authorization are enforced in exactly one place. The built-in implementation is a single PostgreSQL schema, registered through the same plugin path an external store would use; nothing in the API surface, the authorization model or the error contract depends on it being PostgreSQL. Whole-graph analytics reads that store through a topology-only role from its own gear (graph-analytics ADR-0002).
 
-The design generalizes the `studio-graph-storage` prototype: its data model (typed nodes and edges with GTS contracts, deterministic keys, phantom nodes, static/analysis edge split), its retrieval stack (tsvector + pgvector + RRF fusion, chunk folding), and its analytics surface are carried forward (the last into a separate gear, ADR-0007); its Python-only dependencies (Apache AGE, NetworkX, sentence-transformers) are replaced by decisions recorded in ADR-0001, ADR-0004, and ADR-0005; and platform obligations the prototype deliberately skipped — tenancy, access control, pagination, batched writes, observability — are designed in from the start.
+The design generalizes the `studio-graph-storage` prototype: its data model (typed nodes and edges with GTS contracts, deterministic keys, phantom nodes, static/analysis edge split), its retrieval stack (tsvector + pgvector + RRF fusion, chunk folding), and its analytics surface are carried forward (the last into a separate gear, graph-analytics ADR-0002); its Python-only dependencies (Apache AGE, NetworkX, sentence-transformers) are replaced by decisions recorded in ADR-0001, graph-analytics ADR-0001, and ADR-0004; and platform obligations the prototype deliberately skipped — tenancy, access control, pagination, batched writes, observability — are designed in from the start.
 
-The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a typed client trait and transport-agnostic models, an implementation crate with API/domain/infra layers, and **three** plugin surfaces — graph stores behind `GraphStoreV1` (ADR-0001), graph engines behind `GraphEngineV1` for traversal (ADR-0001), and embedding providers (ADR-0005). The built-in PostgreSQL store and engine are the defaults for the first two and are registered exactly as an external plugin is.
+The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a typed client trait and transport-agnostic models, an implementation crate with API/domain/infra layers, and **three** plugin surfaces — graph stores behind `GraphStoreV1` (ADR-0001), graph engines behind `GraphEngineV1` for traversal (ADR-0001), and embedding providers (ADR-0004). The built-in PostgreSQL store and engine are the defaults for the first two and are registered exactly as an external plugin is.
 
 ### 1.2 Architecture Drivers
 
@@ -80,7 +80,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-fr-soft-delete` | Tombstone on node and edge; incident edges follow the node in one transaction; every read path and every read-path index filters on it (Soft Delete Contract) |
 | `p2` | `cpt-cf-graph-storage-fr-labels` | Per-tenant label registry and assignment table; attach/detach as its own action; label filtering in search, projection and per-hop traversal (Label Contract) |
 | `p2` | `cpt-cf-graph-storage-fr-change-events` | `emit_events` trait per type, overridable per GTS pattern by configuration; published through the transactional outbox with the committing revision |
-| `p2` | `cpt-cf-graph-storage-fr-analytics-topology` | Read-only role over node keys, typed edge pairs and `gts_type`; payload, vectors and chunks not readable through it (ADR-0007) |
+| `p2` | `cpt-cf-graph-storage-fr-analytics-topology` | Read-only role over node keys, typed edge pairs and `gts_type`; payload, vectors and chunks not readable through it (graph-analytics ADR-0002) |
 | `p2` | `cpt-cf-graph-storage-fr-metric-annotation` | Projection Service annotates from the analytics gear's revision-keyed cache, or returns unannotated and says so |
 | `p1` | `cpt-cf-graph-storage-fr-revision-signal` | Graph revision incremented in the same transaction as any state change, and only then; exposed on both the topology surface and the API |
 | `p1` | `cpt-cf-graph-storage-fr-tenant-isolation` | Every entity is tenant-scoped through SecureORM; traversal recursion, search arms, and the analytics topology surface carry the tenant predicate |
@@ -100,7 +100,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-nfr-ingest-throughput` | 10k nodes + 20k edges <= 60 s | Ingest Pipeline, Storage Layer | Batched multi-row statements, single transaction, validation before writes, bounded per-batch memory | Ingest benchmark suite on reference profile |
 | `p1` | `cpt-cf-graph-storage-nfr-search-latency` | Hybrid p95 <= 500 ms at 100k nodes | Search Service, Storage Layer | Independent arm queries each using its index (GIN, HNSW), bounded arm limits, fusion in memory | Search benchmarks on seeded reference graph |
 | `p1` | `cpt-cf-graph-storage-nfr-traversal-latency` | Depth-3 p95 <= 1 s at 500k edges | Traversal Service, Storage Layer | Composite edge indexes (tenant, src), (tenant, dst); per-hop frontier bounding; node budgets | Traversal benchmarks on seeded reference graph |
-| `p2` | `cpt-cf-graph-storage-nfr-analytics-memory` | Topology-only read surface | Storage Layer (grant) | Expose node keys with interned type and typed edge pairs and nothing wider; the read-only role makes payload, `search_text`, embedding and chunk columns unreadable rather than merely unused. Computation ceilings move with the analytics gear (ADR-0007) | Grant tests: an attempted write and a payload/embedding `SELECT` both fail |
+| `p2` | `cpt-cf-graph-storage-nfr-analytics-memory` | Topology-only read surface | Storage Layer (grant) | Expose node keys with interned type and typed edge pairs and nothing wider; the read-only role makes payload, `search_text`, embedding and chunk columns unreadable rather than merely unused. Computation ceilings move with the analytics gear (its ADR-0002) | Grant tests: an attempted write and a payload/embedding `SELECT` both fail |
 | `p1` | `cpt-cf-graph-storage-nfr-response-bound` | Aggregate response ceilings | Domain admission, all read components | Cumulative payload bytes, edge count, annotation bytes and total serialized bytes bounded before hydration; deterministic truncation at the established ordering, reported in the response | Benchmark at maximum admissible cardinality asserts the ceilings hold |
 | `p1` | `cpt-cf-graph-storage-nfr-tenant-fairness` | One tenant cannot starve another | Domain admission, Storage Layer | Global caps alongside per-tenant caps, bounded per-tenant queues with round-robin dispatch, reserved interactive connection share above background work | Saturation test with one heavy and one light tenant asserts the light tenant's p95 stays within a documented factor |
 | `p1` | `cpt-cf-graph-storage-nfr-tenant-zero-leak` | Zero cross-tenant results | Storage Layer, all query components | Tenant predicate injected by SecureORM scoping in every query, including every CTE body; no raw unscoped SQL | Adversarial multi-tenant integration tests |
@@ -113,10 +113,18 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | [`cpt-cf-graph-storage-adr-single-postgres-store`](./ADR/0001-cpt-cf-graph-storage-adr-single-postgres-store.md) | Single PostgreSQL 16+ store (pgvector only; SQL/PGQ a probed capability on 19+); graph queries behind the GraphQueryPort with SQL/PGQ active from v1 (fixed-depth shapes) and iterative scoped hops for variable depth; pinned beta image until PG19 GA; Apache AGE not carried into the gear; dedicated traversal mirror as a measured-bottleneck contingency | `cpt-cf-graph-storage-principle-single-source-of-truth`, `cpt-cf-graph-storage-component-traversal-service`, `cpt-cf-graph-storage-component-storage-layer` |
 | [`cpt-cf-graph-storage-adr-unified-node-model`](./ADR/0002-cpt-cf-graph-storage-adr-unified-node-model.md) | One typed node model; owned vs. reference semantics via GTS base types; provenance-gated scope replacement | `cpt-cf-graph-storage-principle-reference-not-replica`, `cpt-cf-graph-storage-principle-provenance-survives-resync`, `cpt-cf-graph-storage-component-ontology-registry`, `cpt-cf-graph-storage-component-ingest-pipeline` |
 | [`cpt-cf-graph-storage-adr-metadata-partitioning`](./ADR/0003-cpt-cf-graph-storage-adr-metadata-partitioning.md) | Common columns + schema-declared indexed/vectorized attributes + payload ceiling with file-storage offload | `cpt-cf-graph-storage-principle-metadata-only-graph`, `cpt-cf-graph-storage-component-ontology-registry`, `cpt-cf-graph-storage-component-projection-service` |
-| [`cpt-cf-graph-storage-adr-analytics-in-rust`](./ADR/0004-cpt-cf-graph-storage-adr-analytics-in-rust.md) | Rust analytics with per-metric determinism contracts; NetworkX parity waived. Narrowed by ADR-0007 on where it runs | `graph-analytics` gear |
-| [`cpt-cf-graph-storage-adr-analytics-own-gear`](./ADR/0007-cpt-cf-graph-storage-adr-analytics-own-gear.md) | Analytics ships as its own gear with a read-only role on this schema; this gear owns DDL, the revision, and the topology grant | `cpt-cf-graph-storage-fr-analytics-topology`, `cpt-cf-graph-storage-fr-metric-annotation` |
-| [`cpt-cf-graph-storage-adr-embedding-provider`](./ADR/0005-cpt-cf-graph-storage-adr-embedding-provider.md) | Pluggable embedding provider; in-process ONNX default, remote plugin, deterministic fake for CI | `cpt-cf-graph-storage-component-embedding-coordinator`, `cpt-cf-graph-storage-constraint-single-embedding-space` |
-| [`cpt-cf-graph-storage-adr-sqlpgq-access`](./ADR/0006-cpt-cf-graph-storage-adr-sqlpgq-access.md) | SQL/PGQ is emitted from typed input through a function-call table reference (no `sea_query` fork, no hand-written SQL); every identifier comes from a closed vocabulary and every value is bound; a pattern carries the tenant bound and proposes candidates while an ordinary scoped query authorizes them; a scope whose tenants cannot be enumerated falls back to the two-query hop | `cpt-cf-graph-storage-component-traversal-service`, `cpt-cf-graph-storage-component-storage-layer` |
+| [`cpt-cf-graph-storage-adr-embedding-provider`](./ADR/0004-cpt-cf-graph-storage-adr-embedding-provider.md) | Pluggable embedding provider; in-process ONNX default, remote plugin, deterministic fake for CI | `cpt-cf-graph-storage-component-embedding-coordinator`, `cpt-cf-graph-storage-constraint-single-embedding-space` |
+| [`cpt-cf-graph-storage-adr-sqlpgq-access`](./ADR/0005-cpt-cf-graph-storage-adr-sqlpgq-access.md) | SQL/PGQ is emitted from typed input through a function-call table reference (no `sea_query` fork, no hand-written SQL); every identifier comes from a closed vocabulary and every value is bound; a pattern carries the tenant bound and proposes candidates while an ordinary scoped query authorizes them; a scope whose tenants cannot be enumerated falls back to the two-query hop | `cpt-cf-graph-storage-component-traversal-service`, `cpt-cf-graph-storage-component-storage-layer` |
+
+Two decisions this gear depends on are owned by the `graph-analytics` gear and
+recorded in its ADR set: [how metrics are computed and what determinism they
+promise](../../graph-analytics/docs/ADR/0001-cpt-cf-graph-analytics-adr-rust-determinism.md),
+and [the boundary that makes analytics a separate deployment unit reading this
+schema over a read-only role](../../graph-analytics/docs/ADR/0002-cpt-cf-graph-analytics-adr-own-gear-boundary.md).
+What this gear owes them is `cpt-cf-graph-storage-fr-analytics-topology`,
+`cpt-cf-graph-storage-fr-metric-annotation` and
+`cpt-cf-graph-storage-fr-revision-signal`; the DDL, the revision and the grant
+stay here.
 
 ### 1.3 Architecture Layers
 
@@ -249,7 +257,7 @@ The gear integrates with the CF/Gears runtime: ToolKit gear lifecycle, Operation
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-constraint-single-embedding-space`
 
-Exactly one embedding provider configuration is active per deployment at a time, identified by its full embedding-space identity (model artifact, tokenizer, preprocessing and pooling configuration) — not only its dimension. The identity under which stored vectors were produced is recorded durably; readiness verifies the active provider against it and blocks vector search on mismatch. The vector column dimension is fixed at migration time. Changing the model requires re-embedding. ADR: [`cpt-cf-graph-storage-adr-embedding-provider`](./ADR/0005-cpt-cf-graph-storage-adr-embedding-provider.md).
+Exactly one embedding provider configuration is active per deployment at a time, identified by its full embedding-space identity (model artifact, tokenizer, preprocessing and pooling configuration) — not only its dimension. The identity under which stored vectors were produced is recorded durably; readiness verifies the active provider against it and blocks vector search on mismatch. The vector column dimension is fixed at migration time. Changing the model requires re-embedding. ADR: [`cpt-cf-graph-storage-adr-embedding-provider`](./ADR/0004-cpt-cf-graph-storage-adr-embedding-provider.md).
 
 #### Payload Size Ceiling
 
@@ -800,7 +808,7 @@ Does not embed, index, or persist — it is a pure function from content to chun
 
 ##### Why this component exists
 
-One component owns the embedding lifecycle so model identity, batching, and dimension guarantees hold across ingest and query paths (ADR-0005).
+One component owns the embedding lifecycle so model identity, batching, and dimension guarantees hold across ingest and query paths (ADR-0004).
 
 ##### Responsibility scope
 
@@ -878,17 +886,17 @@ Does not define which paths are indexed (the type's `index` trait does), does no
 ##### Related components (by ID)
 
 - `cpt-cf-graph-storage-component-traversal-service` — expansion primitive
-- `graph-analytics` gear (ADR-0007) — metric annotations
+- `graph-analytics` gear (its ADR-0002) — metric annotations
 - `cpt-cf-graph-storage-component-ontology-registry` — filter admissibility
 
 #### Graph Analytics — moved out of this gear
 
-**Moved**: the former Graph Analytics Service component → the `graph-analytics` gear (ADR-0007), where it is redefined under that gear's own identifiers.
+**Moved**: the former Graph Analytics Service component → the `graph-analytics` gear (its ADR-0002), where it is redefined under that gear's own identifiers.
 
 Whole-graph metric computation is no longer a component of this gear. It has its
 own deployment unit, its own worker, memory and connection budget, and its own
 DESIGN; the algorithm set, canonical input ordering, determinism contracts and
-`algorithm_contract_version` defined by ADR-0004 move with it unchanged.
+`algorithm_contract_version` defined by graph-analytics ADR-0001 move with it unchanged.
 
 What stays here is the boundary:
 
@@ -896,7 +904,7 @@ What stays here is the boundary:
   their interned type, typed edge pairs with discriminator, and `gts_type`, all
   excluding tombstoned rows. Payload, `search_text`, embeddings and chunks are
   not readable through it, and it cannot write any graph table. The grant is what
-  enforces ADR-0004's topology-only rule; the reading code is not trusted with it.
+  enforces graph-analytics ADR-0001's topology-only rule; the reading code is not trusted with it.
 - **Schema version declaration** — the gear publishes the version its topology
   surface conforms to, so a mismatch is an analytics-side readiness failure
   rather than a runtime error on the first job.
@@ -920,7 +928,7 @@ One infra component owns entities, tenancy scoping, migrations, and the hand-wri
 
 ##### Responsibility scope
 
-SeaORM entities with `Scopable` tenancy; repositories generic over `DBRunner`; batched insert/upsert statements; the traversal queries with injected tenant predicates; index definitions (composite edge indexes, tsvector GIN, trait-declared payload indexes, HNSW vector indexes, all partial on `deleted_at IS NULL`); migrations including vector dimension; the read-only topology role (ADR-0007); readiness probes.
+SeaORM entities with `Scopable` tenancy; repositories generic over `DBRunner`; batched insert/upsert statements; the traversal queries with injected tenant predicates; index definitions (composite edge indexes, tsvector GIN, trait-declared payload indexes, HNSW vector indexes, all partial on `deleted_at IS NULL`); migrations including vector dimension; the read-only topology role (graph-analytics ADR-0002); readiness probes.
 
 It implements `GraphStoreV1` and is registered as the default store plugin exactly like an external one. The trait spans ingest, node and edge reads, tombstoning, the four search arms with their fusion inputs, tabular projection, label assignment and the topology surface — search is inside it because a store that could not answer the search API would not be a store for this gear. The obligations the trait states are behavioural, not mechanical: batch atomicity across nodes, edges and the idempotency record; single-writer serialization per scope identity held until durable; generation fencing under that serialization; refusal to remove a node a live edge references; one snapshot across every arm of a read. This implementation satisfies them with transactions, an exclusive scope-registry row lock, a compare-and-set under it, `ON DELETE RESTRICT`, and a repeatable-read snapshot; another implementation may satisfy them differently, and one that cannot satisfy an obligation declares the capability unsupported rather than approximating it.
 
@@ -1000,7 +1008,7 @@ The public surfaces are defined in the PRD as `cpt-cf-graph-storage-interface-re
 | `POST`/`DELETE` | `/api/graph-storage/v1/edges/{edge_key}/labels` | Attach / detach labels on an edge | p2 |
 | `GET` | `/api/graph-storage/v1/health/ready` | Readiness with named problems | p1 |
 
-Metric computation and job status move to the analytics gear (ADR-0007); this
+Metric computation and job status move to the analytics gear (its ADR-0002); this
 surface exposes only the cached metric annotations that projections already
 carry.
 
@@ -1176,8 +1184,8 @@ pub trait GraphStoreV1: Send + Sync + 'static {
     /// the store. The built-in PostgreSQL store materializes it as the
     /// read-only role the analytics gear queries directly, because serializing
     /// a million-node topology across an API on every recomputation is the cost
-    /// ADR-0004 rejected. A store that cannot expose it declares the capability
-    /// absent, and analytics is then unavailable in that deployment (ADR-0007)
+    /// graph-analytics ADR-0001 rejected. A store that cannot expose it declares the capability
+    /// absent, and analytics is then unavailable in that deployment (graph-analytics ADR-0002)
     /// rather than served over this method at that cost.
     async fn load_topology(&self, ctx: &StoreCtx<'_>, req: TopologyRequest)
         -> Result<TopologyPage, GraphStoreError>;
@@ -1328,7 +1336,7 @@ is invisible to vector search while looking present on every other path.
 ### 3.5 External Dependencies
 
 - PostgreSQL 16+ with pgvector (storage; HNSW cosine indexes). PostgreSQL 19+ additionally enables the SQL/PGQ backend (SQL:2023 property-graph queries in core); before PG19 GA that means a pinned beta image with pgvector built from a pinned source revision (upstream PG19 support landed July 2026), which is now a per-deployment choice rather than a gear requirement (ADR-0001).
-- ONNX Runtime and a MiniLM-class sentence-embedding model (default embedding plugin), or a remote inference endpoint (alternative plugin), per ADR-0005.
+- ONNX Runtime and a MiniLM-class sentence-embedding model (default embedding plugin), or a remote inference endpoint (alternative plugin), per ADR-0004.
 
 ### 3.6 Interactions & Sequences
 
@@ -1568,7 +1576,7 @@ back off) instead of parsing prose.
    phantoms excluded if requested; seeds always kept
 4. Optional metric annotations, only from a cache entry   [Projection Service]
    at the revision this read observed; unannotated and
-   flagged if the analytics gear is absent (ADR-0007)
+   flagged if the analytics gear is absent (graph-analytics ADR-0002)
 5. Subgraph + truncation status returned for rendering
 ```
 
@@ -1601,7 +1609,7 @@ Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by mi
 
 The SQL/PGQ property graph is created by a gear migration alongside the tables, so every fresh database can serve `GRAPH_TABLE` queries without manual setup; the platform migration runner executes that DDL without special handling.
 
-`tenant_id` is the designated partition key and participates in every primary, unique, and foreign-key contract from day one (e.g., nodes are unique on `(tenant_id, node_key)` and edges reference `(tenant_id, node_id)`), so adopting PostgreSQL partitioning at scale is a physical reorganization, not an identity migration (ADR-0001 § scale envelope). `metrics_cache` is written by the analytics gear and its growth is bounded by that gear's retention limits (ADR-0007); this gear reads it for annotation only.
+`tenant_id` is the designated partition key and participates in every primary, unique, and foreign-key contract from day one (e.g., nodes are unique on `(tenant_id, node_key)` and edges reference `(tenant_id, node_id)`), so adopting PostgreSQL partitioning at scale is a physical reorganization, not an identity migration (ADR-0001 § scale envelope). `metrics_cache` is written by the analytics gear and its growth is bounded by that gear's retention limits (graph-analytics ADR-0002); this gear reads it for annotation only.
 
 **Found while building the prototype: two PostgreSQL details this schema
 depends on.**
@@ -1830,11 +1838,11 @@ Payload-free by construction (Telemetry and Audit Contract); written in the inge
 | state | TEXT | active / migrating / retired |
 | created_at / activated_at | TIMESTAMPTZ | Lifecycle timestamps |
 
-This is the canonical durable location of the embedding-space identity. `node` and `chunk` carry an `embedding_epoch` column alongside `embedding` and the embedding-input hash: readiness compares the active provider's identity against the epoch its stored vectors reference, similarity search reads only vectors of the active epoch (never absent, stale, or previous-epoch ones), and the re-embedding lifecycle (ADR-0005) writes new-epoch vectors during backfill before an atomic cutover of `state`.
+This is the canonical durable location of the embedding-space identity. `node` and `chunk` carry an `embedding_epoch` column alongside `embedding` and the embedding-input hash: readiness compares the active provider's identity against the epoch its stored vectors reference, similarity search reads only vectors of the active epoch (never absent, stale, or previous-epoch ones), and the re-embedding lifecycle (ADR-0004) writes new-epoch vectors during backfill before an atomic cutover of `state`.
 
 #### Table: analytics_job — moved
 
-Owned by the `graph-analytics` gear (ADR-0007) along with the metrics cache
+Owned by the `graph-analytics` gear (its ADR-0002) along with the metrics cache
 table, the job state machine, lease recovery and the ownership tuple. This gear
 neither writes nor reads the job table; it reads only the metrics cache, and only
 for annotation.
@@ -1843,7 +1851,7 @@ for annotation.
 
 **ID**: `cpt-cf-graph-storage-dbtable-metrics-cache`
 
-Written only by the `graph-analytics` gear (ADR-0007) and read here for
+Written only by the `graph-analytics` gear (its ADR-0002) and read here for
 projection annotation. Its shape is recorded because this gear reads it and
 because the schema lives in one database; its retention, publication rules and
 `algorithm_contract_version` semantics belong to that gear.
@@ -1861,7 +1869,7 @@ because the schema lives in one database; its retention, publication rules and
 
 ### Prototype Lineage
 
-The `studio-graph-storage` prototype validates this design's data model and retrieval stack. Deliberate departures: Apache AGE removed (ADR-0001), NetworkX replaced (ADR-0004), sentence-transformers replaced by the provider contract (ADR-0005), whole-payload GIN indexing replaced by trait-declared indexes (ADR-0003), and row-at-a-time writes replaced by batched statements (`cpt-cf-graph-storage-nfr-ingest-throughput`). Tenancy, access control, and pagination are new platform obligations the prototype did not carry.
+The `studio-graph-storage` prototype validates this design's data model and retrieval stack. Deliberate departures: Apache AGE removed (ADR-0001), NetworkX replaced (graph-analytics ADR-0001), sentence-transformers replaced by the provider contract (ADR-0004), whole-payload GIN indexing replaced by trait-declared indexes (ADR-0003), and row-at-a-time writes replaced by batched statements (`cpt-cf-graph-storage-nfr-ingest-throughput`). Tenancy, access control, and pagination are new platform obligations the prototype did not carry.
 
 ### Phantom Materialization Contract
 
@@ -2012,7 +2020,7 @@ writer an authorization decision rather than a silent merge.
 
 **Plugins.** The gear remains the PEP for every engine. The selected graph-engine plugin receives a non-forgeable normalized authorization envelope; capability negotiation declares which authorization predicates the engine can enforce. An engine that cannot enforce the complete scope, holds stale authorization state, or cannot prove the requested revision is failed closed or bypassed for the built-in backend — never widened to tenant scope. The same resource-scoped adversarial suite runs against every backend.
 
-**Analytics.** Whole-tenant analytics and its permission live in the `graph-analytics` gear (ADR-0007). What this gear owes it is the topology grant and the revision; metric annotation on a projection is authorized as part of the projection read, since an annotation reveals nothing the projection does not already show.
+**Analytics.** Whole-tenant analytics and its permission live in the `graph-analytics` gear (its ADR-0002). What this gear owes it is the topology grant and the revision; metric annotation on a projection is authorized as part of the projection read, since an annotation reveals nothing the projection does not already show.
 
 ### Read Consistency Contract
 
@@ -2080,7 +2088,7 @@ that the tenant's current `(epoch, revision)` still equals the captured pair and
 inserts under a single-flight uniqueness guard; on mismatch the result is
 discarded (or recomputed), so a cache entry never claims a graph state whose
 topology it did not see. The cache identity additionally carries the immutable
-`algorithm_contract_version` (ADR-0004), so a deployment that changes
+`algorithm_contract_version` (graph-analytics ADR-0001), so a deployment that changes
 output-affecting semantics can never serve an old result under new semantics.
 
 ### Tenant Offboarding and Deletion Monotonicity
@@ -2204,7 +2212,7 @@ job categories (`graph-analytics` DESIGN § Error Model).
 
 **Plugins.** Provider and engine failures are normalized by the gear before crossing the public boundary: unsupported capability → `unimplemented`; incompatible version or configuration → `failed_precondition`; timeout → `deadline_exceeded`; cancellation → `cancelled`; throttling or temporary outage → `unavailable` (with retry-after); stale or rebuilding projection → `failed_precondition` (`PROJECTION_STALE`); malformed plugin response or detected projection corruption → `unknown` / `data_loss`. Vendor messages, URLs, status codes, and response bodies are protected diagnostics kept in access-controlled logs with a trace identifier; public `detail`, reason, and context use only Graph Storage vocabulary.
 
-**Asynchronous jobs** (owned by the `graph-analytics` gear, ADR-0007; the contract is recorded here because the two gears share the error model) have three error surfaces: (1) submission errors before `202` — validation, authorization, admission, dependency — returned immediately as a Problem, no job created; (2) execution errors after `202` — the terminal category, stable reason, safe structured context, and trace identifier are persisted with the job and replayed by the result endpoint, while status returns a failed-job envelope; (3) job-request errors — unknown or unauthorized job (`not_found`, indistinguishable), result requested before completion (`failed_precondition`, `JOB_NOT_COMPLETE`), invalid cancellation (`failed_precondition`), expired result (`not_found`, `JOB_RESULT_EXPIRED`). The SDK exposes the same terminal category and context.
+**Asynchronous jobs** (owned by the `graph-analytics` gear, its ADR-0002; the contract is recorded here because the two gears share the error model) have three error surfaces: (1) submission errors before `202` — validation, authorization, admission, dependency — returned immediately as a Problem, no job created; (2) execution errors after `202` — the terminal category, stable reason, safe structured context, and trace identifier are persisted with the job and replayed by the result endpoint, while status returns a failed-job envelope; (3) job-request errors — unknown or unauthorized job (`not_found`, indistinguishable), result requested before completion (`failed_precondition`, `JOB_NOT_COMPLETE`), invalid cancellation (`failed_precondition`), expired result (`not_found`, `JOB_RESULT_EXPIRED`). The SDK exposes the same terminal category and context.
 
 **Route registration.** Each route registers every Problem status its runtime can produce through OperationBuilder — `standard_errors` plus explicit additional responses for the canonical outcomes it can reach (for example `499` cancelled, `501` unsupported capability, `503` dependency unavailable, `504` deadline exceeded). Every route registers its own set, so OpenAPI describes every failure a generated client or gateway can observe.
 
@@ -2240,7 +2248,7 @@ returns to `Healthy`. A degraded component never silently widens behavior.
 | AuthZ resolver | `Unhealthy` — unreachable | Every authenticated data path fails closed, `unavailable` / `DEPENDENCY_UNAVAILABLE`; gear not ready | Unauthenticated health/readiness endpoints only | Automatic on reconnect; no local state to rebuild |
 | Types registry | `Unhealthy` — unreachable | Type registration and any request needing an unresolved type, `unavailable` / `DEPENDENCY_UNAVAILABLE`; gear not ready | — | Automatic on reconnect; the local type cache is re-validated before flipping to `Healthy` |
 | Embedding provider | `Degraded` — provider unavailable | Requests with `embed=true`, `unavailable` / `DEPENDENCY_UNAVAILABLE`; vector arms of search omitted with the response saying so | Ingest with `embed=false`, lexical search, traversal, projections, reads | Automatic on provider recovery; vectors missed while degraded are stale by input hash and re-embedded by the normal path |
-| Embedding-space identity | `Unhealthy` — active identity ≠ stored identity | Vector and hybrid search, `failed_precondition` / `EMBEDDING_SPACE_MISMATCH` | Lexical search, ingest, traversal, projections, reads — the gear stays ready | Operator runs the re-embedding lifecycle (ADR-0005) to `cutover`; identity match restores the capability automatically at cutover |
+| Embedding-space identity | `Unhealthy` — active identity ≠ stored identity | Vector and hybrid search, `failed_precondition` / `EMBEDDING_SPACE_MISMATCH` | Lexical search, ingest, traversal, projections, reads — the gear stays ready | Operator runs the re-embedding lifecycle (ADR-0004) to `cutover`; identity match restores the capability automatically at cutover |
 | Graph-engine plugin | `Degraded` — stale projection or unprovable cursor | Capabilities unique to the plugin, `unimplemented` / `CAPABILITY_UNSUPPORTED` | Everything routable to the built-in PostgreSQL engine | Plugin acknowledges a rebuild from the current `(source_epoch, graph_revision)`; the gear re-activates it through the activation gate |
 | Graph-engine plugin | `Unhealthy` — incompatible version or configured selector matches nothing | Plugin-only capabilities; the gear stays ready and routes to the built-in engine, except when an explicit selector matched nothing, which is a readiness failure | Built-in engine paths | Operator registers a compatible instance or corrects the selector; re-selection follows the deterministic rules |
 | Dynamic indexes | `Degraded` — building or backfilling | Filters on the affected attributes, `failed_precondition` / `INDEX_NOT_ACTIVE` | Every other filter, and all non-filter operations | Automatic when the build reaches `active`; queued builds are visible with position and estimate |
@@ -2419,7 +2427,7 @@ Every bound the gear enforces is a named configuration key with a safe default a
 | Estimated index build disk footprint | `ddl_max_estimated_bytes` | 32 GiB | 1 – 1,024 GiB | DDL queue admission |
 | Idempotency record retention | `idempotency_retention` | 7 days | 1 – 90 days | Background cleanup |
 
-The analytics ceilings, job deadline, global memory pool, queue depth and metric-cache retention bounds move to the `graph-analytics` gear with the computation (ADR-0007); they are configuration of a different deployment unit, which is the point of the split.
+The analytics ceilings, job deadline, global memory pool, queue depth and metric-cache retention bounds move to the `graph-analytics` gear with the computation (graph-analytics ADR-0002); they are configuration of a different deployment unit, which is the point of the split.
 
 `item_max_bytes` exists because the per-field ceilings do not compose: a producer can stay inside `payload_max_bytes` and `content_max_bytes` on every field and still push a multi-megabyte object by filling all of them at once, and `rest_max_body_bytes` only bounds the batch. It is part of the public API contract, not an internal guard, and is documented on the ingest endpoint alongside the batch bounds.
 
@@ -2469,7 +2477,7 @@ three parts:
 Dequeue is FIFO within a tenant queue. A cancelled or deadline-expired request is
 removed from its queue without occupying a dispatch slot, and the caller sees
 `cancelled` or `deadline_exceeded` rather than a late execution. Analytics has
-its own pools in the `graph-analytics` gear (ADR-0007) under the same three
+its own pools in the `graph-analytics` gear (its ADR-0002) under the same three
 rules; this section governs ingest, queries, provider calls, index builds and
 re-embedding inside this gear.
 

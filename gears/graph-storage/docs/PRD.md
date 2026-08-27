@@ -182,7 +182,7 @@ Several platform initiatives need to persist and query relationships between het
 
 - Requires PostgreSQL 16 or later with the `pgvector` extension and permission to create extensions in the gear's database; no other PostgreSQL extension is required. The SQL/PGQ graph-query backend additionally requires PostgreSQL 19: on an earlier server the gear starts on its iterative-CTE and two-query backends and reports SQL/PGQ as an unavailable capability rather than failing readiness (see ADR-0001). A deployment that wants SQL/PGQ before PostgreSQL 19 GA (expected September/October 2026) runs a pinned PG19 beta image with pgvector built from a pinned source revision
 - Requires an embedding provider: either an in-process ONNX model runtime bundled with the gear or network access to a remote embedding inference endpoint, per deployment configuration
-- Whole-graph analytics is a separate deployment unit (`graph-analytics`, ADR-0007) that reads this gear's schema over a read-only role; a deployment that installs it must budget memory for that gear's topology ceiling, and one that does not gets projections without metric annotations
+- Whole-graph analytics is a separate deployment unit (`graph-analytics`, graph-analytics ADR-0002) that reads this gear's schema over a read-only role; a deployment that installs it must budget memory for that gear's topology ceiling, and one that does not gets projections without metric annotations
 - Depends on the file-storage gear when heavy-content offloading is enabled; the graph gear itself never stores blobs
 
 ## 4. Scope
@@ -220,7 +220,7 @@ Several platform initiatives need to persist and query relationships between het
 - A bundled visualization UI — consumers build UIs on the projection API
 - Bitemporal versioning and node-level history — the graph reflects the latest ingested state; history is a future consideration
 - Undelete, and a retention job that hard-deletes tombstoned rows past a configurable window — both p2; hard delete additionally has to settle cascade ordering, key reuse after purge, and vector/full-text index reconciliation, none of which need to block v1
-- Whole-graph analytics computation — degree, PageRank, components, betweenness and community detection move to the `graph-analytics` gear (ADR-0007); this gear stores the graph they read and annotates projections from their cache
+- Whole-graph analytics computation — degree, PageRank, components, betweenness and community detection move to the `graph-analytics` gear (its ADR-0002); this gear stores the graph they read and annotates projections from their cache
 - Embedding model training or fine-tuning
 
 ## 5. Functional Requirements
@@ -495,7 +495,7 @@ The system **MUST** project nodes matching criteria into tabular results: select
 
 Whole-graph analytics — degree, PageRank, connected components, betweenness
 centrality and community detection — is computed by the separate
-`graph-analytics` gear (ADR-0007), which reads this gear's topology over a
+`graph-analytics` gear (its ADR-0002), which reads this gear's topology over a
 read-only role and owns the revision-keyed metrics cache. The requirements below
 are what **this** gear owes that boundary; the algorithms, their determinism
 contracts and the asynchronous job surface belong to the analytics gear's own
@@ -673,7 +673,7 @@ Depth-3 neighborhood projection **MUST** answer within 1 second at p95 on a tena
 
 - [ ] `p2` - **ID**: `cpt-cf-graph-storage-nfr-analytics-memory`
 
-The topology read surface **MUST** expose at most node keys with their interned type and typed edge pairs — never payloads, composed search text, embeddings or chunk contents — and the grant backing it **MUST** make the wider columns unreadable rather than merely unused. The ceilings that bound a computation's memory move with the computation to the `graph-analytics` gear (ADR-0007).
+The topology read surface **MUST** expose at most node keys with their interned type and typed edge pairs — never payloads, composed search text, embeddings or chunk contents — and the grant backing it **MUST** make the wider columns unreadable rather than merely unused. The ceilings that bound a computation's memory move with the computation to the `graph-analytics` gear (its ADR-0002).
 
 - **Threshold**: Configurable ceilings, defaults 1,000,000 nodes / 10,000,000 edges / 2 GiB estimated topology budget; topology-only memory footprint verified by profiling tests
 - **Rationale**: Keeping analytics topology-only is what makes reading a million-node graph affordable at all; expressing it as a database grant means a future change to the reading code cannot quietly widen it.
@@ -917,10 +917,10 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 |------|--------|------------|
 | Dense hub nodes make traversal and projection slow or unreadable | Interactive scenarios miss latency targets | Node budgets, per-hop edge-type filters, degree-ordered truncation, edge-type exclusion in analytics |
 | JSONB attribute indexing degrades as payloads grow | Filter queries slow down; index bloat | Payload size ceiling, indexable-attribute discipline in ontology design, heavy-content offloading |
-| Embedding model change invalidates stored vectors | Vector search quality silently degrades | Provider identity and dimension pinned in configuration; readiness identity guard blocks vector search on mismatch; operator-triggered resumable re-embedding lifecycle with checkpoints and atomic identity cutover (ADR-0005) |
+| Embedding model change invalidates stored vectors | Vector search quality silently degrades | Provider identity and dimension pinned in configuration; readiness identity guard blocks vector search on mismatch; operator-triggered resumable re-embedding lifecycle with checkpoints and atomic identity cutover (ADR-0004) |
 | Community detection and sampled betweenness differ from prototype outputs | Consumers expecting NetworkX-identical numbers are surprised | PRD explicitly waives numeric parity; determinism and ordering guarantees are documented per algorithm |
 | A single tenant's ingest load starves others | Platform-wide latency degradation | Batch size limits, per-tenant concurrency gates, operation-level permissions, observability of per-tenant load |
-| Analytics load starves the interactive path | Ingest and search miss latency targets | Analytics runs as its own gear with its own CPU, memory and connection budget (ADR-0007), so the two cannot share a pool |
+| Analytics load starves the interactive path | Ingest and search miss latency targets | Analytics runs as its own gear with its own CPU, memory and connection budget (graph-analytics ADR-0002), so the two cannot share a pool |
 | Shared ontologies evolve incompatibly across producers | Ingest failures or semantic drift between producers | Immutable schemas per GTS version, conflict-rejecting registration, family patterns that keep older derived types valid |
 | PostgreSQL 19 GA slips, or a PG19 beta regression hits the pinned stack | The gear ships on a beta database longer than planned | The stack is pinned (beta image + pgvector revision) and validated by the PG19 spike and the prototype's full test suite; the iterative-CTE backend can serve the whole fixed-depth API if a PGQ-specific regression appears; re-pin to stock at GA |
 | SQL/PGQ variable-length paths arrive later than PG20 | The CTE backend carries variable-depth expansion longer | The traversal port isolates the split; consumers see no API difference; a dedicated traversal mirror remains the measured-bottleneck contingency (ADR-0001) |
