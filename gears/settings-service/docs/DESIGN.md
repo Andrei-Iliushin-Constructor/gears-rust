@@ -167,7 +167,7 @@ The service is delivered as a **Constructor Fabric Gear** — the platform's uni
 | Domain | Effective-value resolution, Scope Class behaviour, the value write path, type validation, secret handling | In-process Rust modules |
 | Infrastructure | Hot-path effective-value cache with signal-driven invalidation; fail-closed audit emission | In-memory cache, Event Broker client |
 | External | Type and trait resolution, tenant ancestry, authentication and authorization decisions, secret storage, event transport, entitlement | `types-registry`, `tenant-resolver`, `authn-resolver`, `authz-resolver`, `credstore`, `event-broker`, `license-resolver`. Audit is **not** external in R1 — the store is gear-local (§4.2 *Audit Emitter*) |
-| Storage | Declarations, categories, values, pending changes, apply records, audit records | PostgreSQL via `toolkit-db`, reached through `SecureConn` (§4.8 *The Data Path*) |
+| Storage | Declarations, categories, values, audit records | PostgreSQL via `toolkit-db`, reached through `SecureConn` (§4.8 *The Data Path*) |
 
 #### Context View
 
@@ -365,7 +365,24 @@ Authorization, entitlement, type validation, and audit all fail closed. A mutati
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-constraint-postgres-primary-storage`
 
-Declarations, categories, values, pending changes, apply records and audit records stored in PostgreSQL via `toolkit-db`, reached through `SecureConn` so that every query carries an `AccessScope` (§4.8 *The Data Path*).
+Declarations, categories and values are stored in PostgreSQL via `toolkit-db`, reached through `SecureConn` so that every query carries an `AccessScope` (§4.8 *The Data Path*).
+
+**This is a recorded deviation.** The platform's persistence story is DB-agnostic SeaORM through `toolkit-db`, and the **single-node** deployment shape — edge devices, on-prem appliances, development — is a supported topology (`docs/ARCHITECTURE_MANIFEST.md`). This gear requires PostgreSQL for its production shape. What forces that is narrower than the DDL suggests, so it is worth separating:
+
+| Feature used | On SQLite |
+|---|---|
+| `pg_trgm` **GIN trigram indexes** (§4.7, §4.2 *Search*) | **No equivalent.** This is the only hard requirement. SQLite's FTS5 is token-based, not substring, so cross-field value search (`cpt-cf-settings-service-fr-search-discoverability`, `p2`) cannot be served the same way |
+| **Partial indexes and their predicates** — `uq_value_scope`, `idx_values_needs_review`, the split search corpus | **Not Postgres-only.** SQLite has supported `WHERE`-qualified indexes since 3.8.0 with identical syntax, and `file-storage` already relies on that. The denormalization of `data_classification` onto `setting_values` (§4.7) is needed on both, for the same reason |
+| `JSONB` | `TEXT` plus the JSON1 functions; weaker typing, and `jsonb_typeof` becomes `json_type` |
+| `num_nonnulls(...)` (§4.7) | An equality of predicates, which §4.7's subject-columns `CHECK` already uses for exactly this reason. The two `CHECK`s should be written the same way |
+| `= ANY($granted_slugs)` (§4.8 *Category access*) | `IN (...)` with bound parameters |
+| `BIGSERIAL` (`commit_seq`, activation §4.7) | An autoincrement integer column |
+
+**MySQL is out of scope.** `toolkit-db` builds against it, but no gear in the workspace enables the feature — every one that uses `toolkit-db` declares `pg` and `sqlite`, or `sqlite` alone. This gear targets **PostgreSQL and SQLite**, and its migrations MUST no-op on a MySQL backend rather than fail, so a misconfigured workspace does not break outright. `chat-engine` sets that precedent for both halves of this record: its full-text index is emitted as backend-gated raw SQL, present on Postgres, deliberately skipped on SQLite where the query falls back to an unindexed `LIKE`, and a no-op on MySQL.
+
+**In the single-node/edge shape**, then: everything the gear is *for* is portable — effective-value resolution, the ancestor-id cascade, scope isolation, the write path, activation and audit. **Value search is what degrades**, from an indexed substring match to a scan or to nothing. That is a `p2` capability, which is why running this gear on SQLite is a viable reduced configuration rather than a broken one.
+
+**What is not yet decided is the migration shape.** `file-storage` and `chat-engine` both write per-backend DDL, branching on `get_database_backend()` and documenting where the backends diverge; this design's §4.7 states Postgres DDL only, and §7 names real PostgreSQL for every tier above unit, while the platform's CI runs a SQLite integration tier on every PR (`make test-sqlite`, `docs/TESTING.md` §4). Either this gear writes the per-backend DDL and keeps that tier, or it records that its integration tests are Postgres-only. This is a **DESIGN follow-up**; it changes no contract either way.
 
 #### Constructor Fabric Gear
 
@@ -1807,7 +1824,7 @@ The Settings Service is **supplied as a Constructor Fabric Gear** — a composab
 |---------|--------|-------|
 | Language / runtime | Rust, ToolKit gear (`#[toolkit::gear]`) | SDK crate plus gear implementation crate, per the gear packaging model |
 | HTTP surface | Axum, OpenAPI-documented REST | RFC 9457 problem details; OData on collection lists via `toolkit_odata` |
-| Persistence | PostgreSQL via `toolkit-db`, reached through `SecureConn` with a `PolicyEnforcer`-compiled `AccessScope` (§4.8 *The Data Path*) | Partial and trigram GIN indexes; UUIDv7 keys |
+| Persistence | PostgreSQL via `toolkit-db`, reached through `SecureConn` with a `PolicyEnforcer`-compiled `AccessScope` (§4.8 *The Data Path*) | Partial and trigram GIN indexes; UUIDv7 keys. Postgres is required rather than one backend of three — recorded as a deviation in §3.2 |
 | In-process wiring | `ClientHub` | Resolves each dependency to a local implementation or a generated REST client per deployment profile |
 | Type validation | JSON Schema 2020-12 + `x-gts-traits` | Resolved from `types-registry`; validation only, never a second default |
 | Secret storage | `credstore` gear | Values held by opaque reference; plaintext never in this gear's database, cache, index, or audit |
