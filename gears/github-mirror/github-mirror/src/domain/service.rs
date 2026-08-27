@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -451,7 +452,11 @@ pub struct Service<
     config: ServiceConfig,
     sync_tx: mpsc::Sender<SyncJob>,
     sync_rx: Arc<Mutex<Option<mpsc::Receiver<SyncJob>>>>,
+    in_flight: Arc<Mutex<HashMap<InFlightKey, Uuid>>>,
 }
+
+/// One repository of one tenant: what a queued or running sync occupies.
+type InFlightKey = (Uuid, String);
 
 /// Manual `Clone`: every field is an `Arc` (cheap refcount bump) or already
 /// `Clone` (`PolicyEnforcer`, `ServiceConfig`). A `#[derive(Clone)]` would add
@@ -557,6 +562,7 @@ impl<
             config: self.config.clone(),
             sync_tx: self.sync_tx.clone(),
             sync_rx: Arc::clone(&self.sync_rx),
+            in_flight: Arc::clone(&self.in_flight),
         }
     }
 }
@@ -663,6 +669,7 @@ impl<
             config,
             sync_tx,
             sync_rx: Arc::new(Mutex::new(Some(sync_rx))),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -3378,6 +3385,9 @@ impl<
     /// `in_progress` has nothing to resume and yields an empty result rather
     /// than a fresh sync — asking for that is what `POST /sync` is for.
     ///
+    /// A repository whose sync is already queued or running resumes into that
+    /// run rather than a second one, so calling resume twice is harmless.
+    ///
     /// # Errors
     /// `Forbidden`/`Database` as usual. A repository that cannot be queued is
     /// skipped, so one full queue does not abandon the rest.
@@ -3417,6 +3427,12 @@ impl<
     /// happens later, on the gear's background task. Poll
     /// [`Self::get_session`] with the returned id to watch it finish.
     ///
+    /// A repository already queued or running collapses into that run: the
+    /// caller gets its session id back instead of a second session, so a
+    /// double-click, a retry and a resume of the same repository cost one
+    /// sync. `force` does not split the two — the run in flight is already
+    /// fetching the repository.
+    ///
     /// # Errors
     /// `Forbidden`/`Database` as usual, or `Internal` when the queue is full
     /// or the background worker is not running; in both cases the session is
@@ -3433,9 +3449,25 @@ impl<
         sync_scope.validate()?;
         let tenant_id = ctx.subject_tenant_id();
         let scope = self.session_scope(ctx, actions::UPSERT).await?;
+        let key = (tenant_id, format!("{owner}/{name}"));
+        let id = Uuid::new_v4();
+        {
+            // Claimed under the lock so two concurrent requests cannot both
+            // decide they are the first.
+            let mut in_flight = self.in_flight.lock().await;
+            if let Some(running) = in_flight.get(&key) {
+                tracing::debug!(
+                    repository = %key.1,
+                    session_id = %running,
+                    "sync already in flight; collapsing into it"
+                );
+                return Ok(*running);
+            }
+            in_flight.insert(key.clone(), id);
+        }
+
         let conn = self.db.conn()?;
 
-        let id = Uuid::new_v4();
         let mut session = SyncSessionRecord {
             id,
             repo_full_name: format!("{owner}/{name}"),
@@ -3470,6 +3502,7 @@ impl<
             force,
         };
         if let Err(e) = self.sync_tx.try_send(job) {
+            self.release_in_flight(&key).await;
             let reason = format!("sync could not be queued: {e}");
             session_states::FAILED.clone_into(&mut session.status);
             session.ended_at = Some(now_rfc3339());
@@ -3481,6 +3514,11 @@ impl<
         }
 
         Ok(id)
+    }
+
+    /// Give up a repository's claim so the next request queues a fresh sync.
+    async fn release_in_flight(&self, key: &InFlightKey) {
+        self.in_flight.lock().await.remove(key);
     }
 
     /// Take sole ownership of the job stream. The gear's background task calls
@@ -3498,6 +3536,19 @@ impl<
     /// # Errors
     /// Only failures to *persist* the outcome, which the caller logs.
     pub async fn run_sync_job(&self, job: &SyncJob) -> Result<(), DomainError> {
+        let outcome = self.run_sync_job_inner(job).await;
+        // Released on every path, including the error ones: a claim that
+        // outlived its job would block the repository until restart.
+        self.release_in_flight(&(
+            job.ctx.subject_tenant_id(),
+            format!("{}/{}", job.owner, job.name),
+        ))
+        .await;
+        outcome
+    }
+
+    /// The body of [`Self::run_sync_job`], minus the in-flight bookkeeping.
+    async fn run_sync_job_inner(&self, job: &SyncJob) -> Result<(), DomainError> {
         let tenant_id = job.ctx.subject_tenant_id();
         let scope = self.session_scope(&job.ctx, actions::UPSERT).await?;
         let conn = self.db.conn()?;

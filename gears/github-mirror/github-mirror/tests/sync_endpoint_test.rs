@@ -685,22 +685,91 @@ async fn sync_is_idempotent() {
     let mut pump = common::SyncPump::take(&service).await;
     let router = router_for(service.clone(), ctx);
 
+    // Drained between the two requests: back-to-back requests would collapse
+    // into one run, which `a_second_sync_of_a_repo_in_flight_reuses_it` covers.
     let first = post(
         router.clone(),
         "/github-mirror/v1/repos/rust-lang/rust/sync",
     )
     .await;
     assert_eq!(first.status(), StatusCode::ACCEPTED);
+    assert_eq!(pump.drain(&service).await, 1);
     let second = post(
         router.clone(),
         "/github-mirror/v1/repos/rust-lang/rust/sync",
     )
     .await;
     assert_eq!(second.status(), StatusCode::ACCEPTED);
-    assert_eq!(pump.drain(&service).await, 2, "both jobs must run");
+    assert_eq!(pump.drain(&service).await, 1, "both jobs must run");
 
     let repos = body_json(get(router, "/github-mirror/v1/repos").await).await;
     assert_eq!(repos["items"].as_array().expect("items").len(), 1);
+}
+
+#[tokio::test]
+async fn a_second_sync_of_a_repo_in_flight_reuses_it() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let db = common::inmem_db().await;
+    let service = common::service_with_github(
+        db,
+        "https://api.github.com",
+        Arc::new(common::FakeGithub {
+            result: Some(fetched()),
+        }),
+    );
+    let mut pump = common::SyncPump::take(&service).await;
+    let router = router_for(service.clone(), ctx);
+
+    let first = body_json(
+        post(
+            router.clone(),
+            "/github-mirror/v1/repos/rust-lang/rust/sync",
+        )
+        .await,
+    )
+    .await;
+    let second = body_json(
+        post(
+            router.clone(),
+            "/github-mirror/v1/repos/rust-lang/rust/sync",
+        )
+        .await,
+    )
+    .await;
+
+    assert_eq!(
+        first["session_id"], second["session_id"],
+        "a repo already queued must hand back the run that owns it"
+    );
+    assert_eq!(
+        pump.drain(&service).await,
+        1,
+        "the duplicate must not queue a second job"
+    );
+
+    // A different repository is unaffected by the claim.
+    let other = post(
+        router.clone(),
+        "/github-mirror/v1/repos/rust-lang/cargo/sync",
+    )
+    .await;
+    assert_eq!(other.status(), StatusCode::ACCEPTED);
+    assert_eq!(pump.drain(&service).await, 1);
+
+    // Once the run is done the claim is gone, so the repo can sync again.
+    let again = body_json(
+        post(
+            router.clone(),
+            "/github-mirror/v1/repos/rust-lang/rust/sync",
+        )
+        .await,
+    )
+    .await;
+    assert_ne!(
+        again["session_id"], first["session_id"],
+        "a finished run must not keep collapsing later requests"
+    );
+    assert_eq!(pump.drain(&service).await, 1);
 }
 
 #[tokio::test]
