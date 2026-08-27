@@ -15,6 +15,7 @@
 - [4. Scope](#4-scope)
   - [4.1 In Scope](#41-in-scope)
   - [4.2 Out of Scope](#42-out-of-scope)
+  - [4.3 Increment Scope (current state)](#43-increment-scope-current-state)
 - [5. Functional Requirements](#5-functional-requirements)
   - [5.1 Synchronization Engine](#51-synchronization-engine)
   - [5.2 Entity Coverage](#52-entity-coverage)
@@ -220,6 +221,54 @@ A full local mirror that synchronizes incrementally with GitHub, serves a GitHub
 - Dedicated people/user collection via user-profile endpoints (deferred; v1.0 derives contributors from synchronized entities only)
 - GitHub webhook ingestion or real-time event streaming (future consideration)
 - Web UI or built-in dashboard (consumers build dashboards on the mirror API)
+
+### 4.3 Increment Scope (current state)
+
+Sections 4.1, 5 and 9 describe the **full product**. Delivery is incremental; this
+section is the boundary between what the current code delivers and what is deferred,
+so the unchecked boxes below read as "not yet", not "abandoned".
+
+**Delivered by the gear skeleton increment**
+([gears-rust#4532](https://github.com/constructorfabric/gears-rust/issues/4532)):
+
+- On-demand synchronization (`POST /github-mirror/v1/repos/{owner}/{name}/sync`) of a
+  repository plus 25 entity families into tenant-scoped storage, in one transaction,
+  with rate-limit retry/backoff and completeness-gated reconciliation of upstream
+  deletions (every row carries `extracted_at`)
+- GitHub-compatible read surface (29 endpoints, GitHub-shaped JSON,
+  `page`/`per_page` + `Link` pagination) and the native `/github-mirror/v1` surface
+  (health, repository listing with keyset cursor, sync trigger, commit-files and
+  review-threads analytics reads)
+- Multi-tenant isolation via SecureORM scoping on every query
+- `github-mirror-sdk` client crate
+
+**Deferred to tracked follow-ups**:
+
+- Sync sessions, resume, background execution, scope configuration, per-repo run
+  status: [gears-rust#4632](https://github.com/constructorfabric/gears-rust/issues/4632)
+- ETag/Last-Modified conditional requests, upstream pagination cache, cache eviction
+  and compression:
+  [gears-rust#4630](https://github.com/constructorfabric/gears-rust/issues/4630)
+- Credstore-backed per-tenant credentials and token pools:
+  [gears-rust#4534](https://github.com/constructorfabric/gears-rust/issues/4534)
+- Write-back operations, Python bindings, CLI tool, state-change events: later
+  increments of this PRD, not yet scheduled
+
+**Decisions recorded for the current increment**:
+
+- *Visibility inside a tenant is flat.* Authorization is tenant-scoping plus the AuthZ
+  Resolver's decision; the mirror does not re-derive GitHub-actor-level visibility
+  (e.g. it serves draft PRs to any caller the platform authorizes for the tenant).
+  Mirrored data is treated as shared within the tenant that configured the sync.
+- *`target_url`/`details_url` pass through verbatim.* The mirror is a faithful
+  replica; redacting or allow-listing CI/status URLs is a consumer-side concern.
+- *One gear-wide `github_token` is an interim shortcut.* Until
+  [gears-rust#4534](https://github.com/constructorfabric/gears-rust/issues/4534)
+  lands, every tenant's sync authenticates to GitHub with the same credential; the
+  README documents the operational caveat.
+- *The health endpoint is runtime infrastructure.* `/github-mirror/v1/health` reports
+  gear liveness/version/configuration and sits outside this PRD's requirement
+  tracking, like every other gear's health probe.
 
 ## 5. Functional Requirements
 
@@ -1007,6 +1056,10 @@ The system **MUST** support parallel synchronization of multiple repositories wi
 
 ## 9. Acceptance Criteria
 
+> Checked state tracks the **full product**. For what the current increment already
+> delivers (several criteria are partially met by it), see
+> [§4.3 Increment Scope](#43-increment-scope-current-state) and the crate README.
+
 - [ ] Full synchronization of a repository with 10,000+ issues and 5000+ PRs completes with 100% entity coverage
 - [ ] Repeated `sync repo` reduces API request count by at least 90% via ETag-based conditional requests and change detection
 - [ ] Interrupted synchronization resumes from last checkpoint without re-fetching cached unchanged data
@@ -1072,6 +1125,7 @@ The system **MUST** support parallel synchronization of multiple repositories wi
 
 ## 14. Traceability
 
-- **Design**: [DESIGN.md](./DESIGN.md)
-- **ADRs**: [ADR/](./ADR/)
-- **Features**: [features/](./features/)
+Design docs (DESIGN.md, ADRs, feature specs) have not been ported into this tree yet;
+they land with the follow-up increments listed in
+[§4.3 Increment Scope](#43-increment-scope-current-state). Until then this PRD is the
+single in-tree source of truth for the gear.

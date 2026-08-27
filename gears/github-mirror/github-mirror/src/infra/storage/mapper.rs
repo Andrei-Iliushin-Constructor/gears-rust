@@ -189,6 +189,7 @@ impl From<releases::Model> for Release {
             created_at: m.created_at,
             published_at: m.published_at,
             html_url: m.html_url,
+            assets_json: m.assets_json,
         }
     }
 }
@@ -209,7 +210,8 @@ impl From<contributors::Model> for Contributor {
         Self {
             repo_id: m.repo_id,
             user_id: m.user_id,
-            login: m.login,
+            // '' is the NOT NULL column's stand-in for "no login".
+            login: (!m.login.is_empty()).then_some(m.login),
             contributions: m.contributions,
             user_type: m.user_type,
             avatar_url: m.avatar_url,

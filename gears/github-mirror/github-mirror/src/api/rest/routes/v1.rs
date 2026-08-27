@@ -11,7 +11,7 @@ use crate::api::rest::{dto, handlers};
 
 pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     router = OperationBuilder::get("/github-mirror/v1/health")
-        .operation_id("github_mirror.health")
+        .operation_id("github_mirror.v1.health")
         .summary("GitHub Mirror health")
         .description("Reports that the github-mirror gear is loaded and serving requests")
         .tag(API_TAG)
@@ -26,7 +26,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .register(router, openapi);
 
     router = OperationBuilder::get("/github-mirror/v1/repos")
-        .operation_id("github_mirror.list_repos")
+        .operation_id("github_mirror.v1.list_repos")
         .summary("List mirrored repositories")
         .description(
             "Returns the GitHub repositories held in the local mirror for the caller's tenant",
@@ -49,7 +49,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .register(router, openapi);
 
     router = OperationBuilder::post("/github-mirror/v1/repos/{owner}/{name}/sync")
-        .operation_id("github_mirror.sync_repository")
+        .operation_id("github_mirror.v1.sync_repository")
         .summary("Sync a repository from GitHub into the mirror")
         .description(
             "Fetches the repository plus the first page of its entities from GitHub and              upserts them into the caller's tenant mirror. First slice of the sync engine:              no pagination, conditional requests, or rate-limit budgeting yet.",
@@ -74,7 +74,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .register(router, openapi);
 
     router = OperationBuilder::get("/github-mirror/v1/repos/{owner}/{name}/commits/{sha}/files")
-        .operation_id("github_mirror.list_commit_files")
+        .operation_id("github_mirror.v1.list_commit_files")
         .summary("List mirrored changed files of a commit")
         .description(
             "Returns the changed files held in the local mirror for the tenant, by file name",
@@ -100,7 +100,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .register(router, openapi);
 
     router = OperationBuilder::get("/github-mirror/v1/repos/{owner}/{name}/pulls/{number}/threads")
-        .operation_id("github_mirror.list_review_threads")
+        .operation_id("github_mirror.v1.list_review_threads")
         .summary("List mirrored review threads of a pull request")
         .description(
             "Returns review conversation threads (resolved state included) held in the local              mirror for the tenant",

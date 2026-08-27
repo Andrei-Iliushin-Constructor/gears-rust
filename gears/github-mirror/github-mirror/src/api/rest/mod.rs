@@ -1,3 +1,3 @@
 pub mod dto;
-pub mod handlers;
+pub(crate) mod handlers;
 pub mod routes;

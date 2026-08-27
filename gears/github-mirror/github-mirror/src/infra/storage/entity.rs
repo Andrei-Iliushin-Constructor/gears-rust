@@ -34,6 +34,10 @@ pub mod repositories {
         /// HTTPS clone URL as GitHub reported it; null for rows mirrored
         /// before the column existed.
         pub clone_url: Option<String>,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -65,6 +69,10 @@ pub mod issue_reactions {
         pub user_login: Option<String>,
         /// RFC3339 timestamps kept as text (engine-agnostic), as in the reference.
         pub created_at: String,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -103,6 +111,10 @@ pub mod issue_timeline {
         pub actor_login: Option<String>,
         /// The whole GitHub timeline entry, kept as raw JSON.
         pub payload_json: String,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -142,6 +154,10 @@ pub mod issues {
         pub updated_at: String,
         pub closed_at: Option<String>,
         pub html_url: Option<String>,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -185,6 +201,10 @@ pub mod pull_requests {
         /// Branch names of the pull request's head and base.
         pub head_ref: Option<String>,
         pub base_ref: Option<String>,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -220,6 +240,10 @@ pub mod commits {
         pub committed_at: Option<String>,
         pub additions: i64,
         pub deletions: i64,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -262,6 +286,10 @@ pub mod check_runs {
         pub output_title: Option<String>,
         pub output_summary: Option<String>,
         pub annotations_count: i64,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -294,6 +322,10 @@ pub mod comments {
         pub created_at: String,
         pub updated_at: String,
         pub html_url: Option<String>,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -336,6 +368,10 @@ pub mod review_comments {
         /// Line position at comment-creation time — the stable anchor for
         /// re-resolving where a comment pointed before later force-pushes.
         pub original_position: Option<i64>,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -370,6 +406,10 @@ pub mod reviews {
         /// RFC3339 timestamp kept as text; absent for PENDING reviews.
         pub submitted_at: Option<String>,
         pub html_url: Option<String>,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -400,6 +440,10 @@ pub mod labels {
         /// True for GitHub's default label set.
         pub is_default: bool,
         pub description: Option<String>,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -438,6 +482,10 @@ pub mod milestones {
         pub updated_at: String,
         pub closed_at: Option<String>,
         pub html_url: Option<String>,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -473,6 +521,13 @@ pub mod releases {
         /// Absent for drafts.
         pub published_at: Option<String>,
         pub html_url: Option<String>,
+        /// The release's assets serialized as JSON (name, download URL,
+        /// size); `NULL` when the release has none.
+        pub assets_json: Option<String>,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -503,6 +558,10 @@ pub mod branches {
         /// SHA the branch currently points at.
         pub commit_sha: String,
         pub protected: bool,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -537,6 +596,10 @@ pub mod contributors {
         pub user_type: String,
         pub avatar_url: Option<String>,
         pub html_url: Option<String>,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -580,6 +643,10 @@ pub mod workflow_runs {
         pub updated_at: String,
         pub html_url: Option<String>,
         pub actor_login: Option<String>,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -619,6 +686,10 @@ pub mod pull_request_files {
         pub previous_filename: Option<String>,
         /// Blob SHA of the file version in this pull request.
         pub sha: Option<String>,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -648,6 +719,10 @@ pub mod tags {
         pub name: String,
         /// SHA the tag points at.
         pub commit_sha: String,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -687,6 +762,10 @@ pub mod commit_files {
         pub previous_filename: Option<String>,
         /// Blob SHA of the file version in this commit.
         pub sha: Option<String>,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -725,6 +804,10 @@ pub mod review_threads {
         /// Login of whoever resolved the thread.
         pub resolved_by: Option<String>,
         pub comments_count: i64,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -761,6 +844,10 @@ pub mod commit_comments {
         pub created_at: String,
         pub updated_at: String,
         pub html_url: Option<String>,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -800,6 +887,10 @@ pub mod issue_events {
         pub commit_id: Option<String>,
         /// RFC3339 timestamp kept as text (engine-agnostic), as in the reference.
         pub created_at: String,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -837,6 +928,10 @@ pub mod deployments {
         /// RFC3339 timestamps kept as text (engine-agnostic), as in the reference.
         pub created_at: String,
         pub updated_at: String,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -873,6 +968,10 @@ pub mod pull_request_commits {
         /// RFC3339 timestamps kept as text (engine-agnostic), as in the reference.
         pub authored_at: Option<String>,
         pub committed_at: Option<String>,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -909,6 +1008,10 @@ pub mod commit_statuses {
         /// RFC3339 timestamps kept as text (engine-agnostic), as in the reference.
         pub created_at: String,
         pub updated_at: String,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -951,6 +1054,10 @@ pub mod workflow_jobs {
         /// Raw GitHub JSON array of the job steps: they carry no ids and are
         /// only ever read back together with their job.
         pub steps_json: Option<String>,
+        /// When a sync last wrote this row (RFC3339). Doubles as the
+        /// deletion-reconciliation watermark; empty on rows from before
+        /// the column existed.
+        pub extracted_at: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

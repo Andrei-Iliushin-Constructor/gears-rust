@@ -38,6 +38,19 @@ pub struct Repo {
     pub clone_url: Option<String>,
 }
 
+impl Repo {
+    /// The HTTPS clone URL, deriving GitHub's canonical form when the row was
+    /// mirrored before the column existed. Domain rule, not wire formatting:
+    /// the mirror serves API metadata only, so the URL always points at the
+    /// place the git objects actually live.
+    #[must_use]
+    pub fn clone_url_or_default(&self) -> String {
+        self.clone_url
+            .clone()
+            .unwrap_or_else(|| format!("https://github.com/{}.git", self.full_name))
+    }
+}
+
 /// A mirrored GitHub issue (read-slice shape).
 ///
 /// GitHub's API treats pull requests as issues too — `is_pull_request`
@@ -136,6 +149,8 @@ pub struct SyncSummary {
     pub issue_reactions_synced: u64,
     pub check_runs_synced: u64,
     pub issue_timeline_synced: u64,
+    /// Rows hard-deleted because a complete listing no longer contained them.
+    pub stale_rows_deleted: u64,
 }
 
 /// A mirrored GitHub issue/PR comment (read-slice shape).
@@ -263,6 +278,9 @@ pub struct Release {
     /// Absent for drafts.
     pub published_at: Option<String>,
     pub html_url: Option<String>,
+    /// The release's assets as raw JSON (`name`, `browser_download_url`,
+    /// `size` per asset); `None` when the release has none.
+    pub assets_json: Option<String>,
 }
 
 /// A mirrored GitHub branch head (read-slice shape).
@@ -286,7 +304,8 @@ pub struct Contributor {
     pub repo_id: i64,
     /// The contributor's GitHub user id.
     pub user_id: i64,
-    pub login: String,
+    /// `None` for anonymous contributors.
+    pub login: Option<String>,
     pub contributions: i64,
     /// User, Bot, or Organization.
     pub user_type: String,
@@ -488,6 +507,15 @@ pub struct CheckRun {
     pub output_title: Option<String>,
     pub output_summary: Option<String>,
     pub annotations_count: i64,
+}
+
+impl CheckRun {
+    /// Whether GitHub reported an owning App for this check run — the domain
+    /// rule behind serving a nested `app` object or `null`.
+    #[must_use]
+    pub fn has_app(&self) -> bool {
+        self.app_slug.is_some() || self.app_name.is_some()
+    }
 }
 
 /// One entry of a mirrored GitHub issue timeline (read-slice shape).

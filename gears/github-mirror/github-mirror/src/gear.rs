@@ -56,21 +56,17 @@ type ConcreteService = Service<
     SeaOrmIssueTimelineRepository,
 >;
 
+// The macro requires a literal, so the name cannot reference
+// `service::GEAR_NAME` directly; `gear_name_matches_the_domain_constant`
+// below pins the two together.
 #[toolkit::gear(
     name = "github-mirror",
     deps = [authz_resolver],
     capabilities = [rest, db]
 )]
+#[derive(Default)]
 pub struct GithubMirrorGear {
     service: OnceLock<Arc<ConcreteService>>,
-}
-
-impl Default for GithubMirrorGear {
-    fn default() -> Self {
-        Self {
-            service: OnceLock::new(),
-        }
-    }
 }
 
 impl toolkit::contracts::DatabaseCapability for GithubMirrorGear {
@@ -84,6 +80,10 @@ impl toolkit::contracts::DatabaseCapability for GithubMirrorGear {
 impl Gear for GithubMirrorGear {
     async fn init(&self, ctx: &GearCtx) -> anyhow::Result<()> {
         let cfg: GithubMirrorConfig = ctx.config_or_default()?;
+        // Fails startup on a malformed or non-HTTP base URL rather than
+        // letting every later fetch build garbage requests from it.
+        cfg.resolved_api_base_url()
+            .map_err(|e| anyhow::anyhow!("invalid github-mirror config: {e}"))?;
         info!(api_base_url = %cfg.api_base_url, "Initializing github-mirror gear");
 
         let db = Arc::new(ctx.db_required()?);
@@ -231,9 +231,17 @@ mod tests {
     }
 
     #[test]
+    fn gear_name_matches_the_domain_constant() {
+        assert_eq!(
+            GithubMirrorGear::MODULE_NAME,
+            crate::domain::service::GEAR_NAME
+        );
+    }
+
+    #[test]
     fn gear_provides_all_migrations() {
         use toolkit::contracts::DatabaseCapability;
         let gear = GithubMirrorGear::default();
-        assert_eq!(gear.migrations().len(), 29);
+        assert_eq!(gear.migrations().len(), 31);
     }
 }

@@ -8,7 +8,7 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use github_mirror::api::rest::routes::{ConcreteService, register_routes};
-use github_mirror::domain::ports::github::FetchedRepository;
+use github_mirror::domain::ports::github::{FetchedRepository, ListingCompleteness};
 use github_mirror::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
     CommitRecord, CommitStatusRecord, ContributorRecord, DeploymentRecord, IssueEventRecord,
@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 fn fetched() -> FetchedRepository {
     FetchedRepository {
+        complete: ListingCompleteness::all_complete(),
         repository: RepoRecord {
             id: 42,
             owner: "rust-lang".to_owned(),
@@ -167,6 +168,7 @@ fn fetched() -> FetchedRepository {
             created_at: "2026-08-20T00:00:00Z".to_owned(),
             published_at: Some("2026-08-20T00:00:00Z".to_owned()),
             html_url: None,
+            assets_json: None,
         }],
         branches: vec![BranchRecord {
             repo_id: 42,
@@ -177,7 +179,7 @@ fn fetched() -> FetchedRepository {
         contributors: vec![ContributorRecord {
             repo_id: 42,
             user_id: 71,
-            login: "alice".to_owned(),
+            login: Some("alice".to_owned()),
             contributions: 120,
             user_type: "User".to_owned(),
             avatar_url: None,
@@ -691,4 +693,126 @@ async fn a_concurrent_sync_for_the_same_repo_is_rejected_with_a_conflict() {
     // Once the first sync finishes, the repo can be synced again.
     let retry = post(router, "/github-mirror/v1/repos/rust-lang/rust/sync").await;
     assert_eq!(retry.status(), StatusCode::OK);
+}
+
+/// A repo with exactly the given issues, everything else empty; `issues`
+/// listing completeness as given.
+fn recon_fetched(issue_ids: &[i64], issues_complete: bool) -> FetchedRepository {
+    let mut result = fetched();
+    result.repository = RepoRecord {
+        id: 77,
+        owner: "acme".to_owned(),
+        name: "recon".to_owned(),
+        full_name: "acme/recon".to_owned(),
+        default_branch: "main".to_owned(),
+        private: false,
+        pushed_at: None,
+        stars: 0,
+        forks: 0,
+        description: None,
+        clone_url: None,
+    };
+    result.issues = issue_ids
+        .iter()
+        .map(|id| IssueRecord {
+            id: *id,
+            repo_id: 77,
+            number: *id,
+            title: format!("issue {id}"),
+            body: None,
+            state: "open".to_owned(),
+            is_pull_request: false,
+            created_at: "2026-08-20T00:00:00Z".to_owned(),
+            updated_at: "2026-08-20T00:00:00Z".to_owned(),
+            closed_at: None,
+            html_url: None,
+        })
+        .collect();
+    result.pull_requests = vec![];
+    result.commits = vec![];
+    result.comments = vec![];
+    result.review_comments = vec![];
+    result.reviews = vec![];
+    result.labels = vec![];
+    result.milestones = vec![];
+    result.releases = vec![];
+    result.branches = vec![];
+    result.contributors = vec![];
+    result.workflow_runs = vec![];
+    result.pull_request_files = vec![];
+    result.tags = vec![];
+    result.commit_files = vec![];
+    result.review_threads = vec![];
+    result.commit_comments = vec![];
+    result.issue_events = vec![];
+    result.deployments = vec![];
+    result.pull_request_commits = vec![];
+    result.commit_statuses = vec![];
+    result.workflow_jobs = vec![];
+    result.issue_reactions = vec![];
+    result.check_runs = vec![];
+    result.issue_timeline = vec![];
+    result.complete = ListingCompleteness {
+        issues: issues_complete,
+        ..ListingCompleteness::all_complete()
+    };
+    result
+}
+
+/// Run one inline sync of acme/recon against the given upstream state.
+async fn sync_recon(db: toolkit_db::Db, ctx: &SecurityContext, upstream: FetchedRepository) {
+    let service = common::service_with_github(
+        db,
+        "https://api.github.com",
+        Arc::new(common::FakeGithub {
+            result: Some(upstream),
+        }),
+    );
+    let router = router_for(service, ctx.clone());
+    let response = post(router, "/github-mirror/v1/repos/acme/recon/sync").await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+async fn recon_issue_ids(db: toolkit_db::Db, ctx: &SecurityContext) -> Vec<i64> {
+    let service = common::service_with_github(
+        db,
+        "https://api.github.com",
+        Arc::new(common::FakeGithub { result: None }),
+    );
+    let router = router_for(service, ctx.clone());
+    let json = body_json(get(router, "/repos/acme/recon/issues?state=all").await).await;
+    json.as_array()
+        .expect("items")
+        .iter()
+        .map(|i| i["id"].as_i64().expect("id"))
+        .collect()
+}
+
+#[tokio::test]
+async fn reconciliation_deletes_upstream_removals_but_only_from_complete_listings() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let db = common::inmem_db().await;
+
+    // Sync 1: issues 11 and 12 exist upstream.
+    sync_recon(db.clone(), &ctx, recon_fetched(&[11, 12], true)).await;
+    assert_eq!(recon_issue_ids(db.clone(), &ctx).await, vec![11, 12]);
+
+    // Sync 2: issue 12 vanished upstream, but the listing was truncated —
+    // absence proves nothing, so nothing may be deleted.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    sync_recon(db.clone(), &ctx, recon_fetched(&[11], false)).await;
+    assert_eq!(
+        recon_issue_ids(db.clone(), &ctx).await,
+        vec![11, 12],
+        "a truncated listing must not reconcile deletions"
+    );
+
+    // Sync 3: same upstream state, complete listing — now 12 goes.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    sync_recon(db.clone(), &ctx, recon_fetched(&[11], true)).await;
+    assert_eq!(
+        recon_issue_ids(db.clone(), &ctx).await,
+        vec![11],
+        "a complete listing reconciles the upstream deletion"
+    );
 }

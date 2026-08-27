@@ -66,6 +66,23 @@ async fn migrations_apply_and_roll_back_on_a_clean_database() {
         );
     }
 
+    // The 26-table extracted_at migration is column-additive: only checking
+    // the column itself proves its up() did anything.
+    for table in ["gm_issues", "gm_pull_requests", "gm_commits", "gm_labels"] {
+        assert!(
+            manager.has_column(table, "extracted_at").await.unwrap(),
+            "{table}.extracted_at must exist after up()"
+        );
+    }
+
+    assert!(
+        manager
+            .has_column("gm_releases", "assets_json")
+            .await
+            .unwrap(),
+        "gm_releases.assets_json must exist after up()"
+    );
+
     for migration in Migrator::migrations().iter().rev() {
         migration.down(&manager).await.expect("down must succeed");
     }

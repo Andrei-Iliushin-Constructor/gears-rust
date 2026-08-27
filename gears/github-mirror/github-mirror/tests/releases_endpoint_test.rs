@@ -43,6 +43,7 @@ fn release_record(id: i64, tag_name: &str, created_at: &str) -> ReleaseRecord {
         created_at: created_at.to_owned(),
         published_at: Some(created_at.to_owned()),
         html_url: None,
+        assets_json: None,
     }
 }
 

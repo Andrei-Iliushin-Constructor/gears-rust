@@ -771,7 +771,7 @@ async fn fetch_repository_maps_github_payloads_into_records() {
 
     assert_eq!(fetched.contributors.len(), 1);
     assert_eq!(fetched.contributors[0].user_id, 71);
-    assert_eq!(fetched.contributors[0].login, "alice");
+    assert_eq!(fetched.contributors[0].login.as_deref(), Some("alice"));
     assert_eq!(fetched.contributors[0].contributions, 120);
     assert_eq!(fetched.contributors[0].user_type, "User");
 

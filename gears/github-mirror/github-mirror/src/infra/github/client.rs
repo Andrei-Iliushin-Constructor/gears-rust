@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::domain::error::DomainError;
-use crate::domain::ports::github::{FetchedRepository, GithubPort};
+use crate::domain::ports::github::{FetchedRepository, GithubPort, ListingCompleteness};
 use crate::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
     CommitRecord, CommitStatusRecord, ContributorRecord, DeploymentRecord, IssueEventRecord,
@@ -11,6 +11,7 @@ use crate::domain::repo::{
     ReviewCommentRecord, ReviewRecord, ReviewThreadRecord, TagRecord, WorkflowJobRecord,
     WorkflowRunRecord,
 };
+use crate::infra::github::pagination::parse_link_next;
 
 const FIRST_PAGE_SIZE: u32 = 50;
 /// GitHub serves reviews and changed files only per pull request, so
@@ -27,6 +28,43 @@ const PER_RUN_SYNC_CAP: usize = 10;
 /// issues of the page for the same reason.
 const PER_ISSUE_SYNC_CAP: usize = 10;
 const USER_AGENT: &str = concat!("cf-gears-github-mirror/", env!("CARGO_PKG_VERSION"));
+/// Attempts after the first request when GitHub answers with a rate limit.
+const RATE_LIMIT_RETRIES: u32 = 3;
+/// Longest single back-off sleep, whatever `Retry-After` asks for.
+const MAX_RETRY_SLEEP: std::time::Duration = std::time::Duration::from_mins(1);
+
+/// Whether a `403` is GitHub's rate limiter rather than an authorization
+/// refusal: rate-limit responses carry `Retry-After` or an exhausted
+/// `x-ratelimit-remaining`.
+fn is_rate_limited(headers: &reqwest::header::HeaderMap) -> bool {
+    headers.contains_key("retry-after")
+        || header_string(headers, "x-ratelimit-remaining").as_deref() == Some("0")
+}
+
+/// How long to wait before retrying a rate-limited request: `Retry-After`
+/// when present, else time until `x-ratelimit-reset`, else exponential in
+/// the attempt number — always capped at [`MAX_RETRY_SLEEP`].
+fn retry_delay(headers: &reqwest::header::HeaderMap, attempt: u32) -> std::time::Duration {
+    let seconds = header_string(headers, "retry-after")
+        .and_then(|v| v.parse::<u64>().ok())
+        .or_else(|| {
+            let reset = header_string(headers, "x-ratelimit-reset")?
+                .parse::<i64>()
+                .ok()?;
+            let now = time::OffsetDateTime::now_utc().unix_timestamp();
+            u64::try_from(reset - now).ok()
+        })
+        .unwrap_or(1u64 << attempt);
+    std::time::Duration::from_secs(seconds.max(1)).min(MAX_RETRY_SLEEP)
+}
+
+/// One response header as an owned string, when it is present and printable.
+fn header_string(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(ToOwned::to_owned)
+}
 /// Time to establish the TCP/TLS connection to GitHub.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Time budget for one REST/GraphQL call. A sync makes ~115 of these, so an
@@ -65,23 +103,85 @@ impl GithubClient {
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, DomainError> {
-        let url = format!("{}{path}", self.api_base_url.trim_end_matches('/'));
-        let mut request = self
-            .http
-            .get(&url)
-            .header("Accept", "application/vnd.github+json");
-        if let Some(token) = &self.token {
-            request = request.bearer_auth(token);
-        }
+        Ok(self.get_with_headers(path).await?.0)
+    }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| DomainError::internal(format!("GitHub request failed: {e}")))?;
+    /// GET a list endpoint, also reporting whether the listing is complete:
+    /// a response whose `Link` header advertises no next page IS the whole
+    /// listing. Only a complete listing may reconcile deletions.
+    async fn get_list<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> Result<(Vec<T>, bool), DomainError> {
+        let (items, headers) = self.get_with_headers(path).await?;
+        let complete = header_string(&headers, "link")
+            .as_deref()
+            .and_then(parse_link_next)
+            .is_none();
+        Ok((items, complete))
+    }
+
+    /// GET `path`, waiting out secondary rate limits and classifying
+    /// credential refusals, then hand back the body and response headers.
+    async fn get_with_headers<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> Result<(T, reqwest::header::HeaderMap), DomainError> {
+        let url = format!("{}{path}", self.api_base_url.trim_end_matches('/'));
+
+        // Secondary rate limits (403 with rate headers, or 429) are waited
+        // out and retried a few times instead of failing the whole sync on
+        // the spot; full admission control is #4630's remaining half.
+        let mut attempt: u32 = 0;
+        let (response, rate_limited) = loop {
+            let mut request = self
+                .http
+                .get(&url)
+                .header("Accept", "application/vnd.github+json");
+            if let Some(token) = &self.token {
+                request = request.bearer_auth(token);
+            }
+            let response = request
+                .send()
+                .await
+                .map_err(|e| DomainError::internal(format!("GitHub request failed: {e}")))?;
+
+            let status = response.status();
+            let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || (status == reqwest::StatusCode::FORBIDDEN
+                    && is_rate_limited(response.headers()));
+            if rate_limited && attempt < RATE_LIMIT_RETRIES {
+                let delay = retry_delay(response.headers(), attempt);
+                tracing::warn!(
+                    %url,
+                    %status,
+                    attempt,
+                    delay_secs = delay.as_secs(),
+                    "GitHub rate limit hit; backing off before retrying"
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+                continue;
+            }
+            break (response, rate_limited);
+        };
 
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Err(DomainError::NotFound);
+        }
+        if rate_limited {
+            return Err(DomainError::internal(format!(
+                "GitHub rate limit persisted through {RATE_LIMIT_RETRIES} retries for {path}"
+            )));
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            // Not a rate limit (checked above): the mirror's own token no
+            // longer sees this resource — the repo went private, the token
+            // was revoked, or its scopes shrank.
+            return Err(DomainError::AccessLost(format!(
+                "GitHub answered {status} for {path}"
+            )));
         }
         if !status.is_success() {
             return Err(DomainError::internal(format!(
@@ -89,26 +189,48 @@ impl GithubClient {
             )));
         }
 
-        response
+        let headers = response.headers().clone();
+        let parsed = response
             .json::<T>()
             .await
-            .map_err(|e| DomainError::internal(format!("GitHub response decode failed: {e}")))
+            .map_err(|e| DomainError::internal(format!("GitHub response decode failed: {e}")))?;
+        Ok((parsed, headers))
     }
 
     async fn post_graphql(&self, query: &str) -> Result<serde_json::Value, DomainError> {
         let url = format!("{}/graphql", self.api_base_url.trim_end_matches('/'));
-        let mut request = self
-            .http
-            .post(&url)
-            .json(&serde_json::json!({ "query": query }));
-        if let Some(token) = &self.token {
-            request = request.bearer_auth(token);
-        }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| DomainError::internal(format!("GitHub GraphQL request failed: {e}")))?;
+        let mut attempt: u32 = 0;
+        let response = loop {
+            let mut request = self
+                .http
+                .post(&url)
+                .json(&serde_json::json!({ "query": query }));
+            if let Some(token) = &self.token {
+                request = request.bearer_auth(token);
+            }
+            let response = request.send().await.map_err(|e| {
+                DomainError::internal(format!("GitHub GraphQL request failed: {e}"))
+            })?;
+
+            let status = response.status();
+            let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || (status == reqwest::StatusCode::FORBIDDEN
+                    && is_rate_limited(response.headers()));
+            if rate_limited && attempt < RATE_LIMIT_RETRIES {
+                let delay = retry_delay(response.headers(), attempt);
+                tracing::warn!(
+                    %status,
+                    attempt,
+                    delay_secs = delay.as_secs(),
+                    "GitHub GraphQL rate limit hit; backing off before retrying"
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+                continue;
+            }
+            break response;
+        };
 
         let status = response.status();
         if !status.is_success() {
@@ -331,6 +453,17 @@ struct GhRelease {
     created_at: String,
     published_at: Option<String>,
     html_url: Option<String>,
+    #[serde(default)]
+    assets: Vec<GhReleaseAsset>,
+}
+
+/// The slice of a release asset the mirror keeps: enough to name it and
+/// download it.
+#[derive(Debug, serde::Serialize, Deserialize)]
+struct GhReleaseAsset {
+    name: String,
+    browser_download_url: Option<String>,
+    size: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -349,7 +482,11 @@ struct GhBranch {
 #[derive(Debug, Deserialize)]
 struct GhContributor {
     id: i64,
-    login: String,
+    /// Absent for anonymous contributors (`?anon=1`, which the mirror does
+    /// not request today — kept optional so a future query change degrades
+    /// gracefully instead of failing deserialization).
+    #[serde(default)]
+    login: Option<String>,
     contributions: i64,
     #[serde(rename = "type")]
     user_type: String,
@@ -662,6 +799,13 @@ fn milestone_record(repo_id: i64, m: GhMilestone) -> MilestoneRecord {
 }
 
 fn release_record(repo_id: i64, r: GhRelease) -> ReleaseRecord {
+    // Kept as the raw asset slice, serialized: the mirror's job is to hand
+    // the download URLs back out, not to model asset lifecycles.
+    let assets_json = if r.assets.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&r.assets).ok()
+    };
     ReleaseRecord {
         id: r.id,
         repo_id,
@@ -674,6 +818,7 @@ fn release_record(repo_id: i64, r: GhRelease) -> ReleaseRecord {
         created_at: r.created_at,
         published_at: r.published_at,
         html_url: r.html_url,
+        assets_json,
     }
 }
 
@@ -1240,58 +1385,58 @@ impl GithubPort for GithubClient {
         let repo: GhRepository = self.get_json(&format!("/repos/{owner}/{name}")).await?;
         let repo_id = repo.id;
 
-        let issues: Vec<GhIssue> = self
-            .get_json(&format!(
+        let (issues, issues_complete): (Vec<GhIssue>, bool) = self
+            .get_list(&format!(
                 "/repos/{owner}/{name}/issues?state=all&per_page={FIRST_PAGE_SIZE}"
             ))
             .await?;
-        let pulls: Vec<GhPullRequest> = self
-            .get_json(&format!(
+        let (pulls, pulls_complete): (Vec<GhPullRequest>, bool) = self
+            .get_list(&format!(
                 "/repos/{owner}/{name}/pulls?state=all&per_page={FIRST_PAGE_SIZE}"
             ))
             .await?;
-        let commits: Vec<GhCommit> = self
-            .get_json(&format!(
+        let (commits, commits_complete): (Vec<GhCommit>, bool) = self
+            .get_list(&format!(
                 "/repos/{owner}/{name}/commits?per_page={FIRST_PAGE_SIZE}"
             ))
             .await?;
-        let comments: Vec<GhComment> = self
-            .get_json(&format!(
+        let (comments, comments_complete): (Vec<GhComment>, bool) = self
+            .get_list(&format!(
                 "/repos/{owner}/{name}/issues/comments?per_page={FIRST_PAGE_SIZE}"
             ))
             .await?;
-        let review_comments: Vec<GhReviewComment> = self
-            .get_json(&format!(
+        let (review_comments, review_comments_complete): (Vec<GhReviewComment>, bool) = self
+            .get_list(&format!(
                 "/repos/{owner}/{name}/pulls/comments?per_page={FIRST_PAGE_SIZE}"
             ))
             .await?;
 
-        let labels: Vec<GhLabel> = self
-            .get_json(&format!(
+        let (labels, labels_complete): (Vec<GhLabel>, bool) = self
+            .get_list(&format!(
                 "/repos/{owner}/{name}/labels?per_page={FIRST_PAGE_SIZE}"
             ))
             .await?;
 
-        let milestones: Vec<GhMilestone> = self
-            .get_json(&format!(
+        let (milestones, milestones_complete): (Vec<GhMilestone>, bool) = self
+            .get_list(&format!(
                 "/repos/{owner}/{name}/milestones?state=all&per_page={FIRST_PAGE_SIZE}"
             ))
             .await?;
 
-        let releases: Vec<GhRelease> = self
-            .get_json(&format!(
+        let (releases, releases_complete): (Vec<GhRelease>, bool) = self
+            .get_list(&format!(
                 "/repos/{owner}/{name}/releases?per_page={FIRST_PAGE_SIZE}"
             ))
             .await?;
 
-        let branches: Vec<GhBranch> = self
-            .get_json(&format!(
+        let (branches, branches_complete): (Vec<GhBranch>, bool) = self
+            .get_list(&format!(
                 "/repos/{owner}/{name}/branches?per_page={FIRST_PAGE_SIZE}"
             ))
             .await?;
 
-        let contributors: Vec<GhContributor> = self
-            .get_json(&format!(
+        let (contributors, contributors_complete): (Vec<GhContributor>, bool) = self
+            .get_list(&format!(
                 "/repos/{owner}/{name}/contributors?per_page={FIRST_PAGE_SIZE}"
             ))
             .await?;
@@ -1302,26 +1447,26 @@ impl GithubPort for GithubClient {
             ))
             .await?;
 
-        let deployments: Vec<GhDeployment> = self
-            .get_json(&format!(
+        let (deployments, deployments_complete): (Vec<GhDeployment>, bool) = self
+            .get_list(&format!(
                 "/repos/{owner}/{name}/deployments?per_page={FIRST_PAGE_SIZE}"
             ))
             .await?;
 
-        let issue_events: Vec<GhIssueEvent> = self
-            .get_json(&format!(
+        let (issue_events, issue_events_complete): (Vec<GhIssueEvent>, bool) = self
+            .get_list(&format!(
                 "/repos/{owner}/{name}/issues/events?per_page={FIRST_PAGE_SIZE}"
             ))
             .await?;
 
-        let commit_comments: Vec<GhCommitComment> = self
-            .get_json(&format!(
+        let (commit_comments, commit_comments_complete): (Vec<GhCommitComment>, bool) = self
+            .get_list(&format!(
                 "/repos/{owner}/{name}/comments?per_page={FIRST_PAGE_SIZE}"
             ))
             .await?;
 
-        let tags: Vec<GhTag> = self
-            .get_json(&format!(
+        let (tags, tags_complete): (Vec<GhTag>, bool) = self
+            .get_list(&format!(
                 "/repos/{owner}/{name}/tags?per_page={FIRST_PAGE_SIZE}"
             ))
             .await?;
@@ -1370,8 +1515,26 @@ impl GithubPort for GithubClient {
             .fetch_pull_details(owner, name, repo_id, &mut pull_records)
             .await?;
 
+        let complete = ListingCompleteness {
+            issues: issues_complete,
+            pull_requests: pulls_complete,
+            commits: commits_complete,
+            comments: comments_complete,
+            review_comments: review_comments_complete,
+            labels: labels_complete,
+            milestones: milestones_complete,
+            releases: releases_complete,
+            branches: branches_complete,
+            tags: tags_complete,
+            contributors: contributors_complete,
+            issue_events: issue_events_complete,
+            commit_comments: commit_comments_complete,
+            deployments: deployments_complete,
+        };
+
         Ok(FetchedRepository {
             repository: repository_record(repo),
+            complete,
             issues: issue_records,
             pull_requests: pull_records,
             commits: commit_records,

@@ -39,11 +39,13 @@ pub trait RepoRepository: Send + Sync {
         record: RepoRecord,
     ) -> Result<Repo, DomainError>;
 
+    /// `after`: keyset cursor — only rows whose `full_name` sorts after it.
     async fn list<C: DBRunner>(
         &self,
         conn: &C,
         scope: &AccessScope,
         limit: u64,
+        after: Option<&str>,
     ) -> Result<Vec<Repo>, DomainError>;
 
     async fn find_by_full_name<C: DBRunner>(
@@ -96,6 +98,17 @@ pub trait IssueRepository: Send + Sync {
         repo_id: i64,
         number: i64,
     ) -> Result<Option<Issue>, DomainError>;
+    /// Hard-delete this repo's rows whose `extracted_at` predates
+    /// `extracted_before` — rows the sync that set the watermark did not
+    /// see. Only called for a listing fetched to completion; a truncated or
+    /// scope-disabled listing proves nothing about absence.
+    async fn delete_stale<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        extracted_before: &str,
+    ) -> Result<u64, DomainError>;
 }
 
 /// Write-side record for a mirrored pull request.
@@ -149,6 +162,17 @@ pub trait PullRequestRepository: Send + Sync {
         repo_id: i64,
         number: i64,
     ) -> Result<Option<PullRequest>, DomainError>;
+    /// Hard-delete this repo's rows whose `extracted_at` predates
+    /// `extracted_before` — rows the sync that set the watermark did not
+    /// see. Only called for a listing fetched to completion; a truncated or
+    /// scope-disabled listing proves nothing about absence.
+    async fn delete_stale<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        extracted_before: &str,
+    ) -> Result<u64, DomainError>;
 }
 
 /// Write-side record for a mirrored commit.
@@ -191,6 +215,17 @@ pub trait CommitRepository: Send + Sync {
         repo_id: i64,
         sha: &str,
     ) -> Result<Option<Commit>, DomainError>;
+    /// Hard-delete this repo's rows whose `extracted_at` predates
+    /// `extracted_before` — rows the sync that set the watermark did not
+    /// see. Only called for a listing fetched to completion; a truncated or
+    /// scope-disabled listing proves nothing about absence.
+    async fn delete_stale<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        extracted_before: &str,
+    ) -> Result<u64, DomainError>;
 }
 
 /// Write-side record for a mirrored issue/PR comment.
@@ -225,6 +260,17 @@ pub trait CommentRepository: Send + Sync {
         issue_number: i64,
         limit: u64,
     ) -> Result<Vec<Comment>, DomainError>;
+    /// Hard-delete this repo's rows whose `extracted_at` predates
+    /// `extracted_before` — rows the sync that set the watermark did not
+    /// see. Only called for a listing fetched to completion; a truncated or
+    /// scope-disabled listing proves nothing about absence.
+    async fn delete_stale<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        extracted_before: &str,
+    ) -> Result<u64, DomainError>;
 }
 
 /// Write-side record for a mirrored PR review comment.
@@ -269,6 +315,17 @@ pub trait ReviewCommentRepository: Send + Sync {
         pull_number: i64,
         limit: u64,
     ) -> Result<Vec<ReviewComment>, DomainError>;
+    /// Hard-delete this repo's rows whose `extracted_at` predates
+    /// `extracted_before` — rows the sync that set the watermark did not
+    /// see. Only called for a listing fetched to completion; a truncated or
+    /// scope-disabled listing proves nothing about absence.
+    async fn delete_stale<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        extracted_before: &str,
+    ) -> Result<u64, DomainError>;
 }
 
 /// Write-side record for a mirrored PR review.
@@ -335,6 +392,17 @@ pub trait LabelRepository: Send + Sync {
         repo_id: i64,
         limit: u64,
     ) -> Result<Vec<Label>, DomainError>;
+    /// Hard-delete this repo's rows whose `extracted_at` predates
+    /// `extracted_before` — rows the sync that set the watermark did not
+    /// see. Only called for a listing fetched to completion; a truncated or
+    /// scope-disabled listing proves nothing about absence.
+    async fn delete_stale<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        extracted_before: &str,
+    ) -> Result<u64, DomainError>;
 }
 
 /// Write-side record for a mirrored milestone.
@@ -373,6 +441,17 @@ pub trait MilestoneRepository: Send + Sync {
         repo_id: i64,
         limit: u64,
     ) -> Result<Vec<Milestone>, DomainError>;
+    /// Hard-delete this repo's rows whose `extracted_at` predates
+    /// `extracted_before` — rows the sync that set the watermark did not
+    /// see. Only called for a listing fetched to completion; a truncated or
+    /// scope-disabled listing proves nothing about absence.
+    async fn delete_stale<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        extracted_before: &str,
+    ) -> Result<u64, DomainError>;
 }
 
 /// Write-side record for a mirrored release.
@@ -390,6 +469,9 @@ pub struct ReleaseRecord {
     pub created_at: String,
     pub published_at: Option<String>,
     pub html_url: Option<String>,
+    /// The release's assets as raw JSON (`name`, `browser_download_url`,
+    /// `size` per asset); `None` when the release has none.
+    pub assets_json: Option<String>,
 }
 
 #[async_trait]
@@ -409,6 +491,17 @@ pub trait ReleaseRepository: Send + Sync {
         repo_id: i64,
         limit: u64,
     ) -> Result<Vec<Release>, DomainError>;
+    /// Hard-delete this repo's rows whose `extracted_at` predates
+    /// `extracted_before` — rows the sync that set the watermark did not
+    /// see. Only called for a listing fetched to completion; a truncated or
+    /// scope-disabled listing proves nothing about absence.
+    async fn delete_stale<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        extracted_before: &str,
+    ) -> Result<u64, DomainError>;
 }
 
 /// Write-side record for a mirrored branch head.
@@ -438,6 +531,17 @@ pub trait BranchRepository: Send + Sync {
         repo_id: i64,
         limit: u64,
     ) -> Result<Vec<Branch>, DomainError>;
+    /// Hard-delete this repo's rows whose `extracted_at` predates
+    /// `extracted_before` — rows the sync that set the watermark did not
+    /// see. Only called for a listing fetched to completion; a truncated or
+    /// scope-disabled listing proves nothing about absence.
+    async fn delete_stale<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        extracted_before: &str,
+    ) -> Result<u64, DomainError>;
 }
 
 /// Write-side record for a mirrored contributor.
@@ -446,7 +550,8 @@ pub trait BranchRepository: Send + Sync {
 pub struct ContributorRecord {
     pub repo_id: i64,
     pub user_id: i64,
-    pub login: String,
+    /// `None` for anonymous contributors.
+    pub login: Option<String>,
     pub contributions: i64,
     pub user_type: String,
     pub avatar_url: Option<String>,
@@ -573,6 +678,17 @@ pub trait TagRepository: Send + Sync {
         repo_id: i64,
         limit: u64,
     ) -> Result<Vec<Tag>, DomainError>;
+    /// Hard-delete this repo's rows whose `extracted_at` predates
+    /// `extracted_before` — rows the sync that set the watermark did not
+    /// see. Only called for a listing fetched to completion; a truncated or
+    /// scope-disabled listing proves nothing about absence.
+    async fn delete_stale<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        extracted_before: &str,
+    ) -> Result<u64, DomainError>;
 }
 
 /// Write-side record for a mirrored commit file.

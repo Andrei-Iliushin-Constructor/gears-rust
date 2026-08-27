@@ -116,3 +116,34 @@ async fn list_respects_query_limit() {
     assert_eq!(page.items.len(), 2);
     assert_eq!(page.page_info.limit, 2);
 }
+
+#[tokio::test]
+async fn a_pdp_denial_surfaces_as_forbidden() {
+    use std::sync::Arc;
+
+    use github_mirror::domain::error::DomainError;
+
+    let db = common::inmem_db().await;
+    let allowed = common::service_over(db.clone(), "https://api.github.com");
+    let tenant = common::caller_in(Uuid::new_v4());
+    allowed
+        .upsert_repo(&tenant, repo(600, "guarded"))
+        .await
+        .unwrap_or_else(|e| panic!("seed upsert must succeed: {e}"));
+
+    let denied = common::service_with_enforcer(
+        db,
+        "https://api.github.com",
+        Arc::new(common::FakeGithub { result: None }),
+        common::deny_enforcer(),
+    );
+    let err = denied
+        .list_repos(&tenant, &ODataQuery::default())
+        .await
+        .expect_err("a denying PDP must not let the list through");
+
+    assert!(
+        matches!(err, DomainError::Forbidden(_)),
+        "expected Forbidden, got {err:?}"
+    );
+}

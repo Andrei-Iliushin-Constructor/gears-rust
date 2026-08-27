@@ -9,11 +9,11 @@ use github_mirror_sdk::{
     ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
 use toolkit_macros::domain_model;
-use toolkit_odata::{ODataQuery, Page, PageInfo};
-use toolkit_security::{SecurityContext, pep_properties};
+use toolkit_odata::{CursorV1, ODataQuery, Page, PageInfo, SortDir};
+use toolkit_security::{AccessScope, SecurityContext, pep_properties};
 
 use super::error::DomainError;
-use super::ports::github::GithubPort;
+use super::ports::github::{GithubPort, ListingCompleteness};
 use super::repo::{
     BranchRecord, BranchRepository, CheckRunRecord, CheckRunRepository, CommentRecord,
     CommentRepository, CommitCommentRecord, CommitCommentRepository, CommitFileRecord,
@@ -31,6 +31,14 @@ use super::repo::{
 };
 
 pub const GEAR_NAME: &str = "github-mirror";
+
+/// The current instant as RFC3339 text, matching how every other timestamp
+/// in the mirror is stored.
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
+}
 
 const DEFAULT_LIST_LIMIT: u64 = 50;
 
@@ -198,6 +206,9 @@ pub struct ServiceConfig {
 #[derive(Debug, Clone)]
 pub struct MirrorStatus {
     pub gear: String,
+    /// The gear crate's own version (`CARGO_PKG_VERSION`) — the version of
+    /// this mirror implementation, not of GitHub's API or of any mirrored
+    /// repository.
     pub version: String,
     pub api_base_url: String,
 }
@@ -232,6 +243,9 @@ pub struct SyncSummary {
     pub issue_reactions_synced: u64,
     pub check_runs_synced: u64,
     pub issue_timeline_synced: u64,
+    /// Rows hard-deleted because a complete listing no longer contained them
+    /// (upstream deletion reconciliation).
+    pub stale_rows_deleted: u64,
 }
 
 #[domain_model]
@@ -641,12 +655,36 @@ impl<
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let conn = self.db.conn()?;
-        let items = self.repo.list(&conn, &scope, limit).await?;
+
+        // Keyset pagination on the unique sort key: fetch one row past the
+        // page to learn whether a next page exists at all.
+        let after = query
+            .cursor
+            .as_ref()
+            .and_then(|c| c.k.first())
+            .map(String::as_str);
+        let mut items = self.repo.list(&conn, &scope, limit + 1, after).await?;
+        let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
+            items.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+            items.last().and_then(|last| {
+                CursorV1 {
+                    k: vec![last.full_name.clone()],
+                    o: SortDir::Asc,
+                    s: "full_name".to_owned(),
+                    f: None,
+                    d: "fwd".to_owned(),
+                }
+                .encode()
+                .ok()
+            })
+        } else {
+            None
+        };
 
         Ok(Page::new(
             items,
             PageInfo {
-                next_cursor: None,
+                next_cursor,
                 prev_cursor: None,
                 limit,
             },
@@ -2964,6 +3002,86 @@ impl<
         self.db.conn().is_ok()
     }
 
+    /// Hard-delete rows this sync did not see, family by family, but only
+    /// where the listing was walked to its final page: absence from a
+    /// truncated listing proves nothing (PRD 5.2's "complete and verifiable
+    /// local replica" requires reconciling upstream deletions; the
+    /// completeness gate is what makes doing so safe).
+    // Ten identical completeness-gated delete calls, one per family; the
+    // repetition is the clearest shape and splitting it would hide the gate.
+    #[allow(clippy::cognitive_complexity)]
+    async fn reconcile_stale<DBR: toolkit_db::secure::DBRunner>(
+        &self,
+        conn: &DBR,
+        scope: &AccessScope,
+        complete: ListingCompleteness,
+        repo_id: i64,
+        watermark: &str,
+    ) -> Result<u64, DomainError> {
+        let mut deleted = 0;
+        if complete.issues {
+            deleted += self
+                .issues
+                .delete_stale(conn, scope, repo_id, watermark)
+                .await?;
+        }
+        if complete.pull_requests {
+            deleted += self
+                .pull_requests
+                .delete_stale(conn, scope, repo_id, watermark)
+                .await?;
+        }
+        if complete.commits {
+            deleted += self
+                .commits
+                .delete_stale(conn, scope, repo_id, watermark)
+                .await?;
+        }
+        if complete.comments {
+            deleted += self
+                .comments
+                .delete_stale(conn, scope, repo_id, watermark)
+                .await?;
+        }
+        if complete.review_comments {
+            deleted += self
+                .review_comments
+                .delete_stale(conn, scope, repo_id, watermark)
+                .await?;
+        }
+        if complete.labels {
+            deleted += self
+                .labels
+                .delete_stale(conn, scope, repo_id, watermark)
+                .await?;
+        }
+        if complete.milestones {
+            deleted += self
+                .milestones
+                .delete_stale(conn, scope, repo_id, watermark)
+                .await?;
+        }
+        if complete.releases {
+            deleted += self
+                .releases
+                .delete_stale(conn, scope, repo_id, watermark)
+                .await?;
+        }
+        if complete.branches {
+            deleted += self
+                .branches
+                .delete_stale(conn, scope, repo_id, watermark)
+                .await?;
+        }
+        if complete.tags {
+            deleted += self
+                .tags
+                .delete_stale(conn, scope, repo_id, watermark)
+                .await?;
+        }
+        Ok(deleted)
+    }
+
     /// Fetch one repository from GitHub (first slice: repo + first page of
     /// issues, pull requests, and commits) and upsert it into the mirror.
     ///
@@ -3045,7 +3163,12 @@ impl<
             Err(e) => return Err(DomainError::Database(e)),
         };
 
+        // Captured before any row is written: every upsert in this sync stamps
+        // `extracted_at` with a later instant, so "extracted_at < watermark"
+        // identifies exactly the rows this sync did not touch.
+        let watermark = now_rfc3339();
         let fetched = self.github.fetch_repository(owner, name).await?;
+        let complete = fetched.complete;
 
         // All ~26 tables are written as one transaction: a failure partway
         // through must not leave some tables current and others stale.
@@ -3236,6 +3359,17 @@ impl<
                         fetched.issue_timeline
                     );
 
+                    let stale_rows_deleted = service
+                        .reconcile_stale(tx, &scope, complete, repository.id, &watermark)
+                        .await?;
+                    if stale_rows_deleted > 0 {
+                        tracing::info!(
+                            repository = %repository.full_name,
+                            stale_rows_deleted,
+                            "reconciled upstream deletions"
+                        );
+                    }
+
                     Ok(SyncSummary {
                         repository: repository.full_name,
                         issues_synced,
@@ -3263,6 +3397,7 @@ impl<
                         issue_reactions_synced,
                         check_runs_synced,
                         issue_timeline_synced,
+                        stale_rows_deleted,
                     })
                 })
             })

@@ -29,6 +29,8 @@ pub mod reviews_007;
 pub mod tags_015;
 pub mod workflow_jobs_023;
 pub mod workflow_runs_013;
+pub mod z_extracted_at_030;
+pub mod z_release_assets_031;
 
 pub struct Migrator;
 
@@ -65,6 +67,8 @@ impl MigratorTrait for Migrator {
             Box::new(repo_clone_url_027::Migration),
             Box::new(pull_requests_refs_028::Migration),
             Box::new(review_comments_diff_anchors_029::Migration),
+            Box::new(z_extracted_at_030::Migration),
+            Box::new(z_release_assets_031::Migration),
         ]
     }
 }

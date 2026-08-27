@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use github_mirror::GithubMirrorGear;
 use github_mirror::domain::local_client::LocalClient;
-use github_mirror::domain::ports::github::FetchedRepository;
+use github_mirror::domain::ports::github::{FetchedRepository, ListingCompleteness};
 use github_mirror::domain::repo::RepoRecord;
 use github_mirror_sdk::GithubMirrorClientV1;
 use toolkit::{ClientHub, Gear};
@@ -92,6 +92,7 @@ async fn list_repos_via_hub_returns_seeded_rows() {
 async fn sync_repository_via_sdk_trait_fills_the_mirror() {
     let db = common::inmem_db().await;
     let fetched = FetchedRepository {
+        complete: ListingCompleteness::all_complete(),
         repository: record(500, "constructorfabric", "gears-rust"),
         issues: vec![],
         pull_requests: vec![],

@@ -97,6 +97,22 @@ impl AuthZResolverClient for MockAuthZResolver {
     }
 }
 
+/// PDP fake that denies everything: for exercising the deny path.
+pub struct DenyAllAuthZResolver;
+
+#[async_trait]
+impl AuthZResolverClient for DenyAllAuthZResolver {
+    async fn evaluate(
+        &self,
+        _request: EvaluationRequest,
+    ) -> Result<EvaluationResponse, AuthZResolverError> {
+        Ok(EvaluationResponse {
+            decision: false,
+            context: EvaluationResponseContext::default(),
+        })
+    }
+}
+
 /// GitHub fake: serves a pre-baked fetch result, or `NotFound` when empty.
 pub struct FakeGithub {
     pub result: Option<FetchedRepository>,
@@ -137,10 +153,24 @@ pub fn enforcer() -> PolicyEnforcer {
     PolicyEnforcer::new(authz)
 }
 
+pub fn deny_enforcer() -> PolicyEnforcer {
+    let authz: Arc<dyn AuthZResolverClient> = Arc::new(DenyAllAuthZResolver);
+    PolicyEnforcer::new(authz)
+}
+
 pub fn service_with_github(
     db: Db,
     api_base_url: &str,
     github: Arc<dyn GithubPort>,
+) -> Arc<ConcreteService> {
+    service_with_enforcer(db, api_base_url, github, enforcer())
+}
+
+pub fn service_with_enforcer(
+    db: Db,
+    api_base_url: &str,
+    github: Arc<dyn GithubPort>,
+    policy_enforcer: PolicyEnforcer,
 ) -> Arc<ConcreteService> {
     Arc::new(Service::new(
         Arc::new(DBProvider::new(db)),
@@ -171,7 +201,7 @@ pub fn service_with_github(
         Arc::new(SeaOrmCheckRunRepository::new()),
         Arc::new(SeaOrmIssueTimelineRepository::new()),
         github,
-        enforcer(),
+        policy_enforcer,
         ServiceConfig {
             api_base_url: api_base_url.to_owned(),
         },
