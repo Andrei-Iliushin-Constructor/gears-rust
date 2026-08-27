@@ -1,8 +1,17 @@
 {
   "$id": "gts://gts.cf.core.graph.attribute.v1~",
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "description": "Base attribute type: a reusable payload fragment embedded by node and edge types at a statically declared JSON pointer. It is not a graph element -- it has no row, no identity and no lifetime of its own, so it carries no tenant or timestamps: it is created, updated and deleted with the element that embeds it, and duplicating the owner's tenant into the fragment would create a second place for it to be wrong. The embedding schema names the exact attribute type by $ref, so an instance needs no type discriminator either. Declares no traits of its own -- index, full-text and vector paths are JSON pointers relative to the embedding object, so only that object can declare them.",
+  "description": "Base attribute type: a reusable schema fragment embedded inside a node's or edge's payload at a pointer the embedding type declares. It is not a graph element -- it has no row, no identity and no lifetime of its own, so it carries neither tenant nor row timestamps: it is created, updated and deleted with the element embedding it, and duplicating the owner's values into the fragment would create a second place they could disagree. It does carry its own `type`, so a payload can be read without resolving the embedding schema. Declares no traits schema -- index, full-text and vector paths are JSON pointers rooted at the instance, so only the embedding node or edge type knows where the fragment sits and can declare paths into it.",
   "x-gts-abstract": true,
   "type": "object",
-  "additionalProperties": true
+  "additionalProperties": true,
+  "properties": {
+    "type": {
+      "description": "GTS identifier of this fragment's attribute type. Server-assigned during ingest validation, which resolves the embedding schema anyway; absent from a write request and ignored if sent, always present on read.",
+      "type": "string",
+      "format": "gts-type-id",
+      "x-gts-ref": "gts.cf.core.graph.attribute.v1~",
+      "readOnly": true
+    }
+  }
 }

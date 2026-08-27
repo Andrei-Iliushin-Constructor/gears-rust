@@ -487,26 +487,75 @@ wildcard token.
   "$schema": "http://json-schema.org/draft-07/schema#",
   "x-gts-abstract": true,
   "type": "object",
-  "additionalProperties": true
+  "additionalProperties": true,
+  "properties": {
+    "type": { "type": "string", "format": "gts-type-id",
+              "x-gts-ref": "gts.cf.core.graph.attribute.v1~", "readOnly": true }
+  }
 }
 ```
 
-An attribute type is a reusable payload fragment embedded by node and edge types,
-never a standalone instance — hence no envelope, and deliberately so. A fragment
-has no row, no identity and no lifetime of its own: it is created, updated and
-deleted with the element that embeds it, so `tenant_id` and timestamps on it
-would duplicate the owner's values into a second place they could disagree. It
-needs no `type` discriminator either, because the embedding schema names the
-exact attribute type by `$ref` at a statically declared pointer — `analysis_edge`
-requires `payload.provenance` to be exactly the provenance type. If a later
-requirement introduces a *polymorphic* attribute slot — a payload position that
-may hold any attribute type — that slot needs a discriminator, and the right
-place for it is a new base with one, not a `type` on every fragment.
+An attribute is **not a graph element**. It is a reusable schema fragment
+embedded *inside* a node's or edge's `payload`, at a pointer the embedding type
+declares. It has no row, no identity and no lifetime of its own.
 
-It declares **no** traits schema:
-`index`, `full_text_search` and `vector_search` are JSON pointers rooted at the
-instance, so only the embedding node or edge type knows where the fragment sits
-and can therefore declare paths into it.
+The distinction is easy to lose, so the gear's own analysis scenario spells it
+out — an analyzer reports a finding and attributes it to the commit that
+introduced it:
+
+```jsonc
+{
+  "node_key": "finding:acme:SEC-014:a1b2c3",              // ← a Finding: an owned NODE.
+  "type": "…owned_node.v1~acme.sec._.finding.v1~",        //   its own row, searchable,
+  "payload": { "severity": "high", "rule_id": "SEC-014" } //   traversable, addressable
+}
+{
+  "type": "…analysis_edge.v1~acme.sec._.introduced_by.v1~",  // ← the assertion: an EDGE.
+  "src_node_key": "finding:acme:SEC-014:a1b2c3",             //   its own row
+  "dst_node_key": "commit:github:acme/infra:a1b2c3",
+  "payload": {
+    "provenance": {                                          // ← an ATTRIBUTE: a fragment.
+      "produced_by": "acme-blame-analyzer",                  //   no row, no key; lives and
+      "method": "git-blame",                                 //   dies with the edge above
+      "produced_at": "2026-08-24T09:14:02Z",
+      "confidence": 0.82
+    }
+  }
+}
+```
+
+The Finding is *what* was found; the edge is the assertion connecting it to a
+cause; the provenance is *who says so*. Only the first two are objects a
+consumer searches, traverses or addresses by key — which is exactly why the
+third is a fragment and not a third element kind.
+
+Provenance is also load-bearing rather than descriptive. Scope replacement reads
+`payload.provenance.origin` to decide whether a producer's re-sync may delete a
+row, which is how analyzer conclusions survive re-importing the source they were
+computed from (§ 5.2, `cpt-cf-graph-storage-fr-edge-provenance`). An analysis
+edge without provenance would be indistinguishable from static content and would
+be deleted on the next re-sync — which is why `analysis_edge` requires it in the
+schema rather than by convention.
+
+**What the fragment carries, and what it does not.** No `tenant_id` and no row
+timestamps: a fragment is created, updated and deleted with the element embedding
+it and is only ever read through that element, so those values would be a second
+copy that can disagree with the first. Provenance's own `produced_at` is a
+different thing and stays — it records when the analyzer made the assertion, not
+when the row was written.
+
+It does carry its own `type`. Today `analysis_edge` pins `payload.provenance` by
+`$ref`, so the fragment's type is derivable from the embedding schema — but that
+holds only while one attribute type exists. The base exists to be *reusable*,
+and reuse means several types embedding fragments at pointers of their own
+choosing, at which point a raw payload cannot be interpreted without resolving
+the embedding type's schema first. The field is `readOnly` and server-stamped
+during ingest validation, which resolves that schema anyway: a producer neither
+sends it nor can forge it, and a reader always has it.
+
+It declares **no** traits schema: `index`, `full_text_search` and `vector_search`
+are JSON pointers rooted at the instance, so only the embedding node or edge type
+knows where the fragment sits and can therefore declare paths into it.
 
 ##### Family types
 
