@@ -590,12 +590,14 @@ Most of this system is an in-process SDK contract. The **only** REST surface is 
 
 | Method | Endpoint | Description | Idempotency |
 |--------|----------|-------------|-------------|
-| `GET` | `/v1/change-sets/{change_set_id}/activation` | Activation-facet state: `overall_status` (`awaiting`/`success`/`failed`/`superseded`/`cancelled`), `expected_records`, `succeeded_records`/`failed_records`/`superseded_records`/`cancelled_records`/awaiting counts, per-subscriber responses, per-setting confirmation | Yes |
-| `GET` | `/v1/change-sets/{change_set_id}/activation/responses` | List all `BackResponse` entries for this change set (who responded, for which key, when, what status) | Yes |
+| `GET` | `/settings-service/v1/change-sets/{change_set_id}/activation` | Activation-facet state: `overall_status` (`awaiting`/`success`/`failed`/`superseded`/`cancelled`), `expected_records`, `succeeded_records`/`failed_records`/`superseded_records`/`cancelled_records`/awaiting counts, per-subscriber responses, per-setting confirmation | Yes |
+| `GET` | `/settings-service/v1/change-sets/{change_set_id}/activation/responses` | List all `BackResponse` entries for this change set (who responded, for which key, when, what status) | Yes |
+
+Both are `OperationBuilder` declarations like every other route in the gear — method, versioned `/settings-service/v1/…` path, `operation_id`, `.authenticated()`, licence posture, response schema and registered errors, collected by `OpenApiRegistry` (DESIGN.md §4.3). Neither is anonymous.
 
 **Why activation is a resource of its own.** "Did the values commit" is answered by the `set` response itself, synchronously, per change (DESIGN.md §4.2 *Value Writer*). "Did the consumers activate" cannot be: the wait is unbounded (§3.1), so it needs a resource that outlives the request. This one is keyed by `change_set_id` — a **correlation id**, §4.7 — and the Settings Service stores nothing else under that id, so this facet owns its whole lifecycle. One gear serves both sides (Settings Activation is part of the Settings Service, §1).
 
-**Pagination.** `GET /v1/change-sets/{change_set_id}/activation/responses` uses **cursor pagination** (`cursor`/`limit` → `{ items, page_info }`, no `total_count`) per the shared REST DNA (DESIGN.md §4.3 / guideline §5) — its row count is **changed-keys × subscribers**, unbounded for a platform-wide change set, so it MUST paginate. The `activation` bundle read itself (`/activation`) is a single resource, not a list.
+**Pagination.** `GET /settings-service/v1/change-sets/{change_set_id}/activation/responses` uses **cursor pagination** (`cursor`/`limit` → `{ items, page_info }`, no `total_count`) per the shared REST DNA (DESIGN.md §4.3 / guideline §5) — its row count is **changed-keys × subscribers**, unbounded for a platform-wide change set, so it MUST paginate. The `activation` bundle read itself (`/activation`) is a single resource, not a list.
 
 **These two reads are the entire REST surface.** Everything else is deliberately not REST:
 - **Subscribe / acknowledge** — SDK `subscribe` / `report_outcome` (§4.5), carried as Event Broker events (`activation_success` / `activation_failed`). There is **no REST back-response ingest**.
@@ -672,7 +674,7 @@ sequenceDiagram
  SS->>SS: match applied value to a still-awaiting record's snapshot @ (subscriber, key, tenant)
  SS->>SS: matched record → SUCCEEDED; older awaiting records → SUPERSEDED<br/>failed status → that record FAILED (supersedes nothing)
 
- Admin->>SS: GET /v1/change-sets/{change_set_id}/activation
+ Admin->>SS: GET /settings-service/v1/change-sets/{change_set_id}/activation
  SS-->>Admin: overall_status + succeeded / failed / superseded / cancelled / awaiting record counts
 
  Note over SS: AWAITING until every record is terminal (late acks waited for, unbounded).<br/>Then FAILED if any failed; else SUPERSEDED if any superseded; else CANCELLED if any cancelled; else SUCCESS.
@@ -738,7 +740,7 @@ Per-change-set metadata only. **No stored counters and no stored `overall_status
 
 #### Table: `change_set_await_records`
 
-The load-bearing per-`(change_set_id, subscriber, key)` state. Created at publish for every await-record the change set must hear back on; it holds the value **snapshot** and the terminal outcome, and absorbs the received back-response. It is **also the delivery queue**: rows with `status = 'awaiting'` are exactly what the delivery loop (§4.2 *Event Broker Client*) publishes and re-publishes until acked — there is no separate outbox. `GET /v1/change-sets/{change_set_id}/activation/responses` reads the rows with `received_at IS NOT NULL`.
+The load-bearing per-`(change_set_id, subscriber, key)` state. Created at publish for every await-record the change set must hear back on; it holds the value **snapshot** and the terminal outcome, and absorbs the received back-response. It is **also the delivery queue**: rows with `status = 'awaiting'` are exactly what the delivery loop (§4.2 *Event Broker Client*) publishes and re-publishes until acked — there is no separate outbox. `GET /settings-service/v1/change-sets/{change_set_id}/activation/responses` reads the rows with `received_at IS NOT NULL`.
 
 | Column | Type | Nullable | Default | Constraints |
 |--------|------|----------|---------|-------------|
@@ -765,7 +767,7 @@ Mirrors the Settings Service model (design DESIGN.md §4.8); enforced server-sid
 
 | Operation | Required permission | Scope | Unauthorized |
 |-----------|---------------------|-------|--------------|
-| Read activation facet / responses (`GET /v1/change-sets/{change_set_id}/activation`, `…/responses`) | `read` on `gts.cf.toolkit.settings.change_set.v1~` | The change set's tenant subtree | `404` if not visible |
+| Read activation facet / responses (`GET /settings-service/v1/change-sets/{change_set_id}/activation`, `…/responses`) | `read` on `gts.cf.toolkit.settings.change_set.v1~` | The change set's tenant subtree | `404` if not visible |
 | Emit back-response (SDK `report_outcome` → `activation_success`/`activation_failed` broker event — **not REST**) | **Trusted subscriber** — attributed to the subscriber identity, **not** independently verified (DESIGN.md §6); valid within the deployment trust boundary | — | — |
 
 - **AuthN:** the two read endpoints (§4.3) take an ordinary user/session bearer, gated by RBAC as above. There are **no internal REST endpoints** and **no effects/ack REST** — the publisher publishes in-process (`cache_invalidate` inline; `change_notification` from await-records, §4.2 *Change Set Publisher*/§4.2 *Event Broker Client*), and delivery + acknowledgement are Event-Broker events (§4.2 *Change Set Publisher*/§4.2 *Cache Invalidation Broadcast*), so this design introduces **no platform service-token surface**.
@@ -905,8 +907,8 @@ All metrics exposed as Prometheus scrape targets.
 
 | What to test | Method | Verification target |
 |---|---|---|
-| Activation status | `GET /v1/change-sets/{change_set_id}/activation` | Correct `overall_status` + succeeded/failed/superseded/cancelled/awaiting record counts |
-| List responses | `GET /v1/change-sets/{change_set_id}/activation/responses` | All back-responses for the change set (per subscriber/key) |
+| Activation status | `GET /settings-service/v1/change-sets/{change_set_id}/activation` | Correct `overall_status` + succeeded/failed/superseded/cancelled/awaiting record counts |
+| List responses | `GET /settings-service/v1/change-sets/{change_set_id}/activation/responses` | All back-responses for the change set (per subscriber/key) |
 | AuthZ deny | `GET …/activation` + `DenyingAuthZClient` | 403 |
 | RFC 9457 errors | trigger each category | `type`/`title`/`status`/`detail` present |
 
