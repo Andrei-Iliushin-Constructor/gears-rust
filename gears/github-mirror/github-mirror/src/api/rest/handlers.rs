@@ -19,11 +19,11 @@ use crate::domain::error::DomainError;
 use crate::domain::scope::{CollectionMode, ScopeConfig, SyncScope};
 
 use super::dto::{
-    AuthenticatedUserDto, BranchDto, CheckRunDto, CheckRunsPageDto, CommentDto, CommitCommentDto,
-    CommitDto, CommitFileDto, CommitStatsDto, CommitStatusDto, ContributorDto, DeploymentDto,
-    GithubMirrorHealthDto, IssueDto, IssueEventDto, IssueReactionDto, IssueTimelineEventDto,
-    LabelDto, MilestoneDto, PullRequestDto, PullRequestFileDto, ReleaseDto, RepoDto,
-    RepoSyncStatusDto, ResumeAcceptedDto, ReviewCommentDto, ReviewDto, ReviewThreadDto,
+    AuthenticatedUserDto, BranchDto, CacheClearedDto, CheckRunDto, CheckRunsPageDto, CommentDto,
+    CommitCommentDto, CommitDto, CommitFileDto, CommitStatsDto, CommitStatusDto, ContributorDto,
+    DeploymentDto, GithubMirrorHealthDto, IssueDto, IssueEventDto, IssueReactionDto,
+    IssueTimelineEventDto, LabelDto, MilestoneDto, PullRequestDto, PullRequestFileDto, ReleaseDto,
+    RepoDto, RepoSyncStatusDto, ResumeAcceptedDto, ReviewCommentDto, ReviewDto, ReviewThreadDto,
     SyncAcceptedDto, SyncSessionDto, TagDto, WorkflowJobDto, WorkflowJobsPageDto, WorkflowRunDto,
     WorkflowRunsPageDto,
 };
@@ -110,6 +110,14 @@ fn objects_from_include(include: &str) -> Result<SyncScope, DomainError> {
         }
     }
     Ok(scope)
+}
+
+/// `?owner=X` clears everything mirrored for that owner; `?repo=owner/name`
+/// narrows it to one repository.
+#[derive(Debug, Default, Deserialize)]
+pub struct CacheClearQuery {
+    pub owner: Option<String>,
+    pub repo: Option<String>,
 }
 
 /// `?repo=owner/name` narrows a resume to one repository; omitting it resumes
@@ -755,4 +763,37 @@ pub async fn list_repo_sync_status(
         .list_repo_sync_status(&ctx, &query, filter.status.as_deref())
         .await?;
     Ok(Json(page.map_items(RepoSyncStatusDto::from)))
+}
+
+pub async fn clear_cache(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(svc): Extension<Arc<ConcreteService>>,
+    Query(query): Query<CacheClearQuery>,
+) -> ApiResult<JsonBody<CacheClearedDto>> {
+    let (owner, name) = match (&query.repo, &query.owner) {
+        (Some(slug), _) => {
+            let (owner, name) = slug
+                .split_once('/')
+                .ok_or_else(|| DomainError::Validation {
+                    field: "repo".to_owned(),
+                    message: format!("`{slug}` is not an owner/name slug"),
+                })?;
+            (owner.to_owned(), Some(name.to_owned()))
+        }
+        (None, Some(owner)) => (owner.clone(), None),
+        (None, None) => {
+            return Err(DomainError::Validation {
+                field: "owner".to_owned(),
+                message: "give `owner` or `repo`; clearing every tenant's cache is not offered"
+                    .to_owned(),
+            }
+            .into());
+        }
+    };
+
+    let entries_removed = svc.clear_cache(&ctx, &owner, name.as_deref()).await?;
+    Ok(Json(CacheClearedDto {
+        scope: name.map_or_else(|| owner.clone(), |name| format!("{owner}/{name}")),
+        entries_removed,
+    }))
 }

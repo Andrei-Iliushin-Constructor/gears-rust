@@ -99,6 +99,15 @@ pub trait HttpCache: Send + Sync {
         url: &str,
         entry: CachedResponse,
     ) -> Result<(), DomainError>;
+
+    /// Drop every entry whose URL starts with `url_prefix`, returning how many
+    /// went. This is `clear_cache(session, scope)` from DESIGN §4: the prefix
+    /// is how an org or a single repository is named, since the key itself is
+    /// an opaque hash.
+    ///
+    /// # Errors
+    /// Storage failures.
+    async fn clear(&self, tenant_id: uuid::Uuid, url_prefix: &str) -> Result<u64, DomainError>;
 }
 
 /// A cache that stores nothing, for callers that do not want one.
@@ -125,6 +134,10 @@ impl HttpCache for NoCache {
         _entry: CachedResponse,
     ) -> Result<(), DomainError> {
         Ok(())
+    }
+
+    async fn clear(&self, _tenant_id: uuid::Uuid, _url_prefix: &str) -> Result<u64, DomainError> {
+        Ok(0)
     }
 }
 

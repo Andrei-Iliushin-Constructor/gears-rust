@@ -29,9 +29,15 @@ impl MigrationTrait for Migration {
         Ok(())
     }
 
+    /// Drops the whole table rather than the one column.
+    ///
+    /// `http_cache_rebuild_035` rolls back by dropping `gm_http_cache`, so by
+    /// the time this runs the table is usually gone and dropping a column from
+    /// it would fail. The table is a cache: recreating it costs one re-fetch,
+    /// and `IF EXISTS` makes this safe in either order.
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
-        conn.execute_unprepared("ALTER TABLE gm_http_cache DROP COLUMN next_page;")
+        conn.execute_unprepared("DROP TABLE IF EXISTS gm_http_cache;")
             .await?;
         Ok(())
     }

@@ -9,7 +9,7 @@ use github_mirror_sdk::{
 };
 use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, Order};
 use toolkit_db::secure::{
-    DBRunner, ScopeError, SecureEntityExt, SecureInsertExt, SecureOnConflict,
+    DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureOnConflict,
 };
 use toolkit_db::{DBProvider, DbError};
 use toolkit_security::AccessScope;
@@ -37,6 +37,7 @@ use crate::domain::repo::{
     SyncWatermarkRepository,
 };
 use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache};
+use crate::infra::github::compression::{Compression, content_hash};
 
 use super::entity::branches::{self, Entity as BranchEntity};
 use super::entity::check_runs::{self, Entity as CheckRunEntity};
@@ -2867,12 +2868,38 @@ impl IssueTimelineRepository for SeaOrmIssueTimelineRepository {
 /// dropped wholesale without losing mirrored data.
 pub struct SeaOrmHttpCache {
     db: Arc<DBProvider<DbError>>,
+    compression: Compression,
 }
 
 impl SeaOrmHttpCache {
     #[must_use]
-    pub fn new(db: Arc<DBProvider<DbError>>) -> Self {
-        Self { db }
+    pub fn new(db: Arc<DBProvider<DbError>>, compression: Compression) -> Self {
+        Self { db, compression }
+    }
+
+    /// Decode one stored row, rejecting anything that does not decompress or
+    /// whose body no longer matches its recorded hash.
+    ///
+    /// A rejected row is reported as an error so the caller can log it and
+    /// treat the entry as absent; the request then fetches fresh, which is the
+    /// safe outcome.
+    fn decode(model: http_cache::Model) -> Result<CachedResponse, DomainError> {
+        let mode = Compression::parse(&model.compression)?;
+        let body = mode.decompress(&model.body)?;
+        if content_hash(&body) != model.content_hash {
+            return Err(DomainError::internal(format!(
+                "cached body for {} failed its integrity check",
+                model.url
+            )));
+        }
+
+        Ok(CachedResponse {
+            body: String::from_utf8(body)
+                .map_err(|e| DomainError::internal(format!("cached body is not UTF-8: {e}")))?,
+            etag: model.etag,
+            last_modified: model.last_modified,
+            next_page: model.next_page,
+        })
     }
 }
 
@@ -2894,12 +2921,18 @@ impl HttpCache for SeaOrmHttpCache {
             .await
             .map_err(map_scope_error)?;
 
-        Ok(row.map(|m| CachedResponse {
-            body: m.body,
-            etag: m.etag,
-            last_modified: m.last_modified,
-            next_page: m.next_page,
-        }))
+        let Some(model) = row else {
+            return Ok(None);
+        };
+        match Self::decode(model) {
+            Ok(entry) => Ok(Some(entry)),
+            Err(e) => {
+                // A corrupt entry must not fail the sync; drop it on the floor
+                // and let the caller fetch fresh.
+                tracing::warn!(error = %e, "discarding an unusable cache entry");
+                Ok(None)
+            }
+        }
     }
 
     async fn put(
@@ -2912,14 +2945,21 @@ impl HttpCache for SeaOrmHttpCache {
         let scope = AccessScope::for_tenant(tenant_id);
         let conn = self.db.conn()?;
 
+        let plain = entry.body.as_bytes();
+        let hash = content_hash(plain);
+        let stored = self.compression.compress(plain)?;
+
         let model = || http_cache::ActiveModel {
             tenant_id: ActiveValue::Set(tenant_id),
             cache_key: ActiveValue::Set(key.as_str().to_owned()),
             url: ActiveValue::Set(url.to_owned()),
+            status: ActiveValue::Set(200),
             etag: ActiveValue::Set(entry.etag.clone()),
             last_modified: ActiveValue::Set(entry.last_modified.clone()),
-            body: ActiveValue::Set(entry.body.clone()),
             next_page: ActiveValue::Set(entry.next_page.clone()),
+            body: ActiveValue::Set(stored.clone()),
+            compression: ActiveValue::Set(self.compression.as_str().to_owned()),
+            content_hash: ActiveValue::Set(hash.clone()),
             fetched_at: ActiveValue::Set(now_rfc3339()),
         };
 
@@ -2929,10 +2969,13 @@ impl HttpCache for SeaOrmHttpCache {
         ])
         .update_columns([
             http_cache::Column::Url,
+            http_cache::Column::Status,
             http_cache::Column::Etag,
             http_cache::Column::LastModified,
-            http_cache::Column::Body,
             http_cache::Column::NextPage,
+            http_cache::Column::Body,
+            http_cache::Column::Compression,
+            http_cache::Column::ContentHash,
             http_cache::Column::FetchedAt,
         ])
         .map_err(map_scope_error)?;
@@ -2947,6 +2990,21 @@ impl HttpCache for SeaOrmHttpCache {
             .map_err(map_scope_error)?;
 
         Ok(())
+    }
+
+    async fn clear(&self, tenant_id: Uuid, url_prefix: &str) -> Result<u64, DomainError> {
+        let scope = AccessScope::for_tenant(tenant_id);
+        let conn = self.db.conn()?;
+
+        let result = HttpCacheEntity::delete_many()
+            .secure()
+            .scope_with(&scope)
+            .filter(sea_orm::Condition::all().add(http_cache::Column::Url.starts_with(url_prefix)))
+            .exec(&conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(result.rows_affected)
     }
 }
 

@@ -115,6 +115,15 @@ impl GithubPort for FakeGithub {
     ) -> Result<FetchedRepository, DomainError> {
         self.result.clone().ok_or(DomainError::NotFound)
     }
+
+    async fn clear_cache(
+        &self,
+        _tenant_id: Uuid,
+        _owner: &str,
+        _name: Option<&str>,
+    ) -> Result<u64, DomainError> {
+        Ok(0)
+    }
 }
 
 pub async fn inmem_db() -> Db {

@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
 use crate::domain::scope::{CollectionMode, ScopeConfig};
+use crate::infra::github::compression::Compression;
 use toolkit_utils::var_expand::ExpandVarsError;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -25,6 +26,15 @@ pub struct GithubMirrorConfig {
     /// existing deployment stores.
     #[serde(default = "default_scope")]
     pub scope: ScopeConfig,
+    /// How cached response bodies are stored: `none`, `gzip` or `zstd`
+    /// (PRD §5.6). GitHub JSON gzips to roughly a fifth of its size, so the
+    /// default is on.
+    #[serde(default = "default_compression")]
+    pub cache_compression: String,
+}
+
+fn default_compression() -> String {
+    "gzip".to_owned()
 }
 
 /// The gear's shipped scope: the type's default, with timeline turned on to
@@ -36,6 +46,15 @@ fn default_scope() -> ScopeConfig {
 }
 
 impl GithubMirrorConfig {
+    /// The configured compression mode.
+    ///
+    /// # Errors
+    /// `Validation` when the config names a mode that does not exist, so a
+    /// typo fails at startup rather than at the first cache write.
+    pub fn resolved_compression(&self) -> Result<Compression, crate::domain::error::DomainError> {
+        Compression::parse(&self.cache_compression)
+    }
+
     /// The token with any `${VAR}` reference expanded from the environment.
     ///
     /// # Errors
@@ -57,6 +76,7 @@ impl Default for GithubMirrorConfig {
             api_base_url: default_api_base_url(),
             github_token: None,
             scope: default_scope(),
+            cache_compression: default_compression(),
         }
     }
 }

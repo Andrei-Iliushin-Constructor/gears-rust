@@ -1012,6 +1012,13 @@ impl HttpCache for MemCache {
             .insert(key.as_str().to_owned(), entry);
         Ok(())
     }
+
+    async fn clear(&self, _tenant_id: uuid::Uuid, _url_prefix: &str) -> Result<u64, DomainError> {
+        let mut entries = self.entries.lock().unwrap();
+        let removed = entries.len() as u64;
+        entries.clear();
+        Ok(removed)
+    }
 }
 
 /// Only the repository endpoint is in scope, so one sync is exactly one call.

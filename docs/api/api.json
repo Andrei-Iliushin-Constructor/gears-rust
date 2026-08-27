@@ -1487,6 +1487,26 @@
         ],
         "type": "object"
       },
+      "CacheClearedDto": {
+        "description": "What one cache-clear removed.",
+        "properties": {
+          "entries_removed": {
+            "description": "How many cached responses went.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "scope": {
+            "description": "The owner, or `owner/name`, whose entries were dropped.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "entries_removed"
+        ],
+        "type": "object"
+      },
       "CapabilitiesDto": {
         "description": "Backend capabilities surface for `GET /storages`.",
         "properties": {
@@ -40078,6 +40098,93 @@
         "summary": "List all registered gears",
         "tags": [
           "Gear Orchestrator"
+        ]
+      }
+    },
+    "/github-mirror/v1/cache": {
+      "delete": {
+        "description": "DESIGN 4's `clear_cache`. Removes raw cached responses so the next sync              re-fetches instead of revalidating; the mirrored rows themselves are left              untouched. Give `repo=owner/name` for one repository or `owner=X` for              everything mirrored under that owner.",
+        "operationId": "github_mirror.clear_cache",
+        "parameters": [
+          {
+            "description": "Clear every repository of this owner",
+            "in": "query",
+            "name": "owner",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Clear only this `owner/name` repository",
+            "in": "query",
+            "name": "repo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CacheClearedDto"
+                }
+              }
+            },
+            "description": "How many cached responses were removed"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Drop cached GitHub responses for an owner or a repository",
+        "tags": [
+          "GitHub Mirror"
         ]
       }
     },

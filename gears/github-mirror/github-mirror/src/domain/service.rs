@@ -3053,6 +3053,43 @@ impl<
     /// # Errors
     /// Whatever [`Self::sync_repository`] returns; the session row records
     /// the failure before the error propagates.
+    /// Drop cached GitHub responses for one owner or one repository.
+    ///
+    /// DESIGN §4's `clear_cache(session, scope)`. The mirrored rows are left
+    /// alone: this only discards the raw responses, so the next sync re-fetches
+    /// rather than revalidating.
+    ///
+    /// # Errors
+    /// `Forbidden`/`Database` as usual.
+    pub async fn clear_cache(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name: Option<&str>,
+    ) -> Result<u64, DomainError> {
+        // Clearing a tenant's own cache is a sync-scoped action: it changes
+        // nothing anyone can read, only what the next sync will re-fetch.
+        let tenant_id = ctx.subject_tenant_id();
+        self.policy_enforcer
+            .access_scope_with(
+                ctx,
+                &SYNC_RESOURCE,
+                actions::SYNC,
+                None,
+                &AccessRequest::new().resource_property(pep_properties::OWNER_TENANT_ID, tenant_id),
+            )
+            .await?;
+
+        let removed = self.github.clear_cache(tenant_id, owner, name).await?;
+        tracing::info!(
+            owner,
+            repository = name,
+            removed,
+            "cleared cached responses"
+        );
+        Ok(removed)
+    }
+
     /// What a sync collects when the request does not narrow it.
     #[must_use]
     pub fn default_scope(&self) -> ScopeConfig {

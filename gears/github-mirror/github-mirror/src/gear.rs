@@ -128,7 +128,10 @@ impl Gear for GithubMirrorGear {
         // Conditional requests: a stored ETag replayed as If-None-Match turns a
         // repeat sync into 304s, which GitHub does not charge against the rate
         // limit (#4630).
-        let http_cache = Arc::new(SeaOrmHttpCache::new(Arc::clone(&db)));
+        let http_cache = Arc::new(SeaOrmHttpCache::new(
+            Arc::clone(&db),
+            cfg.resolved_compression()?,
+        ));
         let github: Arc<dyn GithubPort> = Arc::new(GithubClient::with_cache(
             cfg.api_base_url.clone(),
             cfg.resolved_token()?,
@@ -351,6 +354,6 @@ mod tests {
     fn gear_provides_all_migrations() {
         use toolkit::contracts::DatabaseCapability;
         let gear = GithubMirrorGear::default();
-        assert_eq!(gear.migrations().len(), 34);
+        assert_eq!(gear.migrations().len(), 35);
     }
 }

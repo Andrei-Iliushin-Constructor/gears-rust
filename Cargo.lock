@@ -2458,6 +2458,7 @@ dependencies = [
  "cf-gears-toolkit-odata",
  "cf-gears-toolkit-security",
  "cf-gears-toolkit-utils",
+ "flate2",
  "hex",
  "httpmock",
  "inventory",

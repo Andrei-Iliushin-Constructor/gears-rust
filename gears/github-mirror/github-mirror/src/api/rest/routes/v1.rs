@@ -81,6 +81,29 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .error_500(openapi)
         .register(router, openapi);
 
+    router = OperationBuilder::delete("/github-mirror/v1/cache")
+        .operation_id("github_mirror.clear_cache")
+        .summary("Drop cached GitHub responses for an owner or a repository")
+        .description(
+            "DESIGN 4's `clear_cache`. Removes raw cached responses so the next sync              re-fetches instead of revalidating; the mirrored rows themselves are left              untouched. Give `repo=owner/name` for one repository or `owner=X` for              everything mirrored under that owner.",
+        )
+        .tag(API_TAG)
+        .authenticated()
+        .require_license_features::<License>([])
+        .query_param("owner", false, "Clear every repository of this owner")
+        .query_param("repo", false, "Clear only this `owner/name` repository")
+        .handler(handlers::clear_cache)
+        .json_response_with_schema::<dto::CacheClearedDto>(
+            openapi,
+            StatusCode::OK,
+            "How many cached responses were removed",
+        )
+        .error_400(openapi)
+        .error_401(openapi)
+        .error_403(openapi)
+        .error_500(openapi)
+        .register(router, openapi);
+
     router = OperationBuilder::post("/github-mirror/v1/sync/resume")
         .operation_id("github_mirror.resume_syncs")
         .summary("Re-run repositories still marked in_progress")
@@ -124,6 +147,14 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .error_500(openapi)
         .register(router, openapi);
 
+    register_session_routes(router, openapi)
+}
+
+/// Session, run-status and per-entity read routes.
+///
+/// Split from [`register_routes`] only to stay under the 200-line cap; the two
+/// halves are one registration pass.
+fn register_session_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     router = OperationBuilder::get("/github-mirror/v1/sessions")
         .operation_id("github_mirror.list_sync_sessions")
         .summary("List sync sessions, newest first")

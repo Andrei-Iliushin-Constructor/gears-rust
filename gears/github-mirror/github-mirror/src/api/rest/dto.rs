@@ -676,6 +676,16 @@ pub struct SyncAcceptedDto {
     pub status: String,
 }
 
+/// What one cache-clear removed.
+#[derive(Debug)]
+#[toolkit_macros::api_dto(response)]
+pub struct CacheClearedDto {
+    /// The owner, or `owner/name`, whose entries were dropped.
+    pub scope: String,
+    /// How many cached responses went.
+    pub entries_removed: u64,
+}
+
 /// Sessions queued by one resume call.
 #[derive(Debug)]
 #[toolkit_macros::api_dto(response)]

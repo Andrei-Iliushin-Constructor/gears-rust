@@ -65,17 +65,25 @@ pub mod http_cache {
         /// Hex SHA-256 of method + URL + `Accept`.
         #[sea_orm(primary_key, auto_increment = false)]
         pub cache_key: String,
-        /// The URL this entry came from, for debugging only.
+        /// The URL this entry came from. Also what `clear_cache` matches on
+        /// when a caller drops one repository's entries.
         pub url: String,
+        /// The HTTP status the body came with (PRD §5.6 metadata).
+        pub status: i32,
         /// `ETag` to replay as `If-None-Match`.
         pub etag: Option<String>,
         /// `Last-Modified` to replay as `If-Modified-Since`.
         pub last_modified: Option<String>,
-        /// The response body as GitHub returned it.
-        pub body: String,
         /// `rel="next"` from the `Link` header, when the list has more pages.
         /// Kept because a `304` may omit the header.
         pub next_page: Option<String>,
+        /// The response body, encoded per `compression`.
+        pub body: Vec<u8>,
+        /// `none`, `gzip` or `zstd`.
+        pub compression: String,
+        /// SHA-256 of the **uncompressed** body, so the check is independent
+        /// of the mode in force when the row was written.
+        pub content_hash: String,
         pub fetched_at: String,
     }
 
