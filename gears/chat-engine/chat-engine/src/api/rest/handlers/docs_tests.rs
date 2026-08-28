@@ -71,12 +71,34 @@ async fn openapi_json_serves_the_document() {
 
 #[tokio::test]
 async fn openapi_json_reflects_the_gateway_prefix_in_servers() {
-    let uri: Uri = "/cf/chat-engine/v1/openapi".parse().expect("uri");
-    let response = openapi_json(OriginalUri(uri), Extension(built_doc())).await;
+    // One shared handle, as the Extension layer hands out: every request must
+    // be told the base URL it actually arrived on, not the first one's.
+    let doc = built_doc();
 
-    let parsed: serde_json::Value =
-        serde_json::from_str(&body_string(response).await).expect("valid JSON");
-    assert_eq!(parsed["servers"], serde_json::json!([{ "url": "/cf" }]));
+    for (path, expected) in [
+        ("/cf/chat-engine/v1/openapi", Some("/cf")),
+        ("/other/chat-engine/v1/openapi", Some("/other")),
+        ("/chat-engine/v1/openapi", None),
+        // Back to the first prefix: no state may have been settled meanwhile.
+        ("/cf/chat-engine/v1/openapi", Some("/cf")),
+    ] {
+        let uri: Uri = path.parse().expect("uri");
+        let response = openapi_json(OriginalUri(uri), Extension(Arc::clone(&doc))).await;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body_string(response).await).expect("valid JSON");
+
+        match expected {
+            Some(url) => assert_eq!(
+                parsed["servers"],
+                serde_json::json!([{ "url": url }]),
+                "{path} should advertise {url} as its base URL"
+            ),
+            None => assert!(
+                parsed.get("servers").is_none(),
+                "{path} is mounted at the root and needs no servers entry"
+            ),
+        }
+    }
 }
 
 #[tokio::test]
