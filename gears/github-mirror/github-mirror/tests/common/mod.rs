@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use authz_resolver_sdk::{
-    AuthZResolverClient, AuthZResolverError, PolicyEnforcer,
+    AuthZResolverApi, PolicyEnforcer,
     constraints::{Constraint, InPredicate, Predicate},
     models::{EvaluationRequest, EvaluationResponse, EvaluationResponseContext},
 };
@@ -24,10 +24,11 @@ use github_mirror::infra::storage::sea_orm_repo::{
     SeaOrmSyncWriter, SeaOrmTagRepository, SeaOrmWorkflowJobRepository,
     SeaOrmWorkflowRunRepository,
 };
+use toolkit::api::canonical_prelude::CanonicalError;
 use toolkit::{ClientHub, ConfigProvider, GearCtx};
 use toolkit_db::migration_runner::run_migrations_for_testing;
 use toolkit_db::{ConnectOpts, DBProvider, Db, connect_db};
-use toolkit_security::{SecurityContext, pep_properties};
+use toolkit_security::{PlatformSecurityContext, SecurityContext, pep_properties};
 use uuid::Uuid;
 
 pub type ConcreteService = Service;
@@ -36,11 +37,12 @@ pub type ConcreteService = Service;
 pub struct MockAuthZResolver;
 
 #[async_trait]
-impl AuthZResolverClient for MockAuthZResolver {
+impl AuthZResolverApi for MockAuthZResolver {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         let root_id = request
             .context
             .tenant_context
@@ -54,7 +56,7 @@ impl AuthZResolverClient for MockAuthZResolver {
                     .and_then(|v| v.as_str())
                     .and_then(|s| Uuid::parse_str(s).ok())
             })
-            .ok_or_else(|| AuthZResolverError::Internal("tenant context is required".to_owned()))?;
+            .ok_or_else(|| CanonicalError::internal("tenant context is required").create())?;
 
         let predicates = vec![Predicate::In(InPredicate::new(
             pep_properties::OWNER_TENANT_ID,
@@ -75,11 +77,12 @@ impl AuthZResolverClient for MockAuthZResolver {
 pub struct DenyAllAuthZResolver;
 
 #[async_trait]
-impl AuthZResolverClient for DenyAllAuthZResolver {
+impl AuthZResolverApi for DenyAllAuthZResolver {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(EvaluationResponse {
             decision: false,
             context: EvaluationResponseContext::default(),
@@ -123,12 +126,12 @@ pub async fn inmem_db() -> Db {
 }
 
 pub fn enforcer() -> PolicyEnforcer {
-    let authz: Arc<dyn AuthZResolverClient> = Arc::new(MockAuthZResolver);
+    let authz: Arc<dyn AuthZResolverApi> = Arc::new(MockAuthZResolver);
     PolicyEnforcer::new(authz)
 }
 
 pub fn deny_enforcer() -> PolicyEnforcer {
-    let authz: Arc<dyn AuthZResolverClient> = Arc::new(DenyAllAuthZResolver);
+    let authz: Arc<dyn AuthZResolverApi> = Arc::new(DenyAllAuthZResolver);
     PolicyEnforcer::new(authz)
 }
 
@@ -209,8 +212,8 @@ impl ConfigProvider for StaticConfig {
 /// A `GearCtx` good enough for `Gear::init`: config + hub with a fake PDP + an
 /// in-memory database with migrations applied.
 pub async fn gear_ctx(hub: Arc<ClientHub>, section: Option<serde_json::Value>) -> GearCtx {
-    let authz: Arc<dyn AuthZResolverClient> = Arc::new(MockAuthZResolver);
-    hub.register::<dyn AuthZResolverClient>(authz);
+    let authz: Arc<dyn AuthZResolverApi> = Arc::new(MockAuthZResolver);
+    hub.register::<dyn AuthZResolverApi>(authz);
 
     GearCtx::new(
         "github-mirror",
