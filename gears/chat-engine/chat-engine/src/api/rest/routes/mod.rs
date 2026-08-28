@@ -80,8 +80,8 @@ pub struct ChatEngineServices {
 /// - `.authenticated()` + `.require_license_features([&ChatEngineLicense])`
 ///   on every protected route. The `.anonymous()` routes are
 ///   `POST /chat-engine/v1/shared/{share_token}` (the share token is the
-///   grant) and the two documentation routes (`GET /chat-engine/docs`,
-///   `GET /chat-engine/openapi.json`).
+///   grant) and the two documentation routes (`GET /chat-engine/v1/docs`,
+///   `GET /chat-engine/v1/openapi.json`).
 /// - `.json_response_with_schema::<…>(openapi, status, desc)` for typed
 ///   responses; `.json_request::<…>(openapi, desc)` for typed bodies.
 /// - `.standard_errors(openapi)` registers the RFC-9457 error variants.
@@ -487,7 +487,7 @@ pub fn register_routes(
 
     let gear_doc = Arc::new(GearOpenApiDoc::default());
 
-    router = OperationBuilder::get("/chat-engine/openapi.json")
+    router = OperationBuilder::get("/chat-engine/v1/openapi.json")
         .operation_id("chat_engine.docs.openapi")
         .summary("OpenAPI document describing the Chat Engine REST surface")
         .tag(API_TAG)
@@ -501,7 +501,7 @@ pub fn register_routes(
         )
         .register(router, openapi);
 
-    router = OperationBuilder::get("/chat-engine/docs")
+    router = OperationBuilder::get("/chat-engine/v1/docs")
         .operation_id("chat_engine.docs.reference")
         .summary("Interactive API reference for the Chat Engine REST surface")
         .tag(API_TAG)

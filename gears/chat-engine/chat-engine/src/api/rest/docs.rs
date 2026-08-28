@@ -3,7 +3,7 @@
 //! The gateway publishes one document per *process* at `{prefix}/openapi.json`
 //! and `{prefix}/docs`, covering every gear the host mounted. A client
 //! integrating with Chat Engine wants the gear's own surface, so this module
-//! publishes the gear-scoped equivalent under `{prefix}/chat-engine/`.
+//! publishes the gear-scoped equivalent under `{prefix}/chat-engine/v1/`.
 //!
 //! Scoping is done by observation, not by filtering. [`TeeRegistry`] wraps the
 //! registry the host handed to
@@ -23,10 +23,11 @@ use serde_json::Value;
 use toolkit::api::{OpenApiInfo, OpenApiRegistry, OpenApiRegistryImpl, OperationSpec};
 use utoipa::openapi::{RefOr, schema::Schema};
 
-/// Path both documentation routes live under, and the segment
-/// [`GearOpenApiDoc::render`] splits a request path on to recover the
-/// gateway's mount prefix.
-pub(crate) const DOCS_BASE_PATH: &str = "/chat-engine/";
+/// The gear's own path root. [`GearOpenApiDoc::render`] splits a request path
+/// on this to recover whatever the gateway mounted the gear under.
+///
+/// Not `/chat-engine/v1/`: the split has to work for any future version prefix.
+pub(crate) const GEAR_BASE_PATH: &str = "/chat-engine/";
 
 /// Registry decorator that records what passes through it.
 ///
@@ -119,7 +120,7 @@ impl GearOpenApiDoc {
             Err(err) => tracing::warn!(
                 error = %err,
                 "chat-engine: failed to build the gear OpenAPI document; \
-                 {DOCS_BASE_PATH}openapi.json will report 503"
+                 {GEAR_BASE_PATH}v1/openapi.json will report 503"
             ),
         }
     }
@@ -127,7 +128,7 @@ impl GearOpenApiDoc {
     /// Render the document for a request that arrived at `request_path`.
     ///
     /// `request_path` is the full path as the client sent it
-    /// (`/cf/chat-engine/openapi.json`); whatever precedes [`DOCS_BASE_PATH`] is
+    /// (`/cf/chat-engine/v1/openapi.json`); whatever precedes [`GEAR_BASE_PATH`] is
     /// the gateway's mount point and becomes the document's single server entry,
     /// so "try it" in an API browser targets the real base URL.
     ///
@@ -154,9 +155,9 @@ impl GearOpenApiDoc {
 
 /// Split the gateway's mount prefix off a request path.
 ///
-/// `/cf/chat-engine/openapi.json` → `/cf`; `/chat-engine/docs` → `""`.
+/// `/cf/chat-engine/v1/openapi.json` → `/cf`; `/chat-engine/v1/docs` → `""`.
 fn mount_prefix(request_path: &str) -> &str {
-    match request_path.rfind(DOCS_BASE_PATH) {
+    match request_path.rfind(GEAR_BASE_PATH) {
         Some(index) => &request_path[..index],
         None => "",
     }
@@ -165,9 +166,9 @@ fn mount_prefix(request_path: &str) -> &str {
 /// The API reference page.
 ///
 /// `./openapi.json` is deliberately relative: the page is served at
-/// `{prefix}/chat-engine/docs`, so the browser resolves the spec to
-/// `{prefix}/chat-engine/openapi.json` without this gear ever learning what the
-/// gateway's `prefix_path` is.
+/// `{prefix}/chat-engine/v1/docs`, so the browser resolves the spec to
+/// `{prefix}/chat-engine/v1/openapi.json` without this gear ever learning what
+/// the gateway's `prefix_path` is.
 pub const DOCS_PAGE: &str = r#"<!DOCTYPE html>
 <html>
 <head>
