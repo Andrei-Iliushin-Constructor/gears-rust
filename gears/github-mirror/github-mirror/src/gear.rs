@@ -6,7 +6,7 @@ use toolkit::api::OpenApiRegistry;
 use toolkit::{Gear, GearCtx, Healthcheck, HealthcheckResult, RestApiCapability};
 use tracing::info;
 
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use github_mirror_sdk::GithubMirrorClientV1;
 
 use crate::api::rest::routes;
@@ -119,7 +119,7 @@ impl Gear for GithubMirrorGear {
 
         let authz = ctx
             .client_hub()
-            .get::<dyn AuthZResolverClient>()
+            .get::<dyn AuthZResolverApi>()
             .map_err(|e| anyhow::anyhow!("failed to get AuthZ resolver: {e}"))?;
         let policy_enforcer = PolicyEnforcer::new(authz);
 

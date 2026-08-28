@@ -659,7 +659,7 @@ Client initialization: AuthZ plugin resolves `dyn ResourceGroupReadHierarchy` fr
 | Dependency                            | Interface                       | Purpose                                                       |
 | ------------------------------------- | ------------------------------- | ------------------------------------------------------------- |
 | SQL database                          | SeaORM repositories             | durable canonical + closure storage                           |
-| AuthZ Resolver SDK                    | `PolicyEnforcer` / `AuthZResolverClient` | AuthZ evaluation for JWT-authenticated RG API requests (write + read) |
+| AuthZ Resolver SDK                    | `PolicyEnforcer` / `AuthZResolverApi` | AuthZ evaluation for JWT-authenticated RG API requests (write + read) |
 | Vendor-specific RG backend (optional) | `ResourceGroupReadHierarchy`    | alternative hierarchy/membership source for integration reads (vendor impl replaces the registered `ResourceGroupReadHierarchy` at gear init) |
 | AuthZ plugin consumer (optional)      | `ResourceGroupReadHierarchy`    | read group context in PDP logic (narrow reads: hierarchy + listing + single-group + memberships, resolved unscoped; in-process via `ClientHub` — `p1`; MTLS transport — `p2`, deferred / not implemented yet) |
 | General consumers (optional)          | `ResourceGroupClient`           | full read+write access to types/entities/memberships/hierarchy |
@@ -776,12 +776,12 @@ Phase 1 (SystemCapability):
      → REST/gRPC endpoints NOT yet accepting traffic
 
   2. AuthZ Resolver init (deps: [types-registry])
-     → registers AuthZResolverClient in ClientHub
+     → registers AuthZResolverApi in ClientHub
      → plugin discovery is lazy (first evaluate() call)
 
 Phase 2 (ready):
   3. RG Gear starts accepting REST/gRPC traffic
-     → write operations call PolicyEnforcer → AuthZResolverClient (available since step 2)
+     → write operations call PolicyEnforcer → AuthZResolverApi (available since step 2)
      → seed operations run as pre-deployment step with system SecurityContext (bypass AuthZ)
 
   4. AuthZ plugin on first evaluate() call
@@ -821,7 +821,7 @@ sequenceDiagram
     GW->>CS: handler(ctx: SecurityContext)
 
     CS->>PE: access_scope(ctx, COURSE, "list", None)
-    PE->>AZ: evaluate(EvaluationRequest)
+    PE->>AZ: evaluate(SecurityContext, EvaluationRequest)
     Note right of AZ: subject.properties.tenant_id = T1<br/>action.name = "list"<br/>resource.type = "gts.cf.lms.course.v1~"<br/>context.require_constraints = true<br/>context.supported_properties = ["owner_tenant_id"]
 
     AZ->>RG: list_group_depth(system_ctx, T1, filter: "hierarchy/depth ge 0 and type eq 'tenant'")
@@ -843,7 +843,7 @@ Step-by-step:
 
 2. **Domain service** — Courses handler receives the request with `SecurityContext`. Before querying the database, it calls `PolicyEnforcer.access_scope(&ctx, &COURSE_RESOURCE, "list", None)` to obtain row-level access constraints.
 
-3. **AuthZ evaluation** — `PolicyEnforcer` builds an `EvaluationRequest` (subject with `tenant_id = T1`, action `"list"`, resource type `"gts.cf.lms.course.v1~"`, `require_constraints = true`, `supported_properties = ["owner_tenant_id"]`) and calls `AuthZResolverClient.evaluate()`.
+3. **AuthZ evaluation** — `PolicyEnforcer` builds an `EvaluationRequest` (subject with `tenant_id = T1`, action `"list"`, resource type `"gts.cf.lms.course.v1~"`, `require_constraints = true`, `supported_properties = ["owner_tenant_id"]`) and calls `AuthZResolverApi.evaluate(ctx, request)`, passing the caller's `SecurityContext` ahead of the `EvaluationRequest` and receiving `Result<EvaluationResponse, CanonicalError>`.
 
 4. **Hierarchy resolution** — The AuthZ plugin calls `ResourceGroupReadHierarchy.list_group_depth()` with `tenant_id = T1` and a depth filter to resolve the tenant hierarchy. RG returns `[T1 (depth 0), T7 (depth 1)]` — the accessible tenant subtree. The plugin does NOT see `T9` because it is outside `T1`'s hierarchy.
 
@@ -1423,7 +1423,7 @@ Index-to-data ratio: **2.03×** (reasonable for btree-only indexes with UUID key
 |---|---|---|---|---|
 | **Unit** | No DB — in-memory trait mocks | No network | Domain services, invariant logic, error mapping | All repositories (trait-based `InMemory*` impls) |
 | **Integration** | SQLite in-memory (`:memory:`, per-test schema) | No network — direct repo calls | Repositories, closure table SQL, SecureORM tenant scoping, constraints | PostgreSQL-dialect SQL, SERIALIZABLE semantics, `gts_type_path` DOMAIN (covered by E2E) |
-| **API** | SQLite in-memory | No real network — `Router::oneshot()` (in-process HTTP simulation) | REST handlers, OData parsing, domain services, DB | `PolicyEnforcer` / `AuthZResolverClient` (mock Allow/Deny) |
+| **API** | SQLite in-memory | No real network — `Router::oneshot()` (in-process HTTP simulation) | REST handlers, OData parsing, domain services, DB | `PolicyEnforcer` / `AuthZResolverApi` (mock Allow/Deny) |
 | **E2E** | Real PostgreSQL (Docker or hosted) | Real HTTP via `httpx` to running `cf-gears-server` | Everything: AuthZ, DB, network, auth modes | Nothing — full production-like stack |
 
 #### Level 1: Unit Tests (Domain Layer)
@@ -1517,7 +1517,7 @@ API tests verify HTTP-level behavior: request/response shapes, status codes, ODa
 
 | Dependency | Mock | Why |
 |---|---|---|
-| `PolicyEnforcer` / `AuthZResolverClient` | `MockAuthZResolverClient` (always Allow) or `DenyingAuthZResolverClient` | Isolate from AuthZ; test RG's own auth mode logic |
+| `PolicyEnforcer` / `AuthZResolverApi` | `MockAuthZResolverClient` (always Allow) or `DenyingAuthZResolverClient` | Isolate from AuthZ; test RG's own auth mode logic |
 | Database | SQLite in-memory | REST tests need real query execution for OData/pagination; PostgreSQL-dialect behavior covered by E2E |
 | Domain services | Real (not mocked) | REST layer delegates to real services |
 

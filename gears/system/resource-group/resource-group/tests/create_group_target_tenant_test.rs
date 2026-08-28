@@ -50,10 +50,11 @@ use authz_resolver_sdk::constraints::{
     Constraint, InPredicate, InTenantSubtreePredicate, Predicate,
 };
 use authz_resolver_sdk::{
-    AuthZResolverClient, AuthZResolverError, EvaluationRequest, EvaluationResponse,
-    EvaluationResponseContext, PolicyEnforcer,
+    AuthZResolverApi, EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
+    PolicyEnforcer,
 };
-use toolkit_security::pep_properties;
+use toolkit::api::canonical_prelude::CanonicalError;
+use toolkit_security::{PlatformSecurityContext, pep_properties};
 
 use resource_group::domain::error::DomainError;
 use resource_group::domain::group_service::{GroupService, QueryProfile};
@@ -101,11 +102,12 @@ fn unique_tenant_type_code() -> String {
 struct TargetTenantAllowAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for TargetTenantAllowAuthZ {
+impl AuthZResolverApi for TargetTenantAllowAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         let target = request
             .resource
             .properties
@@ -141,11 +143,12 @@ struct InTenantSubtreeOnlyAuthZ {
 }
 
 #[async_trait]
-impl AuthZResolverClient for InTenantSubtreeOnlyAuthZ {
+impl AuthZResolverApi for InTenantSubtreeOnlyAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(EvaluationResponse {
             decision: true,
             context: EvaluationResponseContext {

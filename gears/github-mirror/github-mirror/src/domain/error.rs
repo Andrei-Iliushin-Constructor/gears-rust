@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn enforcer_evaluation_failure_maps_to_internal() {
         let failed = authz_resolver_sdk::EnforcerError::EvaluationFailed(
-            authz_resolver_sdk::AuthZResolverError::Internal("pdp unreachable".to_owned()),
+            toolkit::api::canonical_prelude::CanonicalError::internal("pdp unreachable").create(),
         );
         assert!(matches!(
             DomainError::from(failed),
