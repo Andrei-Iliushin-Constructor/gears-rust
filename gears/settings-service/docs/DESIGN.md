@@ -110,7 +110,6 @@ The service is delivered as a **Constructor Fabric Gear** — the platform's uni
 | `cpt-cf-settings-service-fr-cascading-inheritance` | Ancestor-id walk via the Tenant Resolver, nearest-match wins; `inheritance_trail` on the read; bounded `cascading_impact` report |
 | `cpt-cf-settings-service-fr-tenant-scope-enforcement` | Enforced by the platform data path, not by hand-written predicates: `PolicyEnforcer` compiles the decision into an `AccessScope` and `SecureConn` applies it as automatic `WHERE` clauses (§4.8 *The Data Path*). Reads are further gated by `tenant_visible`, writes by `tenant_overridable` |
 | `cpt-cf-settings-service-fr-authn-role-gating` | Bearer token via the AuthN Resolver, then a fail-closed `PolicyEnforcer` decision; step-up on apply and on behavior-affecting declaration actions |
-| `cpt-cf-settings-service-fr-category-access` | `categories.access_restricted` (`false` by default) decides whether a category needs a grant at all: open categories are reached on the ordinary settings right with no authorization question, restricted ones additionally require a grant naming that category — type `gts.cf.toolkit.settings.category.v1~` and id `categories.key`, the slug. Lists ask about the restricted categories only, in one batch, and filter on `NOT access_restricted OR key = ANY(granted_slugs)` (§4.8 *Category access*, §4.7) |
 | `cpt-cf-settings-service-fr-file-valued-settings` | §3 *Files*: a `file-reference`-trait value is an inline reference (`value`, §4.1) to a file in the `file-storage` gear, never the bytes. **Validated for shape only** — the two-field object `{ file_id, version_id }`, both required — with existence, content type, size and caller entitlement deliberately unchecked, so this service takes no dependency on `file-storage`. The reference is always pinned to a version, so a `bind` under it changes nothing until the setting is repointed; content is never indexed (§4.2 *Search*); `secret` + `file-reference` is rejected (`422`) while `pii` is carried. |
 | `cpt-cf-settings-service-fr-audit-mutations` | Audit Emitter writes synchronously inside the mutation transaction, fail-closed; canonical `resource` id makes history an exact-match query |
 | `cpt-cf-settings-service-fr-feature-license-gating` | `licence_feature` checked through the License Resolver on administrative read paths only; the in-process reader is not gated |
@@ -275,13 +274,13 @@ C4Container
 
 ### 2.3 Release Phasing
 
-This document describes the whole gear. It does not all ship at once, and the sections that carry the first release are not otherwise distinguishable from the ones that look ahead. Releases below are grouped by **what they depend on**, not by requirement priority: priority is the PRD's and stays there, reachable through each requirement id named here. The two axes genuinely differ. `cpt-cf-settings-service-fr-subject-scoped-values` is one requirement spanning two releases, because the PRD asks for its identity model from v1 and lets the implementation phase. And three requirements the PRD ranks below the first tier — `cpt-cf-settings-service-fr-defaults-revert`, `cpt-cf-settings-service-fr-category-access` and `cpt-cf-settings-service-fr-barrier-default-seam` — ship in R1 regardless, because they need nothing that does not already exist and leaving them out would mean shipping a service whose absent behaviour someone could come to rely on.
+This document describes the whole gear. It does not all ship at once, and the sections that carry the first release are not otherwise distinguishable from the ones that look ahead. Releases below are grouped by **what they depend on**, not by requirement priority: priority is the PRD's and stays there, reachable through each requirement id named here. The two axes genuinely differ. `cpt-cf-settings-service-fr-subject-scoped-values` is one requirement spanning two releases, because the PRD asks for its identity model from v1 and lets the implementation phase. And two requirements the PRD ranks below the first tier — `cpt-cf-settings-service-fr-defaults-revert` and `cpt-cf-settings-service-fr-barrier-default-seam` — ship in R1 regardless, because they need nothing that does not already exist and leaving them out would mean shipping a service whose absent behaviour someone could come to rely on.
 
 #### R1 — configuration that resolves and changes safely, in-process
 
 **The defining property: R1 depends on no gear that does not exist.**
 
-Categories and declarations with their lifecycle (`cpt-cf-settings-service-fr-settings-category-model`, `cpt-cf-settings-service-fr-module-contributed-declarations`, `cpt-cf-settings-service-fr-contributed-lifecycle`); GTS typing, validation and secret protection (`cpt-cf-settings-service-fr-typed-value-validation`); Scope Class with cascade, override and source trace (`cpt-cf-settings-service-fr-setting-scope-class`, `cpt-cf-settings-service-fr-tenant-overrides`, `cpt-cf-settings-service-fr-cascading-inheritance`); tenant permission and subtree isolation including the standalone-tenant seam (`cpt-cf-settings-service-fr-tenant-scope-enforcement`, `cpt-cf-settings-service-fr-barrier-default-seam`); authentication and access-level gating with per-category restriction (`cpt-cf-settings-service-fr-authn-role-gating`, `cpt-cf-settings-service-fr-category-access`); a validated, step-up-verified write, effective on next read (`cpt-cf-settings-service-fr-set-value`, `cpt-cf-settings-service-fr-validate-before-set`, `cpt-cf-settings-service-fr-live-read-activation`); revert to ancestor or Schema Default (`cpt-cf-settings-service-fr-defaults-revert`); audited mutations and secret reveals (`cpt-cf-settings-service-fr-audit-mutations`); single and bulk effective reads (`cpt-cf-settings-service-fr-bulk-effective-read`).
+Categories and declarations with their lifecycle (`cpt-cf-settings-service-fr-settings-category-model`, `cpt-cf-settings-service-fr-module-contributed-declarations`, `cpt-cf-settings-service-fr-contributed-lifecycle`); GTS typing, validation and secret protection (`cpt-cf-settings-service-fr-typed-value-validation`); Scope Class with cascade, override and source trace (`cpt-cf-settings-service-fr-setting-scope-class`, `cpt-cf-settings-service-fr-tenant-overrides`, `cpt-cf-settings-service-fr-cascading-inheritance`); tenant permission and subtree isolation including the standalone-tenant seam (`cpt-cf-settings-service-fr-tenant-scope-enforcement`, `cpt-cf-settings-service-fr-barrier-default-seam`); authentication and access-level gating (`cpt-cf-settings-service-fr-authn-role-gating`); a validated, step-up-verified write, effective on next read (`cpt-cf-settings-service-fr-set-value`, `cpt-cf-settings-service-fr-validate-before-set`, `cpt-cf-settings-service-fr-live-read-activation`); revert to ancestor or Schema Default (`cpt-cf-settings-service-fr-defaults-revert`); audited mutations and secret reveals (`cpt-cf-settings-service-fr-audit-mutations`); single and bulk effective reads (`cpt-cf-settings-service-fr-bulk-effective-read`).
 
 Subject-scoped values (`cpt-cf-settings-service-fr-subject-scoped-values`) enter here as **identity model only** — the columns, the partial unique indexes and the subject-aware API shape (§4.1, §4.7) — with resolution over subjects deferred to R2, which is the split the PRD asks for.
 
@@ -375,7 +374,6 @@ Declarations, categories and values are stored in PostgreSQL via `toolkit-db`, r
 | **Partial indexes and their predicates** — `uq_value_scope`, `idx_values_needs_review`, the split search corpus | **Not Postgres-only.** SQLite has supported `WHERE`-qualified indexes since 3.8.0 with identical syntax, and `file-storage` already relies on that. The denormalization of `data_classification` onto `setting_values` (§4.7) is needed on both, for the same reason |
 | `JSONB` | `TEXT` plus the JSON1 functions; weaker typing, and `jsonb_typeof` becomes `json_type` |
 | `num_nonnulls(...)` (§4.7) | An equality of predicates, which §4.7's subject-columns `CHECK` already uses for exactly this reason. The two `CHECK`s should be written the same way |
-| `= ANY($granted_slugs)` (§4.8 *Category access*) | `IN (...)` with bound parameters |
 | `BIGSERIAL` (`commit_seq`, activation §4.7) | An autoincrement integer column |
 
 **MySQL is out of scope.** `toolkit-db` builds against it, but no gear in the workspace enables the feature — every one that uses `toolkit-db` declares `pg` and `sqlite`, or `sqlite` alone. This gear targets **PostgreSQL and SQLite**, and its migrations MUST no-op on a MySQL backend rather than fail, so a misconfigured workspace does not break outright. `chat-engine` sets that precedent for both halves of this record: its full-text index is emitted as backend-gated raw SQL, present on Postgres, deliberately skipped on SQLite where the query falls back to an unindexed `LIKE`, and a no-op on MySQL.
@@ -1555,7 +1553,6 @@ Two things follow from the shape of this flow. An orphan is possible by construc
 | `name` | `varchar(256)` | No | — | **Unique** (`uq_category_name`) |
 | `description` | `varchar(4096)` | Yes | — | |
 | `domain_affinity` | text | Yes | — | |
-| `access_restricted` | boolean | No | `false` | When `false` — the default — the base right on `gts.cf.toolkit.settings.value.v1~` is enough to reach this category's settings. When `true`, a grant on **this category** is required as well (§4.8 *Category access*). Set by a platform administrator, never by a contributing gear. |
 | `sort_order` | integer | No | `0` | |
 | `icon` | text | Yes | — | |
 | `created_at` | `timestamptz` | No | current timestamp | |
@@ -1727,33 +1724,6 @@ Authorization is enforced server-side via `PolicyEnforcer` over the AuthZ Resolv
 
 **`tenant_overridable` binds tenant callers, not the platform administrator.** The flag answers "may a **tenant** set its own value for this setting" (§4.1, `cpt-cf-settings-service-fr-tenant-scope-enforcement`), so a platform administrator targeting a specific tenant (§4.3 *Revert & Clone Rules*) is not blocked by it. Reading the flag as an unconditional gate would erase a shape the model deliberately supports: a `cascading` or `local` setting with `tenant_overridable = false` carries **different values per tenant, inherited by their subtrees, writable only centrally** — a per-tenant quota or limit set by the platform. `scope_class = global` is the separate case: there the flag is forced `false` by a `CHECK` (§4.7) and **nobody**, platform administrator included, writes a tenant-scoped value, because a `global` setting has none to write.
 
-#### Category access
-
-Each setting sits in exactly one category. Access is controlled per **category**, never per single setting (`cpt-cf-settings-service-fr-category-access`).
-
-A category is either **open** or **restricted** — `categories.access_restricted`, `false` by default.
-
-| Category | Who can reach its settings |
-|---|---|
-| open | anyone holding the right on `gts.cf.toolkit.settings.value.v1~` (`read` / `write` / `apply`) |
-| restricted | only callers granted that category — `{ type: gts.cf.toolkit.settings.category.v1~, id: <category slug> }`, the slug being `categories.key` (§4.1), so the two fields together are the category's GTS instance id |
-
-**Reading one setting.** Look at its category. Open — allowed. Restricted — ask `authz-resolver` once about that category, allow or deny.
-
-**Reading a list.** Return settings whose category is open, plus those whose category is restricted and granted:
-
-```sql
-... AND (NOT c.access_restricted OR c.key = ANY($granted_slugs))   -- a query predicate on this design's own columns, not an AccessScope (§4.8 *The Data Path*)
-```
-
-The gear already knows which categories are restricted — it is a column in its own table — so it asks about those only, in one batch, and asks nothing at all when none is restricted.
-
-**Splitting two roles**, which is what this exists for: restrict `billing` and `infra`, grant `billing` to one role and `infra` to the other. Every other category stays open.
-
-**Still checked on top:** `tenant_visible`, licence, and the caller's subtree. An open category grants nothing by itself — it only adds no check of its own.
-
-**Limits.** One setting cannot be restricted on its own, only its whole category. A category nobody restricted is reachable by every settings administrator — which is what happens today, where the right on the type is the only gate.
-
 > Grants live in the deployment's policy manager, not here: this gear asks and enforces, stores no roles, and cannot assign anything. It owes the platform a published list of what can be granted — its actions as permission entries of `gts.cf.toolkit.authz.permission.v1~` — and that is not done yet.
 
 #### The Data Path: What Is Scoped, and the One Read That Is Not
@@ -1768,7 +1738,7 @@ Every query this gear issues goes through `SecureConn`, which takes an `AccessSc
 | Reading or listing definitions | `categories`, `setting_declarations` | **unconstrained — these entities have no tenant dimension** | not an exception, see below |
 | **Resolving an effective value** | `setting_values` | **elevated to the caller's ancestor chain** | the one exception |
 
-**Definitions carry no tenant, so there is nothing to scope.** A category or a declaration is a platform-wide definition: neither table has a `tenant_id`, and a scope filtering on `owner_tenant_id` would reference a property that does not resolve — which the platform treats as a failed constraint, denying every row (rule 9: an unknown property makes its constraint false). An unconstrained scope here is not a boundary being crossed but the accurate statement that this table has no boundary. What governs access is the authorization *decision* — may this caller read declarations at all — together with two ordinary predicates of this design's own: `access_restricted` with the granted category set (§4.8 *Category access*), and `tenant_visible`, licence and mode filtering. Those are business rules on our columns, not row-level scoping, and they are applied as query predicates exactly as they are today.
+**Definitions carry no tenant, so there is nothing to scope.** A category or a declaration is a platform-wide definition: neither table has a `tenant_id`, and a scope filtering on `owner_tenant_id` would reference a property that does not resolve — which the platform treats as a failed constraint, denying every row (rule 9: an unknown property makes its constraint false). An unconstrained scope here is not a boundary being crossed but the accurate statement that this table has no boundary. What governs access is the authorization *decision* — may this caller read declarations at all — together with ordinary predicates of this design's own: `tenant_visible`, licence and mode filtering. Those are business rules on our columns, not row-level scoping, and they are applied as query predicates exactly as they are today.
 
 **The ancestor walk is a real elevation, and it is the only one.** Resolving a `cascading` value reads rows belonging to the caller's ancestors, and an ancestor is never inside the caller's closure — a closure runs downward. So this read cannot be expressed with the caller's own scope, and it should not be: **receiving a value inherited from an ancestor is not the same as being entitled to read that ancestor's settings.** A tenant administrator must not be able to enumerate a parent's overrides or see what the parent set for a sibling. The walk is therefore the service deriving a result on the caller's behalf, not the caller exercising authority — the case the platform's trust elevation exists for, and the shape Account Management already uses for its own hierarchy reads (`AccessScope::allow_all()` behind a single named call site).
 
@@ -2060,11 +2030,6 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | Declaration create — default mandatory | repos | An **omitted** `default_value` → `422 DefaultRequired`; an explicit JSON `null` on a type admitting `null` is **accepted**, stored as `'null'::jsonb`, and resolves with `source=schema_default` — the two are not the same input (§4.1) |
 | Declaration create — secret-trait type | `MockGtsValidator` resolves `secret` trait, `MockSecretManager` | `has_secret_trait=true`; a **non-empty** `default_value` → `422`; an **empty** placeholder is accepted and stored inline, with the Secret Manager **not** called for it; an **omitted** default → `422 DefaultRequired` like any other declaration (§4.2 *Secret Manager*) |
 | Secret masking on read | `MockSecretManager` | Read/search/list return the mask token, never plaintext (`cpt-cf-settings-service-fr-typed-value-validation`) |
-| Category access — open by default | a freshly contributed setting in a category with no grant anywhere | Readable on the base `read` right alone, and **no** authorization question is asked about the category (§4.8 *Category access*) |
-| Category access — restricted separates two roles | billing and infrastructure both `access_restricted`, one granted per role | Each role reads its own category and gets the not-visible response for the other; a third, unrestricted category stays readable by both |
-| Category access — lists ask only about restricted categories | mixed open and restricted categories | Browse and search issue **one** batch covering the restricted ones only, and none at all when nothing is restricted; the count never grows with the number of settings |
-| Category access — restricted and not granted | `MockAuthZClient` denying the restricted category | Its settings are absent from browse and search and give the not-visible response on a single read, while open categories are unaffected |
-| Category access — narrows only | an open category holding a declaration with `tenant_visible = false` | Still not returned to a tenant caller: an open category grants nothing by itself, it only declines to add a check |
 | File-valued setting — stored by reference, unvalidated | a reference naming a file id and version that do not exist | Accepted and stored inline in `value`; **no call leaves the service**; no bytes in the database, cache, search index, or audit record |
 | File-valued setting — a `bind` under a pinned reference changes nothing | `bind` swaps the file's current version while a setting pins the old one | No value change and no activation signal; consumers keep reading the pinned version until the setting is repointed |
 | File-valued setting — secret exclusivity | a type carrying both `secret` and `file-reference` | Rejected at declaration (`422`) |
