@@ -161,39 +161,6 @@ pub trait GroupRepositoryTrait: Send + Sync + 'static {
         group_ids: &[Uuid],
     ) -> Result<(), DomainError>;
 
-    /// Distinct `(gts_type_id, resource_id)` membership keys touched by any
-    /// group in `group_ids`.
-    ///
-    /// Meant to be called *before* [`Self::delete_memberships_many`] wipes
-    /// those same groups' memberships, so the caller can tell afterwards
-    /// which keys the delete actually orphaned — see
-    /// [`Self::delete_orphaned_membership_guards`], the guard-lifecycle
-    /// counterpart to `remove_membership`'s single-removal path (RG-01) for
-    /// this bulk/force-delete path.
-    async fn get_distinct_membership_keys_for_groups<C: DBRunner>(
-        &self,
-        db: &C,
-        group_ids: &[Uuid],
-    ) -> Result<Vec<(i16, String)>, DomainError>;
-
-    /// Delete `resource_membership_tenant` guard rows for every key in
-    /// `keys` that no row in `resource_group_membership` references any
-    /// more.
-    ///
-    /// Membership existence is re-checked per key against the current
-    /// table state, not inferred from which groups a caller just deleted:
-    /// a key can still have a live membership left over from a group
-    /// outside whatever was just removed, and that guard row must survive.
-    /// Intended to run right after a bulk membership delete, in the same
-    /// transaction, with `keys` collected beforehand via
-    /// [`Self::get_distinct_membership_keys_for_groups`]. Returns the
-    /// number of guard rows removed.
-    async fn delete_orphaned_membership_guards<C: DBRunner>(
-        &self,
-        db: &C,
-        keys: &[(i16, String)],
-    ) -> Result<u64, DomainError>;
-
     /// Every descendant of `group_id` (the self-row excluded) with its depth
     /// relative to `group_id`, so callers needing that depth (RG-05's depth
     /// check, RG-10's depth-level batching) don't re-query for it.
@@ -389,6 +356,18 @@ pub trait TypeRepositoryTrait: Send + Sync + 'static {
         type_id: i16,
     ) -> Result<Vec<(Uuid, String)>, DomainError>;
 
+    /// The membership counterpart of `find_groups_violating_removed_parents`,
+    /// and it makes the same decisions for the same reasons: one query per
+    /// bind-parameter chunk rather than one per candidate path, the system
+    /// scope because an integrity sweep must see the real data regardless of
+    /// the caller's view, and a result bounded by the violating memberships
+    /// rather than by the popularity of the child type.
+    ///
+    /// Returns `(membership_code, group_id, group_name)` triples -- one per
+    /// violating pair, deduplicated, so a group with several memberships of
+    /// the same removed type is named once. A `membership_code` that no
+    /// longer resolves to a `gts_type` row is skipped: a type that does not
+    /// exist has no memberships to protect.
     async fn find_groups_violating_removed_membership_types<C: DBRunner>(
         &self,
         db: &C,
@@ -441,46 +420,35 @@ pub trait MembershipRepositoryTrait: Send + Sync + 'static {
         resource_id: &str,
     ) -> Result<Option<membership_entity::Model>, DomainError>;
 
-    /// Try to claim the guard row for a resource membership.
+    /// Whether `(gts_type_id, resource_id)` already has a membership owned by
+    /// a tenant other than `tenant_id`.
     ///
-    /// Reads the existing guard row for PK `(gts_type_id, resource_id)`
-    /// first; if none exists, inserts one with `ON CONFLICT DO NOTHING` and
-    /// re-reads unconditionally. A `DO NOTHING` conflict never raises the
-    /// SQL-level unique-violation a plain `INSERT` would (which would abort
-    /// the whole transaction on `PostgreSQL`), but `sea_orm`'s client-side
-    /// `Insert::exec` still turns an empty `RETURNING` result into
-    /// `DbErr::RecordNotInserted` -- caught here and treated the same as a
-    /// successful no-op insert, since nothing failed at the database level.
-    /// Serializes the first membership of a resource. Returns the
-    /// `tenant_id` that was either just inserted or already present.
+    /// An existence check, not a count and not a fetch: one statement,
+    /// `LIMIT 1`, no rows carried back into the process. The question the
+    /// caller asks is "is this resource already someone else's", and the
+    /// first conflicting row answers it -- a resource in a hundred groups
+    /// costs the same as one in two.
     ///
-    /// The caller must then compare the returned tenant against the group's
-    /// own tenant and reject the `add_membership` if they differ. To keep
-    /// the claim from outliving the memberships it guards, run this in the
-    /// same transaction as the membership insert it gates, and release the
-    /// guard via [`Self::delete_membership_guard`] once
-    /// [`Self::count_memberships`] reports none remain for the pair.
-    async fn ensure_membership_guard<C: DBRunner>(
+    /// The inner subquery is deliberately unscoped and this method builds
+    /// `system_scope()` itself: it is an integrity read, and it must see
+    /// every membership of the pair regardless of the caller's view.
+    /// `resource_group_membership` declares no scope columns, so a
+    /// constrained `AccessScope` would not merely narrow this read -- every
+    /// constraint fails to resolve a column and the whole condition compiles
+    /// to `WHERE false` (`cond.rs`, `build_constraint_condition`), which
+    /// would report every resource compatible with every tenant.
+    ///
+    /// This read and the membership insert it gates must share one
+    /// `SERIALIZABLE` transaction. It is a predicate read followed by a
+    /// write into that same predicate: two first memberships from different
+    /// tenants each see no conflict and both commit otherwise (RG-01). At
+    /// `SERIALIZABLE` that is the write skew SSI cancels, and the retry
+    /// already wrapping the transaction re-runs it against the winner.
+    async fn has_membership_in_other_tenant<C: DBRunner>(
         &self,
         db: &C,
         gts_type_id: i16,
         resource_id: &str,
         tenant_id: Uuid,
-    ) -> Result<Uuid, DomainError>;
-
-    /// Count memberships still referencing `(gts_type_id, resource_id)`.
-    async fn count_memberships<C: DBRunner>(
-        &self,
-        db: &C,
-        gts_type_id: i16,
-        resource_id: &str,
-    ) -> Result<u64, DomainError>;
-
-    /// Delete the membership-tenant guard row for `(gts_type_id, resource_id)`.
-    async fn delete_membership_guard<C: DBRunner>(
-        &self,
-        db: &C,
-        gts_type_id: i16,
-        resource_id: &str,
-    ) -> Result<(), DomainError>;
+    ) -> Result<bool, DomainError>;
 }

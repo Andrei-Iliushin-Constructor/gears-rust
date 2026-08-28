@@ -297,6 +297,11 @@ fn sql_err_kind(err: Option<&sea_orm::SqlErr>) -> &'static str {
 /// Sets `IN_TX = true` for the duration of the closure, so that any call to
 /// `Db::conn()` within it fails rather than silently opening a second
 /// connection outside the transaction.
+///
+/// It also assigns the transaction a process-unique id and records the
+/// isolation level it was asked to open at, both scoped to the same closure.
+/// Those two are read only by the query recorder under `test-support`, though
+/// the counter and the task-locals are compiled into every transaction.
 async fn with_tx_guard<F, T>(isolation: Option<TxIsolationLevel>, f: F) -> T
 where
     F: Future<Output = T>,

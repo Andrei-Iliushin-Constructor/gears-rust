@@ -34,9 +34,6 @@ use resource_group::infra::storage::entity::resource_group::{
 use resource_group::infra::storage::entity::resource_group_membership::{
     self as membership_entity, Entity as MembershipEntity,
 };
-use resource_group::infra::storage::entity::resource_membership_tenant::{
-    self as guard_entity, Column as GuardColumn, Entity as GuardEntity,
-};
 use resource_group::infra::storage::group_repo::GroupRepository;
 use resource_group::infra::storage::type_repo::TypeRepository;
 use resource_group_sdk::models::{ResourceGroup as ResourceGroupSdkModel, ResourceGroupWithDepth};
@@ -1294,175 +1291,6 @@ async fn group_force_delete_leaf() {
         .expect("query");
     assert!(model.is_none(), "Group should be deleted");
     common::assert_closure_count(&conn, &[root.id], 0).await;
-}
-
-/// Force-deleting the only group that held a resource's membership must also
-/// release that resource's `resource_membership_tenant` guard row -- the
-/// same lifecycle `remove_membership` already gives the single-removal path.
-/// Without it, the resource stays claimed for a tenant with zero remaining
-/// memberships, and the guard's `gts_type_id` FK (`ON DELETE RESTRICT`)
-/// later blocks `delete_type` on that type with a misleading "group(s) or
-/// membership(s) of this type exist", even though none do.
-#[tokio::test]
-async fn group_force_delete_releases_orphaned_guard_and_unblocks_type_delete() {
-    let db = common::test_db().await;
-    let type_svc = common::make_type_service(db.clone());
-    let group_svc = common::make_group_service(db.clone());
-    let tenant_id = Uuid::now_v7();
-    let ctx = common::make_ctx(tenant_id);
-
-    let root_type = common::create_root_type(&type_svc, "guardrel").await;
-    let root =
-        common::create_root_group(&group_svc, &ctx, &root_type.code, "Root", tenant_id).await;
-
-    let conn = db.conn().expect("conn");
-    let scope = AccessScope::allow_all();
-    let root_type_id = GtsTypeEntity::find()
-        .filter(GtsTypeColumn::SchemaId.eq(&root_type.code))
-        .secure()
-        .scope_with(&scope)
-        .one(&conn)
-        .await
-        .expect("query gts_type")
-        .expect("type row exists")
-        .id;
-
-    // Direct inserts mirror what `add_membership` would have left behind:
-    // a membership row plus the guard row `ensure_membership_guard` claims
-    // for it.
-    let membership = membership_entity::ActiveModel {
-        group_id: Set(root.id),
-        gts_type_id: Set(root_type_id),
-        resource_id: Set("resource-sole-owner".to_owned()),
-        ..Default::default()
-    };
-    secure_insert::<MembershipEntity>(membership, &scope, &conn)
-        .await
-        .expect("insert membership");
-
-    let guard = guard_entity::ActiveModel {
-        gts_type_id: Set(root_type_id),
-        resource_id: Set("resource-sole-owner".to_owned()),
-        tenant_id: Set(tenant_id),
-        ..Default::default()
-    };
-    secure_insert::<GuardEntity>(guard, &scope, &conn)
-        .await
-        .expect("insert guard row");
-
-    group_svc
-        .delete_group(&ctx, root.id, true)
-        .await
-        .expect("force delete");
-
-    let guard_row = GuardEntity::find()
-        .filter(GuardColumn::GtsTypeId.eq(root_type_id))
-        .filter(GuardColumn::ResourceId.eq("resource-sole-owner"))
-        .secure()
-        .scope_with(&scope)
-        .one(&conn)
-        .await
-        .expect("query resource_membership_tenant");
-    assert!(
-        guard_row.is_none(),
-        "guard row should be released once the last membership referencing \
-         (gts_type_id={root_type_id}, resource_id=resource-sole-owner) is gone"
-    );
-
-    // With the guard row gone, nothing references `root_type` any more, so
-    // deleting it must succeed -- not fail with the misleading
-    // ConflictActiveReferences the orphaned guard's FK used to cause.
-    type_svc
-        .delete_type_unscoped(&root_type.code)
-        .await
-        .expect("delete_type should succeed once the orphaned guard is released");
-}
-
-/// A resource with memberships from two different groups: force-deleting
-/// only one of them (its group is outside the other's subtree) must leave
-/// the guard row alone, since the resource's other membership still
-/// justifies the tenant claim.
-#[tokio::test]
-async fn group_force_delete_preserves_guard_for_membership_outside_subtree() {
-    let db = common::test_db().await;
-    let type_svc = common::make_type_service(db.clone());
-    let group_svc = common::make_group_service(db.clone());
-    let tenant_id = Uuid::now_v7();
-    let ctx = common::make_ctx(tenant_id);
-
-    let root_type = common::create_root_type(&type_svc, "guardkeep").await;
-    let group_in =
-        common::create_root_group(&group_svc, &ctx, &root_type.code, "GroupIn", tenant_id).await;
-    let group_out =
-        common::create_root_group(&group_svc, &ctx, &root_type.code, "GroupOut", tenant_id).await;
-
-    let conn = db.conn().expect("conn");
-    let scope = AccessScope::allow_all();
-    let root_type_id = GtsTypeEntity::find()
-        .filter(GtsTypeColumn::SchemaId.eq(&root_type.code))
-        .secure()
-        .scope_with(&scope)
-        .one(&conn)
-        .await
-        .expect("query gts_type")
-        .expect("type row exists")
-        .id;
-
-    for group_id in [group_in.id, group_out.id] {
-        let membership = membership_entity::ActiveModel {
-            group_id: Set(group_id),
-            gts_type_id: Set(root_type_id),
-            resource_id: Set("resource-shared".to_owned()),
-            ..Default::default()
-        };
-        secure_insert::<MembershipEntity>(membership, &scope, &conn)
-            .await
-            .expect("insert membership");
-    }
-
-    let guard = guard_entity::ActiveModel {
-        gts_type_id: Set(root_type_id),
-        resource_id: Set("resource-shared".to_owned()),
-        tenant_id: Set(tenant_id),
-        ..Default::default()
-    };
-    secure_insert::<GuardEntity>(guard, &scope, &conn)
-        .await
-        .expect("insert guard row");
-
-    // Force-delete only `group_in`'s (single-node) subtree.
-    group_svc
-        .delete_group(&ctx, group_in.id, true)
-        .await
-        .expect("force delete group_in");
-
-    // `group_out`'s membership is untouched.
-    let remaining = MembershipEntity::find()
-        .filter(membership_entity::Column::GroupId.eq(group_out.id))
-        .secure()
-        .scope_with(&scope)
-        .count(&conn)
-        .await
-        .expect("query resource_group_membership");
-    assert_eq!(
-        remaining, 1,
-        "group_out's membership should survive group_in's deletion"
-    );
-
-    // The guard row must survive too: the resource still has a live
-    // membership from a group outside the deleted subtree.
-    let guard_row = GuardEntity::find()
-        .filter(GuardColumn::GtsTypeId.eq(root_type_id))
-        .filter(GuardColumn::ResourceId.eq("resource-shared"))
-        .secure()
-        .scope_with(&scope)
-        .one(&conn)
-        .await
-        .expect("query resource_membership_tenant");
-    assert!(
-        guard_row.is_some(),
-        "guard row must not be released while group_out still holds a membership"
-    );
 }
 
 // =========================================================================
@@ -3376,10 +3204,25 @@ async fn list_groups_leaves_a_filter_without_a_type_alone() {
 /// SQLite's single pooled connection (`max_conns: 1`, see
 /// [`common::test_db`]) makes the side effect's write visible to every
 /// later read on the same connection, deterministically.
+///
+/// With `stale_unlocked_parent` set, it stages the *other* half of the same
+/// race, the one a single connection cannot produce on its own: the reparent
+/// lands on the first in-transaction read, and every **unlocked** model read
+/// then answers with the parent the group had *before* it -- what a
+/// READ COMMITTED transaction sees from its own snapshot while the writer
+/// commits beside it. Only the locked read (`FOR UPDATE`, which on
+/// PostgreSQL waits for that writer and re-reads) reports the new parent.
+/// A transaction that decides "no parent change" from the unlocked read
+/// then writes the old `parent_id` back over the committed move while the
+/// closure table keeps the move's ancestry.
 struct ParentFlippingGroupRepo {
     inner: GroupRepository,
     watched_group_id: Uuid,
     new_parent_id: Uuid,
+    /// When set, unlocked model reads of the watched group report this
+    /// parent regardless of what the row now holds -- the stale snapshot
+    /// described above. `None` disables the simulation entirely.
+    stale_unlocked_parent: Option<Uuid>,
     fired: AtomicBool,
 }
 
@@ -3389,8 +3232,52 @@ impl ParentFlippingGroupRepo {
             inner: GroupRepository,
             watched_group_id,
             new_parent_id,
+            stale_unlocked_parent: None,
             fired: AtomicBool::new(false),
         }
+    }
+
+    /// The stale-snapshot variant: the reparent fires on the first
+    /// in-transaction read, and unlocked model reads keep answering
+    /// `stale_parent_id` afterwards.
+    fn with_stale_unlocked_reads(
+        watched_group_id: Uuid,
+        new_parent_id: Uuid,
+        stale_parent_id: Uuid,
+    ) -> Self {
+        Self {
+            inner: GroupRepository,
+            watched_group_id,
+            new_parent_id,
+            stale_unlocked_parent: Some(stale_parent_id),
+            fired: AtomicBool::new(false),
+        }
+    }
+
+    /// Perform the "concurrent" reparent once, on this connection.
+    async fn flip_once<C: DBRunner>(&self, db: &C, id: Uuid) -> Result<(), DomainError> {
+        if id != self.watched_group_id || self.fired.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        if let Some(model) = self.inner.find_model_by_id(db, id).await? {
+            self.inner
+                .update(
+                    db,
+                    id,
+                    Some(self.new_parent_id),
+                    model.gts_type_id,
+                    &model.name,
+                    model.metadata.as_ref(),
+                )
+                .await?;
+            // A real move rewrites the closure table too -- and that is the
+            // half a lost update cannot put back. Without it this decorator
+            // would stage a race whose two halves cancel out.
+            self.inner
+                .rebuild_subtree_closure(db, id, Some(self.new_parent_id))
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -3402,6 +3289,13 @@ impl GroupRepositoryTrait for ParentFlippingGroupRepo {
         scope: &AccessScope,
         id: Uuid,
     ) -> Result<Option<ResourceGroupSdkModel>, DomainError> {
+        // In the stale-snapshot variant the "concurrent" reparent lands
+        // here -- on the first read `update_group_inner` makes -- so that
+        // every later read in this transaction has to decide for itself
+        // whether it can see it.
+        if self.stale_unlocked_parent.is_some() {
+            self.flip_once(db, id).await?;
+        }
         self.inner.find_by_id(db, scope, id).await
     }
 
@@ -3410,6 +3304,15 @@ impl GroupRepositoryTrait for ParentFlippingGroupRepo {
         db: &C,
         id: Uuid,
     ) -> Result<Option<RgModel>, DomainError> {
+        if let Some(stale_parent) = self.stale_unlocked_parent {
+            let mut result = self.inner.find_model_by_id(db, id).await?;
+            if id == self.watched_group_id
+                && let Some(model) = &mut result
+            {
+                model.parent_id = Some(stale_parent);
+            }
+            return Ok(result);
+        }
         let result = self.inner.find_model_by_id(db, id).await?;
         if id == self.watched_group_id
             && !self.fired.swap(true, Ordering::SeqCst)
@@ -3555,24 +3458,6 @@ impl GroupRepositoryTrait for ParentFlippingGroupRepo {
         self.inner.delete_all_closure_rows_many(db, group_ids).await
     }
 
-    async fn get_distinct_membership_keys_for_groups<C: DBRunner>(
-        &self,
-        db: &C,
-        group_ids: &[Uuid],
-    ) -> Result<Vec<(i16, String)>, DomainError> {
-        self.inner
-            .get_distinct_membership_keys_for_groups(db, group_ids)
-            .await
-    }
-
-    async fn delete_orphaned_membership_guards<C: DBRunner>(
-        &self,
-        db: &C,
-        keys: &[(i16, String)],
-    ) -> Result<u64, DomainError> {
-        self.inner.delete_orphaned_membership_guards(db, keys).await
-    }
-
     async fn get_descendant_ids_with_depth<C: DBRunner>(
         &self,
         db: &C,
@@ -3676,6 +3561,107 @@ impl RgMetricsPort for EscalationRecorder {
         self.isolation_escalations.fetch_add(1, Ordering::SeqCst);
     }
     fn metadata_validation_duration(&self, _operation: Operation, _seconds: f64) {}
+}
+
+/// The lost-update half of the same race, and the one the pre-transaction
+/// hint cannot save the caller from: a rename opens at the backend default,
+/// a concurrent reparent commits while it is open, and the rename's own
+/// UPDATE assigns `parent_id` unconditionally with a predicate of `id`
+/// alone. If the in-transaction read is unlocked, it answers from a
+/// snapshot taken before that commit, `parent_changed` is false, and the
+/// UPDATE puts the old parent back -- while `rebuild_subtree_closure` has
+/// already written the move's ancestry into the closure table. The two
+/// disagree from then on, and nothing detects it: an UPDATE by primary key
+/// under READ COMMITTED never raises `40001`, and SSI pairs only
+/// transactions that are all `SERIALIZABLE`.
+///
+/// The locked read is what closes it. It waits for the in-flight move and
+/// returns the parent that move committed, so the escalation path this
+/// file's sibling test covers is reached at all.
+#[tokio::test]
+async fn group_rename_does_not_revert_a_concurrent_reparent() {
+    let db = common::test_db().await;
+    let type_svc = common::make_type_service(db.clone());
+    let bootstrap_group_svc = common::make_group_service(db.clone());
+    let tenant_id = Uuid::now_v7();
+    let ctx = common::make_ctx(tenant_id);
+
+    let root_type = common::create_root_type(&type_svc, "lostupd").await;
+    let child_type =
+        common::create_child_type(&type_svc, "lostupdchild", &[&root_type.code], &[]).await;
+
+    let parent_a = common::create_root_group(
+        &bootstrap_group_svc,
+        &ctx,
+        &root_type.code,
+        "ParentA",
+        tenant_id,
+    )
+    .await;
+    let parent_b = common::create_root_group(
+        &bootstrap_group_svc,
+        &ctx,
+        &root_type.code,
+        "ParentB",
+        tenant_id,
+    )
+    .await;
+    let group = common::create_child_group(
+        &bootstrap_group_svc,
+        &ctx,
+        &child_type.code,
+        parent_a.id,
+        "Original",
+        tenant_id,
+    )
+    .await;
+
+    // Unlocked reads keep reporting `parent_a` after the reparent commits;
+    // only the locked read sees `parent_b`.
+    let racing_repo = Arc::new(ParentFlippingGroupRepo::with_stale_unlocked_reads(
+        group.id,
+        parent_b.id,
+        parent_a.id,
+    ));
+    let group_svc = GroupService::new(
+        db.clone(),
+        QueryProfile::default(),
+        common::make_enforcer(),
+        racing_repo,
+        Arc::new(TypeRepository),
+        common::make_types_registry(),
+    );
+
+    // A pure rename: the request carries the parent the group already had.
+    group_svc
+        .update_group(
+            &ctx,
+            group.id,
+            UpdateGroupRequest {
+                name: "Renamed".to_owned(),
+                parent_id: Some(parent_a.id),
+                metadata: None,
+            },
+        )
+        .await
+        .expect("rename must succeed");
+
+    let conn = db.conn().expect("conn");
+    let scope = AccessScope::allow_all();
+    let model = RgEntity::find()
+        .filter(RgColumn::Id.eq(group.id))
+        .secure()
+        .scope_with(&scope)
+        .one(&conn)
+        .await
+        .expect("query")
+        .expect("found");
+    assert_eq!(model.name, "Renamed");
+
+    // Whichever parent the row ends up with, the closure table must agree
+    // with it. A rename that reverted the committed move while the closure
+    // kept the move's ancestry is the corruption this guards.
+    common::assert_closure_matches_parent_links(&conn).await;
 }
 
 /// The race `update_group`'s module doc and the `UpdateGroupOutcome` doc

@@ -173,23 +173,25 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait, MR: MembershipRepository
         }
         // @cpt-end:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-8
 
-        // Tenant compatibility via the guard table `resource_membership_tenant`,
-        // run in the same transaction as the membership insert below: a failed
-        // insert (e.g. a duplicate membership) rolls the guard claim back
-        // instead of leaving a claim behind with no membership to justify it
-        // (RG-01, and the guard-lifecycle fix that came with it).
+        // Tenant compatibility and the membership insert share one
+        // transaction, and that transaction is `SERIALIZABLE` (RG-01).
         //
-        // `SERIALIZABLE`, not the default: this transaction's own guard claim
-        // is safe under `READ COMMITTED` on its own (a real unique constraint,
-        // not a predicate read), but `remove_membership`'s guard release
-        // needs to be `SERIALIZABLE` (see its own comment), and PostgreSQL's
-        // SSI only tracks conflicts among transactions that are *all*
-        // `SERIALIZABLE` -- pairing a `SERIALIZABLE` remove with a
-        // `READ COMMITTED` add would let this exact race through: this
-        // transaction re-adds the tenant that `remove_membership` is in the
-        // middle of vacating, its insert is invisible to that transaction's
-        // count (a phantom, from its snapshot), both commit, and the
-        // resource ends up with a live membership and no guard row at all.
+        // The check reads a predicate -- "which tenants already own
+        // memberships of this pair" -- and the insert then writes into that
+        // same predicate. Run apart, as they were, two first memberships from
+        // different tenants each read an empty set and both commit, and the
+        // resource ends up owned by two tenants. Run together at the backend
+        // default, each still reads from its own snapshot and neither sees
+        // the other's uncommitted row: `READ COMMITTED` has nothing to say
+        // about rows that did not exist when the statement began.
+        //
+        // At `SERIALIZABLE` that shape is write skew, which is precisely what
+        // PostgreSQL's SSI cancels: the two read/write pairs form a cycle of
+        // rw-antidependencies, one side is cancelled as the pivot with
+        // `40001`, and the retry already wrapping this transaction re-runs
+        // it against the committed winner and rejects. On SQLite writes
+        // serialize regardless, so the same conclusion holds there for a
+        // different reason.
         let db = self.db.db();
         let membership_repo = self.membership_repo.clone();
         let resource_type_owned = resource_type.to_owned();
@@ -202,31 +204,42 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait, MR: MembershipRepository
                 let resource_type = resource_type_owned.clone();
                 let resource_id = resource_id_owned.clone();
                 Box::pin(async move {
-                    // @cpt-begin:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-9
-                    // Invoke the tenant compatibility check: reads the
-                    // existing guard row, or claims it for `target_tenant_id`
-                    // via `ON CONFLICT DO NOTHING` when absent, then
-                    // unconditionally re-reads to find whichever tenant is
-                    // now on record -- this call's own claim or a concurrent
-                    // one that landed first.
-                    let guard_tenant = membership_repo
-                        .ensure_membership_guard(tx, gts_type_id, &resource_id, target_tenant_id)
+                    // @cpt-begin:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-1
+                    // @cpt-begin:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-2
+                    // @cpt-begin:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-3
+                    // DB: does this resource already have a membership owned
+                    // by another tenant? An existence check with `LIMIT 1`,
+                    // not a count and not a scan of the memberships
+                    // themselves. No memberships at all, or only this
+                    // tenant's, and the answer is "no conflict" -- the first
+                    // membership of a resource may come from any tenant.
+                    let owned_elsewhere = membership_repo
+                        .has_membership_in_other_tenant(
+                            tx,
+                            gts_type_id,
+                            &resource_id,
+                            target_tenant_id,
+                        )
                         .await?;
-                    // @cpt-end:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-9
+                    // @cpt-end:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-3
+                    // @cpt-end:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-2
+                    // @cpt-end:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-1
 
+                    // @cpt-begin:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-9
                     // @cpt-begin:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-10
                     // @cpt-begin:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-4
                     // @cpt-begin:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-5
-                    if guard_tenant != target_tenant_id {
+                    if owned_elsewhere {
                         debug!(
                             resource_type = %resource_type,
                             resource_id = %resource_id,
-                            "Tenant incompatibility on membership add (guard table)"
+                            "Tenant incompatibility on membership add"
                         );
-                        // The message stays generic about *which* tenant holds the
-                        // claim: `guard_tenant` belongs to a tenant other than the
-                        // caller's, and this error reaches the caller verbatim
-                        // over the API (api/rest/error.rs), so it must not name it.
+                        // The message stays generic about *which* tenant owns
+                        // the resource: that id belongs to a tenant other than
+                        // the caller's, and this error reaches the caller
+                        // verbatim over the API (api/rest/error.rs), so it
+                        // must not name it.
                         return Err(DomainError::tenant_incompatibility(format!(
                             "Resource ({resource_type}, {resource_id}) is already \
                              linked to a different tenant"
@@ -235,6 +248,7 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait, MR: MembershipRepository
                     // @cpt-end:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-5
                     // @cpt-end:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-4
                     // @cpt-end:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-10
+                    // @cpt-end:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-9
 
                     // @cpt-begin:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-11
                     // @cpt-begin:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-12
@@ -304,48 +318,17 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait, MR: MembershipRepository
             })?;
         // @cpt-end:cpt-cf-resource-group-flow-membership-remove:p1:inst-remove-memb-4
 
-        // Delete the membership, then release the tenant guard once nothing
-        // references the resource any more -- both in one transaction, so a
-        // membership this call just removed cannot be double-counted by a
-        // concurrent `add_membership`'s guard check.
-        //
-        // `SERIALIZABLE`, not the default: two concurrent removals of
-        // different memberships on the same resource each read the *other's*
-        // membership as still present under READ COMMITTED (neither
-        // transaction has committed yet), so both would keep the guard even
-        // though zero memberships remain once both commit -- a write-skew
-        // that reopens exactly the leak this transaction closes for the
-        // single-removal case. `SERIALIZABLE` aborts one of the two writers
-        // instead, and the existing retry re-runs it against the now-correct
-        // count.
-        let db = self.db.db();
-        let membership_repo = self.membership_repo.clone();
-        let resource_id_owned = resource_id.to_owned();
-
-        db.transaction_with_retry(TxConfig::serializable(), DomainError::db_err, |tx| {
-            let membership_repo = membership_repo.clone();
-            let resource_id = resource_id_owned.clone();
-            Box::pin(async move {
-                membership_repo
-                    .delete(tx, group_id, gts_type_id, &resource_id)
-                    .await?;
-
-                // @cpt-begin:cpt-cf-resource-group-flow-membership-remove:p1:inst-remove-memb-6
-                if membership_repo
-                    .count_memberships(tx, gts_type_id, &resource_id)
-                    .await?
-                    == 0
-                {
-                    membership_repo
-                        .delete_membership_guard(tx, gts_type_id, &resource_id)
-                        .await?;
-                }
-                // @cpt-end:cpt-cf-resource-group-flow-membership-remove:p1:inst-remove-memb-6
-
-                Ok(())
-            })
-        })
-        .await?;
+        // Delete the membership. One row by primary key, and nothing is
+        // decided from a read: with tenant ownership derived from the
+        // memberships themselves there is no second piece of state to keep
+        // in step, so this needs neither its own transaction nor a level
+        // above the backend default. A concurrent `add_membership` either
+        // sees this row (its own `SERIALIZABLE` read, before this delete
+        // commits) and rejects, or does not (after) and is the resource's
+        // first membership again -- both outcomes correct.
+        self.membership_repo
+            .delete(&conn, group_id, gts_type_id, resource_id)
+            .await?;
         // @cpt-end:cpt-cf-resource-group-flow-membership-remove:p1:inst-remove-memb-3
         // @cpt-begin:cpt-cf-resource-group-flow-membership-remove:p1:inst-remove-memb-5
         Ok(())

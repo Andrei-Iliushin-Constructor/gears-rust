@@ -38,7 +38,14 @@ use resource_group_sdk::{
 
 // -- Stub TypesRegistryClient (returns NotFound for all types — metadata validation skipped) --
 
-struct StubTypesRegistry;
+#[derive(Default)]
+struct StubTypesRegistry {
+    /// When set, `get_type_schema` answers with an `Internal` error instead
+    /// of `NotFound`. `NotFound` makes `validate_metadata_via_gts` skip
+    /// validation; any other error makes it *fail*, which is what a test
+    /// about the order between the scope check and metadata validation needs.
+    type_schema_unavailable: bool,
+}
 
 #[async_trait]
 impl types_registry_sdk::TypesRegistryClient for StubTypesRegistry {
@@ -62,6 +69,11 @@ impl types_registry_sdk::TypesRegistryClient for StubTypesRegistry {
         &self,
         type_id: &str,
     ) -> Result<types_registry_sdk::GtsTypeSchema, toolkit_canonical_errors::CanonicalError> {
+        if self.type_schema_unavailable {
+            return Err(types_registry_sdk::testing::internal(format!(
+                "types registry unavailable for {type_id}"
+            )));
+        }
         Err(types_registry_sdk::testing::not_found(type_id))
     }
 
@@ -178,7 +190,16 @@ impl types_registry_sdk::TypesRegistryClient for StubTypesRegistry {
 
 /// Build stub `TypesRegistryClient` for tests.
 pub fn make_types_registry() -> Arc<dyn types_registry_sdk::TypesRegistryClient> {
-    Arc::new(StubTypesRegistry)
+    Arc::new(StubTypesRegistry::default())
+}
+
+/// A registry whose schema lookups fail with `Internal`, so metadata
+/// validation returns an error instead of skipping it.
+#[must_use]
+pub fn make_unavailable_types_registry() -> Arc<dyn types_registry_sdk::TypesRegistryClient> {
+    Arc::new(StubTypesRegistry {
+        type_schema_unavailable: true,
+    })
 }
 
 // -- AllowAll AuthZ mock --

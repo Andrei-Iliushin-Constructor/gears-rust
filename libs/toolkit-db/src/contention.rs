@@ -103,6 +103,10 @@ pub fn is_retryable_contention(backend: DbBackend, err: &DbErr) -> bool {
     }
 }
 
+/// Match an error message against the contention signatures of `backend`.
+///
+/// The single point where backend dispatch happens. A backend with no known
+/// signatures returns `false` -- non-retryable rather than retried blindly.
 fn is_contention_message(backend: DbBackend, msg: &str) -> bool {
     match backend {
         DbBackend::MySql => is_mysql_deadlock(msg),

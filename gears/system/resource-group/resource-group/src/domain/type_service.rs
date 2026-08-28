@@ -108,6 +108,7 @@ impl<TR: TypeRepositoryTrait> TypeService<TR> {
         self.create_type_unscoped(req).await
     }
 
+    // @cpt-flow:cpt-cf-resource-group-flow-type-mgmt-create-type:p1
     /// Create a new GTS type definition without `AuthZ` enforcement.
     ///
     /// **Internal API** — never expose this through a REST handler. Used by
@@ -309,13 +310,20 @@ impl<TR: TypeRepositoryTrait> TypeService<TR> {
     }
 
     /// List GTS type definitions with `OData` filtering and pagination
-    /// (`AuthZ`-gated: `read` on [`RG_TYPE_RESOURCE`]).
+    /// (`AuthZ`-gated: `list` on [`RG_TYPE_RESOURCE`]).
+    ///
+    /// `list`, not `read`: the standard action vocabulary (`DESIGN.md`,
+    /// `AuthZ` matrix and the note under it) reserves `read` for a single
+    /// resource and `list` for a collection, and the sibling collection
+    /// endpoints on groups and memberships already gate on `list`. Gating
+    /// the catalog on `read` would hand the whole type registry to a policy
+    /// that was only meant to grant one type.
     pub async fn list_types(
         &self,
         ctx: &SecurityContext,
         query: &ODataQuery,
     ) -> Result<Page<ResourceGroupType>, DomainError> {
-        self.gate(ctx, "read").await?;
+        self.gate(ctx, "list").await?;
         self.list_types_unscoped(query).await
     }
 
@@ -479,6 +487,7 @@ impl<TR: TypeRepositoryTrait> TypeService<TR> {
         self.delete_type_unscoped(code).await
     }
 
+    // @cpt-flow:cpt-cf-resource-group-flow-type-mgmt-delete-type:p1
     /// Delete a GTS type definition without `AuthZ` enforcement.
     ///
     /// Resolve, reference check and delete run in one transaction with

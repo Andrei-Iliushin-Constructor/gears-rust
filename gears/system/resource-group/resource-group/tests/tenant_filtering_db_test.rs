@@ -88,6 +88,25 @@ fn make_group_service(
     )
 }
 
+/// Same wiring, but every metadata validation fails: the registry answers
+/// `Internal` rather than `NotFound`, so `validate_metadata_via_gts` returns
+/// an error instead of skipping. Used to check what a cross-tenant caller can
+/// learn from *which* error comes back.
+fn make_group_service_with_unavailable_registry(
+    db: Arc<DBProvider<DbError>>,
+) -> GroupService<GroupRepository, TypeRepository> {
+    let authz: Arc<dyn AuthZResolverClient> = Arc::new(TenantScopingAuthZ);
+    let enforcer = PolicyEnforcer::new(authz);
+    GroupService::new(
+        db,
+        QueryProfile::default(),
+        enforcer,
+        Arc::new(GroupRepository),
+        Arc::new(TypeRepository),
+        common::make_unavailable_types_registry(),
+    )
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 
 /// Full chain: two tenants create groups, each tenant sees only its own.
@@ -334,6 +353,64 @@ async fn tenant_isolation_update_cross_tenant_blocked() {
     assert_eq!(
         after.hierarchy.parent_id, None,
         "parent_id must remain None"
+    );
+}
+
+/// A cross-tenant `update_group` must not become an existence oracle.
+///
+/// `update_group` reads the row before it opens its transaction, and that
+/// read builds `system_scope()` -- it answers for a group in any tenant. If
+/// metadata validation ran on the strength of that read alone, a caller in
+/// tenant B would get a *validation* error for a group that exists in
+/// tenant A and a *not-found* for an id that exists nowhere: two different
+/// answers, which is exactly how one learns that the foreign group is real.
+/// The scoped read has to come first, so both cases answer the same way.
+#[tokio::test]
+async fn tenant_isolation_update_cross_tenant_is_not_an_existence_oracle() {
+    let db = test_db().await;
+    let type_svc = common::make_type_service(db.clone());
+    let group_svc = make_group_service(db.clone());
+    // Every metadata validation on this one fails, so the only thing that can
+    // keep the two cases indistinguishable is the order of the two reads.
+    let oracle_svc = make_group_service_with_unavailable_registry(db.clone());
+
+    let tenant_a = Uuid::now_v7();
+    let tenant_b = Uuid::now_v7();
+    let ctx_a = make_ctx(tenant_a);
+    let ctx_b = make_ctx(tenant_b);
+
+    let type_code = common::create_root_type(&type_svc, "xoracle").await.code;
+    let ga = common::create_root_group(&group_svc, &ctx_a, &type_code, "A's group", tenant_a).await;
+
+    let req = || resource_group_sdk::UpdateGroupRequest {
+        name: "Probe".to_owned(),
+        parent_id: None,
+        metadata: Some(serde_json::json!({"probe": true})),
+    };
+
+    let existing = oracle_svc
+        .update_group(&ctx_b, ga.id, req())
+        .await
+        .expect_err("tenant B must not update tenant A's group");
+    let unknown = oracle_svc
+        .update_group(&ctx_b, Uuid::now_v7(), req())
+        .await
+        .expect_err("an unknown id must not update anything either");
+
+    assert!(
+        matches!(
+            existing,
+            resource_group::domain::error::DomainError::GroupNotFound { .. }
+        ),
+        "a group in another tenant must answer not-found, not a metadata \
+         validation error that proves it exists: {existing}"
+    );
+    assert!(
+        matches!(
+            unknown,
+            resource_group::domain::error::DomainError::GroupNotFound { .. }
+        ),
+        "an unknown id must answer not-found: {unknown}"
     );
 }
 

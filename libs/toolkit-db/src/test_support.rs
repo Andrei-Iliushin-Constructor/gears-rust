@@ -1042,12 +1042,7 @@ mod tests {
 
     #[test]
     fn all_in_serializable_transaction_true_when_every_in_tx_event_is_serializable() {
-        let mut a = make(
-            0,
-            QueryKind::Select,
-            Some("resource_membership_tenant"),
-            true,
-        );
+        let mut a = make(0, QueryKind::Select, Some("resource_group"), true);
         a.tx_isolation = Some(crate::secure::TxIsolationLevel::Serializable);
         let mut b = make(
             1,

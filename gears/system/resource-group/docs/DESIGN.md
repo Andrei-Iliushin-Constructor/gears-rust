@@ -64,7 +64,7 @@ RG is intentionally policy-agnostic:
 
 The architecture consists of:
 
-- **RG Resolver SDK** — read and write trait contracts (`ResourceGroupClient`, `ResourceGroupReadHierarchy`)
+- **RG Resolver SDK** — read and write trait contracts (`ResourceGroupClient`, `ResourceGroupReadHierarchy`, `ResourceGroupTypeBootstrap` — the last one un-gated, for in-process type registration at gear init, see the AuthZ matrix below)
 - **RG Gear (Gateway)** — routes requests to built-in or vendor-specific provider
 - **RG Plugin** — full service with database, REST API, seeding, and domain logic
 
@@ -1151,7 +1151,7 @@ Indexes:
 | `resource_id`   | TEXT        | caller-defined resource identifier         |
 | `created_at`       | TIMESTAMPTZ | creation time                              |
 
-Tenant scope is not stored on membership rows. It is derived from `resource_group.tenant_id` via JOIN on `group_id`.
+Tenant scope is not stored on membership rows. It is derived from `resource_group.tenant_id` via JOIN on `group_id` — including the "one tenant per resource" check, which asks whether any membership of the pair belongs to another tenant and is answered by that JOIN with `LIMIT 1`, inside the same `SERIALIZABLE` transaction as the insert it gates.
 
 Constraints/indexes:
 
@@ -1288,6 +1288,7 @@ RG relies on database-level performance rather than application-level caching:
 | `gts.cf.core.rg.group.v1~` | `delete` | `deleteGroup` | DELETE | `/groups/{group_id}` | JWT |
 | `gts.cf.core.rg.group.v1~` | `read` | `listGroupHierarchy` | GET | `/groups/{group_id}/hierarchy` | JWT |
 | _(AuthZ bypassed)_ | — | `listGroupHierarchy` | GET | `/groups/{group_id}/hierarchy` | MTLS |
+| _(AuthZ bypassed)_ | — | `ResourceGroupTypeBootstrap` (no REST surface) | — | — | in-process |
 | `gts.cf.core.rg.group_membership.v1~` | `list` | `listMemberships` | GET | `/memberships` | JWT |
 | `gts.cf.core.rg.group_membership.v1~` | `create` | `addMembership` | POST | `/memberships/{group_id}/{resource_type}/{resource_id}` | JWT |
 | `gts.cf.core.rg.group_membership.v1~` | `delete` | `deleteMembership` | DELETE | `/memberships/{group_id}/{resource_type}/{resource_id}` | JWT |
@@ -1297,6 +1298,7 @@ Notes:
   - Standard action vocabulary: `list` (collection), `read` (single resource), `create`, `update`, `delete` — aligned with [AuthZ usage scenarios](../../../docs/arch/authorization/AUTHZ_USAGE_SCENARIOS.md).
   - The AuthZ plugin reads hierarchy in-process via `ResourceGroupReadHierarchy` registered in `ClientHub` and **bypasses `PolicyEnforcer` invocation** on those reads (`AccessScope::allow_all()`); the plugin still produces AuthZ tenant/subtree constraints from the returned hierarchy — see [RG Authentication Modes: JWT vs MTLS](#rg-authentication-modes-jwt-vs-mtls).
   - MTLS-authenticated requests (AuthZ plugin only) **also** bypass `PolicyEnforcer` entirely — `p2`, **deferred / not implemented yet**, planned for the future microservice split — see [RG Authentication Modes: JWT vs MTLS](#rg-authentication-modes-jwt-vs-mtls).
+  - `ResourceGroupTypeBootstrap` is a narrow, deliberately un-gated SDK trait registered in `ClientHub`, backed by `TypeService`'s unscoped methods. Its one permitted caller is account-management's `register_user_group_types`, which registers the RG type schemas it owns from its own `Gear::init` — a phase at which no gated call can both find a plugin (types-registry keeps registrations in a staging buffer until `post_init`) and be admitted by it (the only actor a gear-init path has is platform-scoped, which the static AuthZ plugin rejects). Guardrail: it must never be exposed through REST, pinned by `bootstrap_bypasses_policy_enforcer_while_gated_path_denies`. Sunset: the carve-out exists only because the GTS type registry lives inside this gear, and should not survive a split of the registry.
   - `listGroupHierarchy` shares `resource_group` + `read` permission with `getGroup` — both are group read operations; the AuthZ policy may differentiate them if needed.
 
 ### Reliability Architecture

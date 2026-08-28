@@ -795,10 +795,11 @@ impl GroupRepositoryTrait for GroupRepository {
     /// Returns `rows_affected` from the `UPDATE ... WHERE id = ?` rather than
     /// answering `RecordNotFound` itself: the previous shape loaded an
     /// `ActiveModel` first to know that -- at the cost of the very read this
-    /// method exists to avoid. Both current callers already read the row
-    /// inside the same `SERIALIZABLE` transaction, so a `0` here is
-    /// unreachable for them in practice, but the signature no longer asks
-    /// them to take that on faith.
+    /// method exists to avoid. Both current callers read the row inside the
+    /// same transaction first -- `update_group_inner` with `FOR UPDATE`,
+    /// because its transaction may be at the backend default -- so a `0`
+    /// here is unreachable for them in practice, but the signature no longer
+    /// asks them to take that on faith.
     async fn update<C: DBRunner>(
         &self,
         db: &C,
@@ -912,9 +913,10 @@ impl GroupRepositoryTrait for GroupRepository {
         .await
         .map_err(|e| match e {
             toolkit_db::secure::ScopeError::Db(db) => DomainError::Database(db),
-            // stringify would wrap this in `DbErr::Custom`, which
-            // `is_retryable_contention` does not recognize -- a 40001 from
-            // this set-based statement would stop being retried.
+            // Keep the typed `DbErr`. `is_retryable_contention` does read
+            // `DbErr::Custom` now, so retry survives a stringify -- but
+            // `sql_err()` does not, and the give-up diagnostics and the
+            // constraint classifiers would be left matching on text.
             other => DomainError::database(other.to_string()),
         })?;
 
@@ -1011,120 +1013,6 @@ impl GroupRepositoryTrait for GroupRepository {
         }
 
         Ok(())
-    }
-
-    /// Distinct `(gts_type_id, resource_id)` membership keys touched by any
-    /// group in `group_ids`. See the trait doc for why callers collect this
-    /// before deleting those groups' memberships.
-    async fn get_distinct_membership_keys_for_groups<C: DBRunner>(
-        &self,
-        db: &C,
-        group_ids: &[Uuid],
-    ) -> Result<Vec<(i16, String)>, DomainError> {
-        use sea_orm::{FromQueryResult, QuerySelect};
-        use std::collections::BTreeSet;
-
-        #[derive(FromQueryResult)]
-        struct MembershipKey {
-            gts_type_id: i16,
-            resource_id: String,
-        }
-
-        if group_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let scope = system_scope();
-        let mut keys: BTreeSet<(i16, String)> = BTreeSet::new();
-
-        // Chunked for the same reason as the other batch operations in this
-        // file: one bind parameter per id, capped per backend.
-        for chunk in group_ids.chunks(toolkit_db::secure::max_bind_params_for(db)) {
-            let rows: Vec<MembershipKey> = MembershipEntity::find()
-                .filter(membership_entity::Column::GroupId.is_in(chunk.to_vec()))
-                .secure()
-                .scope_with(&scope)
-                .project_all(db, |q| {
-                    q.select_only()
-                        .column(membership_entity::Column::GtsTypeId)
-                        .column(membership_entity::Column::ResourceId)
-                        .distinct()
-                        .into_model::<MembershipKey>()
-                })
-                .await
-                .map_err(|e| DomainError::database(e.to_string()))?;
-
-            keys.extend(rows.into_iter().map(|r| (r.gts_type_id, r.resource_id)));
-        }
-
-        Ok(keys.into_iter().collect())
-    }
-
-    /// Delete `resource_membership_tenant` guard rows for every key in
-    /// `keys` whose `resource_group_membership` rows are all gone by the
-    /// time this runs. See the trait doc for the atomicity/ordering
-    /// contract this depends on.
-    async fn delete_orphaned_membership_guards<C: DBRunner>(
-        &self,
-        db: &C,
-        keys: &[(i16, String)],
-    ) -> Result<u64, DomainError> {
-        use crate::infra::storage::entity::resource_membership_tenant::{
-            self as guard_entity, Entity as GuardEntity,
-        };
-        use std::collections::BTreeMap;
-
-        if keys.is_empty() {
-            return Ok(0);
-        }
-
-        let scope = system_scope();
-
-        // Grouped by `gts_type_id` so the still-referenced check below is a
-        // plain single-column `NOT IN` subquery scoped to that type, not a
-        // tuple/row-value comparison -- portable across backends without
-        // depending on row-value `IN` support.
-        let mut by_type: BTreeMap<i16, Vec<String>> = BTreeMap::new();
-        for (type_id, resource_id) in keys {
-            by_type
-                .entry(*type_id)
-                .or_default()
-                .push(resource_id.clone());
-        }
-
-        let mut deleted = 0u64;
-        for (type_id, resource_ids) in by_type {
-            for chunk in resource_ids.chunks(toolkit_db::secure::max_bind_params_for(db)) {
-                // `Expr`'s combinators (`eq`) live on `ExprTrait` as of
-                // sea-query 1.0. Imported here rather than file-wide: its
-                // `eq` would shadow `PartialEq::eq` for the rest of the file.
-                use sea_orm::ExprTrait;
-
-                // `resource_id` is `NOT NULL` on `resource_group_membership`
-                // (both backend branches of the initial migration), so
-                // `NOT IN` here cannot silently degenerate to "no rows"
-                // the way it would if the subquery could produce a NULL.
-                let still_referenced = Query::select()
-                    .column(membership_entity::Column::ResourceId)
-                    .from(MembershipEntity)
-                    .and_where(Expr::col(membership_entity::Column::GtsTypeId).eq(type_id))
-                    .to_owned();
-
-                let result = GuardEntity::delete_many()
-                    .filter(guard_entity::Column::GtsTypeId.eq(type_id))
-                    .filter(guard_entity::Column::ResourceId.is_in(chunk.to_vec()))
-                    .filter(guard_entity::Column::ResourceId.not_in_subquery(still_referenced))
-                    .secure()
-                    .scope_with(&scope)
-                    .exec(db)
-                    .await
-                    .map_err(|e| DomainError::database(e.to_string()))?;
-
-                deleted += result.rows_affected;
-            }
-        }
-
-        Ok(deleted)
     }
 
     /// Every descendant of `group_id` (the self-row excluded) with its depth
@@ -1459,9 +1347,10 @@ impl GroupRepositoryTrait for GroupRepository {
             .await
             .map_err(|e| match e {
                 toolkit_db::secure::ScopeError::Db(db) => DomainError::Database(db),
-                // stringify would wrap this in `DbErr::Custom`, which
-                // `is_retryable_contention` does not recognize -- a 40001 from
-                // this set-based statement would stop being retried.
+                // Keep the typed `DbErr`. `is_retryable_contention` does read
+                // `DbErr::Custom` now, so retry survives a stringify -- but
+                // `sql_err()` does not, and the give-up diagnostics and the
+                // constraint classifiers would be left matching on text.
                 other => DomainError::database(other.to_string()),
             })?;
             // @cpt-end:cpt-cf-resource-group-algo-entity-hier-closure-rebuild:p1:inst-closure-rebuild-4
@@ -1500,20 +1389,27 @@ impl GroupRepositoryTrait for GroupRepository {
     }
 
     /// Check if a group has any memberships.
+    ///
+    /// `LIMIT 1`, not `COUNT(*)`: the caller asks whether any row exists, and
+    /// the first one answers it. A count would read the whole set to produce
+    /// a number nobody looks at.
     async fn has_memberships<C: DBRunner>(
         &self,
         db: &C,
         group_id: Uuid,
     ) -> Result<bool, DomainError> {
+        use sea_orm::QuerySelect;
+
         let scope = system_scope();
-        let count = MembershipEntity::find()
+        let first = MembershipEntity::find()
             .filter(membership_entity::Column::GroupId.eq(group_id))
+            .limit(1)
             .secure()
             .scope_with(&scope)
-            .count(db)
+            .one(db)
             .await
             .map_err(|e| DomainError::database(e.to_string()))?;
-        Ok(count > 0)
+        Ok(first.is_some())
     }
 
     /// Delete all memberships for a group.

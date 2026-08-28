@@ -33,10 +33,10 @@ This report is the full audit. The branch carrying it started as the
 **query-count** subset — the N+1 and redundant-I/O findings — and has since
 taken the transaction-boundary, retry and isolation findings that are about
 *performance*: RG-02, RG-03, RG-09 and RG-15, plus the isolation decisions
-they unblock. It later added the membership-tenant guard table (Section 8)
-and, on 2026-08-21, RG-01 and RG-14 themselves: the guard claim/release this
-same branch introduced needed the transaction boundary those two findings
-asked for, so leaving them for a different branch stopped making sense.
+they unblock. It later took RG-01 as well: the "one tenant per resource"
+check and the membership insert it gates needed one transaction and one
+isolation level to be correct, which is the same subject as the isolation
+decisions above, so leaving it for a different branch stopped making sense.
 
 What still stays out is tenant scoping, the authorization gates, and the
 wider error-mapping changes. Two error classifications did come along, but
@@ -66,7 +66,7 @@ depth-10 parent issued roughly 100 000 separate `INSERT`s.
 
 | ID | Class | Severity | Where | Status |
 |----|-------|----------|-------|--------|
-| RG-01 | no-tx-write | **Critical** | `membership_service.rs` `add_membership_inner` — check-then-insert on a bare connection; the PK includes `group_id`, so two concurrent first-memberships in different tenants both commit and the "one tenant per resource" invariant breaks | Fixed 2026-08-21. The guard claim (`ensure_membership_guard`) and the membership insert now share one `SERIALIZABLE` transaction via `transaction_with_retry` (see TX-04), so a failed insert rolls the claim back instead of leaving it behind. Guarded by `trace_add_membership` |
+| RG-01 | no-tx-write | **Critical** | `membership_service.rs` `add_membership_inner` — check-then-insert on a bare connection; the PK includes `group_id`, so two concurrent first-memberships in different tenants both commit and the "one tenant per resource" invariant breaks | Fixed. The tenant check (`has_membership_in_other_tenant`, an existence read with `LIMIT 1`) and the membership insert now share one `SERIALIZABLE` transaction via `transaction_with_retry`. The check reads a predicate the insert writes into: apart, or together below that level, both writers see no conflict and both commit; at `SERIALIZABLE` that is the write skew SSI cancels, and the retry re-runs the loser into the rejection. Guarded by `trace_add_membership` and, on real PostgreSQL, by `forced_overlap_at_serializable_keeps_one_tenant` with `forced_overlap_at_read_committed_splits_the_resource` as its negative control |
 | RG-02 | no-tx-write | Medium | `type_service.rs` `delete_type` — resolve/count/delete outside any transaction | Fixed. One transaction with bounded retry, at the backend default: `ON DELETE RESTRICT` is what makes a type in use undeletable, and `delete_by_id` maps that constraint to the same conflict the count reports. Guarded by `trace_delete_type` |
 | RG-03 | no-retry-serializable | **Critical** | `type_service.rs` `create_type`/`update_type` — `SERIALIZABLE` without retry, so a `40001` reaches the caller raw. Live call sites: account-management's gear-init type registration, i.e. a startup path, not latent code | Fixed. Both moved to `transaction_with_retry`, each attempt on its own clones. Guarded by a Section 4 rule |
 | RG-04 | n-plus-one | High | `group_repo.rs` `rebuild_subtree_closure` — one `INSERT` per closure row, `A×N` of them | Fixed |
@@ -79,7 +79,7 @@ depth-10 parent issued roughly 100 000 separate `INSERT`s.
 | RG-11 | redundant-io | Low | `group_service.rs` — the same type resolved twice per create/update (`resolve_id` then `find_by_code`) | Fixed |
 | RG-12 | n-plus-one | Medium | `type_repo.rs` `list_types` — junction reads per row, so a page of N types costs `2N+1` queries. **Read path** — the only finding not on a write path | Fixed |
 | RG-13 | redundant-io | Low | `type_service.rs` — the duplicate-check loads full junction data just to test existence | Fixed |
-| RG-14 | no-tx-write | Medium | `membership_service.rs` `remove_membership` — same check-then-write shape as RG-01 | Fixed 2026-08-21. The membership delete, the remaining-membership count, and the guard-row release now share one `SERIALIZABLE` transaction (see TX-04 — the count is a real predicate, unlike TX-03's exact-PK delete), so a membership this call just removed cannot be double-counted by a concurrent `remove_membership`, nor by a concurrent `add_membership` re-adding the tenant being vacated |
+| RG-14 | no-tx-write | Medium | `membership_service.rs` `remove_membership` — same check-then-write shape as RG-01 | Not applicable in this design. With tenant ownership derived from the membership rows themselves there is no second piece of state for a removal to keep in step: it deletes one row by its composite primary key and decides nothing from a read, so it needs neither its own transaction nor a level above the backend default. A concurrent `add_membership` either sees the row from inside its own `SERIALIZABLE` read and rejects, or does not and is the resource's first membership again — both outcomes correct. Pinned by `trace_remove_membership`, which asserts it does *not* open `SERIALIZABLE` |
 | RG-15 | error-shape-swallowing | **Critical** | Platform-wide: repositories map every `sea_orm::DbErr` through `.to_string()` into `DbErr::Custom`, and `is_retryable_contention` only recognized `Exec`/`Query`. `transaction_with_retry` could therefore never tell a serialization failure was retryable when it surfaced inside a repository call — the retry loop was dead code on every write path in the gear | Fixed. `is_retryable_contention` matches `DbErr::Custom` on the same message patterns, with five regression tests. Without it the jittered backoff added alongside these fixes would never have fired |
 
 RG-11 through RG-15 were **not** in the original problem statement — the
@@ -155,7 +155,7 @@ unprotected write-skew and no cross-gear call inside a transaction remained. Thr
 |----|---------|-------------------------------------------|--------|
 | TX-01 | `TypeRepository::insert` did not classify `is_unique_violation()`, unlike `GroupRepository` and `MembershipRepository` | The invariant is `UNIQUE(schema_id)`, held by the schema at every isolation level. Only the *error shape* depended on `SERIALIZABLE`: without the mapping, a duplicate code surfaced as a raw database error unless an SSI abort happened to retry into a clean one. | Fixed — its own perf commit, not one of the RG-tagged fixes above |
 | TX-02 | `update_group` always opened `SERIALIZABLE`, including for a pure rename | The predicates that need SSI — cycle detection, depth and width limits, closure rebuild — are reachable only when `parent_id` changes. | Fixed — its own perf commit, not one of the RG-tagged fixes above |
-| TX-03 | `remove_membership_in_tx` did not need `SERIALIZABLE` | It deletes by the exact composite primary key `(group_id, gts_type_id, resource_id)` — no predicate a concurrent writer can invalidate. The commit that introduced the transaction documented the level as "for symmetry" with `add_membership`, not as a correctness requirement. | Fixed on the source branch; not in this one — isolation, not a query count, and superseded here either way once the guard-lifecycle fix below (TX-04) put the same transaction back under `SERIALIZABLE` for an unrelated, real reason |
+| TX-03 | `remove_membership_in_tx` did not need `SERIALIZABLE` | It deletes by the exact composite primary key `(group_id, gts_type_id, resource_id)` — no predicate a concurrent writer can invalidate. The commit that introduced the transaction documented the level as "for symmetry" with `add_membership`, not as a correctness requirement. | Fixed on the source branch; not in this one — isolation, not a query count. It holds in this design too: `remove_membership` deletes by the exact composite key and stays at the backend default |
 
 These three are a layer apart from the RG findings the Scope section lists above: they come from
 the companion isolation-level pass, not from the query-count detector, so a row here being
@@ -170,42 +170,34 @@ TX-02 and TX-03 are the same shape: `SERIALIZABLE` doubted and removed because t
 own predicate didn't need it. TX-01 is not that shape: its isolation level was never touched.
 What moved there was error classification — a duplicate type code used to surface as a raw
 database error whose shape `SERIALIZABLE` only incidentally influenced, and it now has an
-explicit `is_unique_violation()` mapping instead. The RG-01/RG-14 guard-lifecycle fix
-(2026-08-21) produced the mirror mistake to TX-02/TX-03, caught by an independent review rather
-than by this audit's statement-count rules (see "What this does not cover" — isolation level is
-exactly its blind spot):
+explicit `is_unique_violation()` mapping instead.
 
-| ID | Finding | Why `SERIALIZABLE` *was* the right tool here | Status |
-|----|---------|-----------------------------------------------|--------|
-| TX-04 | `remove_membership`'s guard-release transaction was made `SERIALIZABLE` (closing a write-skew between two concurrent removals — see RG-14's row above), but `add_membership_inner`'s guard-claim transaction was left at the backend default | PostgreSQL's SSI only tracks conflicts among transactions that are *all* `SERIALIZABLE`. A `READ COMMITTED` `add_membership_inner` re-adding the same tenant `remove_membership` is in the middle of vacating is invisible to `remove_membership`'s count as anything other than a phantom from its own snapshot — the two transactions never conflict, both commit, and the resource ends up with a live membership and no guard row. Unlike TX-01–03, this is not a case for downgrading further; the predicate (`count_memberships`) is real on both sides of the race. | Fixed 2026-08-21. `add_membership_inner` also runs `SERIALIZABLE`, so both halves of the guard lifecycle are tracked by SSI together |
+The reverse case is RG-01, and it is worth stating alongside them so the direction of this
+branch is not mistaken for "lower everything". `add_membership` keeps `SERIALIZABLE`, and not
+for symmetry: its tenant check reads a predicate — "does any membership of this pair belong to
+another tenant" — and its insert then writes into that same predicate. At the backend default
+each of two first memberships reads from its own snapshot, neither sees the other's uncommitted
+row, and both commit; the resource ends up owned by two tenants. That is textbook write skew,
+the one anomaly `SERIALIZABLE` exists for, and no amount of narrowing the read replaces it.
 
-`add_membership_inner` and `remove_membership` are not the only two paths that touch
-`resource_membership_tenant`. `force_delete_subtree`'s cascading release
-(`delete_orphaned_membership_guards`, called once its own membership delete may have
-orphaned a key) is a third, reached from `delete_group_inner` only when `force == true` —
-which is exactly when `delete_group` opens the transaction as `SERIALIZABLE` (see the
-row-lock discussion above). It was built `SERIALIZABLE` from the start rather than added
-to the pairing after the fact, but it depends on the identical pairing TX-04 describes:
-without it, a concurrent `add_membership` on a resource whose only membership is being
-force-deleted would be as invisible to the cascade's "still referenced?" check as
-`add_membership_inner` at `READ COMMITTED` was to `remove_membership`'s count. The
-invariant TX-04 is really an instance of, stated once directly: any path that reads or
-writes `resource_membership_tenant` must run `SERIALIZABLE`, or SSI has no way to link it
-to the others sharing that row.
+The level is also the one thing this audit's statement-count rules cannot see (see "What this
+does not cover" — isolation is exactly their blind spot): lower it and the trace is
+byte-identical, and on SQLite, which serializes writes regardless, the outcome does not change
+either. Two things close that gap. The recorder now captures the level a transaction was asked
+to open at, and `trace_add_membership` asserts it — with `trace_remove_membership` and
+`trace_delete_group_non_force` asserting the other direction, so "raise everything to
+`SERIALIZABLE`" cannot satisfy it while undoing the saving this branch is about. And on real
+PostgreSQL, `forced_overlap_at_serializable_keeps_one_tenant` drives the two transactions
+through the exact overlap window and observes the SSI cancellation, while
+`forced_overlap_at_read_committed_splits_the_resource` runs the same barrier one level lower
+and observes the corruption — a permanent negative control, so the pairing cannot be relaxed
+without a test failing.
 
-That invariant is no longer held by review alone. The recorder was extended to capture the
-isolation level a transaction was asked to open at (see "What this does not cover"), and the
-audit suite asserts it on all three paths — `trace_add_membership`, `trace_remove_membership`
-and `trace_force_delete_subtree`. `trace_delete_group_non_force` asserts the other direction,
-that a non-force delete stays at the backend default, so raising everything to `SERIALIZABLE`
-cannot satisfy the first three by quietly undoing the saving this branch is about.
-
-The general lesson TX-04 restates: a `SERIALIZABLE` write path guards nothing against a
-concurrent write that runs at a lower isolation level, even one touching the exact rows it
-depends on. Pairing isolation levels across the read/write pairs an invariant depends on has to
-be reasoned through explicitly per pair — it is not a property either side can hold on its own,
-and, per the blind spot below, no amount of statement-count testing will surface getting it
-wrong.
+The general lesson: a `SERIALIZABLE` write path guards nothing against a concurrent write that
+runs at a lower isolation level, even one touching the exact rows it depends on. Which side of
+an invariant needs which level has to be reasoned through per read/write pair — it is not a
+property either side can hold on its own, and no amount of statement-count testing will surface
+getting it wrong.
 
 Two further observations from that pass, neither acted on:
 
@@ -267,7 +259,7 @@ getting a clean `CycleDetected`, and force-delete races produced no orphans in
 **Partly in this branch, updated 2026-08-21.** The audit's full apparatus
 includes four Rust `testcontainers` suites against real PostgreSQL —
 `pg_concurrency_test.rs` (this gear, on this branch since `0c7341d2f`, and
-extended further by the RG-01/RG-14/TX-04 fixes above),
+extended further by the RG-01 fix above),
 `pg_membership_filter_test.rs`, `pg_group_filter_test.rs` (this gear) and
 `secure_group_scope_postgres.rs` (`libs/toolkit-db`) — each a deliberate,
 written-down deviation from the testing guide:
@@ -333,9 +325,9 @@ The point of the exercise. Nothing needs copying: the recorder lives in
   every rule here. That was exercised twice. First after the audit: two write
   paths were lowered to the backend default, and an independent review later
   found a lost-update race between the group update and the group move that
-  these rules could not have caught. Then again by TX-04, where the guard row's
-  whole correctness turned out to rest on three paths all opening
-  `SERIALIZABLE` — and lowering one of them left the traces byte-identical.
+  these rules could not have caught. Then again by RG-01, whose whole
+  correctness rests on `add_membership` opening `SERIALIZABLE` — and lowering
+  it leaves the trace byte-identical, and the SQLite outcome unchanged.
   The recorder now carries the level each transaction was *asked* to open at,
   read from the same task-local that carries the transaction id, so
   `all_in_serializable_transaction` can assert it. What that pins is the

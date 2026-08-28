@@ -117,8 +117,7 @@ Memberships link resources (users, courses, documents, etc.) to groups in the hi
 2. [x] - `p1` - Resolve resource_type GTS path to surrogate ID - `inst-remove-memb-2`
 3. [x] - `p1` - DB: DELETE FROM resource_group_membership WHERE group_id = {group_id} AND gts_type_id = {type_id} AND resource_id = {resource_id} - `inst-remove-memb-3`
 4. [x] - `p1` - **IF** no rows affected → **RETURN** NotFound: membership does not exist - `inst-remove-memb-4`
-5. [x] - `p1` - Added 2026-08-21: **IF** no memberships remain for `(gts_type_id, resource_id)` → DB: DELETE FROM resource_membership_tenant WHERE gts_type_id = {type_id} AND resource_id = {resource_id} — release the tenant guard so a future membership from another tenant is not blocked - `inst-remove-memb-6`
-6. [x] - `p1` - **RETURN** success (204 No Content) - `inst-remove-memb-5`
+5. [x] - `p1` - **RETURN** success (204 No Content) - `inst-remove-memb-5`
 
 ### List Memberships
 
@@ -150,13 +149,13 @@ Memberships link resources (users, courses, documents, etc.) to groups in the hi
 
 **Steps**:
 
-Superseded 2026-08-21: the per-membership scan below (steps 1-3 as originally written) was replaced with a single-row guard table, `resource_membership_tenant`, keyed on `(gts_type_id, resource_id)`. The guard is claimed and read atomically with the membership insert (same transaction), and released once no membership references the pair — see `ensure_membership_guard`/`count_memberships`/`delete_membership_guard` in `membership_repo.rs`.
+Updated: the check is one existence read, not a scan and not a count, and it shares a `SERIALIZABLE` transaction with the membership insert it gates (RG-01) — see `has_membership_in_other_tenant` in `membership_repo.rs`.
 
-1. [x] - `p1` - DB: SELECT tenant_id FROM resource_membership_tenant WHERE gts_type_id = {resource_type_id} AND resource_id = {resource_id} — read the existing guard row for this resource - `inst-tenant-check-1`
-2. [x] - `p1` - **IF** no guard row exists → INSERT INTO resource_membership_tenant (gts_type_id, resource_id, tenant_id) claiming the resource for the target tenant (first membership, any tenant allowed) - `inst-tenant-check-2`
-3. [x] - `p1` - **IF** the claim races and loses to a UNIQUE violation on `(gts_type_id, resource_id)` → re-read the guard row to find the tenant that won it - `inst-tenant-check-3`
-4. [x] - `p1` - **IF** the guard row's tenant_id equals the target group's tenant_id → **RETURN** pass - `inst-tenant-check-4`
-5. [x] - `p1` - **RETURN** TenantIncompatibility: resource already linked to another tenant, cannot add to the target tenant - `inst-tenant-check-5`
+1. [x] - `p1` - DB: SELECT 1 FROM resource_group rg WHERE rg.id IN (SELECT group_id FROM resource_group_membership WHERE gts_type_id = {resource_type_id} AND resource_id = {resource_id}) AND rg.tenant_id <> {target_tenant_id} LIMIT 1 — does this resource already belong to another tenant - `inst-tenant-check-1`
+2. [x] - `p1` - **IF** no row comes back → pass: either the resource has no memberships at all (first membership, any tenant allowed) or every one of them is already the target tenant's - `inst-tenant-check-2`
+3. [x] - `p1` - The read and the insert run in one `SERIALIZABLE` transaction: the read is a predicate the insert writes into, so below that level two first memberships from different tenants both commit - `inst-tenant-check-3`
+4. [x] - `p1` - **IF** pass → the caller proceeds to the membership insert in the same transaction - `inst-tenant-check-4`
+5. [x] - `p1` - **RETURN** TenantIncompatibility: resource already linked to another tenant (the message names neither tenant) - `inst-tenant-check-5`
 
 ### Membership Data Seeding
 

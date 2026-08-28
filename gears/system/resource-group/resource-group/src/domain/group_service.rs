@@ -82,11 +82,10 @@ pub struct GroupService<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> {
     group_repo: Arc<GR>,
     type_repo: Arc<TR>,
     types_registry: Arc<dyn types_registry_sdk::TypesRegistryClient>,
-    /// Bound to the process-global meter, not injected: the constructor has
-    /// 150-odd call sites and a required parameter would bury the change that
-    /// matters. Until the host installs an exporter the global provider is
-    /// the built-in no-op, so an uninstrumented run -- including every test
-    /// here -- records nothing and pays nothing.
+    /// Defaults to `NoopMetrics`; the composition root installs the real
+    /// recorder through `with_metrics`, whose doc carries the rationale for
+    /// keeping it out of the constructor. An uninstrumented run -- including
+    /// every test here -- records nothing and pays nothing.
     metrics: Arc<dyn RgMetricsPort>,
 }
 
@@ -120,6 +119,7 @@ enum UpdateGroupOutcome {
 /// (a pre-call cross-tenant check on the update path, the snapshot itself on
 /// the move path), and a second read of the same id inside this function on
 /// top of that was the redundant one this type exists to remove.
+#[allow(unknown_lints, de0309_must_have_domain_model)]
 pub(crate) struct ParentSnapshot {
     pub tenant_id: Uuid,
     pub gts_type_id: i16,
@@ -127,6 +127,7 @@ pub(crate) struct ParentSnapshot {
 
 /// What a subtree move hands back to its caller: enough to assemble the
 /// response and record the metric, and nothing of the persistence layer.
+#[allow(unknown_lints, de0309_must_have_domain_model)]
 pub(crate) struct MoveOutcome {
     pub parent_tenant_id: Option<Uuid>,
     pub closure_rows: u64,
@@ -444,6 +445,17 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
             let conn = db
                 .conn()
                 .map_err(|e| DomainError::database(e.to_string()))?;
+            // Scoped read first, before anything whose *shape* the caller can
+            // observe. `find_model_by_id` builds `system_scope()`, so on its
+            // own it answers for a group in any tenant -- and the metadata
+            // validation right below returns a schema-shaped 400, which a
+            // cross-tenant id must not be able to tell apart from the 404 an
+            // unknown id gets. Same rule the delete path states: a foreign id
+            // and a non-existent one look identical from outside.
+            group_repo
+                .find_by_id(&conn, &scope, group_id)
+                .await?
+                .ok_or_else(|| DomainError::group_not_found(group_id))?;
             let existing = group_repo
                 .find_model_by_id(&conn, group_id)
                 .await?
@@ -1147,8 +1159,19 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
             .await?
             .ok_or_else(|| DomainError::group_not_found(group_id))?;
 
+        // Locked, not a plain read. This attempt may be running at the
+        // backend default (the rename/metadata path), where the UPDATE below
+        // matches on `id` alone and always assigns `parent_id` -- so a
+        // `SERIALIZABLE` reparent committing between this read and that
+        // write would have its `parent_id` silently reverted while the
+        // closure table kept the ancestry of the move. Nothing detects that:
+        // an UPDATE by primary key under READ COMMITTED never raises
+        // `40001`, and SSI pairs only transactions that are all
+        // `SERIALIZABLE`. `FOR UPDATE` waits for that in-flight move and
+        // returns the parent it committed, so `parent_changed` below sees it
+        // and escalates before anything is written.
         let existing = group_repo
-            .find_model_by_id(tx, group_id)
+            .find_model_by_id_for_update(tx, group_id)
             .await?
             .ok_or_else(|| DomainError::group_not_found(group_id))?;
         // @cpt-end:cpt-cf-resource-group-flow-entity-hier-update-group:p1:inst-update-group-2
@@ -1705,33 +1728,12 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
             .collect();
         let subtree_count: u64 = all_ids.len().try_into().unwrap_or(u64::MAX);
 
-        // Collected before the membership delete below, so it can be
-        // checked afterwards which of these keys the delete actually
-        // orphaned (RG-01 guard-lifecycle parity with `remove_membership`'s
-        // single-removal path -- see `delete_orphaned_membership_guards`).
-        let membership_keys = group_repo
-            .get_distinct_membership_keys_for_groups(conn, &all_ids)
-            .await?;
-
         // Memberships and closure rows have no FK ordering constraint among
         // themselves, so both go in one statement for the whole subtree
         // rather than two per node.
         group_repo.delete_memberships_many(conn, &all_ids).await?;
         group_repo
             .delete_all_closure_rows_many(conn, &all_ids)
-            .await?;
-
-        // Release the membership-tenant guard for any key the delete above
-        // just orphaned. A key can still have a live membership left over
-        // from a group outside this subtree, so this re-checks the actual
-        // remaining count rather than assuming every key touched by the
-        // subtree is now free (RG-01) -- without this, the guard row
-        // outlives every membership it was guarding, permanently pinning
-        // the resource to its tenant and leaving an FK (`ON DELETE
-        // RESTRICT` on `gts_type`) that later blocks `delete_type` with a
-        // misleading "group(s) or membership(s) of this type exist".
-        group_repo
-            .delete_orphaned_membership_guards(conn, &membership_keys)
             .await?;
 
         // Group rows do have one: a parent cannot go before its children.

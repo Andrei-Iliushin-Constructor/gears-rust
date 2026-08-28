@@ -20,6 +20,7 @@
 //! into a resource-group PR.
 
 /// The write operation a measurement belongs to.
+#[allow(unknown_lints, de0309_must_have_domain_model)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
     Create,
@@ -30,6 +31,9 @@ pub enum Operation {
 }
 
 impl Operation {
+    /// The stable label value for the `operation` metric attribute.
+    /// Dashboards and alerts are written against these strings, so renaming
+    /// one is a breaking change for whoever reads the metrics.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -47,6 +51,7 @@ impl Operation {
 /// Deliberately two-valued. A per-error-kind breakdown belongs to the error
 /// taxonomy, not here; this exists so a duration histogram can separate the
 /// time spent on work that succeeded from time spent on work that did not.
+#[allow(unknown_lints, de0309_must_have_domain_model)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Ok,
@@ -54,6 +59,8 @@ pub enum Outcome {
 }
 
 impl Outcome {
+    /// The stable label value for the `outcome` metric attribute -- see
+    /// [`Operation::as_str`] on why these strings are a contract.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -105,6 +112,7 @@ pub trait RgMetricsPort: Send + Sync {
 /// For call sites constructed without a meter -- the global provider is
 /// already a no-op until an exporter is wired, so this exists for tests and
 /// for constructing a service without reaching for the global at all.
+#[allow(unknown_lints, de0309_must_have_domain_model)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoopMetrics;
 

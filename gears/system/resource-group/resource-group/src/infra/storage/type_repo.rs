@@ -538,10 +538,15 @@ impl TypeRepositoryTrait for TypeRepository {
                 // time the delete runs, and then the answer comes from here.
                 // Same conflict either way.
                 if e.is_foreign_key_violation() {
-                    DomainError::conflict_active_references(format!(
-                        "Cannot delete type: group(s) or membership(s) of this type exist \
-                         (type_id {type_id})"
-                    ))
+                    // No `type_id` in the text: it is the internal SMALLINT
+                    // surrogate the API never exposes, and the count-based
+                    // message for the same conflict in `delete_type_unscoped`
+                    // names the type by its code. Two messages for one
+                    // conflict should not disagree on what they identify.
+                    DomainError::conflict_active_references(
+                        "Cannot delete type: group(s) or membership(s) of this type exist"
+                            .to_owned(),
+                    )
                 } else {
                     DomainError::database(e.to_string())
                 }
@@ -811,6 +816,13 @@ impl TypeRepositoryTrait for TypeRepository {
 
             violating.extend(members.into_iter().map(|m| (m.gts_type_id, m.group_id)));
         }
+
+        // One row came back per violating *membership*, so a group with five
+        // memberships of a removed type appears five times -- and the caller
+        // joins these names into the rejection message without deduplicating
+        // them. Same pair, same violation: report it once.
+        violating.sort_unstable();
+        violating.dedup();
 
         if violating.is_empty() {
             return Ok(Vec::new());

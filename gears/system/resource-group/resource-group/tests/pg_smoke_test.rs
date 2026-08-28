@@ -66,9 +66,6 @@ use resource_group::infra::storage::entity::resource_group_closure::{
 use resource_group::infra::storage::entity::resource_group_membership::{
     self as membership_entity, Column as MembershipColumn, Entity as MembershipEntity,
 };
-use resource_group::infra::storage::entity::resource_membership_tenant::{
-    self as guard_entity, Column as GuardColumn, Entity as GuardEntity,
-};
 use resource_group::infra::storage::group_repo::GroupRepository;
 use resource_group::infra::storage::migrations::Migrator;
 use resource_group::infra::storage::type_repo::TypeRepository;
@@ -364,19 +361,6 @@ async fn pg_force_delete_leaves_no_orphans() {
         .await
         .expect("insert membership");
 
-    // The guard row `ensure_membership_guard` would have claimed for this
-    // membership, inserted directly since this test bypasses
-    // `add_membership`.
-    let guard = guard_entity::ActiveModel {
-        gts_type_id: Set(root_type_id),
-        resource_id: Set("pg-smoke-resource".to_owned()),
-        tenant_id: Set(tenant_id),
-        ..Default::default()
-    };
-    secure_insert::<GuardEntity>(guard, &scope, &conn)
-        .await
-        .expect("insert guard row");
-
     group_svc
         .delete_group(&ctx, root.id, true)
         .await
@@ -429,33 +413,14 @@ async fn pg_force_delete_leaves_no_orphans() {
         "memberships for the deleted group should be gone"
     );
 
-    // The guard row is one more class of orphan the same force-delete must
-    // not leave behind (RG-01 guard-lifecycle parity with
-    // `remove_membership`'s single-removal path): once the child's
-    // membership on `pg-smoke-resource` is gone, nothing justifies the
-    // tenant claim on it any more.
-    let guard_row = GuardEntity::find()
-        .filter(GuardColumn::GtsTypeId.eq(root_type_id))
-        .filter(GuardColumn::ResourceId.eq("pg-smoke-resource"))
-        .secure()
-        .scope_with(&scope)
-        .one(&conn)
-        .await
-        .expect("query resource_membership_tenant");
-    assert!(
-        guard_row.is_none(),
-        "guard row for (gts_type_id={root_type_id}, resource_id=pg-smoke-resource) \
-         should be released once its last membership is gone"
-    );
-
-    // With the guard row gone, nothing on real PostgreSQL FK-restricts
-    // deleting `root_type` any more -- a leftover guard row here is exactly
-    // what turns this into the misleading "group(s) or membership(s) of
-    // this type exist" `ConflictActiveReferences`.
+    // With every membership of the subtree gone, nothing on real PostgreSQL
+    // FK-restricts deleting `root_type` any more: `ON DELETE RESTRICT` on
+    // `resource_group_membership.gts_type_id` is what would otherwise answer
+    // with "group(s) or membership(s) of this type exist".
     type_svc
         .delete_type_unscoped(&root_type.code)
         .await
-        .expect("delete_type should succeed once the orphaned guard is released");
+        .expect("delete_type should succeed once the subtree's memberships are gone");
 }
 
 /// RG-06 on real PostgreSQL: a 4-deep create chain, then the full closure

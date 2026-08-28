@@ -376,13 +376,14 @@ async fn trace_force_delete_subtree() {
         "delete_group(force=true) must run its writes inside a transaction:\n{}",
         rec.dump()
     );
-    // Force delete releases the guard rows its bulk membership delete
-    // orphaned, so it is the third path onto `resource_membership_tenant` and
-    // is bound by the same pairing as the two in `membership_service`.
+    // A force delete rewrites a whole subtree -- closure rows, memberships,
+    // the group rows themselves -- and races a concurrent create or move
+    // anywhere inside it. That is write skew over rows it does not lock, so
+    // it keeps `SERIALIZABLE` where the non-force delete does not.
     assert!(
         rec.all_in_serializable_transaction(),
-        "TX-04 regression: the force-delete cascade releases guard rows, so it \
-         must open SERIALIZABLE like the paths it races:\n{}",
+        "the force-delete cascade rewrites a subtree it does not lock and \
+         must open SERIALIZABLE:\n{}",
         rec.dump()
     );
 }
@@ -528,10 +529,11 @@ async fn trace_list_memberships() {
 /// that table is a key part or `created_at`, all four known to the caller
 /// (RG-08).
 ///
-/// Fixed 2026-08-21 (RG-01): the guard claim and the membership insert now
-/// share one transaction (`ensure_membership_guard` + `insert` inside
-/// `add_membership_inner`'s `transaction_with_retry`), so a failed insert
-/// rolls the claim back instead of leaving it behind. This asserts the fix.
+/// Fixed (RG-01): the tenant-compatibility check and the membership insert
+/// now share one `SERIALIZABLE` transaction inside `add_membership_inner`.
+/// Apart, two first memberships from different tenants each read an empty
+/// set and both commit; together at that level the read and the write into
+/// the same predicate are the write skew SSI cancels. This asserts the fix.
 #[tokio::test]
 async fn trace_add_membership() {
     let (db, rec) = common::test_db_with_recorder().await;
@@ -578,33 +580,35 @@ async fn trace_add_membership() {
 
     assert!(
         rec.writes_outside_tx().is_empty(),
-        "RG-01 regression: add_membership's guard claim and membership insert \
+        "RG-01 regression: add_membership's tenant check and membership insert \
          should share one transaction; got a write outside it:\n{}",
         rec.dump()
     );
     // `writes_outside_tx` only proves each write ran inside *some*
-    // transaction -- it would still pass if the guard claim and the
+    // transaction -- it would still pass if the tenant check and the
     // membership insert ran in two separate, sequential transactions rather
     // than one, which reopens RG-01 just as surely as running outside a
     // transaction entirely.
     assert!(
         rec.all_in_one_transaction(),
-        "RG-01 regression: add_membership's guard claim and membership insert \
+        "RG-01 regression: add_membership's tenant check and membership insert \
          must share one transaction, not merely one each:\n{}",
         rec.dump()
     );
-    // The guard row's correctness rests on something no statement count can
-    // see: `add_membership`, `remove_membership` and the force-delete cascade
-    // must *all* open `SERIALIZABLE`, because PostgreSQL's SSI only tracks
-    // conflicts among transactions that are all at that level. Lower one of
-    // them and this trace is byte-identical -- same statements, same order,
-    // same transaction -- and on SQLite, serializable regardless, the result
-    // does not change either. Only the requested level shows it (TX-04 in
-    // `docs/db-behavior-audit.md`).
+    // One transaction is not enough on its own, and the missing half is
+    // something no statement count can see. The check reads a predicate and
+    // the insert writes into it; at the backend default both writers read
+    // from their own snapshot, neither sees the other's uncommitted row, and
+    // both commit. Only `SERIALIZABLE` makes that a cycle SSI can cancel --
+    // and lowering the level leaves this trace byte-identical (same
+    // statements, same order, same transaction), while on SQLite, which
+    // serializes writes regardless, the outcome does not change either. The
+    // requested level is the only signal.
     assert!(
         rec.all_in_serializable_transaction(),
-        "TX-04 regression: add_membership must open SERIALIZABLE so SSI pairs \
-         it with the guard-releasing paths:\n{}",
+        "RG-01 regression: add_membership must open SERIALIZABLE -- the tenant \
+         check is a predicate read the insert writes into, and below that \
+         level two first memberships from different tenants both commit:\n{}",
         rec.dump()
     );
 }
@@ -634,18 +638,24 @@ async fn trace_remove_membership() {
 
     snapshot_trace("remove_membership", &rec);
 
-    // RG-14: the delete, the remaining-membership count and the guard release
-    // are one atomic decision, so they belong to one transaction.
-    assert!(
-        rec.all_in_one_transaction(),
-        "RG-14 regression: remove_membership's delete, count and guard release \
-         must share one transaction:\n{}",
+    // One DELETE by primary key, and nothing decided from a read: tenant
+    // ownership is derived from the membership rows themselves, so a removal
+    // has no second piece of state to keep in step and needs neither its own
+    // transaction nor a level above the backend default. The negative half of
+    // `trace_add_membership`'s assertion -- "raise everything to
+    // SERIALIZABLE" must not be how that one is satisfied.
+    let membership_deletes = count_in(&rec.stats(), QueryKind::Delete, "resource_group_membership");
+    assert_eq!(
+        membership_deletes,
+        1,
+        "expected exactly 1 resource_group_membership DELETE, got \
+         {membership_deletes}:\n{}",
         rec.dump()
     );
     assert!(
-        rec.all_in_serializable_transaction(),
-        "TX-04 regression: remove_membership must open SERIALIZABLE so SSI \
-         pairs it with the guard-claiming path:\n{}",
+        !rec.all_in_serializable_transaction(),
+        "remove_membership decides nothing from a read and must stay at the \
+         backend default:\n{}",
         rec.dump()
     );
 }
@@ -1532,6 +1542,34 @@ fn static_rule_passes_type_service_uses_retry() {
         "expected exactly 3 transaction_with_retry call sites in \
          type_service.rs -- create_type, update_type, delete_type -- \
          found {retried}"
+    );
+}
+
+#[test]
+fn static_rule_update_group_locks_the_row_it_may_rewrite() {
+    // `update_group` opens at the backend default for a rename or a
+    // metadata-only edit, and `GroupRepository::update` matches on `id`
+    // alone while always assigning `parent_id`. So the read that decides
+    // whether this request moves the group has to be the locked one: an
+    // unlocked read answers from a READ COMMITTED snapshot, and a reparent
+    // that commits in the gap gets written back out while the closure table
+    // keeps its ancestry. Invisible on SQLite -- it has no row locks and
+    // sea-query omits the clause -- and unreachable through the recorder,
+    // which is why it is pinned here as well as by
+    // `group_rename_does_not_revert_a_concurrent_reparent`.
+    let src = include_str!("../src/domain/group_service.rs");
+    let update_inner = fn_body(src, "update_group_inner");
+
+    assert!(
+        update_inner.contains("find_model_by_id_for_update"),
+        "update_group_inner must take the row lock on the group before it \
+         decides whether the parent changed: without it, a rename running \
+         below SERIALIZABLE reverts a concurrent move it never saw"
+    );
+    assert!(
+        !update_inner.contains(".find_model_by_id(tx, group_id)"),
+        "the authoritative read of the updated group must be the locked one; \
+         an unlocked read of the same row reintroduces the lost update"
     );
 }
 

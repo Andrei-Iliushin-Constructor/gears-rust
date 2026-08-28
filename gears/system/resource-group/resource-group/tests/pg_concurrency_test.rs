@@ -29,11 +29,10 @@
 //! | 3 | two `create_type` same code | | exactly one 409 |
 //! | 4 | non-force delete | create child | FK blocks create |
 //! | 5 | `delete_type` | `create_group` of type | RESTRICT blocks |
-//! | 6 | `add_membership` (tenant A) | `add_membership` (tenant B), same resource | guard claims exactly one, other gets a clean `TenantIncompatibility` -- not a bare DB error |
-//! | 7 | `remove_membership` x2, same resource | | guard released once, not stuck to the vacated tenant |
-//! | 8 | `ensure_membership_guard` claim, held-open loser | | forced into the `ON CONFLICT DO NOTHING` branch, resolves cleanly |
-//! | 9 | force-delete of a group holding the only membership on a resource | `add_membership` re-claiming that resource, same tenant, different group | guard row and surviving memberships agree (guard present iff a membership survives) -- never a live membership with no guard |
-//! | 10 | same as 9, but the cascade's membership-delete and guard-check bracket the add's guard-read and insert via a forced handshake | | same invariant as 9, plus: at least one side actually aborts on `40001` |
+//! | 6 | `add_membership` (tenant A) | `add_membership` (tenant B), same resource | exactly one commits, the other gets a clean `TenantIncompatibility` -- not a bare DB error |
+//! | 7 | `remove_membership` x2, same resource | | the resource is free for another tenant once its last membership is gone |
+//! | 8 | tenant check + membership insert, forced overlap at `SERIALIZABLE` | | SSI cancels one side; the resource ends up owned by one tenant |
+//! | 9 | same forced overlap at the backend default | | negative control: both commit and the resource ends up owned by two tenants |
 
 mod common;
 
@@ -41,15 +40,13 @@ use std::sync::Arc;
 
 use resource_group::domain::error::DomainError;
 use resource_group::domain::group_service::GroupService;
-use resource_group::domain::repo::{GroupRepositoryTrait, MembershipRepositoryTrait};
+use resource_group::domain::repo::MembershipRepositoryTrait;
 use resource_group::domain::type_service::TypeService;
 use resource_group::infra::storage::entity::resource_group_membership::{
     self as membership_entity, Entity as MembershipEntity,
 };
-use resource_group::infra::storage::entity::resource_membership_tenant::{
-    self as guard_entity, Entity as GuardEntity,
-};
 use resource_group::infra::storage::group_repo::GroupRepository;
+use resource_group::infra::storage::membership_repo::MembershipRepository;
 use resource_group::infra::storage::migrations::Migrator;
 use resource_group::infra::storage::type_repo::TypeRepository;
 use resource_group_sdk::models::{CreateGroupRequest, CreateTypeRequest, UpdateTypeRequest};
@@ -654,10 +651,10 @@ async fn concurrent_add_membership_from_two_tenants_claims_exactly_one() {
     let resource_id = "res-1".to_owned();
 
     // Both tenants race to be the first membership on the same resource.
-    // `ensure_membership_guard`'s claim is `ON CONFLICT DO NOTHING` inside
-    // the same transaction as the membership insert (RG-01) specifically so
-    // this cannot surface as a bare, unclassified database error under real
-    // contention -- see the doc comment on `ensure_membership_guard`.
+    // The check and the insert share one `SERIALIZABLE` transaction (RG-01),
+    // so the loser is either cancelled on `40001` and retried into the
+    // rejection, or reads the winner's committed row outright. Either way it
+    // must surface as a domain error, not a bare database one.
     let (r1, r2) = tokio::join!(
         membership_svc.add_membership(&ctx_a, group_a.id, &member_type.code, &resource_id),
         membership_svc.add_membership(&ctx_b, group_b.id, &member_type.code, &resource_id),
@@ -665,7 +662,10 @@ async fn concurrent_add_membership_from_two_tenants_claims_exactly_one() {
 
     match (&r1, &r2) {
         (Ok(_), Ok(_)) => {
-            panic!("both tenants claimed the same resource -- the guard did not serialize them")
+            panic!(
+                "both tenants claimed the same resource -- the tenant check and the \
+                 insert were not serialized against each other (RG-01)"
+            )
         }
         (Err(e1), Err(e2)) => panic!(
             "both attempts failed -- expected exactly one TenantIncompatibility, not a \
@@ -682,10 +682,10 @@ async fn concurrent_add_membership_from_two_tenants_claims_exactly_one() {
 }
 
 // -----------------------------------------------------------------------
-// 7. two concurrent remove_membership calls release the guard once
+// 7. two concurrent remove_membership calls free the resource
 // -----------------------------------------------------------------------
 #[tokio::test]
-async fn concurrent_remove_membership_releases_the_guard_exactly_once() {
+async fn concurrent_removals_free_the_resource_for_another_tenant() {
     let Some(fix) = pg_fixture().await else {
         return;
     };
@@ -720,7 +720,7 @@ async fn concurrent_remove_membership_releases_the_guard_exactly_once() {
         .expect("create group type");
 
     // Two groups under the same tenant, both linked to the same resource --
-    // the guard tracks the tenant, not the group, so both adds succeed.
+    // ownership is per tenant, not per group, so both adds succeed.
     let group_1 = group_svc
         .create_group(
             &ctx_a,
@@ -764,12 +764,10 @@ async fn concurrent_remove_membership_releases_the_guard_exactly_once() {
         .await
         .expect("add membership 2");
 
-    // Remove both concurrently. Under READ COMMITTED each side's
-    // `count_memberships` can see the other's not-yet-committed delete and
-    // conclude "one still remains" -- write-skew that would leave the guard
-    // pinned to `tenant_a` forever, even with no membership left to justify
-    // it. `remove_membership` runs `SERIALIZABLE` specifically so one side
-    // aborts and retries against the post-commit count instead.
+    // Remove both concurrently. Each removal is one DELETE by primary key
+    // and decides nothing from a read, so there is no second piece of state
+    // to fall out of step and no isolation level to get wrong -- which is
+    // the point of deriving ownership from the membership rows themselves.
     let (r1, r2) = tokio::join!(
         membership_svc.remove_membership(&ctx_a, group_1.id, &member_type.code, &resource_id),
         membership_svc.remove_membership(&ctx_a, group_2.id, &member_type.code, &resource_id),
@@ -777,7 +775,8 @@ async fn concurrent_remove_membership_releases_the_guard_exactly_once() {
     r1.expect("remove membership 1");
     r2.expect("remove membership 2");
 
-    // If the guard leaked, it would still say `tenant_a` and reject this.
+    // With every membership gone, the resource belongs to nobody, and the
+    // next tenant to link it becomes its owner.
     let group_b = group_svc
         .create_group(
             &ctx_b,
@@ -797,36 +796,45 @@ async fn concurrent_remove_membership_releases_the_guard_exactly_once() {
         .add_membership(&ctx_b, group_b.id, &member_type.code, &resource_id)
         .await
         .expect(
-            "guard leak: a different tenant should be able to claim the resource once every \
-             membership on it has been removed",
+            "a different tenant should be able to take the resource once every membership \
+             on it has been removed",
         );
 }
 
 // -----------------------------------------------------------------------
-// 8. guard claim actually hits the ON CONFLICT DO NOTHING branch
+// 8/9. tenant check + membership insert, forced into the overlap window
 // -----------------------------------------------------------------------
-// Scenario 6 above races two full `add_membership` calls via `tokio::join!`,
-// but that interleaving is not guaranteed to land inside the exact window
-// where one side's `INSERT ... ON CONFLICT DO NOTHING` finds a real
-// conflict -- it can just as easily have both sides' optimistic pre-read
-// run before either has inserted, or one side's pre-read find the other's
-// already-committed row and return early, neither of which exercises the
-// conflict branch at all. This test forces that window deterministically by
-// holding the winner's transaction open past its own INSERT until the loser
-// has had time to issue its own conflicting one, instead of hoping
-// `tokio::join!` schedules it that way.
-#[tokio::test]
-async fn concurrent_guard_claim_hits_the_do_nothing_conflict_branch() {
-    let Some(fix) = pg_fixture().await else {
-        return;
-    };
+// Scenario 6 races two full `add_membership` calls, but that interleaving is
+// not guaranteed to land inside the window RG-01 is about: one side's check
+// can just as easily run after the other has already committed, which is the
+// uninteresting ordering. These two force the window with a handshake and
+// differ only in the isolation level the two transactions open at -- which is
+// the whole claim being tested, so the pair is written as one helper driven
+// twice.
+//
+// The barrier is: A checks (sees nothing), B then checks (still sees
+// nothing, A has not written yet) and commits its insert, and only then does
+// A insert and commit. At `SERIALIZABLE` that is a cycle of
+// rw-antidependencies and PostgreSQL cancels A as the pivot. At the backend
+// default nothing objects and both commit -- the corruption this pairing
+// exists to prevent, kept as a permanent negative control so the level
+// cannot be quietly lowered.
+struct OverlapOutcome {
+    first: Result<(), DomainError>,
+    second: Result<(), DomainError>,
+    owning_tenants: Vec<Uuid>,
+}
 
-    let db = fix.db.db();
-    let repo = resource_group::infra::storage::membership_repo::MembershipRepository;
-    let (type_svc, _) = make_services(fix.db.clone());
+async fn run_first_membership_overlap(fix: &PgFixture, config: TxConfig) -> OverlapOutcome {
+    let tenant_a = Uuid::now_v7();
+    let tenant_b = Uuid::now_v7();
+    let ctx_a = make_ctx(tenant_a);
+    let ctx_b = make_ctx(tenant_b);
+    let (type_svc, group_svc) = make_services(fix.db.clone());
+
     let member_type = type_svc
         .create_type_unscoped(CreateTypeRequest {
-            code: type_code("probemt"),
+            code: type_code("ovlmbr"),
             can_be_root: true,
             allowed_parent_types: vec![],
             allowed_membership_types: vec![],
@@ -834,762 +842,196 @@ async fn concurrent_guard_claim_hits_the_do_nothing_conflict_branch() {
         })
         .await
         .expect("create member type");
-    let conn = fix.db.conn().expect("db conn");
-    let gts_type_id: i16 = resource_group::infra::storage::type_repo::TypeRepository::resolve_id(
-        &conn,
-        &member_type.code,
-    )
-    .await
-    .expect("resolve type id")
-    .expect("type must exist");
-    let resource_id = "probe-res".to_owned();
-    let tenant_a = Uuid::now_v7();
-    let tenant_b = Uuid::now_v7();
 
-    let (winner_inserted_tx, winner_inserted_rx) = tokio::sync::oneshot::channel::<()>();
-    let (release_winner_tx, release_winner_rx) = tokio::sync::oneshot::channel::<()>();
+    let group_type = type_svc
+        .create_type_unscoped(CreateTypeRequest {
+            code: type_code("ovlgrp"),
+            can_be_root: true,
+            allowed_parent_types: vec![],
+            allowed_membership_types: vec![member_type.code.clone()],
+            metadata_schema: None,
+        })
+        .await
+        .expect("create group type");
 
-    let db_winner = db.clone();
-    let resource_id_w = resource_id.clone();
-    let winner = tokio::spawn(async move {
-        db_winner
-            .transaction_ref_mapped::<_, (), DomainError>(move |tx| {
-                let resource_id = resource_id_w.clone();
+    let mut group_ids = Vec::new();
+    for (ctx, tenant, name) in [(&ctx_a, tenant_a, "A"), (&ctx_b, tenant_b, "B")] {
+        let group = group_svc
+            .create_group(
+                ctx,
+                CreateGroupRequest {
+                    id: None,
+                    code: group_type.code.clone(),
+                    name: name.to_owned(),
+                    parent_id: None,
+                    tenant_id: None,
+                    metadata: None,
+                },
+                tenant,
+            )
+            .await
+            .expect("create group");
+        group_ids.push(group.id);
+    }
+    let (group_a, group_b) = (group_ids[0], group_ids[1]);
+
+    let conn = fix.db.conn().expect("conn");
+    let gts_type_id: i16 = TypeRepository::resolve_id(&conn, &member_type.code)
+        .await
+        .expect("resolve type id")
+        .expect("type must exist");
+
+    let resource_id = "overlap-res".to_owned();
+    let db = fix.db.db();
+
+    let (a_checked_tx, a_checked_rx) = tokio::sync::oneshot::channel::<()>();
+    let (b_done_tx, b_done_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let db_a = db.clone();
+    let resource_a = resource_id.clone();
+    let config_a = config.clone();
+    let first = tokio::spawn(async move {
+        db_a.transaction_ref_mapped_with_config::<_, (), DomainError>(config_a, move |tx| {
+            let resource_id = resource_a.clone();
+            // Ignored, not `expect`ed: at SERIALIZABLE the peer may already
+            // have returned by the time this fires, and its receiver going
+            // away is an outcome of the race, not a reason to panic.
+            let a_checked_tx = a_checked_tx;
+            let b_done_rx = b_done_rx;
+            Box::pin(async move {
+                let conflict = MembershipRepository
+                    .has_membership_in_other_tenant(tx, gts_type_id, &resource_id, tenant_a)
+                    .await?;
+                assert!(!conflict, "A must see an unclaimed resource");
+                let _send = a_checked_tx.send(());
+                let _recv = b_done_rx.await;
+                MembershipRepository
+                    .insert(tx, group_a, gts_type_id, &resource_id)
+                    .await?;
+                Ok(())
+            })
+        })
+        .await
+    });
+
+    a_checked_rx.await.expect("A must reach its check");
+
+    let db_b = db.clone();
+    let resource_b = resource_id.clone();
+    let config_b = config.clone();
+    let second = tokio::spawn(async move {
+        let out = db_b
+            .transaction_ref_mapped_with_config::<_, (), DomainError>(config_b, move |tx| {
+                let resource_id = resource_b.clone();
                 Box::pin(async move {
-                    resource_group::infra::storage::membership_repo::MembershipRepository
-                        .ensure_membership_guard(tx, gts_type_id, &resource_id, tenant_a)
+                    let conflict = MembershipRepository
+                        .has_membership_in_other_tenant(tx, gts_type_id, &resource_id, tenant_b)
                         .await?;
-                    winner_inserted_tx.send(()).expect("send winner-inserted");
-                    release_winner_rx.await.expect("recv release");
+                    assert!(!conflict, "B must still see an unclaimed resource");
+                    MembershipRepository
+                        .insert(tx, group_b, gts_type_id, &resource_id)
+                        .await?;
                     Ok(())
                 })
             })
-            .await
-            .expect("winner transaction");
+            .await;
+        let _send = b_done_tx.send(());
+        out
     });
 
-    winner_inserted_rx.await.expect("recv winner-inserted");
+    let second_result = second.await.expect("B task");
+    let first_result = first.await.expect("A task");
 
-    let db_loser = db.clone();
-    let loser = tokio::spawn(async move {
-        db_loser
-            .transaction_ref_mapped::<_, Result<uuid::Uuid, DomainError>, DomainError>(move |tx| {
-                let resource_id = resource_id.clone();
-                Box::pin(async move {
-                    Ok(repo
-                        .ensure_membership_guard(tx, gts_type_id, &resource_id, tenant_b)
-                        .await)
-                })
-            })
+    // Which tenants ended up owning the resource. Read as rows, not as a
+    // count: this asks *who*, and the answer is at most two groups.
+    let conn = fix.db.conn().expect("conn");
+    let scope = AccessScope::allow_all();
+    let mut owning_tenants = Vec::new();
+    for (group_id, tenant_id) in [(group_a, tenant_a), (group_b, tenant_b)] {
+        let row = MembershipEntity::find()
+            .filter(membership_entity::Column::GroupId.eq(group_id))
+            .filter(membership_entity::Column::GtsTypeId.eq(gts_type_id))
+            .filter(membership_entity::Column::ResourceId.eq(resource_id.clone()))
+            .secure()
+            .scope_with(&scope)
+            .one(&conn)
             .await
-            .expect("loser transaction")
-    });
-
-    // The winner's INSERT is done but deliberately uncommitted. On
-    // PostgreSQL, the loser's `INSERT ... ON CONFLICT DO NOTHING` blocks on
-    // the winner's uncommitted conflicting row rather than erroring
-    // immediately, so releasing the winner only after giving the loser's
-    // task a moment to actually reach and issue that statement is what
-    // forces the conflict deterministically instead of by luck: release too
-    // early and the loser's own pre-read might still find nothing and race
-    // the INSERT clean, release too late and nothing would be different.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    release_winner_tx.send(()).expect("send release");
-
-    winner.await.expect("winner task");
-    let result = loser.await.expect("loser task");
-    match result {
-        Ok(winner_tenant) => {
-            assert_eq!(
-                winner_tenant, tenant_a,
-                "loser should see the winner's tenant"
-            );
+            .expect("query membership");
+        if row.is_some() {
+            owning_tenants.push(tenant_id);
         }
-        Err(e) => panic!(
-            "the loser's guard claim hit the DO NOTHING conflict and should have resolved to \
-             the winner's tenant instead of erroring: {e}"
-        ),
+    }
+
+    OverlapOutcome {
+        first: first_result,
+        second: second_result,
+        owning_tenants,
     }
 }
 
-// -----------------------------------------------------------------------
-// 9. concurrent force-delete (cascading guard release) vs add_membership
-//    re-adding the same resource under the same tenant, via an unrelated
-//    group
-// -----------------------------------------------------------------------
-// TX-04 (db-behavior-audit.md) pairs `add_membership_inner`'s guard claim
-// against `remove_membership`'s guard release under `SERIALIZABLE` so SSI
-// tracks both halves of the guard lifecycle together; without that pairing,
-// a `READ COMMITTED` `add_membership_inner` re-adding the same tenant a
-// concurrent cleanup is in the middle of vacating is invisible to the
-// cleanup's live-membership count, and the resource ends up with a live
-// membership and no guard row. `force_delete_subtree`'s cascading release
-// (`delete_orphaned_membership_guards`, reached from `delete_group_inner`
-// only when `force == true` -- exactly when `delete_group` opens
-// `SERIALIZABLE`) is a third path capable of releasing that same guard row
-// and depends on the identical pairing. This test reproduces TX-04's shape
-// with the cascade standing in for `remove_membership`: force-delete a
-// group holding the resource's only membership, racing `add_membership` of
-// the *same* resource under the *same* tenant but a different, unrelated
-// group -- exactly the shape that would go undetected if the cascade ran at
-// a weaker isolation level, since add's own tenant-match check cannot save
-// it (the tenant matches by construction).
-//
-// A *different*-tenant racer was deliberately not used here: an
-// `add_membership` for another tenant can only ever observe "no guard" once
-// the cascade's delete of that row has actually committed (Postgres never
-// exposes uncommitted writes across sessions, regardless of isolation
-// level), at which point the cascade's own transaction -- including its
-// membership delete -- is already done. That ordering is always a safe,
-// fully serial outcome; it cannot exhibit the write-skew this test is
-// after. The danger is specific to a *same*-tenant reclaim, which is
-// allowed to proceed on nothing more than "the guard already names my
-// tenant" and therefore does not gate itself against the cascade the way a
-// mismatched tenant would.
 #[tokio::test]
-async fn concurrent_force_delete_and_same_tenant_add_membership() {
+async fn forced_overlap_at_serializable_keeps_one_tenant() {
     let Some(fix) = pg_fixture().await else {
         return;
     };
 
-    let tenant_a = Uuid::now_v7();
-    let ctx_a = make_ctx(tenant_a);
-    let (type_svc, group_svc) = make_services(fix.db.clone());
-    let membership_svc = common::make_membership_service(fix.db.clone());
-
-    let member_type = type_svc
-        .create_type_unscoped(CreateTypeRequest {
-            code: type_code("fdcmbr"),
-            can_be_root: true,
-            allowed_parent_types: vec![],
-            allowed_membership_types: vec![],
-            metadata_schema: None,
-        })
-        .await
-        .expect("create member type");
-
-    let group_type = type_svc
-        .create_type_unscoped(CreateTypeRequest {
-            code: type_code("fdcgrp"),
-            can_be_root: true,
-            allowed_parent_types: vec![],
-            allowed_membership_types: vec![member_type.code.clone()],
-            metadata_schema: None,
-        })
-        .await
-        .expect("create group type");
-
-    // `group_a` is force-deleted below; it holds the only membership on
-    // `resource_id`, so it is also what holds the guard row for it.
-    let group_a = group_svc
-        .create_group(
-            &ctx_a,
-            CreateGroupRequest {
-                id: None,
-                code: group_type.code.clone(),
-                name: "A".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
-            tenant_a,
-        )
-        .await
-        .expect("create group A");
-
-    // `group_a2` is unrelated to `group_a`'s subtree but owned by the same
-    // tenant, and is where the racing `add_membership` lands -- the same
-    // tenant re-adding the resource, not a different one.
-    let group_a2 = group_svc
-        .create_group(
-            &ctx_a,
-            CreateGroupRequest {
-                id: None,
-                code: group_type.code,
-                name: "A2".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
-            tenant_a,
-        )
-        .await
-        .expect("create group A2");
-
-    let resource_id = "res-1".to_owned();
-
-    membership_svc
-        .add_membership(&ctx_a, group_a.id, &member_type.code, &resource_id)
-        .await
-        .expect("seed membership on group A");
-
-    // Race: force-delete of group A cascades into
-    // `delete_orphaned_membership_guards`, which releases the guard once its
-    // own membership delete leaves nothing else referencing the resource,
-    // against `add_membership` re-claiming the same resource for the same
-    // tenant via `group_a2`. Both sides must be `SERIALIZABLE` for SSI to
-    // see the cycle: the cascade's predicate read over live memberships
-    // (the "still referenced?" check) rw-conflicts with the add's insert,
-    // and the add's read of the guard row rw-conflicts with the cascade's
-    // release of it -- a two-edge cycle Postgres resolves by aborting one
-    // side with `40001`, which `TxConfig::serializable()`'s bounded retry
-    // then replays against the post-commit state.
-    let (delete_result, add_result) = tokio::join!(
-        group_svc.delete_group(&ctx_a, group_a.id, true),
-        membership_svc.add_membership(&ctx_a, group_a2.id, &member_type.code, &resource_id),
-    );
-
-    // Both operations can legitimately succeed (the cascade correctly saw
-    // the add's membership and left the guard alone, or the add correctly
-    // re-claimed it after the cascade had already released it), or either
-    // can fail on contention/state left by the other. What must not happen
-    // is a final state where the guard and the memberships disagree --
-    // checked below independently of these return values, since both could
-    // report success while the rows underneath are inconsistent.
-    eprintln!(
-        "concurrent_force_delete_and_same_tenant_add_membership: {} {}",
-        fmt_outcome("delete", &delete_result),
-        fmt_outcome("add", &add_result),
-    );
-
-    // Read the guard row and the surviving memberships back unscoped --
-    // same rationale as `count_memberships`'s own `system_scope()`: this is
-    // an integrity check, not a tenant-scoped read, and must see every row
-    // regardless of caller scope.
-    let conn = fix.db.conn().expect("db conn");
-    let scope = AccessScope::allow_all();
-    let gts_type_id: i16 = TypeRepository::resolve_id(&conn, &member_type.code)
-        .await
-        .expect("resolve type id")
-        .expect("type must exist");
-
-    let membership_a = MembershipEntity::find()
-        .filter(membership_entity::Column::GroupId.eq(group_a.id))
-        .filter(membership_entity::Column::GtsTypeId.eq(gts_type_id))
-        .filter(membership_entity::Column::ResourceId.eq(resource_id.clone()))
-        .secure()
-        .scope_with(&scope)
-        .one(&conn)
-        .await
-        .expect("query membership A")
-        .is_some();
-
-    let membership_a2 = MembershipEntity::find()
-        .filter(membership_entity::Column::GroupId.eq(group_a2.id))
-        .filter(membership_entity::Column::GtsTypeId.eq(gts_type_id))
-        .filter(membership_entity::Column::ResourceId.eq(resource_id.clone()))
-        .secure()
-        .scope_with(&scope)
-        .one(&conn)
-        .await
-        .expect("query membership A2")
-        .is_some();
-
-    let guard_tenant = GuardEntity::find()
-        .filter(guard_entity::Column::GtsTypeId.eq(gts_type_id))
-        .filter(guard_entity::Column::ResourceId.eq(resource_id.clone()))
-        .secure()
-        .scope_with(&scope)
-        .one(&conn)
-        .await
-        .expect("query guard row")
-        .map(|g| g.tenant_id);
-
-    // The only consistent outcomes: no guard and no membership left at all
-    // (the cascade fully won and the add never landed), or a guard that
-    // names `tenant_a` while at least one of the two memberships is still
-    // alive (any mix of "A survived because the delete lost", "A2 landed
-    // because the add won", or both, if the delete simply failed and
-    // retried outside this test's own join). Anything else -- a guard with
-    // no live membership under it, or a live membership with no guard at
-    // all -- is exactly the claim-vs-cleanup write-skew this test exists to
-    // rule out.
-    let any_membership = membership_a || membership_a2;
-    match (guard_tenant, any_membership) {
-        (None, false) => {}
-        (Some(t), true) if t == tenant_a => {}
-        (guard, _) => panic!(
-            "inconsistent guard/membership state after the race: \
-             guard_tenant={guard:?}, membership_a_exists={membership_a}, \
-             membership_a2_exists={membership_a2} (expected either no guard \
-             with no memberships, or a guard naming tenant_a with at least \
-             one of the two memberships still alive)"
-        ),
-    }
-}
-
-// -----------------------------------------------------------------------
-// 10. same race as scenario 9, forced into the actual overlap window
-// -----------------------------------------------------------------------
-// Scenario 9 races the full `delete_group`/`add_membership` service calls,
-// but `add_membership_inner` does three extra round trips (group lookup,
-// type resolution, allowed-membership-types load) before it ever opens its
-// transaction, while the cascade opens its transaction right after its
-// AuthZ check; in a low-latency test environment the cascade reliably
-// commits before the add's transaction even begins, so scenario 9 alone
-// never actually lands inside the window where the two transactions'
-// snapshots overlap (empirically: 15/15 local runs resolved as a fully
-// serial "cascade wins, then add re-claims", which is a safe outcome but
-// not the one this invariant depends on `SERIALIZABLE` for). This test
-// drops down a layer -- the way scenario 8 does for a different race -- and
-// drives the two transactions' own repository calls directly with a
-// two-way barrier, so the cascade's own membership delete and its
-// "still referenced?" predicate check bracket the add's guard read and
-// membership insert: neither side's snapshot can observe the other's
-// write, which is exactly the overlap a `READ COMMITTED` version of either
-// side would resolve into corruption instead of an SSI abort.
-//
-// Deliberately minimal: only the two repository calls that touch
-// `resource_group_membership` / `resource_membership_tenant` are run here,
-// not the rest of `force_delete_subtree` (closure rows, the group row
-// itself) or the rest of `add_membership_inner` (group/type lookups) --
-// those don't participate in this particular conflict, and every previous
-// scenario in this file already exercises them.
-#[tokio::test]
-async fn concurrent_force_delete_and_same_tenant_add_membership_forced_overlap() {
-    let Some(fix) = pg_fixture().await else {
-        return;
-    };
-
-    let tenant_a = Uuid::now_v7();
-    let ctx_a = make_ctx(tenant_a);
-    let (type_svc, group_svc) = make_services(fix.db.clone());
-    let membership_svc = common::make_membership_service(fix.db.clone());
-
-    let member_type = type_svc
-        .create_type_unscoped(CreateTypeRequest {
-            code: type_code("fdcmbr2"),
-            can_be_root: true,
-            allowed_parent_types: vec![],
-            allowed_membership_types: vec![],
-            metadata_schema: None,
-        })
-        .await
-        .expect("create member type");
-
-    let group_type = type_svc
-        .create_type_unscoped(CreateTypeRequest {
-            code: type_code("fdcgrp2"),
-            can_be_root: true,
-            allowed_parent_types: vec![],
-            allowed_membership_types: vec![member_type.code.clone()],
-            metadata_schema: None,
-        })
-        .await
-        .expect("create group type");
-
-    let group_a = group_svc
-        .create_group(
-            &ctx_a,
-            CreateGroupRequest {
-                id: None,
-                code: group_type.code.clone(),
-                name: "A".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
-            tenant_a,
-        )
-        .await
-        .expect("create group A");
-
-    let group_a2 = group_svc
-        .create_group(
-            &ctx_a,
-            CreateGroupRequest {
-                id: None,
-                code: group_type.code,
-                name: "A2".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
-            tenant_a,
-        )
-        .await
-        .expect("create group A2");
-
-    let resource_id = "res-1".to_owned();
-
-    membership_svc
-        .add_membership(&ctx_a, group_a.id, &member_type.code, &resource_id)
-        .await
-        .expect("seed membership on group A");
-
-    let conn = fix.db.conn().expect("db conn");
-    let gts_type_id: i16 = TypeRepository::resolve_id(&conn, &member_type.code)
-        .await
-        .expect("resolve type id")
-        .expect("type must exist");
-
-    let db = fix.db.db();
-    let deleted_group_id = group_a.id;
-    let reclaim_group_id = group_a2.id;
-    let resource_id_cascade = resource_id.clone();
-    let resource_id_add = resource_id.clone();
-
-    // Two-way handshake instead of a timed sleep: the cascade deletes group
-    // A's membership row, then waits for the add to have done its guard
-    // read and insert (still uncommitted) before running its own
-    // "still referenced?" check; the add waits for that delete (still
-    // uncommitted) before doing its own read and insert. Both transactions
-    // are open the whole time, so this is a guaranteed overlap, not a
-    // probable one.
-    let (to_add_tx, to_add_rx) = tokio::sync::oneshot::channel::<()>();
-    let (to_cascade_tx, to_cascade_rx) = tokio::sync::oneshot::channel::<()>();
-
-    let db_cascade = db.clone();
-    let cascade = tokio::spawn(async move {
-        db_cascade
-            .transaction_ref_mapped_with_config::<_, (), DomainError>(
-                TxConfig::serializable(),
-                move |tx| {
-                    let keys = vec![(gts_type_id, resource_id_cascade.clone())];
-                    Box::pin(async move {
-                        GroupRepository
-                            .delete_memberships_many(tx, &[deleted_group_id])
-                            .await?;
-                        // Ignored, not `expect`ed: if the peer transaction already returned
-                        // -- an SSI abort is raised at statement time, which is one of the
-                        // outcomes these tests treat as a pass -- its receiver is gone, and
-                        // that is not a reason to panic this side out of its own assertions.
-                        let _send = to_add_tx.send(());
-                        let _recv = to_cascade_rx.await;
-                        GroupRepository
-                            .delete_orphaned_membership_guards(tx, &keys)
-                            .await?;
-                        Ok(())
-                    })
-                },
-            )
-            .await
-    });
-
-    let db_add = db.clone();
-    let add = tokio::spawn(async move {
-        db_add
-            .transaction_ref_mapped_with_config::<_, (), DomainError>(
-                TxConfig::serializable(),
-                move |tx| {
-                    let resource_id = resource_id_add.clone();
-                    Box::pin(async move {
-                        let _recv = to_add_rx.await;
-                        resource_group::infra::storage::membership_repo::MembershipRepository
-                            .ensure_membership_guard(tx, gts_type_id, &resource_id, tenant_a)
-                            .await?;
-                        resource_group::infra::storage::membership_repo::MembershipRepository
-                            .insert(tx, reclaim_group_id, gts_type_id, &resource_id)
-                            .await?;
-                        let _send = to_cascade_tx.send(());
-                        Ok(())
-                    })
-                },
-            )
-            .await
-    });
-
-    let cascade_result = cascade.await.expect("cascade task");
-    let add_result = add.await.expect("add task");
+    let outcome = run_first_membership_overlap(&fix, TxConfig::serializable()).await;
 
     eprintln!(
-        "concurrent_force_delete_and_same_tenant_add_membership_forced_overlap: {} {}",
-        fmt_outcome("cascade", &cascade_result),
-        fmt_outcome("add", &add_result),
+        "forced_overlap_at_serializable_keeps_one_tenant: {} {}",
+        fmt_outcome("first", &outcome.first),
+        fmt_outcome("second", &outcome.second),
     );
 
-    // The whole point of forcing the window: at least one side must lose it
-    // to an SSI abort. Both committing here would mean the two statements
-    // were never actually tracked as conflicting -- a problem with this
-    // test's setup, not a pass on the invariant it exists to check.
-    assert!(
-        cascade_result.is_err() || add_result.is_err(),
-        "expected the forced overlap to produce an SSI abort on at least \
-         one side; both committed, meaning the two transactions were not \
-         tracked as conflicting: cascade={cascade_result:?} add={add_result:?}"
-    );
-
-    // Same invariant as scenario 9, checked the same way.
-    let scope = AccessScope::allow_all();
-    let membership_a = MembershipEntity::find()
-        .filter(membership_entity::Column::GroupId.eq(deleted_group_id))
-        .filter(membership_entity::Column::GtsTypeId.eq(gts_type_id))
-        .filter(membership_entity::Column::ResourceId.eq(resource_id.clone()))
-        .secure()
-        .scope_with(&scope)
-        .one(&conn)
-        .await
-        .expect("query membership A")
-        .is_some();
-
-    let membership_a2 = MembershipEntity::find()
-        .filter(membership_entity::Column::GroupId.eq(reclaim_group_id))
-        .filter(membership_entity::Column::GtsTypeId.eq(gts_type_id))
-        .filter(membership_entity::Column::ResourceId.eq(resource_id.clone()))
-        .secure()
-        .scope_with(&scope)
-        .one(&conn)
-        .await
-        .expect("query membership A2")
-        .is_some();
-
-    let guard_tenant = GuardEntity::find()
-        .filter(guard_entity::Column::GtsTypeId.eq(gts_type_id))
-        .filter(guard_entity::Column::ResourceId.eq(resource_id.clone()))
-        .secure()
-        .scope_with(&scope)
-        .one(&conn)
-        .await
-        .expect("query guard row")
-        .map(|g| g.tenant_id);
-
-    let any_membership = membership_a || membership_a2;
-    match (guard_tenant, any_membership) {
-        (None, false) => {}
-        (Some(t), true) if t == tenant_a => {}
-        (guard, _) => panic!(
-            "inconsistent guard/membership state after the forced-overlap race: \
-             guard_tenant={guard:?}, membership_a_exists={membership_a}, \
-             membership_a2_exists={membership_a2}"
-        ),
-    }
-}
-
-// Negative control for the scenario above, and the reason its
-// `SERIALIZABLE` pairing is not decoration. Same forced overlap, same two
-// repository calls, one difference: the cascade side runs at the backend
-// default. PostgreSQL's SSI only tracks conflicts among transactions that
-// are *all* `SERIALIZABLE`, so nothing aborts, both sides commit, and the
-// resource ends up with a live membership and no guard row -- the exact
-// corruption TX-04 describes.
-//
-// This is the audit's own method made permanent: inject the defect, watch
-// the invariant break, keep the demonstration next to the fix. Note what it
-// does *not* do -- like the test above, it opens its own transactions, so
-// neither test would catch `delete_group` or `add_membership_inner` being
-// switched to a lower level. That choice lives in `group_service.rs`'s
-// `delete_group` (`force` picks `TxConfig::serializable()`) and in
-// `membership_service.rs`, and is guarded by review, not by this file.
-#[tokio::test]
-async fn forced_overlap_at_read_committed_orphans_the_guard() {
-    let Some(fix) = pg_fixture().await else {
-        return;
-    };
-
-    let tenant_a = Uuid::now_v7();
-    let ctx_a = make_ctx(tenant_a);
-    let (type_svc, group_svc) = make_services(fix.db.clone());
-    let membership_svc = common::make_membership_service(fix.db.clone());
-
-    let member_type = type_svc
-        .create_type_unscoped(CreateTypeRequest {
-            code: type_code("fdcmbr3"),
-            can_be_root: true,
-            allowed_parent_types: vec![],
-            allowed_membership_types: vec![],
-            metadata_schema: None,
-        })
-        .await
-        .expect("create member type");
-
-    let group_type = type_svc
-        .create_type_unscoped(CreateTypeRequest {
-            code: type_code("fdcgrp3"),
-            can_be_root: true,
-            allowed_parent_types: vec![],
-            allowed_membership_types: vec![member_type.code.clone()],
-            metadata_schema: None,
-        })
-        .await
-        .expect("create group type");
-
-    let group_a = group_svc
-        .create_group(
-            &ctx_a,
-            CreateGroupRequest {
-                id: None,
-                code: group_type.code.clone(),
-                name: "A".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
-            tenant_a,
-        )
-        .await
-        .expect("create group A");
-
-    let group_a2 = group_svc
-        .create_group(
-            &ctx_a,
-            CreateGroupRequest {
-                id: None,
-                code: group_type.code,
-                name: "A2".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
-            tenant_a,
-        )
-        .await
-        .expect("create group A2");
-
-    let resource_id = "res-1".to_owned();
-
-    membership_svc
-        .add_membership(&ctx_a, group_a.id, &member_type.code, &resource_id)
-        .await
-        .expect("seed membership on group A");
-
-    let conn = fix.db.conn().expect("db conn");
-    let gts_type_id: i16 = TypeRepository::resolve_id(&conn, &member_type.code)
-        .await
-        .expect("resolve type id")
-        .expect("type must exist");
-
-    let db = fix.db.db();
-    let deleted_group_id = group_a.id;
-    let reclaim_group_id = group_a2.id;
-    let resource_id_cascade = resource_id.clone();
-    let resource_id_add = resource_id.clone();
-
-    // Two-way handshake instead of a timed sleep: the cascade deletes group
-    // A's membership row, then waits for the add to have done its guard
-    // read and insert (still uncommitted) before running its own
-    // "still referenced?" check; the add waits for that delete (still
-    // uncommitted) before doing its own read and insert. Both transactions
-    // are open the whole time, so this is a guaranteed overlap, not a
-    // probable one.
-    let (to_add_tx, to_add_rx) = tokio::sync::oneshot::channel::<()>();
-    let (to_cascade_tx, to_cascade_rx) = tokio::sync::oneshot::channel::<()>();
-    // Third leg, the one the SERIALIZABLE test above does not need: the add
-    // must still be uncommitted when the cascade runs its "still
-    // referenced?" check, or the cascade simply sees the committed
-    // membership and correctly keeps the guard.
-    let (to_commit_tx, to_commit_rx) = tokio::sync::oneshot::channel::<()>();
-
-    let db_cascade = db.clone();
-    let cascade = tokio::spawn(async move {
-        db_cascade
-            .transaction_ref_mapped_with_config::<_, (), DomainError>(
-                TxConfig::default(),
-                move |tx| {
-                    let keys = vec![(gts_type_id, resource_id_cascade.clone())];
-                    Box::pin(async move {
-                        GroupRepository
-                            .delete_memberships_many(tx, &[deleted_group_id])
-                            .await?;
-                        // Ignored, not `expect`ed: if the peer transaction already returned
-                        // -- an SSI abort is raised at statement time, which is one of the
-                        // outcomes these tests treat as a pass -- its receiver is gone, and
-                        // that is not a reason to panic this side out of its own assertions.
-                        let _send = to_add_tx.send(());
-                        let _recv = to_cascade_rx.await;
-                        GroupRepository
-                            .delete_orphaned_membership_guards(tx, &keys)
-                            .await?;
-                        let _send = to_commit_tx.send(());
-                        Ok(())
-                    })
-                },
-            )
-            .await
-    });
-
-    let db_add = db.clone();
-    let add = tokio::spawn(async move {
-        db_add
-            .transaction_ref_mapped_with_config::<_, (), DomainError>(
-                TxConfig::serializable(),
-                move |tx| {
-                    let resource_id = resource_id_add.clone();
-                    Box::pin(async move {
-                        let _recv = to_add_rx.await;
-                        resource_group::infra::storage::membership_repo::MembershipRepository
-                            .ensure_membership_guard(tx, gts_type_id, &resource_id, tenant_a)
-                            .await?;
-                        resource_group::infra::storage::membership_repo::MembershipRepository
-                            .insert(tx, reclaim_group_id, gts_type_id, &resource_id)
-                            .await?;
-                        let _send = to_cascade_tx.send(());
-                        let _recv = to_commit_rx.await;
-                        Ok(())
-                    })
-                },
-            )
-            .await
-    });
-
-    let cascade_result = cascade.await.expect("cascade task");
-    let add_result = add.await.expect("add task");
-
-    eprintln!(
-        "forced_overlap_at_read_committed_orphans_the_guard: {} {}",
-        fmt_outcome("cascade", &cascade_result),
-        fmt_outcome("add", &add_result),
-    );
-
-    // No SSI abort is possible here: SSI only tracks conflicts among
-    // transactions that are *all* `SERIALIZABLE`, and the cascade is not.
-    // Both sides commit, and the invariant breaks.
-    assert!(
-        cascade_result.is_ok() && add_result.is_ok(),
-        "the negative control expects both sides to commit at READ COMMITTED; \
-         an abort here means the setup no longer reproduces the window: \
-         cascade={cascade_result:?} add={add_result:?}"
-    );
-
-    // Same invariant as scenario 9, checked the same way.
-    let scope = AccessScope::allow_all();
-    let membership_a = MembershipEntity::find()
-        .filter(membership_entity::Column::GroupId.eq(deleted_group_id))
-        .filter(membership_entity::Column::GtsTypeId.eq(gts_type_id))
-        .filter(membership_entity::Column::ResourceId.eq(resource_id.clone()))
-        .secure()
-        .scope_with(&scope)
-        .one(&conn)
-        .await
-        .expect("query membership A")
-        .is_some();
-
-    let membership_a2 = MembershipEntity::find()
-        .filter(membership_entity::Column::GroupId.eq(reclaim_group_id))
-        .filter(membership_entity::Column::GtsTypeId.eq(gts_type_id))
-        .filter(membership_entity::Column::ResourceId.eq(resource_id.clone()))
-        .secure()
-        .scope_with(&scope)
-        .one(&conn)
-        .await
-        .expect("query membership A2")
-        .is_some();
-
-    let guard_tenant = GuardEntity::find()
-        .filter(guard_entity::Column::GtsTypeId.eq(gts_type_id))
-        .filter(guard_entity::Column::ResourceId.eq(resource_id.clone()))
-        .secure()
-        .scope_with(&scope)
-        .one(&conn)
-        .await
-        .expect("query guard row")
-        .map(|g| g.tenant_id);
-
-    // The corruption this whole pairing exists to prevent: a live membership
-    // with no guard row behind it. The next `add_membership` from any other
-    // tenant would find no guard and claim the resource, while tenant A's
-    // membership is still sitting there.
-    assert!(
-        !membership_a,
-        "group A's membership should have been deleted by the cascade"
-    );
-    assert!(
-        membership_a2,
-        "the add committed, so group A2's membership must exist"
-    );
     assert_eq!(
-        guard_tenant, None,
-        "READ COMMITTED is expected to orphan the guard row here; if this \
-         now holds, re-derive whether the pairing is still load-bearing \
-         before relaxing any isolation level"
+        outcome.owning_tenants.len(),
+        1,
+        "exactly one tenant may end up owning the resource; got {:?}",
+        outcome.owning_tenants
+    );
+    assert!(
+        outcome.first.is_err(),
+        "the side that read before the winner committed must be cancelled, \
+         not allowed to write into the predicate it already read"
+    );
+    let err = format!("{}", outcome.first.expect_err("checked above"));
+    assert!(
+        err.contains("40001") || err.contains("could not serialize access"),
+        "the cancellation must be the SSI serialization failure the retry \
+         wrapper knows how to re-run, got: {err}"
+    );
+}
+
+/// The negative control for the test above, and the reason `add_membership`
+/// cannot quietly drop to the backend default: the very same barrier, one
+/// level lower, commits both sides and leaves the resource owned by two
+/// tenants. If this ever stops reproducing, the pairing above has stopped
+/// being what protects the invariant.
+#[tokio::test]
+async fn forced_overlap_at_read_committed_splits_the_resource() {
+    let Some(fix) = pg_fixture().await else {
+        return;
+    };
+
+    let outcome = run_first_membership_overlap(&fix, TxConfig::default()).await;
+
+    eprintln!(
+        "forced_overlap_at_read_committed_splits_the_resource: {} {}",
+        fmt_outcome("first", &outcome.first),
+        fmt_outcome("second", &outcome.second),
+    );
+
+    outcome
+        .first
+        .expect("at the backend default nothing objects");
+    outcome
+        .second
+        .expect("at the backend default nothing objects");
+    assert_eq!(
+        outcome.owning_tenants.len(),
+        2,
+        "negative control: at the backend default both writers commit and the \
+         resource ends up owned by two tenants; got {:?}",
+        outcome.owning_tenants
     );
 }

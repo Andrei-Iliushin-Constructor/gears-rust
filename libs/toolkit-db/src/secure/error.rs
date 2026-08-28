@@ -84,7 +84,8 @@ pub fn is_unique_violation(err: &sea_orm::DbErr) -> bool {
 /// Recognized patterns across backends:
 /// - **Postgres** SQLSTATE `23503` — "`foreign_key_violation`" / "violates
 ///   foreign key constraint"
-/// - **`SQLite`** extended codes `787`/`1811` — "FOREIGN KEY constraint failed"
+/// - **`SQLite`** extended code `787` (`SQLITE_CONSTRAINT_FOREIGNKEY`) —
+///   "FOREIGN KEY constraint failed"
 /// - **`MySQL`** errors `1451`/`1452` — "a foreign key constraint fails"
 #[must_use]
 pub fn is_foreign_key_violation(err: &sea_orm::DbErr) -> bool {
