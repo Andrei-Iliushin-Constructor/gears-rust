@@ -45,3 +45,7 @@ pub async fn openapi_json(
 pub async fn docs_page() -> Html<&'static str> {
     Html(DOCS_PAGE)
 }
+
+#[cfg(test)]
+#[path = "docs_tests.rs"]
+mod docs_tests;
