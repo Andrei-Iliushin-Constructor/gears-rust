@@ -182,3 +182,133 @@ fn docs_page_points_at_the_sibling_document() {
     // Relative, so the page works under any gateway `prefix_path`.
     assert!(DOCS_PAGE.contains(r#"apiDescriptionUrl="./openapi""#));
 }
+
+#[test]
+fn tee_downcasts_to_the_host_it_stands_in_for() {
+    let host = RecordingHost::default();
+    let tee = TeeRegistry::new(&host);
+
+    // A transparent decorator: `as_any` must reach past the wrapper, or a
+    // caller downcasting the registry silently gets `None`.
+    assert!(tee.as_any().downcast_ref::<RecordingHost>().is_some());
+    assert!(tee.as_any().downcast_ref::<TeeRegistry<'_>>().is_none());
+}
+
+#[test]
+fn build_is_idempotent_and_keeps_the_first_document() {
+    let host = RecordingHost::default();
+    let tee = TeeRegistry::new(&host);
+    tee.register_operation(&spec("/chat-engine/v1/sessions"));
+
+    let doc = GearOpenApiDoc::default();
+    doc.build(&tee);
+
+    // A second operation registered after the snapshot must not appear: the
+    // repeated build is a no-op, not a refresh.
+    tee.register_operation(&spec("/chat-engine/v1/messages/{id}"));
+    doc.build(&tee);
+
+    let parsed: Value =
+        serde_json::from_str(doc.render("/chat-engine/v1/openapi").expect("rendered"))
+            .expect("valid JSON");
+    assert!(parsed["paths"]["/chat-engine/v1/sessions"].is_object());
+    assert!(parsed["paths"]["/chat-engine/v1/messages/{id}"].is_null());
+}
+
+#[test]
+fn render_is_computed_once_and_reused() {
+    let doc = built_doc();
+
+    let first = doc.render("/cf/chat-engine/v1/openapi").expect("rendered");
+    // Same borrow returned for a different prefix: the mount point is fixed for
+    // the process, so the first caller settles it.
+    let second = doc
+        .render("/other/chat-engine/v1/openapi")
+        .expect("rendered");
+
+    assert!(std::ptr::eq(first, second));
+}
+
+/// Drive the mounted routes through a real router, so the registration itself
+/// is exercised rather than just the handlers behind it.
+mod mount {
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
+    use http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    use super::*;
+
+    fn router() -> Router {
+        let host = RecordingHost::default();
+        let tee = TeeRegistry::new(&host);
+        // A real operation so the served document is not merely empty.
+        tee.register_operation(&spec("/chat-engine/v1/sessions"));
+        crate::api::rest::docs::mount(Router::new(), &tee)
+    }
+
+    async fn get(path: &str) -> (StatusCode, String, String) {
+        let response = router()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(http::header::CONTENT_TYPE)
+            .map(|v| v.to_str().unwrap_or_default().to_owned())
+            .unwrap_or_default();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (
+            status,
+            content_type,
+            String::from_utf8(body.to_vec()).expect("utf-8"),
+        )
+    }
+
+    #[tokio::test]
+    async fn serves_the_reference_page() {
+        let (status, content_type, body) = get("/chat-engine/v1/docs").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(content_type.starts_with("text/html"));
+        assert!(body.contains("<elements-api"));
+    }
+
+    #[tokio::test]
+    async fn serves_the_document() {
+        let (status, content_type, body) = get("/chat-engine/v1/openapi").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, "application/json");
+
+        let parsed: Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(parsed["info"]["title"], "Chat Engine API");
+        // The route the fixture registered, plus the two mount() registers.
+        assert!(parsed["paths"]["/chat-engine/v1/sessions"].is_object());
+        assert!(parsed["paths"]["/chat-engine/v1/docs"].is_object());
+        assert!(parsed["paths"]["/chat-engine/v1/openapi"].is_object());
+    }
+
+    #[tokio::test]
+    async fn documents_itself_as_anonymous() {
+        let (_, _, body) = get("/chat-engine/v1/openapi").await;
+        let parsed: Value = serde_json::from_str(&body).expect("valid JSON");
+
+        // No `security` block: a reference behind a token cannot be read by
+        // whoever needs it most.
+        for path in ["/chat-engine/v1/docs", "/chat-engine/v1/openapi"] {
+            assert!(
+                parsed["paths"][path]["get"].get("security").is_none(),
+                "{path} should be anonymous"
+            );
+        }
+    }
+}
