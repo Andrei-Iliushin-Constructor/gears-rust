@@ -30,7 +30,7 @@ pub async fn openapi_json(
                 (header::CONTENT_TYPE, "application/json"),
                 (header::CACHE_CONTROL, "no-store"),
             ],
-            json.to_owned(),
+            json,
         )
             .into_response(),
         None => (
