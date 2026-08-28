@@ -182,14 +182,8 @@ async fn group_create_incompatible_parent_type() {
     let err = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: unrelated_type.code.clone(),
-                name: "Bad".to_owned(),
-                parent_id: Some(root.id),
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(unrelated_type.code.clone(), "Bad".to_owned())
+                .with_parent_id(Some(root.id)),
             tenant_id,
         )
         .await
@@ -216,14 +210,7 @@ async fn group_create_root_when_cannot_be_root() {
     let err = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: child_type.code.clone(),
-                name: "Rootless".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(child_type.code.clone(), "Rootless".to_owned()),
             tenant_id,
         )
         .await
@@ -246,14 +233,10 @@ async fn group_create_nonexistent_type() {
     let err = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: gts_id!("cf.core.rg.type.v1~x.test.nonexistent.type.v1~").to_owned(),
-                name: "Ghost".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(
+                gts_id!("cf.core.rg.type.v1~x.test.nonexistent.type.v1~").to_owned(),
+                "Ghost".to_owned(),
+            ),
             tenant_id,
         )
         .await
@@ -288,14 +271,8 @@ async fn group_create_cross_tenant_parent() {
     let err = group_svc
         .create_group(
             &ctx_b,
-            CreateGroupRequest {
-                id: None,
-                code: child_type.code.clone(),
-                name: "CrossTenant".to_owned(),
-                parent_id: Some(root_a.id),
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(child_type.code.clone(), "CrossTenant".to_owned())
+                .with_parent_id(Some(root_a.id)),
             tenant_b,
         )
         .await
@@ -322,14 +299,8 @@ async fn group_create_with_metadata() {
     let group = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code.clone(),
-                name: "WithMeta".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: Some(meta.clone()),
-            },
+            CreateGroupRequest::new(root_type.code.clone(), "WithMeta".to_owned())
+                .with_metadata(Some(meta.clone())),
             tenant_id,
         )
         .await
@@ -1419,14 +1390,8 @@ async fn group_create_max_depth_exceeded() {
     let err = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: child_type.code.clone(),
-                name: "TooDeep".to_owned(),
-                parent_id: Some(root.id),
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(child_type.code.clone(), "TooDeep".to_owned())
+                .with_parent_id(Some(root.id)),
             tenant_id,
         )
         .await
@@ -1472,14 +1437,8 @@ async fn group_create_max_width_exceeded() {
     let err = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: child_type.code.clone(),
-                name: "Child2".to_owned(),
-                parent_id: Some(root.id),
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(child_type.code.clone(), "Child2".to_owned())
+                .with_parent_id(Some(root.id)),
             tenant_id,
         )
         .await
@@ -1618,14 +1577,8 @@ async fn group_create_depth_exact_boundary() {
     let err = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: grandchild_type.code.clone(),
-                name: "Grandchild".to_owned(),
-                parent_id: Some(child.id),
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(grandchild_type.code.clone(), "Grandchild".to_owned())
+                .with_parent_id(Some(child.id)),
             tenant_id,
         )
         .await
@@ -1680,14 +1633,8 @@ async fn group_create_width_exact_boundary() {
     let err = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: child_type.code.clone(),
-                name: "Child3".to_owned(),
-                parent_id: Some(root.id),
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(child_type.code.clone(), "Child3".to_owned())
+                .with_parent_id(Some(root.id)),
             tenant_id,
         )
         .await
@@ -1717,14 +1664,7 @@ async fn group_create_name_empty() {
     let err = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code.clone(),
-                name: String::new(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(root_type.code.clone(), String::new()),
             tenant_id,
         )
         .await
@@ -1751,14 +1691,7 @@ async fn group_create_name_too_long() {
     let err = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code.clone(),
-                name: long_name,
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(root_type.code.clone(), long_name),
             tenant_id,
         )
         .await
@@ -1790,14 +1723,8 @@ async fn group_metadata_barrier_stored() {
     let group = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code.clone(),
-                name: "BarrierGroup".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: Some(meta.clone()),
-            },
+            CreateGroupRequest::new(root_type.code.clone(), "BarrierGroup".to_owned())
+                .with_metadata(Some(meta.clone())),
             tenant_id,
         )
         .await
@@ -1840,14 +1767,8 @@ async fn group_metadata_rich_multiple_fields() {
     let group = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code.clone(),
-                name: "RichMeta".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: Some(meta.clone()),
-            },
+            CreateGroupRequest::new(root_type.code.clone(), "RichMeta".to_owned())
+                .with_metadata(Some(meta.clone())),
             tenant_id,
         )
         .await
@@ -1872,14 +1793,8 @@ async fn group_metadata_update_replaces_entirely() {
     let group = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code.clone(),
-                name: "ReplaceMe".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: Some(old_meta),
-            },
+            CreateGroupRequest::new(root_type.code.clone(), "ReplaceMe".to_owned())
+                .with_metadata(Some(old_meta)),
             tenant_id,
         )
         .await
@@ -1932,14 +1847,7 @@ async fn group_metadata_none_to_some() {
     let group = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code.clone(),
-                name: "NoMeta".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(root_type.code.clone(), "NoMeta".to_owned()),
             tenant_id,
         )
         .await
@@ -1980,14 +1888,8 @@ async fn group_metadata_some_to_none() {
     let group = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code.clone(),
-                name: "WithMeta".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: Some(meta),
-            },
+            CreateGroupRequest::new(root_type.code.clone(), "WithMeta".to_owned())
+                .with_metadata(Some(meta)),
             tenant_id,
         )
         .await
@@ -2031,14 +1933,9 @@ async fn group_metadata_barrier_in_hierarchy() {
     let barrier = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: child_type.code.clone(),
-                name: "BarrierChild".to_owned(),
-                parent_id: Some(root.id),
-                tenant_id: None,
-                metadata: Some(json!({"self_managed": true})),
-            },
+            CreateGroupRequest::new(child_type.code.clone(), "BarrierChild".to_owned())
+                .with_parent_id(Some(root.id))
+                .with_metadata(Some(json!({"self_managed": true}))),
             tenant_id,
         )
         .await
@@ -2093,14 +1990,8 @@ async fn group_metadata_in_hierarchy_response() {
     let root = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code.clone(),
-                name: "Root".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: Some(root_meta.clone()),
-            },
+            CreateGroupRequest::new(root_type.code.clone(), "Root".to_owned())
+                .with_metadata(Some(root_meta.clone())),
             tenant_id,
         )
         .await
@@ -2110,14 +2001,9 @@ async fn group_metadata_in_hierarchy_response() {
     let child = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: child_type.code.clone(),
-                name: "Child".to_owned(),
-                parent_id: Some(root.id),
-                tenant_id: None,
-                metadata: Some(child_meta.clone()),
-            },
+            CreateGroupRequest::new(child_type.code.clone(), "Child".to_owned())
+                .with_parent_id(Some(root.id))
+                .with_metadata(Some(child_meta.clone())),
             tenant_id,
         )
         .await
@@ -2317,14 +2203,7 @@ async fn adr_department_cannot_be_root() {
     let err = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: dept_type.code.clone(),
-                name: "RootDept".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(dept_type.code.clone(), "RootDept".to_owned()),
             tenant_id,
         )
         .await
@@ -2352,14 +2231,8 @@ async fn adr_branch_only_under_department() {
     let err = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: branch_type.code.clone(),
-                name: "BadBranch".to_owned(),
-                parent_id: Some(t1.id),
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(branch_type.code.clone(), "BadBranch".to_owned())
+                .with_parent_id(Some(t1.id)),
             tenant_id,
         )
         .await
@@ -2519,14 +2392,8 @@ async fn security_group_metadata_sql_injection() {
     let group = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code.clone(),
-                name: "SQLMetaGroup".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: Some(evil_meta.clone()),
-            },
+            CreateGroupRequest::new(root_type.code.clone(), "SQLMetaGroup".to_owned())
+                .with_metadata(Some(evil_meta.clone())),
             tenant_id,
         )
         .await
@@ -2567,14 +2434,8 @@ async fn security_group_metadata_large_payload() {
     let result = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code.clone(),
-                name: "BigMetaGroup".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: Some(big_meta.clone()),
-            },
+            CreateGroupRequest::new(root_type.code.clone(), "BigMetaGroup".to_owned())
+                .with_metadata(Some(big_meta.clone())),
             tenant_id,
         )
         .await;
@@ -2667,14 +2528,7 @@ async fn tenant_root_first_create_allowed() {
     let root = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: tenant_type.code.clone(),
-                name: "MainTenant".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(tenant_type.code.clone(), "MainTenant".to_owned()),
             tenant_id,
         )
         .await
@@ -2698,14 +2552,7 @@ async fn tenant_root_second_create_rejected() {
     group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: tenant_type.code.clone(),
-                name: "First".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(tenant_type.code.clone(), "First".to_owned()),
             tenant_id,
         )
         .await
@@ -2717,14 +2564,7 @@ async fn tenant_root_second_create_rejected() {
     let err = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: second_type.code.clone(),
-                name: "Second".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(second_type.code.clone(), "Second".to_owned()),
             Uuid::now_v7(),
         )
         .await
@@ -2749,14 +2589,7 @@ async fn non_tenant_root_alongside_tenant_root_allowed() {
     let tenant_root = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: tenant_type.code.clone(),
-                name: "MainTenant".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(tenant_type.code.clone(), "MainTenant".to_owned()),
             tenant_id,
         )
         .await
@@ -2768,14 +2601,7 @@ async fn non_tenant_root_alongside_tenant_root_allowed() {
     let workspace = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: workspace_type.code.clone(),
-                name: "Workspaces".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(workspace_type.code.clone(), "Workspaces".to_owned()),
             tenant_root.hierarchy.tenant_id,
         )
         .await
@@ -2798,14 +2624,7 @@ async fn tenant_root_update_to_second_root_rejected() {
     let root = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code.clone(),
-                name: "Root".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(root_type.code.clone(), "Root".to_owned()),
             tenant_id,
         )
         .await
@@ -2816,14 +2635,8 @@ async fn tenant_root_update_to_second_root_rejected() {
     let child = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: sub_type.code.clone(),
-                name: "SubTenant".to_owned(),
-                parent_id: Some(root.id),
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(sub_type.code.clone(), "SubTenant".to_owned())
+                .with_parent_id(Some(root.id)),
             root.hierarchy.tenant_id,
         )
         .await
@@ -2866,14 +2679,7 @@ async fn tenant_root_self_update_allowed() {
     let root = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: tenant_type.code.clone(),
-                name: "RootA".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(tenant_type.code.clone(), "RootA".to_owned()),
             tenant_id,
         )
         .await
@@ -2955,13 +2761,8 @@ async fn group_create_duplicate_id_is_already_exists() {
     let root_type = common::create_root_type(&type_svc, "dupid").await;
 
     let id = Uuid::now_v7();
-    let req = |name: &str| CreateGroupRequest {
-        id: Some(id),
-        code: root_type.code.clone(),
-        name: name.to_owned(),
-        parent_id: None,
-        tenant_id: None,
-        metadata: None,
+    let req = |name: &str| {
+        CreateGroupRequest::new(root_type.code.clone(), name.to_owned()).with_id(Some(id))
     };
 
     group_svc
@@ -3006,13 +2807,8 @@ async fn group_create_duplicate_id_same_tenant_is_already_exists() {
     let root_type = common::create_root_type(&type_svc, "dupidsame").await;
 
     let id = Uuid::now_v7();
-    let req = |name: &str| CreateGroupRequest {
-        id: Some(id),
-        code: root_type.code.clone(),
-        name: name.to_owned(),
-        parent_id: None,
-        tenant_id: None,
-        metadata: None,
+    let req = |name: &str| {
+        CreateGroupRequest::new(root_type.code.clone(), name.to_owned()).with_id(Some(id))
     };
 
     group_svc

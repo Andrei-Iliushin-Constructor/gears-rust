@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::domain::repo::MembershipRepositoryTrait;
+use crate::infra::storage::FK_RGM_GROUP_ID;
 use crate::infra::storage::entity::resource_group_membership::{
     self as membership_entity, Entity as MembershipEntity,
 };
@@ -138,7 +139,7 @@ impl MembershipRepositoryTrait for MembershipRepository {
                     // answer stays a database error rather than a confident
                     // lie about which resource was missing.
                     let msg = e.to_string();
-                    if msg.contains("fk_rgm_group_id") {
+                    if msg.contains(FK_RGM_GROUP_ID) {
                         DomainError::group_not_found(group_id)
                     } else {
                         DomainError::database(msg)

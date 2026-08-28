@@ -201,14 +201,7 @@ async fn concurrent_move_a_to_b_and_b_to_a() {
     let root = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: rt.code.clone(),
-                name: "Root".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(rt.code.clone(), "Root".to_owned()),
             tenant_id,
         )
         .await
@@ -217,14 +210,7 @@ async fn concurrent_move_a_to_b_and_b_to_a() {
     let a = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: rt.code.clone(),
-                name: "A".to_owned(),
-                parent_id: Some(root.id),
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(rt.code.clone(), "A".to_owned()).with_parent_id(Some(root.id)),
             tenant_id,
         )
         .await
@@ -233,14 +219,7 @@ async fn concurrent_move_a_to_b_and_b_to_a() {
     let b = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: rt.code,
-                name: "B".to_owned(),
-                parent_id: Some(root.id),
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(rt.code, "B".to_owned()).with_parent_id(Some(root.id)),
             tenant_id,
         )
         .await
@@ -315,14 +294,7 @@ async fn concurrent_create_child_and_move_parent() {
     let root = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: rt.code.clone(),
-                name: "Root".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(rt.code.clone(), "Root".to_owned()),
             tenant_id,
         )
         .await
@@ -331,14 +303,7 @@ async fn concurrent_create_child_and_move_parent() {
     let other = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: rt.code.clone(),
-                name: "Other".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(rt.code.clone(), "Other".to_owned()),
             tenant_id,
         )
         .await
@@ -347,14 +312,8 @@ async fn concurrent_create_child_and_move_parent() {
     let parent = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: rt.code.clone(),
-                name: "Parent".to_owned(),
-                parent_id: Some(root.id),
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(rt.code.clone(), "Parent".to_owned())
+                .with_parent_id(Some(root.id)),
             tenant_id,
         )
         .await
@@ -363,14 +322,8 @@ async fn concurrent_create_child_and_move_parent() {
     let (child, _moved) = tokio::join!(
         group_svc.create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: rt.code.clone(),
-                name: "Child".to_owned(),
-                parent_id: Some(parent.id),
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(rt.code.clone(), "Child".to_owned())
+                .with_parent_id(Some(parent.id)),
             tenant_id
         ),
         group_svc.move_group(parent.id, Some(other.id)),
@@ -467,14 +420,7 @@ async fn concurrent_non_force_delete_and_create_child() {
     let root = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: rt.code.clone(),
-                name: "Root".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(rt.code.clone(), "Root".to_owned()),
             tenant_id,
         )
         .await
@@ -484,34 +430,57 @@ async fn concurrent_non_force_delete_and_create_child() {
         group_svc.delete_group(&ctx, root.id, false),
         group_svc.create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: rt.code,
-                name: "Orphan".to_owned(),
-                parent_id: Some(root.id),
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(rt.code, "Orphan".to_owned()).with_parent_id(Some(root.id)),
             tenant_id
         ),
     );
 
-    match (&del_res, &create_res) {
+    // The FK/lock mechanism spelled out on `delete_group` resolves this race
+    // one of exactly two ways, depending on which side's transaction commits
+    // first:
+    //
+    // * the delete wins -> the child insert loses its parent to
+    //   `fk_resource_group_parent` (`ON DELETE RESTRICT`), and
+    //   `create_group_inner`/`map_insert_error` report that as
+    //   `DomainError::GroupNotFound` on the *create* side;
+    // * the create wins -> the delete's own "does this group have children"
+    //   check (taken after its `FOR UPDATE` lock is granted) now sees the
+    //   new child and refuses with `DomainError::ConflictActiveReferences` on
+    //   the *delete* side.
+    //
+    // A concatenated `format!("{e1}{e2}")` check let either error's text
+    // satisfy the assertion for both sides at once, so a delete error that
+    // regressed into some unrelated shape could hide behind create's
+    // "not found" text (or vice versa). Each side is checked against the one
+    // answer its own code path can actually produce instead.
+    match (del_res, create_res) {
         (Ok(()), Ok(_)) => {
             panic!("both non-force delete and create succeeded -- FK invariant broken!")
         }
         (Err(e1), Err(e2)) => {
-            let m = format!("{e1}{e2}");
             assert!(
-                m.contains("conflict") || m.contains("not found") || m.contains("precondition"),
-                "expected conflict/not_found, got: {e1} / {e2}"
+                matches!(e1, DomainError::ConflictActiveReferences { .. }),
+                "delete lost the race by seeing the new child -- expected \
+                 ConflictActiveReferences, got: {e1}"
+            );
+            assert!(
+                matches!(e2, DomainError::GroupNotFound { .. }),
+                "create lost the race to the FK on the deleted parent -- expected \
+                 GroupNotFound, got: {e2}"
             );
         }
-        (Ok(()), Err(e)) | (Err(e), Ok(_)) => {
-            let m = format!("{e}");
+        (Ok(()), Err(e)) => {
             assert!(
-                m.contains("conflict") || m.contains("not found") || m.contains("precondition"),
-                "expected conflict/not_found/precondition, got: {e}"
+                matches!(e, DomainError::GroupNotFound { .. }),
+                "delete won the race, so create must fail on the now-missing parent -- \
+                 expected GroupNotFound, got: {e}"
+            );
+        }
+        (Err(e), Ok(_)) => {
+            assert!(
+                matches!(e, DomainError::ConflictActiveReferences { .. }),
+                "create won the race, so delete must see the new child -- expected \
+                 ConflictActiveReferences, got: {e}"
             );
         }
     }
@@ -545,14 +514,7 @@ async fn concurrent_delete_type_and_create_group() {
         type_svc.delete_type(&ctx, &rt.code),
         group_svc.create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: rt.code.clone(),
-                name: "Race".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(rt.code.clone(), "Race".to_owned()),
             tenant_id
         ),
     );
@@ -619,14 +581,7 @@ async fn concurrent_add_membership_from_two_tenants_claims_exactly_one() {
     let group_a = group_svc
         .create_group(
             &ctx_a,
-            CreateGroupRequest {
-                id: None,
-                code: group_type.code.clone(),
-                name: "A".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(group_type.code.clone(), "A".to_owned()),
             tenant_a,
         )
         .await
@@ -635,14 +590,7 @@ async fn concurrent_add_membership_from_two_tenants_claims_exactly_one() {
     let group_b = group_svc
         .create_group(
             &ctx_b,
-            CreateGroupRequest {
-                id: None,
-                code: group_type.code,
-                name: "B".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(group_type.code, "B".to_owned()),
             tenant_b,
         )
         .await
@@ -724,14 +672,7 @@ async fn concurrent_removals_free_the_resource_for_another_tenant() {
     let group_1 = group_svc
         .create_group(
             &ctx_a,
-            CreateGroupRequest {
-                id: None,
-                code: group_type.code.clone(),
-                name: "G1".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(group_type.code.clone(), "G1".to_owned()),
             tenant_a,
         )
         .await
@@ -740,14 +681,7 @@ async fn concurrent_removals_free_the_resource_for_another_tenant() {
     let group_2 = group_svc
         .create_group(
             &ctx_a,
-            CreateGroupRequest {
-                id: None,
-                code: group_type.code.clone(),
-                name: "G2".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(group_type.code.clone(), "G2".to_owned()),
             tenant_a,
         )
         .await
@@ -780,14 +714,7 @@ async fn concurrent_removals_free_the_resource_for_another_tenant() {
     let group_b = group_svc
         .create_group(
             &ctx_b,
-            CreateGroupRequest {
-                id: None,
-                code: group_type.code,
-                name: "B".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(group_type.code, "B".to_owned()),
             tenant_b,
         )
         .await
@@ -859,14 +786,7 @@ async fn run_first_membership_overlap(fix: &PgFixture, config: TxConfig) -> Over
         let group = group_svc
             .create_group(
                 ctx,
-                CreateGroupRequest {
-                    id: None,
-                    code: group_type.code.clone(),
-                    name: name.to_owned(),
-                    parent_id: None,
-                    tenant_id: None,
-                    metadata: None,
-                },
+                CreateGroupRequest::new(group_type.code.clone(), name.to_owned()),
                 tenant,
             )
             .await

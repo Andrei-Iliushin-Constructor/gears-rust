@@ -321,6 +321,35 @@ async fn trace_update_group() {
         "update_group must not read a row back after writing it (RG-08):\n{}",
         rec.dump()
     );
+    // A plain rename never touches the parent, so `update_group_inner` no
+    // longer loads the full type (`find_by_code`) to feed
+    // `move_group_internal_impl`'s parent-compatibility check -- that read
+    // only matters on the `parent_changed` branch, which this request never
+    // takes. It used to run unconditionally and pull both junction tables
+    // for a type this call never needed the parent/membership lists of.
+    let parent_junction_selects =
+        count_in(&rec.stats(), QueryKind::Select, "gts_type_allowed_parent");
+    let membership_junction_selects = count_in(
+        &rec.stats(),
+        QueryKind::Select,
+        "gts_type_allowed_membership",
+    );
+    assert_eq!(
+        parent_junction_selects,
+        0,
+        "a rename must not read gts_type_allowed_parent -- that table is only \
+         relevant to the parent-changed branch's move-compatibility check, \
+         got {parent_junction_selects} SELECTs:\n{}",
+        rec.dump()
+    );
+    assert_eq!(
+        membership_junction_selects,
+        0,
+        "a rename must not read gts_type_allowed_membership -- same reasoning \
+         as gts_type_allowed_parent above, got {membership_junction_selects} \
+         SELECTs:\n{}",
+        rec.dump()
+    );
 }
 
 #[tokio::test]
@@ -521,7 +550,7 @@ async fn trace_list_memberships() {
 
 /// `add_membership`'s own trace, which the suite did not have.
 ///
-/// Two things are pinned here, and they point in opposite directions.
+/// Three things are pinned here.
 ///
 /// The membership table is read once and written once: the tenant-compatibility
 /// check is a single statement whose subquery derives the member groups
@@ -534,6 +563,19 @@ async fn trace_list_memberships() {
 /// Apart, two first memberships from different tenants each read an empty
 /// set and both commit; together at that level the read and the write into
 /// the same predicate are the write skew SSI cancels. This asserts the fix.
+///
+/// Fixed again: the `allowed_membership_types` check -- loading the group's
+/// full type and testing the requested resource type against it -- used to
+/// run on the pool, before `BEGIN`. PostgreSQL's SSI only tracks
+/// rw-antidependencies between reads and writes that both happen inside a
+/// serializable transaction, so a concurrent `update_type` removing this
+/// resource type from `allowed_membership_types` -- itself `SERIALIZABLE` --
+/// was invisible to a pre-transaction read of the same row: it could commit
+/// between that read and this insert with neither side raising `40001`. The
+/// check now runs inside the same transaction as the tenant check and the
+/// insert, so all three are covered by the one SSI cycle. Only `resolve_id`
+/// (the resource type's own surrogate-id lookup) and the initial group read
+/// stay on the pool -- out of scope for this fix, tracked separately.
 #[tokio::test]
 async fn trace_add_membership() {
     let (db, rec) = common::test_db_with_recorder().await;
@@ -609,6 +651,32 @@ async fn trace_add_membership() {
         "RG-01 regression: add_membership must open SERIALIZABLE -- the tenant \
          check is a predicate read the insert writes into, and below that \
          level two first memberships from different tenants both commit:\n{}",
+        rec.dump()
+    );
+
+    // The allowed_membership_types check reads the group's full type,
+    // including the `gts_type_allowed_parent` and `gts_type_allowed_membership`
+    // junction tables. `all_in_serializable_transaction()` above only asks
+    // whether every *in-tx* event is SERIALIZABLE -- it has nothing to say
+    // about a read that runs on the pool instead of in a transaction at all,
+    // which is exactly the shape the regression this pins would take: the
+    // check moving back out of the transaction rather than merely running
+    // at a weaker level. Assert directly that every read of those two
+    // junction tables happened inside a transaction.
+    let junction_read_outside_tx = rec.events().into_iter().any(|e| {
+        matches!(e.kind, QueryKind::Select)
+            && matches!(
+                e.table.as_deref(),
+                Some("gts_type_allowed_parent" | "gts_type_allowed_membership")
+            )
+            && !e.in_tx
+    });
+    assert!(
+        !junction_read_outside_tx,
+        "allowed_membership_types regression: the type's junction tables must \
+         be read inside the same SERIALIZABLE transaction as the insert, not \
+         on the pool -- an outside-tx read of either is invisible to SSI and \
+         cannot be cancelled against a concurrent update_type:\n{}",
         rec.dump()
     );
 }

@@ -1188,20 +1188,19 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
         // and the closure-table compatibility checks performed by
         // `move_group_internal_impl`. The 4a/4b/4c/4d sub-steps are realized
         // by that helper and the metadata validation block right below.
-        // Type is immutable on update — reuse the existing `gts_type_id` and
-        // resolve the type definition for `move_group_internal_impl`'s
-        // parent-compatibility check below.
-        // @cpt-begin:cpt-cf-resource-group-flow-entity-hier-update-group:p1:inst-update-group-4a
-        // Validate new type's allowed_parents permits current parent's type
-        // (or the new type allows root if no parent). For the immutable-type
-        // case this collapses into `move_group_internal_impl` running the
-        // `rg_type.allowed_parent_types` check on a parent change.
+        // Type is immutable on update — reuse the existing `gts_type_id`.
+        //
+        // Only the path is resolved unconditionally here: the response's
+        // `code` field needs it (see the final `Ok` below) regardless of
+        // whether the parent changes, and it is a single row read by primary
+        // key. The full type -- `rg_type`, which `find_by_code` builds by
+        // also reading `gts_type_allowed_parent` and
+        // `gts_type_allowed_membership` -- is loaded further down, inside
+        // the `parent_changed` branch (see `inst-update-group-4a` there): it
+        // feeds nothing but `move_group_internal_impl`'s parent-compatibility
+        // check, so a plain rename or metadata edit has no use for it and no
+        // longer pays for those two junction-table reads.
         let existing_type_path = Self::resolve_type_path_from_id(tx, existing.gts_type_id).await?;
-        let rg_type = type_repo
-            .find_by_code(tx, &existing_type_path)
-            .await?
-            .ok_or_else(|| DomainError::type_not_found(&existing_type_path))?;
-        // @cpt-end:cpt-cf-resource-group-flow-entity-hier-update-group:p1:inst-update-group-4a
 
         // @cpt-begin:cpt-cf-resource-group-flow-entity-hier-update-group:p1:inst-update-group-4e
         // Already validated against this same type before `BEGIN` -- the type
@@ -1271,6 +1270,24 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
             return Ok(UpdateGroupOutcome::NeedsSerializable);
         }
         if parent_changed {
+            // @cpt-begin:cpt-cf-resource-group-flow-entity-hier-update-group:p1:inst-update-group-4a
+            // Validate new type's allowed_parents permits current parent's type
+            // (or the new type allows root if no parent). For the immutable-type
+            // case this collapses into `move_group_internal_impl` running the
+            // `rg_type.allowed_parent_types` check on a parent change.
+            //
+            // Loaded here rather than unconditionally above: `rg_type` is
+            // read only to hand to `move_group_internal_impl` a few lines
+            // down, and `find_by_code` loads it by also reading the
+            // `gts_type_allowed_parent` and `gts_type_allowed_membership`
+            // junction tables. A rename or metadata edit never reaches this
+            // branch, so it no longer pays for either.
+            let rg_type = type_repo
+                .find_by_code(tx, &existing_type_path)
+                .await?
+                .ok_or_else(|| DomainError::type_not_found(&existing_type_path))?;
+            // @cpt-end:cpt-cf-resource-group-flow-entity-hier-update-group:p1:inst-update-group-4a
+
             // Delegate to move logic (cycle detection + closure rebuild).
             // Type stays the same, so use the resolved `rg_type` for parent
             // compatibility checks inside the move helper. Its

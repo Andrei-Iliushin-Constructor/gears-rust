@@ -14,13 +14,14 @@ use resource_group_sdk::odata::{GroupFilterField, HierarchyFilterField};
 use sea_orm::sea_query::{Alias, Expr, Query};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 use toolkit_db::odata::{LimitCfg, paginate_odata};
-use toolkit_db::secure::{DBRunner, SecureDeleteExt, SecureEntityExt, SecureUpdateExt};
+use toolkit_db::secure::{DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureUpdateExt};
 use toolkit_odata::{CursorV1, ODataQuery, Page, SortDir};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::domain::repo::GroupRepositoryTrait;
+use crate::infra::storage::FK_RESOURCE_GROUP_PARENT;
 use crate::infra::storage::entity::{
     gts_type::{self, Entity as GtsTypeEntity},
     resource_group::{self as rg_entity, Entity as ResourceGroupEntity},
@@ -747,47 +748,7 @@ impl GroupRepositoryTrait for GroupRepository {
         // data already in hand (RG-08).
         toolkit_db::secure::secure_insert::<ResourceGroupEntity>(model, &scope, db)
             .await
-            .map_err(|e| {
-                if e.is_unique_violation() {
-                    DomainError::group_already_exists(id)
-                } else if e.is_foreign_key_violation() {
-                    // The parent this create read a moment ago is gone: a
-                    // concurrent non-force delete of it won the race, and
-                    // `fk_resource_group_parent` is `ON DELETE RESTRICT`, so
-                    // the loser learns about it here rather than from its own
-                    // read. That read is the caller's snapshot; the FK check
-                    // is not, which is exactly why this arm exists.
-                    //
-                    // It exists *now* because the non-force delete runs at the
-                    // backend default. Under SERIALIZABLE on both sides the
-                    // same race surfaced as a `40001` and the retry loop
-                    // re-read a clean answer; with the delete lowered, SSI has
-                    // no second serializable party to detect against and the
-                    // foreign key answers instead. Unmapped it was a 500.
-                    //
-                    // Which foreign key, though: this table has two, and
-                    // `fk_rg_gts_type` fails when a concurrent `delete_type`
-                    // removes the type between this transaction resolving it
-                    // and inserting. Answering *that* with "group not found,
-                    // id = parent" would name the wrong resource and the wrong
-                    // cause, so only the parent constraint maps. PostgreSQL
-                    // puts the constraint name in the message; SQLite says
-                    // only "FOREIGN KEY constraint failed", so there the
-                    // answer stays a database error -- unhelpful, but not a
-                    // confident lie, and the race needs concurrent writers
-                    // SQLite does not have.
-                    let msg = e.to_string();
-                    if msg.contains("fk_resource_group_parent")
-                        && let Some(parent_id) = parent_id
-                    {
-                        DomainError::group_not_found(parent_id)
-                    } else {
-                        DomainError::database(msg)
-                    }
-                } else {
-                    DomainError::database(e.to_string())
-                }
-            })
+            .map_err(|e| map_insert_error(&e, id, parent_id))
     }
 
     /// Update a resource group entity.
@@ -1448,6 +1409,54 @@ impl GroupRepositoryTrait for GroupRepository {
     }
 }
 
+/// Map a `secure_insert::<ResourceGroupEntity>` failure to the `DomainError`
+/// it should surface as.
+///
+/// `id` is the group being inserted (used for the unique-violation answer);
+/// `parent_id` is the `parent_id` value that row was inserted with (used for
+/// the foreign-key answer below).
+fn map_insert_error(e: &ScopeError, id: Uuid, parent_id: Option<Uuid>) -> DomainError {
+    if e.is_unique_violation() {
+        DomainError::group_already_exists(id)
+    } else if e.is_foreign_key_violation() {
+        // The parent this create read a moment ago is gone: a
+        // concurrent non-force delete of it won the race, and
+        // `fk_resource_group_parent` is `ON DELETE RESTRICT`, so
+        // the loser learns about it here rather than from its own
+        // read. That read is the caller's snapshot; the FK check
+        // is not, which is exactly why this arm exists.
+        //
+        // It exists *now* because the non-force delete runs at the
+        // backend default. Under SERIALIZABLE on both sides the
+        // same race surfaced as a `40001` and the retry loop
+        // re-read a clean answer; with the delete lowered, SSI has
+        // no second serializable party to detect against and the
+        // foreign key answers instead. Unmapped it was a 500.
+        //
+        // Which foreign key, though: this table has two, and
+        // `fk_rg_gts_type` fails when a concurrent `delete_type`
+        // removes the type between this transaction resolving it
+        // and inserting. Answering *that* with "group not found,
+        // id = parent" would name the wrong resource and the wrong
+        // cause, so only the parent constraint maps. PostgreSQL
+        // puts the constraint name in the message; SQLite says
+        // only "FOREIGN KEY constraint failed", so there the
+        // answer stays a database error -- unhelpful, but not a
+        // confident lie, and the race needs concurrent writers
+        // SQLite does not have.
+        let msg = e.to_string();
+        if msg.contains(FK_RESOURCE_GROUP_PARENT)
+            && let Some(parent_id) = parent_id
+        {
+            DomainError::group_not_found(parent_id)
+        } else {
+            DomainError::database(msg)
+        }
+    } else {
+        DomainError::database(e.to_string())
+    }
+}
+
 /// Depth filter for hierarchy queries.
 enum DepthFilter {
     Single(toolkit_odata::filter::FilterOp, i32),
@@ -1514,3 +1523,7 @@ impl TypeFilter {
     }
 }
 // @cpt-end:cpt-cf-resource-group-dod-entity-hier-hierarchy-engine:p1:inst-full
+
+#[cfg(test)]
+#[path = "group_repo_tests.rs"]
+mod tests;

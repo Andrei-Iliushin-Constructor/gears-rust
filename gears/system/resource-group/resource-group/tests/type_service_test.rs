@@ -1978,6 +1978,80 @@ async fn bootstrap_bypasses_policy_enforcer_while_gated_path_denies() {
 }
 
 // =========================================================================
+// Source-scan: `ResourceGroupTypeBootstrap` must never reach the REST layer
+//
+// `ResourceGroupTypeBootstrap` is deliberately not AuthZ-gated (see the
+// bypass test above) -- it exists for trusted, in-process callers only
+// (migrations, seed jobs, other gears wiring bootstrap data at startup).
+// Never wiring it into `api/rest` is the whole reason it is allowed to skip
+// `gate()`; if it, or any code path holding one, were reachable from a REST
+// handler, that AuthZ bypass would be reachable over HTTP too. There is no
+// runtime check that can see this from here -- from the REST layer's own
+// perspective the trait is simply unused, gated or not -- so this scans the
+// REST module's source for the name instead.
+// =========================================================================
+
+/// Recursively collect the paths of every `.rs` file under `dir`.
+///
+/// Panics on an unreadable directory or entry rather than skipping it: a
+/// scan that silently drops a subdirectory it could not read would look
+/// exactly like one that scanned it and found nothing wrong.
+fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("failed to read directory {}: {e}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| {
+            panic!(
+                "failed to read a directory entry under {}: {e}",
+                dir.display()
+            )
+        });
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// `ResourceGroupTypeBootstrap` must never be named anywhere under
+/// `api/rest/`: that would put its AuthZ bypass one call away from a REST
+/// handler.
+#[test]
+fn resource_group_type_bootstrap_is_never_referenced_from_rest() {
+    let rest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api/rest");
+    let mut files = Vec::new();
+    collect_rs_files(&rest_dir, &mut files);
+
+    // A rule that scanned zero files would pass by accident, not because the
+    // invariant holds -- the directory being missing, emptied by a refactor,
+    // or a typo above would all look identical to "no violations found".
+    // This positively asserts the scan had something to look at, the same
+    // way `fn_body`'s panic-on-miss in `db_behavior_audit_test.rs` refuses
+    // to let "found nothing" pass as "found no problems".
+    assert!(
+        !files.is_empty(),
+        "scanned zero .rs files under {} -- this rule would pass vacuously; \
+         the directory is missing, was emptied, or its path changed and \
+         this scan needs to move with it",
+        rest_dir.display()
+    );
+
+    for file in &files {
+        let src = std::fs::read_to_string(file)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", file.display()));
+        assert!(
+            !src.contains("ResourceGroupTypeBootstrap"),
+            "{} references `ResourceGroupTypeBootstrap` -- this trait is \
+             deliberately not AuthZ-gated and must never be reachable from \
+             the REST layer",
+            file.display()
+        );
+    }
+}
+
+// =========================================================================
 // Removing an allowed membership type that is still in use (uncovered
 // `type_service.rs` 686-693, and the "violations found" branch of
 // `find_groups_violating_removed_membership_types` in

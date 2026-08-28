@@ -249,14 +249,11 @@ impl From<ResourceGroupWithDepth> for GroupWithDepthDto {
 
 impl From<CreateGroupDto> for CreateGroupRequest {
     fn from(dto: CreateGroupDto) -> Self {
-        Self {
-            id: dto.id,
-            code: dto.type_path,
-            name: dto.name,
-            parent_id: dto.parent_id,
-            tenant_id: dto.tenant_id,
-            metadata: dto.metadata,
-        }
+        Self::new(dto.type_path, dto.name)
+            .with_id(dto.id)
+            .with_parent_id(dto.parent_id)
+            .with_tenant_id(dto.tenant_id)
+            .with_metadata(dto.metadata)
     }
 }
 

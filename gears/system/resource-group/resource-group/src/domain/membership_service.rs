@@ -152,29 +152,9 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait, MR: MembershipRepository
         // @cpt-end:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-6
         // @cpt-end:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-5
 
-        // @cpt-begin:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-7
-        // Load group type's allowed_membership_types and validate
-        let allowed = self
-            .type_repo
-            .load_full_type_by_id(&conn, group_model.gts_type_id)
-            .await?;
-        // @cpt-end:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-7
-
-        // @cpt-begin:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-8
-        if !allowed
-            .allowed_membership_types
-            .iter()
-            .any(|m| m == resource_type)
-        {
-            return Err(DomainError::validation(format!(
-                "Resource type '{resource_type}' is not in allowed_membership_types for group type '{}'",
-                allowed.code
-            )));
-        }
-        // @cpt-end:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-8
-
-        // Tenant compatibility and the membership insert share one
-        // transaction, and that transaction is `SERIALIZABLE` (RG-01).
+        // Tenant compatibility, the allowed_membership_types check, and the
+        // membership insert all share one transaction, and that transaction
+        // is `SERIALIZABLE` (RG-01).
         //
         // The check reads a predicate -- "which tenants already own
         // memberships of this pair" -- and the insert then writes into that
@@ -194,16 +174,51 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait, MR: MembershipRepository
         // different reason.
         let db = self.db.db();
         let membership_repo = self.membership_repo.clone();
+        let type_repo = self.type_repo.clone();
         let resource_type_owned = resource_type.to_owned();
         let resource_id_owned = resource_id.to_owned();
         let target_tenant_id = group_model.tenant_id;
+        let group_type_id = group_model.gts_type_id;
 
         let model = db
             .transaction_with_retry(TxConfig::serializable(), DomainError::db_err, |tx| {
                 let membership_repo = membership_repo.clone();
+                let type_repo = type_repo.clone();
                 let resource_type = resource_type_owned.clone();
                 let resource_id = resource_id_owned.clone();
                 Box::pin(async move {
+                    // @cpt-begin:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-7
+                    // Load group type's allowed_membership_types and validate.
+                    //
+                    // Moved inside this SERIALIZABLE transaction on purpose:
+                    // PostgreSQL's SSI only tracks rw-antidependencies between
+                    // reads and writes that both happen inside a serializable
+                    // transaction. `update_type` (which can remove this
+                    // resource type from `allowed_membership_types`) also runs
+                    // at `SERIALIZABLE`, but a read of the type made on the
+                    // pool -- outside any transaction -- is invisible to that
+                    // machinery. Such a read could see the type as still
+                    // allowing this membership, have `update_type` commit its
+                    // removal in the gap, and then have this function insert
+                    // the now-disallowed membership anyway, with neither side
+                    // ever seeing a `40001`. Reading it here, inside the same
+                    // transaction as the insert it gates, closes that gap.
+                    let allowed = type_repo.load_full_type_by_id(tx, group_type_id).await?;
+                    // @cpt-end:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-7
+
+                    // @cpt-begin:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-8
+                    if !allowed
+                        .allowed_membership_types
+                        .iter()
+                        .any(|m| m == &resource_type)
+                    {
+                        return Err(DomainError::validation(format!(
+                            "Resource type '{resource_type}' is not in allowed_membership_types for group type '{}'",
+                            allowed.code
+                        )));
+                    }
+                    // @cpt-end:cpt-cf-resource-group-flow-membership-add:p1:inst-add-memb-8
+
                     // @cpt-begin:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-1
                     // @cpt-begin:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-2
                     // @cpt-begin:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-3

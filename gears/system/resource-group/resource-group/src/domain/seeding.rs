@@ -154,14 +154,10 @@ pub async fn seed_groups<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait>(
             // @cpt-end:cpt-cf-resource-group-algo-entity-hier-seed-groups:p1:inst-seed-groups-2c
             Err(DomainError::GroupNotFound { .. }) => {
                 // @cpt-begin:cpt-cf-resource-group-algo-entity-hier-seed-groups:p1:inst-seed-groups-2d
-                let req = CreateGroupRequest {
-                    id: Some(seed.id),
-                    code: seed.code.clone(),
-                    name: seed.name.clone(),
-                    parent_id: seed.parent_id,
-                    tenant_id: None,
-                    metadata: seed.metadata.clone(),
-                };
+                let req = CreateGroupRequest::new(seed.code.clone(), seed.name.clone())
+                    .with_id(Some(seed.id))
+                    .with_parent_id(seed.parent_id)
+                    .with_metadata(seed.metadata.clone());
                 group_service
                     .create_group_unscoped(req, seed.tenant_id)
                     .await?;

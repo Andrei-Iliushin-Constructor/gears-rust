@@ -60,7 +60,12 @@ const PG_DEADLOCK_DETECTED: &str = "40P01";
 /// serialization failures and deadlocks (e.g. `"could not serialize access due
 /// to concurrent update"` carries no `"40001"` substring). Matching the message
 /// is the reliable signal here. Message text is `lc_messages`-dependent, so the
-/// numeric-code checks above remain as a locale-independent belt-and-suspenders.
+/// numeric-code checks above remain as a locale-independent belt-and-suspenders
+/// -- restricted to the two literal shapes a SQLSTATE actually appears in
+/// (`SQLSTATE 40001`, `(40001)`) rather than the bare digits, since `is_pg_contention`
+/// also sees `DbErr::Custom` messages a caller composed itself, and a bare
+/// `40001` is a run of six hex digits that a UUID can produce by chance (see
+/// `contains_sqlstate`).
 const PG_SERIALIZATION_MSG: &str = "could not serialize access";
 const PG_DEADLOCK_MSG: &str = "deadlock detected";
 
@@ -91,6 +96,12 @@ const SQLITE_LOCKED_MSG: &str = "database is locked";
 ///
 /// Without this arm, retry detection silently returns `false` for a
 /// genuinely retryable error, so `transaction_with_retry` never fires (RG-15).
+///
+/// The flip side of accepting `DbErr::Custom` here is that its message can be
+/// anything calling code chose to put there, including an interpolated id --
+/// see `contains_sqlstate` for why the numeric `40001`/`40P01` checks are
+/// narrowed to their actual SQLSTATE renderings rather than a bare digit
+/// match.
 #[must_use]
 pub fn is_retryable_contention(backend: DbBackend, err: &DbErr) -> bool {
     match err {
@@ -132,10 +143,29 @@ fn is_mysql_deadlock(msg: &str) -> bool {
 }
 
 fn is_pg_contention(msg: &str) -> bool {
-    msg.contains(PG_SERIALIZATION_FAILURE)
-        || msg.contains(PG_DEADLOCK_DETECTED)
+    contains_sqlstate(msg, PG_SERIALIZATION_FAILURE)
+        || contains_sqlstate(msg, PG_DEADLOCK_DETECTED)
         || msg.contains(PG_SERIALIZATION_MSG)
         || msg.contains(PG_DEADLOCK_MSG)
+}
+
+/// Match `sqlstate` in `msg` as an actual SQLSTATE occurrence, not a bare
+/// digit run.
+///
+/// `is_retryable_contention` also classifies `DbErr::Custom` messages that
+/// calling code assembled itself (see its doc comment), and those routinely
+/// interpolate identifiers -- a group id, a parent id -- into the text. A
+/// UUID is 32 hex characters, and `40001`/`40P01` are common enough digit
+/// sequences that one turns up in an unrelated UUID by chance; a bare
+/// `msg.contains("40001")` would then misclassify a "group <uuid> not found"
+/// message as a serialization failure. Restricting the numeric match to the
+/// two shapes a driver/log actually renders a SQLSTATE in -- `SQLSTATE
+/// 40001` (verbose driver or log output) and `(40001)` (a parenthesized
+/// code, e.g. `error 1213 (40001)`) -- keeps the numeric check a
+/// belt-and-suspenders on top of the message-text match above without that
+/// false-positive risk.
+fn contains_sqlstate(msg: &str, sqlstate: &str) -> bool {
+    msg.contains(&format!("SQLSTATE {sqlstate}")) || msg.contains(&format!("({sqlstate})"))
 }
 
 fn is_sqlite_busy(msg: &str) -> bool {
@@ -264,6 +294,52 @@ mod tests {
         let err = DbErr::Custom("UNIQUE constraint failed: gts_type.schema_id".to_owned());
         assert!(!is_retryable_contention(DbBackend::Postgres, &err));
         assert!(!is_retryable_contention(DbBackend::Sqlite, &err));
+    }
+
+    // ── Numeric SQLSTATE precision (UUID false-positive) ──────────────
+    //
+    // `DbErr::Custom` messages reaching this function are frequently
+    // assembled by calling code with an interpolated id, not by a driver. A
+    // bare `msg.contains("40001")` would call a "group not found" message a
+    // serialization failure whenever the group's UUID happens to contain
+    // that digit run in its hex -- unrelated to any real contention, and a
+    // false positive that costs a few wasted retries rather than a
+    // correctness bug, but a false positive all the same.
+
+    #[test]
+    fn custom_wrap_uuid_containing_sqlstate_digits_not_retryable() {
+        let err = DbErr::Custom("group 40001abc-1234-5678-9abc-def012345678 not found".to_owned());
+        assert!(
+            !is_retryable_contention(DbBackend::Postgres, &err),
+            "a UUID that happens to contain the digits `40001` must not be mistaken for \
+             SQLSTATE 40001"
+        );
+    }
+
+    #[test]
+    fn custom_wrap_uuid_containing_deadlock_sqlstate_digits_not_retryable() {
+        let err = DbErr::Custom("parent 40p01234-1234-5678-9abc-def012345678 not found".to_owned());
+        assert!(
+            !is_retryable_contention(DbBackend::Postgres, &err),
+            "a UUID that happens to contain the digits `40p01` must not be mistaken for \
+             SQLSTATE 40P01"
+        );
+    }
+
+    #[test]
+    fn real_pg_serialization_failure_message_still_retryable() {
+        // The genuine shape sqlx/sea-orm surface for a real serialization
+        // failure: "SQLSTATE 40001" as a substring of a longer driver
+        // message, not the bare digits alone. Pinned separately from the
+        // message-text tests above so a regression in `contains_sqlstate`
+        // specifically (as opposed to the `could not serialize access`
+        // match) turns this red.
+        let err = DbErr::Custom(
+            "error returned from database: error with SQLSTATE 40001: could not serialize \
+             access due to concurrent update"
+                .to_owned(),
+        );
+        assert!(is_retryable_contention(DbBackend::Postgres, &err));
     }
 
     // ── SQLite BUSY (code 5) ─────────────────────────────────────────

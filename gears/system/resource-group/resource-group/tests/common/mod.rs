@@ -372,14 +372,7 @@ pub async fn create_root_group(
 ) -> ResourceGroupModel {
     svc.create_group(
         ctx,
-        CreateGroupRequest {
-            id: None,
-            code: type_code.to_owned(),
-            name: name.to_owned(),
-            parent_id: None,
-            tenant_id: None,
-            metadata: None,
-        },
+        CreateGroupRequest::new(type_code.to_owned(), name.to_owned()),
         tenant_id,
     )
     .await
@@ -397,14 +390,8 @@ pub async fn create_child_group(
 ) -> ResourceGroupModel {
     svc.create_group(
         ctx,
-        CreateGroupRequest {
-            id: None,
-            code: type_code.to_owned(),
-            name: name.to_owned(),
-            parent_id: Some(parent_id),
-            tenant_id: None,
-            metadata: None,
-        },
+        CreateGroupRequest::new(type_code.to_owned(), name.to_owned())
+            .with_parent_id(Some(parent_id)),
         tenant_id,
     )
     .await

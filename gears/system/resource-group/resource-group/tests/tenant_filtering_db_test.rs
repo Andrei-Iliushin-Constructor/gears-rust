@@ -602,14 +602,10 @@ async fn group_based_membership_data_correctly_stored() {
     let project_a = group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: project_type.clone(),
-                name: "ProjectA".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(
+                project_type.clone(),
+                "ProjectA".to_owned(),
+            ),
             tenant,
         )
         .await
@@ -618,14 +614,7 @@ async fn group_based_membership_data_correctly_stored() {
     let project_b = group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: project_type,
-                name: "ProjectB".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(project_type, "ProjectB".to_owned()),
             tenant,
         )
         .await

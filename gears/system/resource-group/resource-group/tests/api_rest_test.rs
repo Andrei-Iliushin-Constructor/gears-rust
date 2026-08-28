@@ -668,14 +668,7 @@ async fn rest_post_membership_returns_201() {
     let group = group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: gt_code,
-                name: "G1".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(gt_code, "G1".to_owned()),
             tenant_id,
         )
         .await
@@ -803,14 +796,7 @@ async fn rest_delete_membership_returns_204() {
     let group = group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: gt,
-                name: "GDel".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(gt, "GDel".to_owned()),
             tenant_id,
         )
         .await
@@ -884,14 +870,7 @@ async fn rest_post_group_with_parent_returns_201() {
     let parent = group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: root_type.clone(),
-                name: "Parent".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(root_type.clone(), "Parent".to_owned()),
             tenant_id,
         )
         .await
@@ -927,14 +906,7 @@ async fn rest_delete_group_force_returns_204() {
     let parent = group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: rt.clone(),
-                name: "FParent".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(rt.clone(), "FParent".to_owned()),
             tenant_id,
         )
         .await
@@ -944,14 +916,8 @@ async fn rest_delete_group_force_returns_204() {
     group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: rt,
-                name: "FChild".to_owned(),
-                parent_id: Some(parent.id),
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(rt, "FChild".to_owned())
+                .with_parent_id(Some(parent.id)),
             tenant_id,
         )
         .await
@@ -979,14 +945,7 @@ async fn rest_get_group_hierarchy_returns_200() {
     let root = group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: rt.clone(),
-                name: "HRoot".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(rt.clone(), "HRoot".to_owned()),
             tenant_id,
         )
         .await
@@ -995,14 +954,8 @@ async fn rest_get_group_hierarchy_returns_200() {
     let child = group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: rt,
-                name: "HChild".to_owned(),
-                parent_id: Some(root.id),
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(rt, "HChild".to_owned())
+                .with_parent_id(Some(root.id)),
             tenant_id,
         )
         .await
@@ -1312,14 +1265,7 @@ async fn input_membership_non_gts_resource_type() {
     let group = group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: rt,
-                name: "NGGroup".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(rt, "NGGroup".to_owned()),
             tenant_id,
         )
         .await
@@ -1662,14 +1608,7 @@ async fn gts_membership_post_tilde_encoded() {
     let group = group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: gt,
-                name: "TildeGroup".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(gt, "TildeGroup".to_owned()),
             tenant_id,
         )
         .await
@@ -1723,14 +1662,7 @@ async fn gts_membership_delete_tilde_encoded() {
     let group = group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: gt,
-                name: "TildeDelGrp".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(gt, "TildeDelGrp".to_owned()),
             tenant_id,
         )
         .await
@@ -1892,14 +1824,7 @@ async fn smallint_membership_response_has_no_surrogate_ids() {
     let group = group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: gt,
-                name: "MSIDGrp".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(gt, "MSIDGrp".to_owned()),
             tenant_id,
         )
         .await
@@ -1936,14 +1861,7 @@ async fn smallint_hierarchy_response_has_no_surrogate_ids() {
     let root = group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: rt.clone(),
-                name: "HSIDRoot".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(rt.clone(), "HSIDRoot".to_owned()),
             tenant_id,
         )
         .await
@@ -1952,14 +1870,8 @@ async fn smallint_hierarchy_response_has_no_surrogate_ids() {
     let child = group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: rt,
-                name: "HSIDChild".to_owned(),
-                parent_id: Some(root.id),
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(rt, "HSIDChild".to_owned())
+                .with_parent_id(Some(root.id)),
             tenant_id,
         )
         .await
@@ -2263,14 +2175,7 @@ async fn rest_move_group_under_descendant_returns_400_cycle() {
     let root = group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: rt.clone(),
-                name: "CycRoot".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(rt.clone(), "CycRoot".to_owned()),
             tenant_id,
         )
         .await
@@ -2279,14 +2184,8 @@ async fn rest_move_group_under_descendant_returns_400_cycle() {
     let child = group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: rt,
-                name: "CycChild".to_owned(),
-                parent_id: Some(root.id),
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(rt, "CycChild".to_owned())
+                .with_parent_id(Some(root.id)),
             tenant_id,
         )
         .await
@@ -2342,14 +2241,7 @@ async fn rest_move_group_self_parent_returns_400_cycle() {
     let root = group_svc
         .create_group(
             &ctx,
-            resource_group_sdk::CreateGroupRequest {
-                id: None,
-                code: rt,
-                name: "SelfRoot".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            resource_group_sdk::CreateGroupRequest::new(rt, "SelfRoot".to_owned()),
             tenant_id,
         )
         .await

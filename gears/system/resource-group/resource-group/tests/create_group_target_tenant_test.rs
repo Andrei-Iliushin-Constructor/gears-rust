@@ -178,14 +178,7 @@ async fn tenant_id_omitted_uses_caller_tenant() {
     let group = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code,
-                name: "Omitted".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(root_type.code, "Omitted".to_owned()),
             tenant_id,
         )
         .await
@@ -214,14 +207,8 @@ async fn tenant_id_matches_caller_tenant_succeeds() {
     let group = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code,
-                name: "SameTenant".to_owned(),
-                parent_id: None,
-                tenant_id: Some(tenant_id),
-                metadata: None,
-            },
+            CreateGroupRequest::new(root_type.code, "SameTenant".to_owned())
+                .with_tenant_id(Some(tenant_id)),
             tenant_id,
         )
         .await
@@ -251,14 +238,8 @@ async fn foreign_tenant_allowed_by_permissive_policy_succeeds() {
     let group = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code,
-                name: "ForeignAllowed".to_owned(),
-                parent_id: None,
-                tenant_id: Some(target_tenant),
-                metadata: None,
-            },
+            CreateGroupRequest::new(root_type.code, "ForeignAllowed".to_owned())
+                .with_tenant_id(Some(target_tenant)),
             caller_tenant,
         )
         .await
@@ -289,14 +270,8 @@ async fn foreign_tenant_denied_by_default_policy_returns_tenant_not_found() {
     let err = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code,
-                name: "ForeignDenied".to_owned(),
-                parent_id: None,
-                tenant_id: Some(target_tenant),
-                metadata: None,
-            },
+            CreateGroupRequest::new(root_type.code, "ForeignDenied".to_owned())
+                .with_tenant_id(Some(target_tenant)),
             caller_tenant,
         )
         .await
@@ -333,14 +308,7 @@ async fn in_tenant_subtree_scope_is_denied_fail_closed() {
     let err = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code,
-                name: "SubtreeDenied".to_owned(),
-                parent_id: None,
-                tenant_id: Some(target_tenant),
-                metadata: None,
-            },
+            CreateGroupRequest::new(root_type.code, "SubtreeDenied".to_owned()).with_tenant_id(Some(target_tenant)),
             caller_tenant,
         )
         .await
@@ -384,14 +352,9 @@ async fn explicit_tenant_id_conflicting_with_parent_tenant_returns_validation_er
     let err = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: child_type.code,
-                name: "Conflict".to_owned(),
-                parent_id: Some(root.id),
-                tenant_id: Some(tenant_b),
-                metadata: None,
-            },
+            CreateGroupRequest::new(child_type.code, "Conflict".to_owned())
+                .with_parent_id(Some(root.id))
+                .with_tenant_id(Some(tenant_b)),
             tenant_a,
         )
         .await
@@ -437,14 +400,8 @@ async fn tenant_typed_group_with_explicit_tenant_id_returns_validation_error() {
     let err = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: None,
-                code: tenant_type.code,
-                name: "TenantTypedConflict".to_owned(),
-                parent_id: None,
-                tenant_id: Some(other_tenant),
-                metadata: None,
-            },
+            CreateGroupRequest::new(tenant_type.code, "TenantTypedConflict".to_owned())
+                .with_tenant_id(Some(other_tenant)),
             tenant_id,
         )
         .await
@@ -476,14 +433,9 @@ async fn explicit_id_with_foreign_tenant_id_returns_validation_error() {
     let err = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: Some(Uuid::now_v7()),
-                code: root_type.code,
-                name: "IdPlusForeignTenant".to_owned(),
-                parent_id: None,
-                tenant_id: Some(target_tenant),
-                metadata: None,
-            },
+            CreateGroupRequest::new(root_type.code, "IdPlusForeignTenant".to_owned())
+                .with_id(Some(Uuid::now_v7()))
+                .with_tenant_id(Some(target_tenant)),
             caller_tenant,
         )
         .await
@@ -510,14 +462,9 @@ async fn explicit_id_with_same_tenant_still_succeeds() {
     let group = group_svc
         .create_group(
             &ctx,
-            CreateGroupRequest {
-                id: Some(id),
-                code: root_type.code,
-                name: "IdPlusSameTenant".to_owned(),
-                parent_id: None,
-                tenant_id: Some(tenant_id),
-                metadata: None,
-            },
+            CreateGroupRequest::new(root_type.code, "IdPlusSameTenant".to_owned())
+                .with_id(Some(id))
+                .with_tenant_id(Some(tenant_id)),
             tenant_id,
         )
         .await
@@ -538,14 +485,7 @@ async fn create_group_unscoped_none_tenant_id_still_works_like_seeding() {
 
     let group = group_svc
         .create_group_unscoped(
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code,
-                name: "SeedLikeUsual".to_owned(),
-                parent_id: None,
-                tenant_id: None,
-                metadata: None,
-            },
+            CreateGroupRequest::new(root_type.code, "SeedLikeUsual".to_owned()),
             tenant_id,
         )
         .await
@@ -567,14 +507,8 @@ async fn create_group_unscoped_agreeing_tenant_id_succeeds() {
 
     let group = group_svc
         .create_group_unscoped(
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code,
-                name: "SeedAgree".to_owned(),
-                parent_id: None,
-                tenant_id: Some(tenant_id),
-                metadata: None,
-            },
+            CreateGroupRequest::new(root_type.code, "SeedAgree".to_owned())
+                .with_tenant_id(Some(tenant_id)),
             tenant_id,
         )
         .await
@@ -597,14 +531,8 @@ async fn create_group_unscoped_mismatched_tenant_id_returns_validation_error() {
 
     let err = group_svc
         .create_group_unscoped(
-            CreateGroupRequest {
-                id: None,
-                code: root_type.code,
-                name: "SeedMismatch".to_owned(),
-                parent_id: None,
-                tenant_id: Some(conflicting_tenant),
-                metadata: None,
-            },
+            CreateGroupRequest::new(root_type.code, "SeedMismatch".to_owned())
+                .with_tenant_id(Some(conflicting_tenant)),
             trusted_tenant,
         )
         .await
@@ -639,14 +567,8 @@ async fn create_group_unscoped_tenant_typed_with_explicit_tenant_id_rejected() {
 
     let err = group_svc
         .create_group_unscoped(
-            CreateGroupRequest {
-                id: None,
-                code: tenant_type.code,
-                name: "SeedTenantTypedConflict".to_owned(),
-                parent_id: None,
-                tenant_id: Some(tenant_id),
-                metadata: None,
-            },
+            CreateGroupRequest::new(tenant_type.code, "SeedTenantTypedConflict".to_owned())
+                .with_tenant_id(Some(tenant_id)),
             tenant_id,
         )
         .await
