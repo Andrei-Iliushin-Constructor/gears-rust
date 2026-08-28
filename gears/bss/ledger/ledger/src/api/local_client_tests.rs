@@ -339,11 +339,10 @@ mod pg {
 
     use async_trait::async_trait;
     use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
-    use authz_resolver_sdk::error::AuthZResolverError;
     use authz_resolver_sdk::models::{
         EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
     };
-    use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+    use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
     use bss_ledger_sdk::api::LedgerClientV1;
     use bss_ledger_sdk::{
         AccountClass, AllocateOutcome, AllocatePayment, FiscalCalendarSpec, Granularity,
@@ -356,9 +355,10 @@ mod pg {
     use sea_orm_migration::MigratorTrait;
     use testcontainers_modules::postgres::Postgres;
     use testcontainers_modules::testcontainers::runners::AsyncRunner;
+    use toolkit::api::canonical_prelude::CanonicalError;
     use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
     use toolkit_gts::gts_id;
-    use toolkit_security::SecurityContext;
+    use toolkit_security::{PlatformSecurityContext, SecurityContext};
     use uuid::Uuid;
 
     use crate::api::local_client::LedgerLocalClient;
@@ -392,11 +392,12 @@ mod pg {
     pub(super) struct AllowAuthZ;
 
     #[async_trait]
-    impl AuthZResolverClient for AllowAuthZ {
+    impl AuthZResolverApi for AllowAuthZ {
         async fn evaluate(
             &self,
+            _ctx: PlatformSecurityContext,
             request: EvaluationRequest,
-        ) -> Result<EvaluationResponse, AuthZResolverError> {
+        ) -> Result<EvaluationResponse, CanonicalError> {
             let tenant_id = subject_tenant_id(&request);
             Ok(EvaluationResponse {
                 decision: true,
@@ -414,11 +415,12 @@ mod pg {
     pub(super) struct DenyAuthZ;
 
     #[async_trait]
-    impl AuthZResolverClient for DenyAuthZ {
+    impl AuthZResolverApi for DenyAuthZ {
         async fn evaluate(
             &self,
+            _ctx: PlatformSecurityContext,
             _request: EvaluationRequest,
-        ) -> Result<EvaluationResponse, AuthZResolverError> {
+        ) -> Result<EvaluationResponse, CanonicalError> {
             Ok(EvaluationResponse {
                 decision: false,
                 context: EvaluationResponseContext {
