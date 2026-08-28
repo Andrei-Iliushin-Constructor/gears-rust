@@ -24,7 +24,7 @@ The Chat Engine API uses **HTTP with chunked streaming**:
 
 **Where**: [`openapi.json`](openapi.json) — OpenAPI 3.1, generated from
 the live route registrations by `make openapi-chat-engine`. The gear also serves it at
-`{prefix}/chat-engine/v1/openapi.json`, with an API reference page at
+`{prefix}/chat-engine/v1/openapi`, with an API reference page at
 `{prefix}/chat-engine/v1/docs`.
 
 This directory used to hold a hand-written `http-protocol.json`. It was written before

@@ -1,5 +1,5 @@
 //! Handlers for the gear-scoped API reference (`/chat-engine/v1/docs`) and
-//! the document behind it (`/chat-engine/v1/openapi.json`).
+//! the document behind it (`/chat-engine/v1/openapi`).
 //!
 //! Both are anonymous: an API reference that demands a bearer token before it
 //! will tell you which endpoints exist is not a reference.
@@ -15,7 +15,7 @@ use axum::response::{Html, IntoResponse, Response};
 
 use crate::api::rest::docs::{DOCS_PAGE, GearOpenApiDoc};
 
-/// `GET /chat-engine/v1/openapi.json` — the gear's OpenAPI 3.1 document.
+/// `GET /chat-engine/v1/openapi` — the gear's OpenAPI 3.1 document.
 ///
 /// [`OriginalUri`] rather than the nested `Uri`: the gateway mounts this router
 /// under `prefix_path`, and the document's `servers` entry has to reflect the

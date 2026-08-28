@@ -1564,7 +1564,7 @@
         ]
       }
     },
-    "/chat-engine/v1/openapi.json": {
+    "/chat-engine/v1/openapi": {
       "get": {
         "operationId": "chat_engine.docs.openapi",
         "responses": {

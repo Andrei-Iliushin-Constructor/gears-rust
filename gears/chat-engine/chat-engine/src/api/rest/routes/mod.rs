@@ -81,7 +81,7 @@ pub struct ChatEngineServices {
 ///   on every protected route. The `.anonymous()` routes are
 ///   `POST /chat-engine/v1/shared/{share_token}` (the share token is the
 ///   grant) and the two documentation routes (`GET /chat-engine/v1/docs`,
-///   `GET /chat-engine/v1/openapi.json`).
+///   `GET /chat-engine/v1/openapi`).
 /// - `.json_response_with_schema::<…>(openapi, status, desc)` for typed
 ///   responses; `.json_request::<…>(openapi, desc)` for typed bodies.
 /// - `.standard_errors(openapi)` registers the RFC-9457 error variants.
@@ -97,7 +97,7 @@ pub fn register_routes(
     let mut router = router;
 
     // Every `OperationBuilder` below registers through this decorator, so the
-    // gear-scoped document served at `/chat-engine/openapi.json` is assembled
+    // gear-scoped document served at `/chat-engine/v1/openapi` is assembled
     // from exactly what this function registers. Shadowing `openapi` keeps the
     // per-endpoint chains untouched — they still read as plain registry calls.
     let tee = TeeRegistry::new(openapi);
@@ -487,7 +487,7 @@ pub fn register_routes(
 
     let gear_doc = Arc::new(GearOpenApiDoc::default());
 
-    router = OperationBuilder::get("/chat-engine/v1/openapi.json")
+    router = OperationBuilder::get("/chat-engine/v1/openapi")
         .operation_id("chat_engine.docs.openapi")
         .summary("OpenAPI document describing the Chat Engine REST surface")
         .tag(API_TAG)
