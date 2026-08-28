@@ -203,7 +203,7 @@ C4Container
 
 ### 2.1 Goals
 
-- **Consumer notification per change set (filtered)** — `change_notification { change_set_id, tenant, changed_keys: [key] }`, delivered **per subscriber**, carrying **only the changed keys that subscriber is subscribed to** (never the full change set). One message per change set per subscriber, so a consumer batch-reacts without re-subscribing or polling. `tenant` is always present — the root tenant's id at platform scope (DESIGN.md §4.7). Keys are the settings' GTS **instance** ids `<value-type>~<instance-id>` — referenceable by construction; **only the value type (left half) is registered**, the setting itself is not (DESIGN.md §4.7). No `change_kind` — consumers re-read anyway.
+- **Consumer notification per change set (filtered)** — `change_notification { change_set_id, tenant, changed_keys: [key] }`, delivered **per subscriber**, carrying **only the changed keys that subscriber is subscribed to** (never the full change set). One message per change set per subscriber, so a consumer batch-reacts without re-subscribing or polling. `tenant` is always present — the root tenant's id at platform scope (DESIGN.md §4.7). Keys are the settings' GTS **type** ids — referenceable by construction, each registered when its declaration was created (DESIGN.md §4.7). No `change_kind` — consumers re-read anyway.
 - **Replica cache invalidation (broadcast)** — `cache_invalidate { change_set_id, tenant, changed_keys: [key] }`, published once per change set to **all** Settings Service replicas (no subscription, no ack), carrying the full changed-key set so every replica evicts its cached `(key, tenant)` entries (§4.2 *Cache Invalidation Broadcast*).
 - **Immutable change set** — the settings changed by a single `set` are stored immediately (effective on read) and then reconciled as one unit. The bundle's expected values are **fixed at write time**; to change a value the administrator sets it again, producing a **new** change set.
 - **Per-setting subscription** — a consumer subscribes, in its own name, to the **specific setting keys** it must actively activate (not merely pull). Subscription implies **acknowledged delivery** for those keys (§4.2 *Subscription Manager*).
@@ -315,7 +315,7 @@ Reconciliation waits until **every** await-record resolves; there is **no TTL**.
 |-------|------|----------|-------------|
 | `change_set_id` | UUID | Yes | The `set` request (DESIGN.md §4.2 *Value Writer*) whose changes these are — correlates the signal to its cause and to response reports. |
 | `tenant` | string | Yes | The tenant the change applies to (`/tenants/{id}`); the **root tenant's id** for a platform-wide change (DESIGN.md §4.7). The consumer re-reads for this tenant and is responsible for resolving affected descendant tenants if it cares about cascading. |
-| `changed_keys` | `[key]` | Yes | **Only the changed setting keys that the receiving subscriber is subscribed to** (GTS instance ids; no operation type) — never the full change set. Delivered per subscriber, so each consumer sees a bundle scoped to its own subscriptions. Consumer already re-reads; operation type is not needed. |
+| `changed_keys` | `[key]` | Yes | **Only the changed setting keys that the receiving subscriber is subscribed to** (GTS type ids; no operation type) — never the full change set. Delivered per subscriber, so each consumer sees a bundle scoped to its own subscriptions. Consumer already re-reads; operation type is not needed. |
 
 **Invariant:** the payload never contains values or secrets, and never keys the subscriber did not subscribe to. A consumer that needs values re-reads them via `SettingsReaderClient` (DESIGN.md §4.5), which resolves effective values for the given `tenant`.
 
@@ -335,7 +335,7 @@ Reconciliation waits until **every** await-record resolves; there is **no TTL**.
 |-------|------|----------|-------------|
 | `change_set_id` | UUID | Yes | The change set this response answers. |
 | `subscriber` | string | Yes | Consumer identity (gear/module namespace) that reacted. |
-| `key` | string | Yes | The changed setting (GTS instance id) this response answers. Together with `subscriber` and `change_set_id` it identifies the **await-record**; a consumer emits one response per changed setting it is subscribed to. |
+| `key` | string | Yes | The changed setting (GTS type id) this response answers. Together with `subscriber` and `change_set_id` it identifies the **await-record**; a consumer emits one response per changed setting it is subscribed to. |
 | `tenant` | string | Yes | The tenant the consumer applied the change for, echoed from the notification. Lets the system verify against the tenant-scoped effective value. |
 | `status` | `ResponseStatus` | Yes | `success` / `failed`. |
 | `applied_value` | string | Conditional | **Required when `status = success`**; absent when `status = failed`. The value the consumer applied for `key` at `tenant` — the **plaintext value** for non-secret settings, or a **hash** for secret-valued settings (plaintext never leaves the consumer). The Settings Service verifies it against the expected value **snapshotted at write time** for the await-record (§4.2 *Change Set Publisher*; comparing hashes for secrets); a value that does **not** match makes the record **failed** even when `status = success`, and a `success` that omits it cannot be verified at all, so it resolves the record **failed** too (§4.2 *Change Set Outcome Tracker*). |
@@ -364,7 +364,7 @@ One row per **(change set, subscriber, key)** the change set must hear back on. 
 |-------|------|----------|-------------|
 | `change_set_id` | UUID | Yes | The change set this record belongs to. `(change_set_id, subscriber, key)` is the record's **unique identity** — `tenant` is **not** in the key (it is determined by the change set). It is **not** an ordering key: `change_set_id` is a UUIDv7 minted when the `set` request is **accepted** (DESIGN.md §4.2 *Value Writer*), and because a change set commits **per change**, a long change set accepted earlier can settle later — so `change_set_id` order is creation order, not settle order. "Older / newer" within a `(subscriber, key, tenant)` supersession group is therefore a comparison of **`change_set_tracker.settle_seq`** (§4.7), the monotonic sequence assigned when the change set settles. |
 | `subscriber` | string | Yes | Consumer identity that owes an acknowledgement. |
-| `key` | string | Yes | The changed setting (GTS instance id). |
+| `key` | string | Yes | The changed setting (GTS type id). |
 | `expected_value` | string | Yes | The **snapshot fixed at write time** (§4.2 *Change Set Publisher*) — the tenant-scoped effective value in the canonical encoding (§4.1 *Canonical value encoding*), or a **hash** over those canonical bytes for secret-valued settings. The back-response's applied value is compared against this snapshot, never a recomputed value. |
 | `status` | `RecordStatus` | Yes | `awaiting` → `succeeded` / `failed` / `superseded` / `cancelled` (§4.2 *Change Set Outcome Tracker*; `cancelled` = the owing consumer retired, §4.2 *Subscription Manager*). Terminal states are **immutable**, so redelivered acks are idempotent no-ops. |
 | `answered_at` | `timestamptz` | No | When the record reached a terminal state; `NULL` while `awaiting`. |
@@ -393,7 +393,7 @@ One row per **(change set, subscriber, key)** the change set must hear back on. 
 |-------|------|----------|-------------|
 | `id` | UUID | Yes | Subscription id (UUIDv7). |
 | `subscriber` | string | Yes | The consumer identity that registered this subscription — **any trusted in-platform consumer**, not necessarily the setting's owner/contributor. |
-| `key` | string | Yes | The **exact setting key** (GTS instance id) the subscriber watches — one row per setting the consumer must actively activate. Not a namespace/prefix pattern. Registered by the consumer (trusted-caller, §4.2 *Subscription Manager*) for any key it can read — **not** tied to contribution, and stored by this system, **not** on the settings declaration (which stays activation-agnostic). |
+| `key` | string | Yes | The **exact setting key** (GTS type id) the subscriber watches — one row per setting the consumer must actively activate. Not a namespace/prefix pattern. Registered by the consumer (trusted-caller, §4.2 *Subscription Manager*) for any key it can read — **not** tied to contribution, and stored by this system, **not** on the settings declaration (which stays activation-agnostic). |
 | `created_at` | `timestamptz` | Yes | UTC timestamp. |
 
 > A subscription **implies acknowledged delivery** for its key — there is no non-acking subscription. Replica cache invalidation is *not* modelled as a subscription (§4.2 *Cache Invalidation Broadcast*): it is an unconditional broadcast with no registry row.
@@ -584,7 +584,7 @@ Replica cache coherence is **not** a subscription. Every Settings Service replic
 
 ### 4.3 API Contracts
 
-Most of this system is an in-process SDK contract. The **only** REST surface is the **read-only change-set activation facet** (§4.3). Subscription and acknowledgement are SDK + Event Broker (§4.5); replica cache invalidation is the `cache_invalidate` broadcast (§4.2 *Cache Invalidation Broadcast*) — neither is REST. `{key}` is the setting's GTS instance id (URL-encoded).
+Most of this system is an in-process SDK contract. The **only** REST surface is the **read-only change-set activation facet** (§4.3). Subscription and acknowledgement are SDK + Event Broker (§4.5); replica cache invalidation is the `cache_invalidate` broadcast (§4.2 *Cache Invalidation Broadcast*) — neither is REST. `{key}` is the setting's GTS type id (URL-encoded).
 
 #### REST — Change-Set Activation Facet (read-only)
 
@@ -618,7 +618,7 @@ Canonical definitions; the [Settings Service](./DESIGN.md) publishes and consume
 
 **The subject rides with `tenant`, and is absent until something writes it.** A setting value may be scoped to a subject inside a tenant ([DESIGN.md](./DESIGN.md) §4.7), so every signal that names a tenant carries the optional subject beside it: a consumer re-reading a changed value needs the same scope the change was applied at, a replica evicts a cache key that includes it, and a back-response has to say which subject's value it applied.
 
-**A pair, not one attribute**, because a subject is identified by `(subject_type, subject_id)` and by neither half alone. `subject_id` is the subject's **runtime** identity — minted when the subject is created, unique only within its type — so two types may legitimately mint the same id. This is the one place the subject differs in shape from `changed_keys` beside it: a setting key is an **authored** GTS instance id in chain form and carries its own type, which is why no value-type attribute travels next to it. A subject has no authored id to carry a type inside, so the type travels as its own attribute. Both attributes are **optional and absent in v1**, which writes no subject-scoped values; they are in the shape now because `cpt-cf-settings-service-fr-subject-scoped-values` forbids shipping anything that would need a migration — and for a signal the migration is worse than a column, since it is a **published contract** other gears have already compiled against. Adding them now is free under the rule above — optional attributes leave the type id alone; adding them after consumers exist would still be free for the *publisher* and useless for the *consumer*, which is compiled against a payload that had no place to put a subject.
+**A pair, not one attribute**, because a subject is identified by `(subject_type, subject_id)` and by neither half alone. `subject_id` is the subject's **runtime** identity — minted when the subject is created, unique only within its type — so two types may legitimately mint the same id. This is the one place the subject differs in shape from `changed_keys` beside it: a setting key is an **authored** GTS type id in chain form and carries its own type, which is why no value-type attribute travels next to it. A subject has no authored id to carry a type inside, so the type travels as its own attribute. Both attributes are **optional and absent in v1**, which writes no subject-scoped values; they are in the shape now because `cpt-cf-settings-service-fr-subject-scoped-values` forbids shipping anything that would need a migration — and for a signal the migration is worse than a column, since it is a **published contract** other gears have already compiled against. Adding them now is free under the rule above — optional attributes leave the type id alone; adding them after consumers exist would still be free for the *publisher* and useless for the *consumer*, which is compiled against a payload that had no place to put a subject.
 
 **Two events, two trust domains:** consumer activation (`change_notification`) is per-subscriber and filtered; cache coherence (`cache_invalidate`) is a full-set broadcast confined to the service's own replicas. The full change set never reaches an external consumer (§4.8).
 
@@ -716,7 +716,7 @@ sequenceDiagram
 |--------|------|----------|---------|-------------|
 | `id` | UUID | No | auto | **PK** |
 | `subscriber` | text | No | — | |
-| `key` | text | No | — | Exact setting key (GTS instance id); one row per subscribed setting |
+| `key` | text | No | — | Exact setting key (GTS type id); one row per subscribed setting |
 | `created_at` | `timestamptz` | No | `now()` | Matches `Subscription.created_at` (§4.1), which the entity declares required |
 
 **Indexes:** unique `uq_sub_subscriber_key` on `(subscriber, key)`; `idx_sub_key` on `key` (fan-out lookup by changed key).
@@ -747,7 +747,7 @@ The load-bearing per-`(change_set_id, subscriber, key)` state. Created at publis
 | `id` | UUID | No | auto | **PK** |
 | `change_set_id` | UUID | No | — | Correlation id → the `set` request (no DB FK) |
 | `subscriber` | text | No | — | Owing consumer identity |
-| `key` | text | No | — | Changed setting (GTS instance id) |
+| `key` | text | No | — | Changed setting (GTS type id) |
 | `expected_value` | text | No | — | Snapshot of the tenant-scoped effective value at publish, canonically encoded (§4.1 *Canonical value encoding*; a **hash** over those bytes for secret-valued settings); the applied value is compared against this (§4.2 *Change Set Publisher*/§4.2 *Change Set Outcome Tracker*) |
 | `status` | text | No | `'awaiting'` | Check: `awaiting`, `succeeded`, `failed`, `superseded`, `cancelled` |
 | `applied_value` | text | Yes | — | The received back-response value in the same canonical encoding as `expected_value` (§4.1 *Canonical value encoding*; plaintext for non-secret, hash for secret); `NULL` until a response arrives (and for `superseded`, which resolves without one) |
