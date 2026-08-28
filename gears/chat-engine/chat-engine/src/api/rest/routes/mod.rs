@@ -343,10 +343,9 @@ pub fn register_routes(
         .require_license_features([&ChatEngineLicense])
         .path_param("id", "Session UUID")
         .handler(handlers::glue::summarize_session)
-        .json_response_with_schema::<StreamingEventDto>(
+        .sse_json::<StreamingEventDto>(
             openapi,
-            StatusCode::OK,
-            "SSE typed delta stream of message.start/message.text.delta/message.complete/message.error events (text/event-stream)",
+            "SSE typed delta stream of message.start/message.text.delta/message.complete/message.error events",
         )
         .standard_errors(openapi)
         .register(router, openapi);
@@ -364,10 +363,9 @@ pub fn register_routes(
         .path_param("id", "Session UUID")
         .json_request::<SendMessageRequestDto>(openapi, "Message payload")
         .handler(handlers::glue::send_message_in_session)
-        .json_response_with_schema::<StreamingEventDto>(
+        .sse_json::<StreamingEventDto>(
             openapi,
-            StatusCode::OK,
-            "SSE typed delta stream of message.start/message.text.delta/message.complete/message.error events (text/event-stream)",
+            "SSE typed delta stream of message.start/message.text.delta/message.complete/message.error events",
         )
         .standard_errors(openapi)
         .register(router, openapi);
@@ -410,10 +408,9 @@ pub fn register_routes(
         .require_license_features([&ChatEngineLicense])
         .path_param("id", "Message UUID")
         .handler(handlers::glue::resume_message_stream)
-        .json_response_with_schema::<StreamingEventDto>(
+        .sse_json::<StreamingEventDto>(
             openapi,
-            StatusCode::OK,
-            "SSE delta stream replayed from Last-Event-ID then live-tailed (text/event-stream)",
+            "SSE delta stream replayed from Last-Event-ID then live-tailed",
         )
         .standard_errors(openapi)
         .register(router, openapi);
@@ -439,10 +436,9 @@ pub fn register_routes(
         .path_param("id", "Message UUID")
         .json_request::<RecreateMessageRequestDto>(openapi, "Recreate options")
         .handler(handlers::glue::recreate_message)
-        .json_response_with_schema::<StreamingEventDto>(
+        .sse_json::<StreamingEventDto>(
             openapi,
-            StatusCode::OK,
-            "SSE typed delta stream of message.start/message.text.delta/message.complete/message.error events (text/event-stream)",
+            "SSE typed delta stream of message.start/message.text.delta/message.complete/message.error events",
         )
         .standard_errors(openapi)
         .register(router, openapi);
@@ -494,3 +490,7 @@ pub fn register_routes(
         .layer(Extension(webhooks))
         .layer(Extension(stream_buffer))
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod mod_tests;

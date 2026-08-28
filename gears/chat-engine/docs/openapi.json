@@ -1260,13 +1260,13 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
+              "text/event-stream": {
                 "schema": {
                   "$ref": "#/components/schemas/StreamingEventDto"
                 }
               }
             },
-            "description": "SSE typed delta stream of message.start/message.text.delta/message.complete/message.error events (text/event-stream)"
+            "description": "SSE typed delta stream of message.start/message.text.delta/message.complete/message.error events"
           },
           "400": {
             "content": {
@@ -1367,13 +1367,13 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
+              "text/event-stream": {
                 "schema": {
                   "$ref": "#/components/schemas/StreamingEventDto"
                 }
               }
             },
-            "description": "SSE delta stream replayed from Last-Event-ID then live-tailed (text/event-stream)"
+            "description": "SSE delta stream replayed from Last-Event-ID then live-tailed"
           },
           "400": {
             "content": {
@@ -2612,13 +2612,13 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
+              "text/event-stream": {
                 "schema": {
                   "$ref": "#/components/schemas/StreamingEventDto"
                 }
               }
             },
-            "description": "SSE typed delta stream of message.start/message.text.delta/message.complete/message.error events (text/event-stream)"
+            "description": "SSE typed delta stream of message.start/message.text.delta/message.complete/message.error events"
           },
           "400": {
             "content": {
@@ -2955,13 +2955,13 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
+              "text/event-stream": {
                 "schema": {
                   "$ref": "#/components/schemas/StreamingEventDto"
                 }
               }
             },
-            "description": "SSE typed delta stream of message.start/message.text.delta/message.complete/message.error events (text/event-stream)"
+            "description": "SSE typed delta stream of message.start/message.text.delta/message.complete/message.error events"
           },
           "400": {
             "content": {
