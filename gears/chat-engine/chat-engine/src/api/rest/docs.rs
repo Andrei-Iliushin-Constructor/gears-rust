@@ -17,10 +17,14 @@
 // @cpt-cf-chat-engine-api-rest-docs
 
 use std::any::Any;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
+use axum::{Extension, Router};
+use http::StatusCode;
 use serde_json::Value;
-use toolkit::api::{OpenApiInfo, OpenApiRegistry, OpenApiRegistryImpl, OperationSpec};
+use toolkit::api::{
+    OpenApiInfo, OpenApiRegistry, OpenApiRegistryImpl, OperationBuilder, OperationSpec,
+};
 use utoipa::openapi::{RefOr, schema::Schema};
 
 /// The gear's own path root. [`GearOpenApiDoc::render`] splits a request path
@@ -161,6 +165,48 @@ fn mount_prefix(request_path: &str) -> &str {
         Some(index) => &request_path[..index],
         None => "",
     }
+}
+
+/// Mount the two documentation routes and snapshot the document they serve.
+///
+/// Call this **last** in [`register_routes`](super::register_routes): the
+/// snapshot covers whatever has passed through `registry` by then, so any
+/// operation registered afterwards would be missing from it.
+///
+/// Both routes are anonymous. An API reference that demands a bearer token
+/// before it will list the endpoints is useless to whoever is trying to work
+/// out how to obtain one.
+///
+/// Lives here rather than beside the versioned endpoints because it needs none
+/// of their service wiring — only a registry and a router — which is also what
+/// makes it testable on its own.
+pub fn mount(router: Router, registry: &TeeRegistry<'_>) -> Router {
+    let mut router = OperationBuilder::get("/chat-engine/v1/openapi")
+        .operation_id("chat_engine.docs.openapi")
+        .summary("OpenAPI document describing the Chat Engine REST surface")
+        .tag(super::routes::API_TAG)
+        .anonymous()
+        .handler(super::handlers::docs::openapi_json)
+        .json_response(StatusCode::OK, "OpenAPI 3.1 document")
+        .text_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The document could not be assembled at startup",
+            "text/plain",
+        )
+        .register(router, registry);
+
+    router = OperationBuilder::get("/chat-engine/v1/docs")
+        .operation_id("chat_engine.docs.reference")
+        .summary("Interactive API reference for the Chat Engine REST surface")
+        .tag(super::routes::API_TAG)
+        .anonymous()
+        .handler(super::handlers::docs::docs_page)
+        .html_response(StatusCode::OK, "API reference page")
+        .register(router, registry);
+
+    let doc = Arc::new(GearOpenApiDoc::default());
+    doc.build(registry);
+    router.layer(Extension(doc))
 }
 
 /// The API reference page.

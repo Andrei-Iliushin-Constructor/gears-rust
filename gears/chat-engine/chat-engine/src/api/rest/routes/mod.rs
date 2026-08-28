@@ -26,7 +26,7 @@ use toolkit::api::operation_builder::{
 };
 
 use crate::api::rest::WebhookEmitter;
-use crate::api::rest::docs::{GearOpenApiDoc, TeeRegistry};
+use crate::api::rest::docs::TeeRegistry;
 use crate::api::rest::dto::{
     CreateSessionRequestDto, ExportAcceptedDto, MessageDto, MessageListDto, ReactionListDto,
     ReactionRequestDto, RecreateMessageRequestDto, RegisterSessionTypeRequestDto, SearchRequestDto,
@@ -43,7 +43,7 @@ use crate::domain::service::{
 
 /// API tag used by every Chat Engine endpoint in the generated OpenAPI
 /// document.
-const API_TAG: &str = "Chat Engine";
+pub(crate) const API_TAG: &str = "Chat Engine";
 
 /// License feature required by all `cf-chat-engine` endpoints.
 ///
@@ -476,51 +476,14 @@ pub fn register_routes(
         .standard_errors(openapi)
         .register(router, openapi);
 
-    // -------------------------------------------------------------------
-    // Gear-scoped API reference
-    //
-    // The gateway's own `{prefix}/docs` covers every gear in the process;
-    // these two routes narrow it to Chat Engine. Anonymous, because a
-    // reference that needs a token before it will list the endpoints is
-    // useless to whoever is trying to obtain one.
-    // -------------------------------------------------------------------
-
-    let gear_doc = Arc::new(GearOpenApiDoc::default());
-
-    router = OperationBuilder::get("/chat-engine/v1/openapi")
-        .operation_id("chat_engine.docs.openapi")
-        .summary("OpenAPI document describing the Chat Engine REST surface")
-        .tag(API_TAG)
-        .anonymous()
-        .handler(handlers::docs::openapi_json)
-        .json_response(StatusCode::OK, "OpenAPI 3.1 document")
-        .text_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "The document could not be assembled at startup",
-            "text/plain",
-        )
-        .register(router, openapi);
-
-    router = OperationBuilder::get("/chat-engine/v1/docs")
-        .operation_id("chat_engine.docs.reference")
-        .summary("Interactive API reference for the Chat Engine REST surface")
-        .tag(API_TAG)
-        .anonymous()
-        .handler(handlers::docs::docs_page)
-        .html_response(StatusCode::OK, "API reference page")
-        .register(router, openapi);
-
-    // Snapshot now that every Chat Engine operation — the two routes above
-    // included — has passed through the tee. Anything registered after this
-    // point would be missing from the served document.
-    gear_doc.build(&tee);
+    // Mounted last: it snapshots everything registered above (itself included).
+    router = crate::api::rest::docs::mount(router, &tee);
 
     // -------------------------------------------------------------------
     // Service & webhook DI attached once at the end.
     // -------------------------------------------------------------------
 
     router
-        .layer(Extension(gear_doc))
         .layer(Extension(services.sessions))
         .layer(Extension(services.messages))
         .layer(Extension(services.variants))
