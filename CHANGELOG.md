@@ -9,6 +9,21 @@ release-plz updates this file in the Release PR.
 
 ## [Unreleased]
 
+## [0.4.10](https://github.com/constructorfabric/gears-rust/compare/cf-gears-api-gateway-v0.4.9...cf-gears-api-gateway-v0.4.10) - 2026-08-28
+
+### Fixed
+
+- *(api-gateway)* seconds-scale bucket boundaries for http.server.request.duration (by @Jotunhei)
+
+### Other
+
+- Merge pull request #4671 from Jotunhei/fix/http-server-duration-bucket-boundaries (by @MikeFalcon77) - #4671
+
+### Contributors
+
+* @MikeFalcon77
+* @Jotunhei
+
 ## [0.2.30](https://github.com/constructorfabric/gears-rust/compare/cf-gears-authn-resolver-v0.2.29...cf-gears-authn-resolver-v0.2.30) - 2026-08-26
 
 ### Other
