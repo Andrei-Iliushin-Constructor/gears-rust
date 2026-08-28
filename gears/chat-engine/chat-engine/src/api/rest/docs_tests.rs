@@ -132,7 +132,7 @@ fn build_produces_a_document_covering_the_teed_operations() {
     doc.build(&tee);
 
     let rendered = doc.render("/chat-engine/v1/openapi").expect("rendered");
-    let parsed: Value = serde_json::from_str(rendered).expect("valid JSON");
+    let parsed: Value = serde_json::from_str(&rendered).expect("valid JSON");
 
     assert_eq!(parsed["info"]["title"], "Chat Engine API");
     assert!(parsed["paths"]["/chat-engine/v1/sessions"].is_object());
@@ -162,7 +162,7 @@ fn render_injects_the_mount_prefix_as_the_server() {
     let doc = built_doc();
 
     let rendered = doc.render("/cf/chat-engine/v1/openapi").expect("rendered");
-    let parsed: Value = serde_json::from_str(rendered).expect("valid JSON");
+    let parsed: Value = serde_json::from_str(&rendered).expect("valid JSON");
 
     assert_eq!(parsed["servers"], serde_json::json!([{ "url": "/cf" }]));
 }
@@ -172,7 +172,7 @@ fn render_omits_servers_when_mounted_at_the_root() {
     let doc = built_doc();
 
     let rendered = doc.render("/chat-engine/v1/openapi").expect("rendered");
-    let parsed: Value = serde_json::from_str(rendered).expect("valid JSON");
+    let parsed: Value = serde_json::from_str(&rendered).expect("valid JSON");
 
     assert!(parsed.get("servers").is_none());
 }
@@ -209,24 +209,34 @@ fn build_is_idempotent_and_keeps_the_first_document() {
     doc.build(&tee);
 
     let parsed: Value =
-        serde_json::from_str(doc.render("/chat-engine/v1/openapi").expect("rendered"))
+        serde_json::from_str(&doc.render("/chat-engine/v1/openapi").expect("rendered"))
             .expect("valid JSON");
     assert!(parsed["paths"]["/chat-engine/v1/sessions"].is_object());
     assert!(parsed["paths"]["/chat-engine/v1/messages/{id}"].is_null());
 }
 
 #[test]
-fn render_is_computed_once_and_reused() {
+fn render_resolves_servers_per_call_not_per_process() {
     let doc = built_doc();
 
-    let first = doc.render("/cf/chat-engine/v1/openapi").expect("rendered");
-    // Same borrow returned for a different prefix: the mount point is fixed for
-    // the process, so the first caller settles it.
-    let second = doc
+    let under_cf = doc.render("/cf/chat-engine/v1/openapi").expect("rendered");
+    let under_other = doc
         .render("/other/chat-engine/v1/openapi")
         .expect("rendered");
+    let at_root = doc.render("/chat-engine/v1/openapi").expect("rendered");
 
-    assert!(std::ptr::eq(first, second));
+    // Each caller must be told its own base URL. Caching one rendering for the
+    // process would hand the second and third callers the first one's.
+    let parse = |s: &str| -> Value { serde_json::from_str(s).expect("valid JSON") };
+    assert_eq!(
+        parse(&under_cf)["servers"],
+        serde_json::json!([{ "url": "/cf" }])
+    );
+    assert_eq!(
+        parse(&under_other)["servers"],
+        serde_json::json!([{ "url": "/other" }])
+    );
+    assert!(parse(&at_root).get("servers").is_none());
 }
 
 /// Drive the mounted routes through a real router, so the registration itself

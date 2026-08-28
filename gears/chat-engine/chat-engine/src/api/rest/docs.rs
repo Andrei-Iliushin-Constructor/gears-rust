@@ -86,11 +86,12 @@ impl OpenApiRegistry for TeeRegistry<'_> {
 pub struct GearOpenApiDoc {
     /// Document without a `servers` entry: the mount prefix is deployment
     /// configuration owned by the gateway, not by this gear.
+    ///
+    /// Only the prefix-free form is stored. Serializing per request costs a
+    /// pretty-print of a document this endpoint serves to a human opening the
+    /// reference page, and it keeps `servers` a property of the request rather
+    /// than of whichever request happened to arrive first.
     document: OnceLock<Value>,
-    /// Serialized document with `servers` resolved from the first request's
-    /// path. The prefix is fixed for the lifetime of the process, so the first
-    /// caller settles it for everyone.
-    rendered: OnceLock<String>,
 }
 
 impl GearOpenApiDoc {
@@ -134,26 +135,24 @@ impl GearOpenApiDoc {
     /// `request_path` is the full path as the client sent it
     /// (`/cf/chat-engine/v1/openapi`); whatever precedes [`GEAR_BASE_PATH`] is
     /// the gateway's mount point and becomes the document's single server entry,
-    /// so "try it" in an API browser targets the real base URL.
+    /// so "try it" in an API browser targets the real base URL. Resolved per
+    /// call: a gear mounted under two paths must describe each honestly.
     ///
     /// Returns `None` when the document could not be built at startup.
-    pub fn render(&self, request_path: &str) -> Option<&str> {
-        let document = self.document.get()?;
-        Some(self.rendered.get_or_init(|| {
-            let mut document = document.clone();
-            let prefix = mount_prefix(request_path);
-            if !prefix.is_empty()
-                && let Some(object) = document.as_object_mut()
-            {
-                object.insert(
-                    "servers".to_owned(),
-                    Value::Array(vec![serde_json::json!({ "url": prefix })]),
-                );
-            }
-            // Pretty-printed: this document is read by humans as often as by
-            // code generators.
-            serde_json::to_string_pretty(&document).unwrap_or_else(|_| "{}".to_owned())
-        }))
+    pub fn render(&self, request_path: &str) -> Option<String> {
+        let mut document = self.document.get()?.clone();
+        let prefix = mount_prefix(request_path);
+        if !prefix.is_empty()
+            && let Some(object) = document.as_object_mut()
+        {
+            object.insert(
+                "servers".to_owned(),
+                Value::Array(vec![serde_json::json!({ "url": prefix })]),
+            );
+        }
+        // Pretty-printed: this document is read by humans as often as by
+        // code generators.
+        Some(serde_json::to_string_pretty(&document).unwrap_or_else(|_| "{}".to_owned()))
     }
 }
 
