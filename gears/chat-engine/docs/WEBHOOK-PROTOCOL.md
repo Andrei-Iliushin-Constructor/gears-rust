@@ -24,8 +24,8 @@ The Chat Engine API uses **HTTP with chunked streaming**:
 
 **Where**: [`openapi.json`](openapi.json) — OpenAPI 3.1, generated from
 the live route registrations by `make openapi-chat-engine`. The gear also serves it at
-`{prefix}/chat-engine/openapi.json`, with an API reference page at
-`{prefix}/chat-engine/docs`.
+`{prefix}/chat-engine/v1/openapi.json`, with an API reference page at
+`{prefix}/chat-engine/v1/docs`.
 
 This directory used to hold a hand-written `http-protocol.json`. It was written before
 the implementation and never matched it — it described `/sessions`, `/messages/send`
@@ -338,7 +338,7 @@ Regenerate with `make openapi-chat-engine` and diff.
 
 ### Documentation Generation
 
-- **HTTP**: Redoc, Swagger UI, or the reference page the gear serves at `{prefix}/chat-engine/docs`
+- **HTTP**: Redoc, Swagger UI, or the reference page the gear serves at `{prefix}/chat-engine/v1/docs`
 - **Webhook**: Custom documentation from JSON Schema
 
 ## See Also

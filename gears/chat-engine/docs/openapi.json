@@ -876,11 +876,11 @@
   "info": {
     "description": "REST surface of the Chat Engine gear: session types, session lifecycle, messages and SSE streaming, variants, reactions, search, session intelligence, export and sharing.",
     "title": "Chat Engine API",
-    "version": "0.2.7"
+    "version": "0.3.1"
   },
   "openapi": "3.1.0",
   "paths": {
-    "/chat-engine/docs": {
+    "/chat-engine/v1/docs": {
       "get": {
         "operationId": "chat_engine.docs.reference",
         "responses": {
@@ -897,38 +897,6 @@
           }
         },
         "summary": "Interactive API reference for the Chat Engine REST surface",
-        "tags": [
-          "Chat Engine"
-        ]
-      }
-    },
-    "/chat-engine/openapi.json": {
-      "get": {
-        "operationId": "chat_engine.docs.openapi",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
-              }
-            },
-            "description": "OpenAPI 3.1 document"
-          },
-          "503": {
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "format": "text/plain",
-                  "type": "string"
-                }
-              }
-            },
-            "description": "The document could not be assembled at startup"
-          }
-        },
-        "summary": "OpenAPI document describing the Chat Engine REST surface",
         "tags": [
           "Chat Engine"
         ]
@@ -1591,6 +1559,38 @@
           }
         ],
         "summary": "List variants for a message",
+        "tags": [
+          "Chat Engine"
+        ]
+      }
+    },
+    "/chat-engine/v1/openapi.json": {
+      "get": {
+        "operationId": "chat_engine.docs.openapi",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OpenAPI 3.1 document"
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "format": "text/plain",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The document could not be assembled at startup"
+          }
+        },
+        "summary": "OpenAPI document describing the Chat Engine REST surface",
         "tags": [
           "Chat Engine"
         ]

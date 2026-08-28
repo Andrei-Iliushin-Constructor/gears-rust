@@ -131,7 +131,9 @@ fn build_produces_a_document_covering_the_teed_operations() {
     let doc = GearOpenApiDoc::default();
     doc.build(&tee);
 
-    let rendered = doc.render("/chat-engine/openapi.json").expect("rendered");
+    let rendered = doc
+        .render("/chat-engine/v1/openapi.json")
+        .expect("rendered");
     let parsed: Value = serde_json::from_str(rendered).expect("valid JSON");
 
     assert_eq!(parsed["info"]["title"], "Chat Engine API");
@@ -139,10 +141,10 @@ fn build_produces_a_document_covering_the_teed_operations() {
 }
 
 #[test]
-fn mount_prefix_is_whatever_precedes_the_docs_base_path() {
-    assert_eq!(mount_prefix("/cf/chat-engine/openapi.json"), "/cf");
-    assert_eq!(mount_prefix("/chat-engine/openapi.json"), "");
-    assert_eq!(mount_prefix("/a/b/chat-engine/docs"), "/a/b");
+fn mount_prefix_is_whatever_precedes_the_gear_base_path() {
+    assert_eq!(mount_prefix("/cf/chat-engine/v1/openapi.json"), "/cf");
+    assert_eq!(mount_prefix("/chat-engine/v1/openapi.json"), "");
+    assert_eq!(mount_prefix("/a/b/chat-engine/v1/docs"), "/a/b");
 }
 
 #[test]
@@ -154,7 +156,7 @@ fn mount_prefix_falls_back_to_empty_for_unexpected_paths() {
 fn render_reports_unavailable_until_built() {
     let doc = GearOpenApiDoc::default();
 
-    assert!(doc.render("/cf/chat-engine/openapi.json").is_none());
+    assert!(doc.render("/cf/chat-engine/v1/openapi.json").is_none());
 }
 
 #[test]
@@ -173,7 +175,9 @@ fn render_injects_the_mount_prefix_as_the_server() {
 fn render_omits_servers_when_mounted_at_the_root() {
     let doc = built_doc();
 
-    let rendered = doc.render("/chat-engine/openapi.json").expect("rendered");
+    let rendered = doc
+        .render("/chat-engine/v1/openapi.json")
+        .expect("rendered");
     let parsed: Value = serde_json::from_str(rendered).expect("valid JSON");
 
     assert!(parsed.get("servers").is_none());
