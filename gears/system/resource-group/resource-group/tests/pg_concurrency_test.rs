@@ -598,11 +598,23 @@ async fn concurrent_add_membership_from_two_tenants_claims_exactly_one() {
 
     let resource_id = "res-1".to_owned();
 
-    // Both tenants race to be the first membership on the same resource.
-    // The check and the insert share one `SERIALIZABLE` transaction (RG-01),
-    // so the loser is either cancelled on `40001` and retried into the
-    // rejection, or reads the winner's committed row outright. Either way it
-    // must surface as a domain error, not a bare database one.
+    // Both tenants race to be the first membership on the same resource,
+    // through the real public `add_membership` -- not the raw repository
+    // calls `run_first_membership_overlap` below drives, so there is no
+    // injection point for a handshake that would force the two attempts
+    // into the exact SSI-conflict window. `tokio::join!` gives actual
+    // concurrency, not a guaranteed overlap: the two may interleave inside
+    // their transactions, or run close enough to fully serialize, with the
+    // second simply reading the first's already-committed row.
+    //
+    // The assertions below hold either way, which is the point of this
+    // test: it is a black-box robustness check on the outcome
+    // (`add_membership` never lets two tenants both succeed, and never
+    // answers a genuine conflict with a bare database error), not a proof
+    // that the write-skew abort itself fires. That proof is deterministic
+    // and lives in `forced_overlap_at_serializable_keeps_one_tenant` below,
+    // with `forced_overlap_at_read_committed_splits_the_resource` as its
+    // negative control.
     let (r1, r2) = tokio::join!(
         membership_svc.add_membership(&ctx_a, group_a.id, &member_type.code, &resource_id),
         membership_svc.add_membership(&ctx_b, group_b.id, &member_type.code, &resource_id),
@@ -610,10 +622,7 @@ async fn concurrent_add_membership_from_two_tenants_claims_exactly_one() {
 
     match (&r1, &r2) {
         (Ok(_), Ok(_)) => {
-            panic!(
-                "both tenants claimed the same resource -- the tenant check and the \
-                 insert were not serialized against each other (RG-01)"
-            )
+            panic!("both tenants claimed the same resource -- add_membership let them both succeed")
         }
         (Err(e1), Err(e2)) => panic!(
             "both attempts failed -- expected exactly one TenantIncompatibility, not a \

@@ -89,6 +89,39 @@ pub struct GroupService<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> {
     metrics: Arc<dyn RgMetricsPort>,
 }
 
+/// The isolation level one `update_group` attempt opens its transaction at.
+///
+/// Named rather than passed as a bare `bool`: `attempt_update_group` and
+/// `update_group_inner` thread this value straight from the pre-transaction
+/// hint through to `TxConfig` and back out to the `NeedsSerializable` check,
+/// and a `bool` at those call sites reads as "the flag" rather than "which
+/// level" -- exactly backwards for the one parameter this whole branch of
+/// the PR is about getting right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteIsolation {
+    /// The backend default. Correct for a rename or metadata-only edit:
+    /// one row by primary key, locked explicitly
+    /// (`find_model_by_id_for_update`) rather than protected by a
+    /// cross-row predicate.
+    RowLocked,
+    /// A parent change. Cycle detection and the closure rebuild read a
+    /// predicate over rows the write does not itself lock.
+    Serializable,
+}
+
+impl WriteIsolation {
+    fn tx_config(self) -> TxConfig {
+        match self {
+            Self::RowLocked => TxConfig::default(),
+            Self::Serializable => TxConfig::serializable(),
+        }
+    }
+
+    fn is_serializable(self) -> bool {
+        matches!(self, Self::Serializable)
+    }
+}
+
 /// Result of one `update_group_inner` attempt.
 ///
 /// Internal control flow only -- it never crosses a `?` boundary into
@@ -497,6 +530,11 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
         // direction is harmless: SERIALIZABLE is a safe superset, so a hint
         // that overshoots costs a little and protects the same invariants.
         let guessed_parent_changed = existing.parent_id != req.parent_id;
+        let hinted_isolation = if guessed_parent_changed {
+            WriteIsolation::Serializable
+        } else {
+            WriteIsolation::RowLocked
+        };
 
         let first = Self::attempt_update_group(
             &db,
@@ -506,7 +544,7 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
             group_id,
             &req,
             &profile,
-            guessed_parent_changed,
+            hinted_isolation,
         )
         .await?;
 
@@ -522,7 +560,7 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
                     group_id,
                     &req,
                     &profile,
-                    true,
+                    WriteIsolation::Serializable,
                 )
                 .await?
                 {
@@ -542,7 +580,7 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
         result
     }
 
-    /// Run one `update_group` attempt at the isolation level `serializable`
+    /// Run one `update_group` attempt at the isolation level `isolation`
     /// selects, with the usual bounded retry inside it.
     #[allow(clippy::too_many_arguments)]
     async fn attempt_update_group(
@@ -553,15 +591,9 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
         group_id: Uuid,
         req: &UpdateGroupRequest,
         profile: &QueryProfile,
-        serializable: bool,
+        isolation: WriteIsolation,
     ) -> Result<UpdateGroupOutcome, DomainError> {
-        let config = if serializable {
-            TxConfig::serializable()
-        } else {
-            TxConfig::default()
-        };
-
-        db.transaction_with_retry(config, DomainError::db_err, |tx| {
+        db.transaction_with_retry(isolation.tx_config(), DomainError::db_err, |tx| {
             let req = req.clone();
             let scope = scope.clone();
             let profile = profile.clone();
@@ -576,7 +608,7 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
                     group_id,
                     &req,
                     &profile,
-                    serializable,
+                    isolation,
                 )
                 .await
             })
@@ -1122,10 +1154,11 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
 
     /// Inner logic for `update_group`, runs inside the transaction its caller
     /// opened -- at `SERIALIZABLE` or at the backend default, per the
-    /// `serializable` argument. When that argument is `false` and the
-    /// authoritative read finds the parent changing after all, this returns
-    /// `UpdateGroupOutcome::NeedsSerializable` without writing anything, and
-    /// the caller reruns the operation at the level the change requires.
+    /// `isolation` argument. When that argument is `WriteIsolation::RowLocked`
+    /// and the authoritative read finds the parent changing after all, this
+    /// returns `UpdateGroupOutcome::NeedsSerializable` without writing
+    /// anything, and the caller reruns the operation at
+    /// `WriteIsolation::Serializable`.
     ///
     /// **Type immutability.** A group's GTS type is fixed at creation —
     /// `UpdateGroupRequest` does not carry a `code` field. The existing
@@ -1150,7 +1183,7 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
         group_id: Uuid,
         req: &UpdateGroupRequest,
         profile: &QueryProfile,
-        serializable: bool,
+        isolation: WriteIsolation,
     ) -> Result<UpdateGroupOutcome, DomainError> {
         // @cpt-begin:cpt-cf-resource-group-flow-entity-hier-update-group:p1:inst-update-group-2
         // DB: SELECT FROM resource_group WHERE id = {group_id} -- load existing group
@@ -1266,7 +1299,7 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
         // on a stale hint, stop here -- before the move branch and before the
         // update below, so nothing has been written -- and let the caller
         // rerun the whole operation at the right level.
-        if parent_changed && !serializable {
+        if parent_changed && !isolation.is_serializable() {
             return Ok(UpdateGroupOutcome::NeedsSerializable);
         }
         if parent_changed {

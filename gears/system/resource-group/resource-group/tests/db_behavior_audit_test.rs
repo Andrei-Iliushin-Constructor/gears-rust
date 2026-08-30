@@ -1551,6 +1551,61 @@ fn fn_body<'a>(src: &'a str, name: &str) -> &'a str {
         })
 }
 
+/// Split `if {marker} { <true arm> } else { <false arm> }` into its two arm
+/// bodies, by brace depth rather than by string search for the closing
+/// brace -- so a literal that happens to appear inside one arm's own nested
+/// braces cannot be mistaken for the end of that arm.
+///
+/// `marker` is the text right after `if ` and before the opening `{`, e.g.
+/// `"force"`. Panics with a clear message if the shape isn't there, rather
+/// than silently returning something that makes every caller's assertion
+/// vacuously true.
+fn split_if_else<'a>(body: &'a str, marker: &str) -> (&'a str, &'a str) {
+    let if_marker = format!("if {marker} {{");
+    let if_start = body.find(&if_marker).unwrap_or_else(|| {
+        panic!(
+            "no `{if_marker}` found -- the branch this rule checks may have moved or been renamed"
+        )
+    });
+    let true_start = if_start + if_marker.len();
+
+    let true_end = brace_close(body, true_start);
+    let true_arm = &body[true_start..true_end];
+
+    let after_true = &body[true_end + 1..];
+    let else_marker = "else {";
+    let trimmed = after_true.trim_start();
+    assert!(
+        trimmed.starts_with(else_marker),
+        "expected `}} else {{` right after the `if {marker}` arm, found: {:?}",
+        &trimmed[..trimmed.len().min(40)]
+    );
+    let false_start = (body.len() - trimmed.len()) + else_marker.len();
+    let false_end = brace_close(body, false_start);
+    let false_arm = &body[false_start..false_end];
+
+    (true_arm, false_arm)
+}
+
+/// Given the index right after an opening `{`, return the index of its
+/// matching `}` by counting nested braces.
+fn brace_close(body: &str, open_index: usize) -> usize {
+    let mut depth = 1i32;
+    for (offset, ch) in body[open_index..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return open_index + offset;
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unbalanced braces while scanning from index {open_index}");
+}
+
 #[test]
 fn static_rule_passes_group_service_uses_retry() {
     let src = include_str!("../src/domain/group_service.rs");
@@ -1666,13 +1721,25 @@ fn static_rule_non_force_delete_locks_before_it_decides() {
          opens the window it was closing"
     );
 
-    // And the level must still be chosen, not hard-coded back.
+    // And the level must still be chosen, not hard-coded back -- checked
+    // per branch, not by whether both literals appear somewhere in the
+    // function. `contains("if force {") && contains(serializable) &&
+    // contains(default)` passes just as well if the two branches were
+    // swapped, since both literals are still present; splitting the `if` by
+    // brace depth and checking each arm on its own catches that swap.
+    let (force_true_arm, force_false_arm) = split_if_else(delete_group, "force");
     assert!(
-        delete_group.contains("if force {")
-            && delete_group.contains("TxConfig::serializable()")
-            && delete_group.contains("TxConfig::default()"),
-        "delete_group must pick its isolation level from `force`: a force \
-         delete rewrites a subtree and keeps SERIALIZABLE"
+        force_true_arm.contains("TxConfig::serializable()")
+            && !force_true_arm.contains("TxConfig::default()"),
+        "delete_group's `force` arm must select TxConfig::serializable() -- a \
+         force delete rewrites a subtree and keeps SERIALIZABLE:\n{force_true_arm}"
+    );
+    assert!(
+        force_false_arm.contains("TxConfig::default()")
+            && !force_false_arm.contains("TxConfig::serializable()"),
+        "delete_group's non-`force` arm must select TxConfig::default() -- a \
+         non-force delete has no cross-row predicate to protect and must stay \
+         at the backend default:\n{force_false_arm}"
     );
 }
 

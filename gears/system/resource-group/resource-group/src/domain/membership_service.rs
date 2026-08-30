@@ -246,6 +246,7 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait, MR: MembershipRepository
                     // @cpt-begin:cpt-cf-resource-group-algo-membership-check-tenant-compat:p1:inst-tenant-check-5
                     if owned_elsewhere {
                         debug!(
+                            group_id = %group_id,
                             resource_type = %resource_type,
                             resource_id = %resource_id,
                             "Tenant incompatibility on membership add"

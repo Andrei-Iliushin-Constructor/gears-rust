@@ -545,3 +545,77 @@ async fn seed_memberships_nonexistent_group() {
     let result = seed_memberships(&mbr_svc, &seeds).await;
     assert!(result.is_err(), "nonexistent group should error");
 }
+
+// TC-SEED-13: seed_types goes through the unscoped TypeService entry
+// points, not the AuthZ-gated ones.
+//
+// `seed_types` runs at `Gear::init`, before any caller `SecurityContext`
+// exists, so it calls `get_type_unscoped`/`create_type_unscoped`/
+// `update_type_unscoped` -- the same reasoning as
+// `ResourceGroupTypeBootstrap` (see that trait's doc comment). Every other
+// test in this file wires `TypeService` with the allow-all enforcer, which
+// would let a regression back to the gated `get_type`/`create_type`/
+// `update_type` calls pass unnoticed: allow-all admits both. Wiring a
+// deny-all enforcer here is the same technique
+// `bootstrap_bypasses_policy_enforcer_while_gated_path_denies`
+// (type_service_test.rs) uses to pin the identical property on the
+// bootstrap trait.
+#[tokio::test]
+async fn seed_types_bypasses_policy_enforcer() {
+    let db = test_db().await;
+    let type_svc = common::make_type_service_deny(db);
+
+    let parent_code = unique_type_code("seeddenyparent");
+    seed_types(
+        &type_svc,
+        &[CreateTypeRequest {
+            code: parent_code.clone(),
+            can_be_root: true,
+            allowed_parent_types: vec![],
+            allowed_membership_types: vec![],
+            metadata_schema: None,
+        }],
+    )
+    .await
+    .expect("seeding the parent type must also bypass the enforcer");
+
+    let code = unique_type_code("seeddeny");
+    let seeds = vec![CreateTypeRequest {
+        code: code.clone(),
+        can_be_root: true,
+        allowed_parent_types: vec![],
+        allowed_membership_types: vec![],
+        metadata_schema: None,
+    }];
+
+    let result = seed_types(&type_svc, &seeds)
+        .await
+        .expect("seed_types must succeed under a deny-all enforcer");
+    assert_eq!(result.created, 1);
+
+    // Re-seeding the same definition takes the "unchanged" path
+    // (get_type_unscoped -> compare -> skip), which must also bypass the
+    // gate: a regression that gated only the create branch would still
+    // leave this one open.
+    let result = seed_types(&type_svc, &seeds)
+        .await
+        .expect("re-seeding an unchanged type must also bypass the enforcer");
+    assert_eq!(result.unchanged, 1);
+
+    // And the update branch (get_type_unscoped -> differs ->
+    // update_type_unscoped), the third of the three unscoped entry points.
+    // `can_be_root: false` needs a real allowed parent to stay a valid
+    // placement, hence the parent type seeded above -- this diff must fail
+    // (if at all) on that domain rule, not on the AuthZ gate.
+    let updated_seeds = vec![CreateTypeRequest {
+        code,
+        can_be_root: false,
+        allowed_parent_types: vec![parent_code],
+        allowed_membership_types: vec![],
+        metadata_schema: None,
+    }];
+    let result = seed_types(&type_svc, &updated_seeds)
+        .await
+        .expect("updating a changed type must also bypass the enforcer");
+    assert_eq!(result.updated, 1);
+}
