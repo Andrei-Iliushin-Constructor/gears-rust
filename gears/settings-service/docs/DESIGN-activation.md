@@ -847,6 +847,23 @@ All metrics exposed as Prometheus scrape targets.
 - **Signal ordering:** every signal is published **after** the value's durable commit (§4.2 *Cache Invalidation Broadcast*; DESIGN.md §4.2 *Value Writer* commit → evict → publish), so no recipient ever observes a signal for an unstored value.
 - **Write-failure visibility:** per-administrator failure notification is this design's back-response/`event_value_change_failed` path (DESIGN.md §4.4); the **aggregate** operator-facing signal — write-failure-rate on the shared platform dashboards plus an alert-routing rule for platform-wide conditions — is owned by the settings-service design (§7 *Feature Metrics* / DESIGN.md §7 *NFR Mapping & Scale Model* there), since it derives from write outcomes rather than activation outcomes.
 
+#### Fan-out bounds
+
+A change set's signal volume is bounded by **subscribers, not by tenants**. One filtered `change_notification` reaches each subscriber watching at least one changed key, and one `cache_invalidate` broadcast covers the whole change set however many tenants inherit it — descendants are expanded inside each replica's eviction, never as messages (§4.2 *Cache Invalidation Broadcast*). A cascading change therefore costs the **read** path rather than the transport: descendants re-resolve on their next read, inside the effective-value targets in DESIGN.md §7 (cache hit p95 ≤ 2 ms, miss ≤ 15 ms, ancestry depth ≤ 10).
+
+| Dimension | Bound | Anchor |
+|-----------|-------|--------|
+| `change_notification` messages per change set | ≤ 200 — one per distinct subscriber, **never one per affected tenant** | the subscriber-instance bound below |
+| `cache_invalidate` broadcasts per change set | exactly **1**, independent of how many tenants inherit the change | §4.2 *Cache Invalidation Broadcast* |
+| Subscribers per setting key | ≤ 20; typically 1–2, the owning gear's replicas | per-setting subscription (§4.2 *Subscription Manager*) |
+| Subscriber instances per platform | ≤ 200 | consumers are gear replicas, not tenants |
+| Active subscriptions (subscriber × key) | ≤ 20,000 | ≤ 5,000 declarations (DESIGN.md §7) with a few consumers each |
+| Change sets per second | ≤ 50 | matches the mutating-REST anchor (DESIGN.md §7) |
+| Sustained notification publish rate | ≤ 500/s | 50 change sets × ~10 subscribers |
+| Await-records per change set | ≤ 10,000 | ≤ 500 changes per bulk set × ≤ 20 subscribers per key |
+
+They are design anchors rather than SLAs: they size the delivery queue (`change_set_await_records`, §4.7) and the publish loop, as DESIGN.md §7 sizes the cache and the search index.
+
 ### Testing Architecture
 
 #### Testing Levels
