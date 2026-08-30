@@ -269,6 +269,7 @@ No constraints beyond project defaults apply to this gear (no GPU/async-runtime/
 - **Cross-region settings replication**: multi-region propagation of configuration is deferred; v1 targets the single control-plane scope.
 - **Ancestor-level batch set across descendant tenants**: v1 supports per-scope/per-tenant sets only.
 - **Edition Defaults (per-edition baseline value sets)**: bulk-setting curated per-edition default values and then applying them is deferred to a later iteration; v1 ships Schema Defaults only. Candidate follow-up.
+- **Per-scope narrowing of delegation**: what a tenant may do with a setting — see it, change it — is decided once on the declaration and inherited unchanged by every scope below. A tenant cannot withhold override or visibility from its own subtree beyond what the declaration already withholds. The cost is explicit: a setting a partner must be able to lock below itself has to be declared non-overridable for every tenant, which is coarser than the business case wants; what it buys is that a control a tenant cannot use always has one nameable reason. Candidate follow-up.
 - **Export/import of settings manifests**: backup/migration/onboarding via settings export-import is deferred to a later iteration covering backup/DR and tenant onboarding.
 - **Settings visual design**: UI/visual specification is not addressed by this PRD; interface expectations are captured only at the Use Case level.
 - **GTS type authoring and the Types Registry itself**: owned by the platform's Types Registry (`gears/system/types-registry`); this PRD consumes GTS types, it does not define the registry.
@@ -775,7 +776,7 @@ The system **MUST** support at least 100,000 tenants in the tenant scope hierarc
 **Main Flow**:
 
 1. Administrator reviews the changes (old → new, scope) and the client asks the service to check them — validity, current effective value and source, and the affected descendants
-2. Administrator re-authenticates (step-up) and confirms
+2. Administrator confirms; where a change targets a setting whose declaration requires elevated confirmation, they re-authenticate first (`cpt-cf-settings-service-fr-service-writes`)
 3. The client sets the values in one call; the service validates each one again, stores it, and activates it by live-read (pull) with cache invalidation — a consumer needing more than a live re-read self-reacts on the change signal
 
 **Postconditions**: Each stored value is in effect via live-read (or the consumer's own self-react, where needed); the response says what happened to each setting.
@@ -966,6 +967,7 @@ Several mandatory acceptance criteria depend on platform capabilities that **do 
 
 - Retired-setting value lifecycle: when a setting becomes retired — a gear removal **or an administrator's (soft) removal of a setting** — what happens to its administrator-set values — purge, archive, or retain as orphaned? Applies to both the gear-retire and admin-remove paths. — owner: Settings Service DESIGN owner — target resolution: before GA.
 - Step-up re-authentication primitive: `authn-resolver`'s public API has no re-authentication/step-up method today (ADR-0003's minimalist interface). Step-up is consumed as a pluggable behaviour behind a stable contract; the open items are the exact contract shape, who builds the default second-authentication gear that satisfies it, and by when (an integrator can substitute their own implementation behind the same contract). — owner: Platform Security / `authn-resolver` owners — target resolution: before DESIGN depends on it.
+- Per-scope narrowing of delegation: should a tenant be able to withhold override or visibility from its own subtree, beyond what the declaration already withholds? Until it exists, a setting a partner must be able to lock below itself is declared non-overridable platform-wide. Revisit with the reseller-tier requirements.
 - View/owner/admin access-level model: `authz-resolver` has no built-in role storage or hierarchy today (deferred to a future AuthZ Management Gear per `docs/arch/authorization/PERMISSION_GTS_TYPE.md`). What concrete mechanism backs the view-vs-owner/admin distinction this PRD assumes, and who builds it? — owner: Platform AuthZ owners — target resolution: before DESIGN depends on it.
 
 ## 14. Traceability
