@@ -265,6 +265,19 @@ pub fn build_store(mut documents: Vec<UnitDocument>) -> Result<UnitStore, StoreB
 /// nothing downstream, because compatibility compares two documents passed to
 /// `compare_documents` directly and reads its baseline revision separately.
 ///
+/// **The overlay covers documents, not edges — T13.** The roots below are the
+/// candidates' identifiers alone, so the closure walks the *stored* edge set. A
+/// first admission has no stored edges yet, which makes a `$ref` or `x-gts-ref`
+/// naming an entity outside the candidate's identifier chain invisible here:
+/// `validate_schema` then refuses a target the registry holds. A revision has the
+/// mirror problem, following the previous revision's edges rather than the
+/// candidate document's. Writing the rows at commit does not fix either — the
+/// rows arrive after the read that needed them. T13 adds the pure extractor and
+/// calls it over each candidate document here, seeding its targets as roots
+/// beside `chain_ids()`, with genuinely absent targets reported apart from
+/// [`UnitStore::missing_candidates`] (which holds the candidate itself on every
+/// first admission).
+///
 /// Nothing is retained: the store is built here and dropped with the unit, so two
 /// sequential calls after a committed revision each see it with no invalidation
 /// step.

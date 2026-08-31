@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use sea_orm_migration::MigratorTrait;
+use testcontainers::ImageExt;
 use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerRequest, ImageExt};
 use toolkit_gts::gts_id;
 
 use types_registry::infra::storage::Migrator;
@@ -217,9 +217,7 @@ fn binary_literal(db: &DatabaseConnection) -> &'static str {
 
 #[tokio::test]
 async fn migration_applies_and_rolls_back_on_postgres() {
-    use testcontainers_modules::postgres::Postgres;
-
-    let request = ContainerRequest::from(Postgres::default())
+    let request = test_containers::postgres()
         .with_env_var("POSTGRES_PASSWORD", "pass")
         .with_env_var("POSTGRES_USER", "user")
         .with_env_var("POSTGRES_DB", "app");
@@ -257,9 +255,7 @@ async fn migration_applies_and_rolls_back_on_postgres() {
 
 #[tokio::test]
 async fn migration_applies_and_rolls_back_on_mysql() {
-    use testcontainers_modules::mysql::Mysql;
-
-    let container = Mysql::default()
+    let container = test_containers::mysql()
         .start()
         .await
         .expect("start mysql container");

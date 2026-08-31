@@ -131,6 +131,11 @@ process-wide pull with a per-gear push that works across processes."*
   hand-rolls batching, idempotency or retry.
 - `InventoryTypeSchema` / `InventoryInstance` gain `owning_gear`, derived from the declaring
   crate's gear name, so the SDK can filter and attribution stops being a constant.
+- **`cfg.entities` is outside P4's scope.** It carries operator-controlled identities whose
+  GTS identifiers are deployment-specific and cannot be expressed as gear-owned inventory items
+  (e.g. the platform-root tenant type). These are seeded into the database at startup through
+  the same inline admission path as types-registry's own inventory (T24). They are not
+  reconciled through the SDK — no gear owns them; the deployment operator does.
 
 **This is where registrant-side retry becomes real** — and it lives in the SDK helper. The
 earlier answer that no retry was needed was conditional on keeping pull.

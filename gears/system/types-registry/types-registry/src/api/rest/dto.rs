@@ -457,7 +457,8 @@ pub struct SubmitEntityDto {
     /// The authored document.
     pub content: serde_json::Value,
     /// Optimistic precondition. **Omit** to require that the identifier does not
-    /// exist; a literal `0` is refused. `>= 1` is the version to match.
+    /// exist; a literal `0` is refused. Positive versions are reserved for T11
+    /// revisions and are synchronously refused until revisions are implemented.
     #[serde(default)]
     pub expected_resource_version: Option<i64>,
     /// ADR-0004 `force`: waive one cross-minor compatibility check. Refused where
@@ -478,9 +479,10 @@ pub struct SubmitEntityDto {
 pub struct SubmitEntitiesRequest {
     #[schema(min_items = 1)]
     pub items: Vec<SubmitEntityDto>,
-    /// Run every check and commit nothing. Part of the request fingerprint, so
-    /// reusing one `Idempotency-Key` for a dry run and then a commit is a
-    /// conflict, not a replay of the dry-run result.
+    /// Reserved for T20 rollback-only evaluation. `true` is synchronously refused
+    /// until dry runs are implemented. The field is already part of the request
+    /// fingerprint, so a future dry run and commit cannot share one idempotency
+    /// identity.
     #[serde(default)]
     pub dry_run: Option<bool>,
 }

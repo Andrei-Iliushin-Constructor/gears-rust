@@ -121,7 +121,12 @@ impl DependencyRepo {
     /// could disagree with the name. Without the seed, `validate_schema` on a
     /// derived candidate and `validate_instance` on any Instance would fail with a
     /// missing base. T13 adds what is *genuinely* edge-derived: `$ref` and
-    /// `x-gts-ref` targets, which no identifier implies.
+    /// `x-gts-ref` targets, which no identifier implies — and it adds them **as
+    /// roots the caller passes in**, extracted from the candidate document, not
+    /// only as `dependency` rows. The rows are written at commit and so do not
+    /// exist during the read that validates the candidate that authored them; a
+    /// caller relying on the edge walk alone cannot see a first admission's own
+    /// references. See `domain::gts_store::load_unit_store`.
     ///
     /// Candidates with no entity row are reported in
     /// [`DependencyClosure::missing_roots`] rather than failing the read, because a

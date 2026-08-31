@@ -799,20 +799,38 @@ any identifier, and derivation/conformance, which stay materialized because T14'
 walk has no identifier to walk backwards from — the criterion below already says so. Both endpoints are always managed entities. This is also
 the same extractor the worker uses for in-batch ordering.
 
+**Writing the rows is not enough — the extractor also runs on the read side.** Rows are
+replaced at commit, so they do not exist while the candidate that authored them is being
+validated: on a first admission `load_unit_store` walks an edge set that says nothing about
+this candidate, and a `$ref` to an entity outside the candidate's identifier chain never
+reaches the store. `validate_schema` then refuses a target the registry holds. A revision has
+the mirror problem — the stored edges are the *previous* revision's, so a reference the
+candidate added is not followed and one it dropped still is. `load_unit_store`'s
+"the candidate overlay wins" today covers documents but not edges. The fix is the same pure
+extractor, called over the candidate document *before* the closure read, its targets seeded as
+closure roots beside the candidate's `chain_ids()`. Found at the PR #4641 review.
+
 **Acceptance criteria:**
 - [ ] `x-gts-ref` edge targets the exact identifier, or the pattern's longest valid identifier prefix; a pattern naming nothing valid (`gts.*`) and a GTS §9.6 relative pointer create no edge
 - [ ] Admission replaces only the admitted entity's outgoing rows, through the existing `DependencyRepo::replace_outgoing` — written and unit-tested at T4, with no caller until this task
 - [ ] Derivation and conformance are materialized even though derivable from the identifier
 - [ ] Extraction uses `gts-rust`'s extractor, never a local scan
 - [ ] Extraction is exposed as a pure function over authored content, callable without a database — required for unit testing without a fixture DB
+- [ ] `load_unit_store` seeds the closure with the direct reference targets extracted from each candidate **document**, alongside the candidate's `chain_ids()` — a first admission has no stored edges of its own, so the identifier-derived seed is the only thing the closure would otherwise see
+- [ ] For a revision the roots come from the candidate document's references, never from the previous revision's stored edge set: the overlay wins for edges as it already does for documents
+- [ ] A reference target that genuinely does not exist is distinguishable from a candidate that is not stored yet. `DependencyClosure::missing_roots` holds the candidate itself by construction on every first admission, so extracted targets need their own channel — a separate `UnitStore::missing_references` rather than more entries in `missing_candidates`, which T19 must be able to tell apart. `missing_candidates` has no production reader before this task, so the split costs nothing to make now
+- [ ] The `CLOSURE_BOUND` accounting covers the added roots: `ensure_within_bound` already charges the seeded roots before the first hop, and reference targets enlarge that seed
 
 **Verification:**
 - [ ] Gear tests, all three backends (see [Commands](#commands))
 - [ ] Table-driven test over edge-kind fixtures, including the no-edge cases
 - [ ] Test: re-admission removes an edge the new revision dropped
+- [ ] Test: a new schema whose `$ref` names an existing schema **outside its identifier chain** is admitted — the case that fails today with `invalid_schema`
+- [ ] Test: a revision that adds one reference and drops another resolves against the new set, not the stored one
+- [ ] Test: a reference to an identifier no entity carries is reported as a missing reference, distinct from the candidate's own absence
 
 **Dependencies:** Checkpoint 2
-**Files likely touched:** `TR/src/domain/dependency.rs` (extraction; T14 adds the worklist and the pair takes `TR/src/domain/dependency/` — trigger table above), `TR/src/infra/storage/repo/`, `TR/src/domain/ports.rs`, `TR/src/infra/storage/store.rs`, `TR/src/infra/storage/entity/dependency.rs`, `TR/tests/dependency_test.rs`
+**Files likely touched:** `TR/src/domain/dependency.rs` (extraction; T14 adds the worklist and the pair takes `TR/src/domain/dependency/` — trigger table above), `TR/src/domain/gts_store.rs` (the read-side seed), `TR/src/infra/storage/repo/`, `TR/src/domain/ports.rs`, `TR/src/infra/storage/store.rs`, `TR/src/infra/storage/entity/dependency.rs`, `TR/tests/dependency_test.rs`, `TR/tests/gts_store_test.rs`
 **Scope:** M
 
 ---
@@ -1158,12 +1176,22 @@ is switched off, so it is where that must be true. The `local_client` cache is *
 (SPEC §8.3, `plan.md` P7): its old model-typed implementation goes when the old models go, and
 T30 lands its replacement. Between here and T30 reads are uncached.
 
+**Operator-configured entities (`cfg.entities`).** The YAML `gears.types-registry.config.entities`
+field carries operator-controlled identities that cannot be expressed as inventory items — their
+GTS identifiers are deployment-specific (e.g. the platform-root and customer tenant types in
+`e2e-local.yaml`). Currently these are seeded only into the in-memory `TypesRegistryService`;
+T24 must seed them into the database through the same inline admission path used for
+types-registry's own inventory. An invalid or oversized `cfg.entities` must fail boot loudly
+(current in-memory behaviour preserved). The `cfg.entities` field itself is not removed — it
+remains the deployment-time escape hatch for identities that no gear can own.
+
 **Acceptance criteria:**
 - [ ] Seeding covers exactly the entities types-registry owns; no other gear's declarations are pulled
-- [ ] Seeding is idempotent — a second start admits nothing new and reports `unchanged`
+- [ ] `cfg.entities` from the deployment configuration is seeded into the database at startup, through the same inline admission path; the field is validated and any failure fails boot
+- [ ] Seeding is idempotent — a second start admits nothing new and reports `unchanged` for both owned inventory and `cfg.entities`
 - [ ] Seeding runs **before** the outbox worker starts (P3) and enqueues nothing — it invokes the worker inline
 - [ ] `init()` never waits on a registrant and never blocks on the outbox (`constraint-boot-path`)
-- [ ] Its own seed set fits one batch; if it ever exceeds `limits.batch_candidates`, startup fails loudly rather than silently splitting
+- [ ] Owned inventory and `cfg.entities` together fit within `limits.batch_candidates`; if they exceed it, startup fails loudly rather than silently splitting
 - [ ] The v1 REST routes T9a restored are deleted **together with** the repository they read —
       `POST /v1/entities` (`types_registry.register`), `GET /v1/entities/{gts_id}`
       (`types_registry.get`) and the in-memory `GET /v1/entities` list. A route left pointing at a
@@ -1176,8 +1204,11 @@ T30 lands its replacement. Between here and T30 reads are uncached.
 - [ ] Gear tests, all three backends (see [Commands](#commands))
 - [ ] Test: second `init()` against a populated database seeds nothing
 - [ ] Test: the seed set contains no entity owned by another gear
+- [ ] Test: `cfg.entities` entries are present and readable after boot, and a second boot reports `unchanged` for them
+- [ ] Test: an invalid entry in `cfg.entities` fails boot with a clear error
 - [ ] Test: a read issued after an entity is written directly to the database (not through the service) returns it — proving the read path holds no process-local copy. This is the single-process form of SPEC §13's two-pod criterion
 - [ ] `make quickstart` — server boots with only registry-owned types present
+- [ ] `make e2e-local` — server boots with `cfg.entities` populated (the two AM tenant types); both are readable after boot
 - [ ] Manual: restart, confirm entities and artifacts byte-identical
 
 **Dependencies:** T19, T21, T23
@@ -1185,9 +1216,10 @@ T30 lands its replacement. Between here and T30 reads are uncached.
 - `TR/src/gear.rs`
 - `TR/src/domain/seeding.rs`
 - `TR/src/domain/service.rs`
+- `TR/src/config.rs` (doc update: `entities` field comment names the inline seeding path)
 - `TR/src/infra/storage/in_memory_repo.rs` (deleted); `TR/src/infra/cache/` retyped in T30, not deleted
 - `TR/tests/seeding_test.rs`, `TR/tests/ready_mode_tests.rs` (deleted)
-**Scope:** M
+**Scope:** M+
 
 ---
 

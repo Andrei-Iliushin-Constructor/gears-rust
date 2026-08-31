@@ -13,11 +13,11 @@
 
 use std::sync::Arc;
 
-use sea_orm::{EntityTrait, QueryOrder};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::macros::datetime;
-use toolkit_db::secure::SecureEntityExt;
+use toolkit_db::secure::{SecureDeleteExt, SecureEntityExt};
 use toolkit_db::{DBProvider, DbError};
 use toolkit_gts::gts_id;
 
@@ -27,7 +27,9 @@ use types_registry::domain::admission::{
 };
 use types_registry::domain::enums::{OperationKind, OperationStatus};
 use types_registry::domain::policy::RegistrationPolicy;
-use types_registry::domain::registry_service::{AdmissionMode, EntityKey, RegistryService};
+use types_registry::domain::registry_service::{
+    AdmissionMode, EntityKey, RegistryService, ServiceError,
+};
 use types_registry::infra::storage::entity::enums as storage_enums;
 use types_registry::infra::storage::entity::{
     entity, instance, instance_revision, operation, operation_item, type_schema,
@@ -35,7 +37,7 @@ use types_registry::infra::storage::entity::{
 };
 
 mod common;
-use common::{TestDir, allow_all, stores, test_db_file};
+use common::{TestDir, allow_all, stores, test_db, test_db_file};
 
 const BOOT: OffsetDateTime = datetime!(2026-08-18 09:15:30 UTC);
 const CF_TYPE: &str = gts_id!("cf.core.example.type.v1~");
@@ -405,4 +407,72 @@ async fn a_nonterminal_replay_resumes_inline_admission_before_t21() {
 
     drop(svc);
     drop(db);
+}
+
+#[tokio::test]
+async fn an_entity_without_its_current_state_is_reported_as_corrupt() {
+    let db = test_db().await;
+    let svc = service(&db);
+    svc.submit(
+        &submission("corrupt-schema", CF_TYPE, schema(CF_TYPE)),
+        BOOT,
+    )
+    .await
+    .expect("schema accepted");
+    svc.submit(
+        &submission(
+            "corrupt-instance",
+            CF_INSTANCE,
+            json!({ "name": "first", "size": 7 }),
+        ),
+        BOOT,
+    )
+    .await
+    .expect("instance accepted");
+
+    let state = read_durable_state(&db).await;
+    let schema_id = state
+        .entities
+        .iter()
+        .find(|row| row.gts_id == CF_TYPE)
+        .expect("schema entity")
+        .id;
+    let instance_id = state
+        .entities
+        .iter()
+        .find(|row| row.gts_id == CF_INSTANCE)
+        .expect("instance entity")
+        .id;
+
+    {
+        let provider: DBProvider<DbError> = DBProvider::new(db.db());
+        let conn = provider.conn().expect("conn");
+        let scope = allow_all();
+        type_schema::Entity::delete_many()
+            .filter(type_schema::Column::EntityId.eq(schema_id))
+            .secure()
+            .scope_with(&scope)
+            .exec(&conn)
+            .await
+            .expect("remove current schema state");
+        instance::Entity::delete_many()
+            .filter(instance::Column::EntityId.eq(instance_id))
+            .secure()
+            .scope_with(&scope)
+            .exec(&conn)
+            .await
+            .expect("remove current instance state");
+    }
+
+    for (gts_id, expected) in [
+        (CF_TYPE, "no current Type Schema state"),
+        (CF_INSTANCE, "no current Instance state"),
+    ] {
+        match svc.entity(&EntityKey::parse(gts_id)).await {
+            Err(ServiceError::CorruptDocument(detail)) => {
+                assert!(detail.contains(expected), "unexpected detail: {detail}");
+            }
+            other => panic!("expected corrupt current state, got {other:?}"),
+        }
+    }
 }

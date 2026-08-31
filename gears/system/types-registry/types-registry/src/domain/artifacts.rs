@@ -13,27 +13,14 @@
 //! `entity.resource_version` — reserved for optimistic writes. The canonical form
 //! is [`crate::domain::admission::fingerprint`]'s, for the reason stated there.
 //!
-//! # Why FNV-1a and not SHA-256
+//! # Digest algorithms
 //!
-//! Both digests here answer *"is this byte-identical to what I had?"* over input
-//! that is **not** client-controlled: `content_hash` covers an already-validated
-//! document, `resolution_fingerprint` covers artifacts this server computed. So
-//! collision resistance against a chosen input buys nothing, and `SECURITY.md §9`
-//! puts direct `sha2` imports behind the DE0708 allow-list precisely to keep
-//! unreviewed hashing out (`toolkit-odata`'s cursor and `oidc-authn-plugin`'s cache
-//! key moved to inline FNV-1a for the same reason).
-//!
-//! Neither use is weakened by the narrower digest:
-//!
-//! * `content_hash` is a **prefilter** (ADR-0012): a collision proposes
-//!   `unchanged`, T11's exact byte comparison rejects it, and the cost is one
-//!   wasted comparison.
-//! * `resolution_fingerprint` is compared old-versus-new **for one entity**, not
-//!   across a population — not a birthday problem, ~2⁻⁶⁴ per comparison.
-//!
-//! [`crate::domain::admission::fingerprint`] keeps SHA-256 because its inputs *are*
-//! client-controlled and its equality decides a replay.
+//! `content_hash` uses FNV-1a because it is only a **prefilter** (ADR-0012): a
+//! collision proposes `unchanged`, and T11's exact byte comparison rejects it.
+//! `resolution_fingerprint`, however, is the persisted equality identity of the
+//! effective artifacts and has no exact-comparison fallback, so it uses SHA-256.
 
+use aws_lc_rs::digest::{Context, SHA256};
 use gts::ResolvedType;
 use toolkit_macros::domain_model;
 
@@ -104,12 +91,17 @@ pub fn resolution_fingerprint(
     effective_traits: &str,
     effective_traits_schema: &str,
 ) -> Vec<u8> {
-    fnv1a_64(&[
-        b"tr-resolution-v1",
+    let mut hasher = Context::new(&SHA256);
+    for field in [
+        b"tr-resolution-v1".as_slice(),
         resolved_schema.as_bytes(),
         effective_traits.as_bytes(),
         effective_traits_schema.as_bytes(),
-    ])
+    ] {
+        hasher.update(&u64::try_from(field.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hasher.update(field);
+    }
+    hasher.finish().as_ref().to_vec()
 }
 
 /// Digest one authored document's canonical bytes — `type_schema_revision.content_hash`.

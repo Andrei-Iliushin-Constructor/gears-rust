@@ -535,11 +535,13 @@ fn normalize_dialect(declared: &str) -> Option<&'static str> {
 fn conflicting_dialect(value: &Value, path: &str, is_root: bool) -> Option<String> {
     match value {
         Value::Object(map) => {
-            if !is_root
-                && let Some(declared) = map.get("$schema").and_then(Value::as_str)
-                && normalize_dialect(declared).is_none()
-            {
-                return Some(path.to_owned());
+            if !is_root && let Some(declared) = map.get("$schema") {
+                let supported = declared
+                    .as_str()
+                    .is_some_and(|declared| normalize_dialect(declared).is_some());
+                if !supported {
+                    return Some(path.to_owned());
+                }
             }
             map.iter().find_map(|(key, child)| {
                 conflicting_dialect(child, &format!("{path}.{key}"), false)

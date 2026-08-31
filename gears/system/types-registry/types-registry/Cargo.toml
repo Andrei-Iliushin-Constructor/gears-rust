@@ -37,9 +37,9 @@ utoipa = { workspace = true, features = ["time"] }
 axum = { workspace = true, features = ["macros"] }
 uuid = { workspace = true, features = ["v5"] }
 thiserror = { workspace = true }
-# SHA-256 for the request fingerprint and the idempotency scope hash (T7). The
-# FIPS-validated implementation the platform installs at bootstrap, rather than
-# the `sha2` crate DE0708 bans -- see `domain/admission/fingerprint.rs`.
+# SHA-256 for request/idempotency fingerprints and the persisted resolution
+# identity. The FIPS-validated implementation the platform installs at bootstrap,
+# rather than the `sha2` crate DE0708 bans -- see `domain/admission/fingerprint.rs`.
 aws-lc-rs = { workspace = true }
 parking_lot = { workspace = true }
 lru = "0.18.2"
@@ -78,8 +78,12 @@ toolkit-db = { workspace = true, features = ["sqlite"] }
 # PostgreSQL / MySQL bring-up for the `integration` suite. Not optional --
 # `[dev-dependencies]` cannot be -- but every reference is behind
 # `#![cfg(feature = "integration")]`, so a default `cargo test` needs no Docker.
+# The images come from `test-containers`, never from
+# `testcontainers-modules`' own defaults, whose tags are long past end of life
+# and would pin the database version transitively through `Cargo.lock`
+# (`cargo xtask check-test-container-pins`).
 testcontainers = { workspace = true }
-testcontainers-modules = { workspace = true }
+test-containers = { workspace = true }
 # `Router::oneshot` for the REST contract tests (T9).
 tower = { workspace = true }
 time = { workspace = true, features = ["macros"] }

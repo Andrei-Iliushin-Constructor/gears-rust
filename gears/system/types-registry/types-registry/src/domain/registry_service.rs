@@ -372,31 +372,42 @@ impl RegistryService {
 
         let (content, resolved_schema, effective_traits, effective_traits_schema) = match current {
             CurrentState::TypeSchema { current, document } => {
-                let content = document
-                    .map(|doc| parse_stored(&doc.raw_schema, &row.gts_id))
-                    .transpose()?;
-                match current {
-                    Some(current) => (
-                        content,
-                        Some(parse_stored(&current.resolved_schema, &row.gts_id)?),
-                        Some(parse_stored(&current.effective_traits, &row.gts_id)?),
-                        Some(parse_stored(&current.effective_traits_schema, &row.gts_id)?),
-                    ),
-                    None => (content, None, None, None),
-                }
+                let current = current.ok_or_else(|| {
+                    ServiceError::CorruptDocument(format!(
+                        "entity '{}' has no current Type Schema state",
+                        row.gts_id
+                    ))
+                })?;
+                let document = document.ok_or_else(|| {
+                    ServiceError::CorruptDocument(format!(
+                        "entity '{}' has no current Type Schema document",
+                        row.gts_id
+                    ))
+                })?;
+                (
+                    Some(parse_stored(&document.raw_schema, &row.gts_id)?),
+                    Some(parse_stored(&current.resolved_schema, &row.gts_id)?),
+                    Some(parse_stored(&current.effective_traits, &row.gts_id)?),
+                    Some(parse_stored(&current.effective_traits_schema, &row.gts_id)?),
+                )
             }
             // The three artifacts are `None` by construction rather than by
             // omission: an Instance has no derived state, so there is nothing a
             // later task could materialize into them.
-            CurrentState::Instance { value } => match value {
-                Some(value) => (
+            CurrentState::Instance { value } => {
+                let value = value.ok_or_else(|| {
+                    ServiceError::CorruptDocument(format!(
+                        "entity '{}' has no current Instance state",
+                        row.gts_id
+                    ))
+                })?;
+                (
                     Some(parse_stored(&value.canonical_value, &row.gts_id)?),
                     None,
                     None,
                     None,
-                ),
-                None => (None, None, None, None),
-            },
+                )
+            }
         };
 
         Ok(Some(EntityRecord {

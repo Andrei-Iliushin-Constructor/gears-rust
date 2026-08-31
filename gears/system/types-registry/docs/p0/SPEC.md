@@ -338,6 +338,17 @@ admission (D2), and every later read goes to the database.
 Seeding precedes the worker start and enqueues nothing, so seed operations cannot be leased
 concurrently.
 
+**Two seed sources, one inline pass.** Seeding covers (1) types-registry's own toolkit-gts
+inventory (base types and control-plane types it declares) and (2) the operator-configured
+`cfg.entities` from the deployment YAML — identities whose GTS identifiers are
+deployment-specific and cannot be expressed as gear-owned inventory items (e.g. the
+platform-root tenant type whose identity is chosen by the operator). Both sources are admitted
+together in a single inline pass; an invalid or oversized combined seed set fails startup
+loudly. D11 governs (1): types-registry seeds only what it owns and every other gear reconciles
+its own through the SDK helper. `cfg.entities` is outside D11's scope — it is not owned by any
+gear and is not reconciled through the SDK; it is deployment configuration that the registry
+admits on behalf of the platform operator.
+
 Acceptance and admission therefore have different executors. Acceptance is always
 synchronous, in the caller's task, inside registry code: the REST handler for API traffic, or
 the local client for an in-process SDK caller. Admission is performed by exactly one outbox

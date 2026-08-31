@@ -10,6 +10,7 @@ use super::{content_hash, resolution_fingerprint};
 fn the_resolution_fingerprint_is_stable_across_two_computations() {
     let a = resolution_fingerprint(r#"{"a":1}"#, "{}", "{}");
     let b = resolution_fingerprint(r#"{"a":1}"#, "{}", "{}");
+    assert_eq!(a.len(), 32, "the persisted equality identity is SHA-256");
     assert_eq!(a, b);
 }
 

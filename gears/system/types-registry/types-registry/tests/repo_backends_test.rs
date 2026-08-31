@@ -643,11 +643,10 @@ async fn assert_repo_primitives_behave(db: &Provider, backend: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repository_primitives_behave_on_postgres() {
+    use testcontainers::ImageExt;
     use testcontainers::runners::AsyncRunner;
-    use testcontainers::{ContainerRequest, ImageExt};
-    use testcontainers_modules::postgres::Postgres;
 
-    let request = ContainerRequest::from(Postgres::default())
+    let request = test_containers::postgres()
         .with_env_var("POSTGRES_PASSWORD", "pass")
         .with_env_var("POSTGRES_USER", "user")
         .with_env_var("POSTGRES_DB", "app");
@@ -670,9 +669,8 @@ async fn repository_primitives_behave_on_postgres() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repository_primitives_behave_on_mysql() {
     use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::mysql::Mysql;
 
-    let container = Mysql::default()
+    let container = test_containers::mysql()
         .start()
         .await
         .expect("start mysql container");

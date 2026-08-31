@@ -473,6 +473,25 @@ fn a_nested_dialect_must_not_differ_but_may_be_spelled_differently() {
 }
 
 #[test]
+fn a_nested_dialect_must_be_a_supported_string() {
+    let pair = closed();
+
+    for declared in [Value::Null, json!(7), json!({})] {
+        let mut req = request(vec![candidate(CF_TYPE)]);
+        req.candidates[0].content = Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "properties": { "inner": { "$schema": declared } },
+        }));
+        match run(&pair, &req) {
+            Err(AcceptanceError::ConflictingDialect { path, .. }) => {
+                assert_eq!(path, "$.properties.inner");
+            }
+            other => panic!("expected ConflictingDialect, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn a_registration_without_a_document_is_refused() {
     let pair = closed();
     let mut req = request(vec![candidate(CF_TYPE)]);
