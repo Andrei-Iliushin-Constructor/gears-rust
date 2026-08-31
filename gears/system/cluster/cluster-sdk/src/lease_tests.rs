@@ -272,6 +272,8 @@ fn a_backward_wall_step_biases_the_hybrid_forever_but_never_the_wall_clock() {
 /// `virtual_clock()`) and this test fails, which is the point.
 #[tokio::test(start_paused = true)]
 async fn the_production_clock_ignores_virtual_time_but_the_test_clock_tracks_it() {
+    const WALL_CLOCK_TOLERANCE_MS: u64 = 1_000;
+
     let system = LeaseClock::new();
     let test = LeaseClock::virtual_clock();
     let system_before = system.now_millis();
@@ -283,15 +285,18 @@ async fn the_production_clock_ignores_virtual_time_but_the_test_clock_tracks_it(
     // wall time, so the reading barely moves — nothing like the hour advanced.
     let system_after = system.now_millis();
     assert!(
-        system_after.abs_diff(system_before) < 1_000,
+        system_after.abs_diff(system_before) < WALL_CLOCK_TOLERANCE_MS,
         "the production clock must not absorb virtual time (H3): {system_before} -> \
          {system_after}; before the fix this jumped ~1h because `new()` was the hybrid"
     );
 
     // The injected virtual clock still fast-forwards, so TTL scenarios keep lapsing.
+    // Its wall anchor is sampled before `test_before`, so real wall time spent between
+    // those reads reduces the observed delta; use the same bound accepted above.
     let test_after = test.now_millis();
     assert!(
-        test_after >= test_before + 3_600_000,
+        test_after.saturating_sub(test_before)
+            >= 3_600_000_u64.saturating_sub(WALL_CLOCK_TOLERANCE_MS),
         "the injected virtual clock must still track `advance` ({test_before} -> \
          {test_after})"
     );
