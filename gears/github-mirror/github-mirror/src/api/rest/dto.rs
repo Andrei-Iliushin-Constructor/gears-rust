@@ -38,10 +38,139 @@ impl From<MirrorStatus> for GithubMirrorHealthDto {
 #[toolkit_macros::api_dto(response)]
 pub struct ActorDto {
     pub login: String,
+    /// GitHub's numeric user id, when the mirror stored one — a login can be
+    /// renamed and later reused, the id cannot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    /// `User`, `Bot` or `Organization`, under GitHub's own field name.
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub user_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub html_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site_admin: Option<bool>,
+}
+
+/// One person as the sync stored them inside an issue or pull row.
+#[derive(serde::Deserialize)]
+struct StoredActor {
+    #[serde(default)]
+    id: Option<i64>,
+    login: String,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(rename = "type", default)]
+    user_type: Option<String>,
+    #[serde(default)]
+    avatar_url: Option<String>,
+    #[serde(default)]
+    html_url: Option<String>,
+    #[serde(default)]
+    site_admin: Option<bool>,
+}
+
+/// One label as the sync stored it inside an issue or pull row.
+#[derive(serde::Deserialize)]
+struct StoredLabel {
+    #[serde(default)]
+    id: Option<i64>,
+    #[serde(default)]
+    node_id: Option<String>,
+    name: String,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(rename = "default", default)]
+    is_default: Option<bool>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+/// People stored as a JSON array, back as GitHub's actor objects.
+fn actors(stored_json: Option<&str>) -> Vec<ActorDto> {
+    stored_json
+        .and_then(|raw| serde_json::from_str::<Vec<StoredActor>>(raw).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| ActorDto {
+            login: a.login,
+            id: a.id,
+            node_id: a.node_id,
+            user_type: a.user_type,
+            avatar_url: a.avatar_url,
+            html_url: a.html_url,
+            site_admin: a.site_admin,
+        })
+        .collect()
+}
+
+/// Labels stored as a JSON array, back as GitHub's label objects.
+fn labels(stored_json: Option<&str>) -> Vec<LabelRefDto> {
+    stored_json
+        .and_then(|raw| serde_json::from_str::<Vec<StoredLabel>>(raw).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|l| LabelRefDto {
+            id: l.id,
+            node_id: l.node_id,
+            name: l.name,
+            color: l.color,
+            is_default: l.is_default,
+            description: l.description,
+        })
+        .collect()
+}
+
+/// A label as GitHub embeds it in an issue or pull request.
+#[derive(Debug)]
+#[toolkit_macros::api_dto(response)]
+pub struct LabelRefDto {
+    /// GitHub's label id; absent on rows mirrored before it was stored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    pub name: String,
+    /// The chip colour a client paints the label with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Whether GitHub created the label with the repository.
+    #[serde(rename = "default", skip_serializing_if = "Option::is_none")]
+    pub is_default: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 fn actor(login: Option<String>) -> Option<ActorDto> {
-    login.map(|login| ActorDto { login })
+    login.map(|login| ActorDto {
+        login,
+        id: None,
+        node_id: None,
+        user_type: None,
+        avatar_url: None,
+        html_url: None,
+        site_admin: None,
+    })
+}
+
+/// The author of an issue or pull request: GitHub's whole `user` object when
+/// the sync stored one, and the bare login for rows mirrored before it did.
+fn author(author_json: Option<&str>, author_login: Option<String>) -> Option<ActorDto> {
+    author_json
+        .and_then(|raw| serde_json::from_str::<StoredActor>(raw).ok())
+        .map(|a| ActorDto {
+            login: a.login,
+            id: a.id,
+            node_id: a.node_id,
+            user_type: a.user_type,
+            avatar_url: a.avatar_url,
+            html_url: a.html_url,
+            site_admin: a.site_admin,
+        })
+        .or_else(|| actor(author_login))
 }
 
 /// GitHub `{ "sha": ... }` git reference object.
@@ -103,7 +232,15 @@ impl From<Repo> for RepoDto {
             node_id: repo.node_id,
             name: repo.name,
             full_name: repo.full_name,
-            owner: ActorDto { login: repo.owner },
+            owner: ActorDto {
+                login: repo.owner,
+                id: None,
+                node_id: None,
+                user_type: None,
+                avatar_url: None,
+                html_url: None,
+                site_admin: None,
+            },
             private: repo.private,
             description: repo.description,
             default_branch: repo.default_branch,
@@ -133,6 +270,18 @@ pub struct IssueDto {
     pub updated_at: String,
     pub closed_at: Option<String>,
     pub html_url: Option<String>,
+    /// Who opened it, who it is assigned to, and the labels it carries —
+    /// the fields a GitHub client renders a list row from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<ActorDto>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub assignees: Vec<ActorDto>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<LabelRefDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comments: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locked: Option<bool>,
 }
 
 impl From<Issue> for IssueDto {
@@ -149,6 +298,11 @@ impl From<Issue> for IssueDto {
             updated_at: i.updated_at,
             closed_at: i.closed_at,
             html_url: i.html_url,
+            user: author(i.author_json.as_deref(), i.author_login),
+            assignees: actors(i.assignees_json.as_deref()),
+            labels: labels(i.labels_json.as_deref()),
+            comments: i.comments_count,
+            locked: i.locked,
         }
     }
 }
@@ -201,6 +355,20 @@ pub struct PullRequestDto {
     pub closed_at: Option<String>,
     pub merged_at: Option<String>,
     pub html_url: Option<String>,
+    /// Who opened it, who it is assigned to, who was asked to review, and
+    /// the labels it carries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<ActorDto>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub assignees: Vec<ActorDto>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub requested_reviewers: Vec<ActorDto>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<LabelRefDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comments: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locked: Option<bool>,
 }
 
 impl From<PullRequest> for PullRequestDto {
@@ -229,6 +397,12 @@ impl From<PullRequest> for PullRequestDto {
             closed_at: p.closed_at,
             merged_at: p.merged_at,
             html_url: p.html_url,
+            user: author(p.author_json.as_deref(), p.author_login),
+            assignees: actors(p.assignees_json.as_deref()),
+            requested_reviewers: actors(p.requested_reviewers_json.as_deref()),
+            labels: labels(p.labels_json.as_deref()),
+            comments: p.comments_count,
+            locked: p.locked,
         }
     }
 }

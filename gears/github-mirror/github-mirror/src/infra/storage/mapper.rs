@@ -46,6 +46,12 @@ impl From<issues::Model> for Issue {
             updated_at: m.updated_at,
             closed_at: m.closed_at,
             html_url: m.html_url,
+            author_login: m.author_login,
+            author_json: m.author_json,
+            assignees_json: m.assignees_json,
+            labels_json: m.labels_json,
+            comments_count: m.comments_count,
+            locked: m.locked,
         }
     }
 }
@@ -73,6 +79,13 @@ impl From<pull_requests::Model> for PullRequest {
             html_url: m.html_url,
             head_ref: m.head_ref,
             base_ref: m.base_ref,
+            author_login: m.author_login,
+            author_json: m.author_json,
+            assignees_json: m.assignees_json,
+            labels_json: m.labels_json,
+            comments_count: m.comments_count,
+            locked: m.locked,
+            requested_reviewers_json: m.requested_reviewers_json,
         }
     }
 }

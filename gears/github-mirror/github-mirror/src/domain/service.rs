@@ -22,13 +22,13 @@ use super::repo::{
     CommitStatusRepository, ContributorRecord, ContributorRepository, DeploymentRecord,
     DeploymentRepository, IssueEventRecord, IssueEventRepository, IssueReactionRecord,
     IssueReactionRepository, IssueRecord, IssueRepository, IssueTimelineEventRecord,
-    IssueTimelineRepository, LabelRecord, LabelRepository, MilestoneRecord, MilestoneRepository,
-    PullRequestCommitRecord, PullRequestCommitRepository, PullRequestFileRecord,
-    PullRequestFileRepository, PullRequestRecord, PullRequestRepository, ReleaseRecord,
-    ReleaseRepository, RepoRecord, RepoRepository, ReviewCommentRecord, ReviewCommentRepository,
-    ReviewRecord, ReviewRepository, ReviewThreadRecord, ReviewThreadRepository, TagRecord,
-    TagRepository, WorkflowJobRecord, WorkflowJobRepository, WorkflowRunRecord,
-    WorkflowRunRepository,
+    IssueTimelineRepository, LabelRecord, LabelRepository, ListingFilter, MilestoneRecord,
+    MilestoneRepository, PullRequestCommitRecord, PullRequestCommitRepository,
+    PullRequestFileRecord, PullRequestFileRepository, PullRequestRecord, PullRequestRepository,
+    ReleaseRecord, ReleaseRepository, RepoRecord, RepoRepository, ReviewCommentRecord,
+    ReviewCommentRepository, ReviewRecord, ReviewRepository, ReviewThreadRecord,
+    ReviewThreadRepository, TagRecord, TagRepository, WorkflowJobRecord, WorkflowJobRepository,
+    WorkflowRunRecord, WorkflowRunRepository,
 };
 
 /// The gear's name, taken from the `#[toolkit::gear]` attribute so the
@@ -742,7 +742,7 @@ impl<
         owner: &str,
         name: &str,
         query: &ODataQuery,
-        state: Option<&str>,
+        filter: ListingFilter<'_>,
     ) -> Result<Page<Issue>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -767,7 +767,7 @@ impl<
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .issues
-            .list_by_repo(&conn, &scope, repository.id, limit, state)
+            .list_by_repo(&conn, &scope, repository.id, limit, filter)
             .await?;
 
         Ok(Page::new(
@@ -835,7 +835,7 @@ impl<
         owner: &str,
         name: &str,
         query: &ODataQuery,
-        state: Option<&str>,
+        filter: ListingFilter<'_>,
     ) -> Result<Page<PullRequest>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -860,7 +860,7 @@ impl<
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .pull_requests
-            .list_by_repo(&conn, &scope, repository.id, limit, state)
+            .list_by_repo(&conn, &scope, repository.id, limit, filter)
             .await?;
 
         Ok(Page::new(
@@ -1735,6 +1735,119 @@ impl<
     /// # Errors
     /// `DomainError::NotFound` when the repository is not mirrored for this
     /// tenant; `Forbidden`/`Database`/`Internal` as usual.
+    /// How many workflow runs this repository has, across every page.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
+    pub async fn count_workflow_runs(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name_arg: &str,
+    ) -> Result<u64, DomainError> {
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &WORKFLOW_RUN_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await?;
+
+        let conn = self.db.conn()?;
+        let full_name = format!("{owner}/{name_arg}");
+        let repository = self
+            .repo
+            .find_by_full_name(&conn, &scope, &full_name)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+
+        self.workflow_runs
+            .count_by_repo(&conn, &scope, repository.id)
+            .await
+    }
+
+    /// How many jobs this workflow run has, across every page.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
+    pub async fn count_workflow_jobs(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name_arg: &str,
+        run_id: i64,
+    ) -> Result<u64, DomainError> {
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &WORKFLOW_JOB_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await?;
+
+        let conn = self.db.conn()?;
+        let full_name = format!("{owner}/{name_arg}");
+        let repository = self
+            .repo
+            .find_by_full_name(&conn, &scope, &full_name)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+
+        self.workflow_jobs
+            .count_by_run(&conn, &scope, repository.id, run_id)
+            .await
+    }
+
+    /// How many check runs this commit has, across every page.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
+    pub async fn count_check_runs(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name_arg: &str,
+        head_sha: &str,
+    ) -> Result<u64, DomainError> {
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &CHECK_RUN_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await?;
+
+        let conn = self.db.conn()?;
+        let full_name = format!("{owner}/{name_arg}");
+        let repository = self
+            .repo
+            .find_by_full_name(&conn, &scope, &full_name)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+
+        self.check_runs
+            .count_by_commit(&conn, &scope, repository.id, head_sha)
+            .await
+    }
+
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
     pub async fn list_workflow_runs(
         &self,
         ctx: &SecurityContext,

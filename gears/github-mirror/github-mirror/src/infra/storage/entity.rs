@@ -186,6 +186,15 @@ pub mod issues {
         /// deletion-reconciliation watermark; `None` on rows from before
         /// the column existed.
         pub extracted_at: Option<DateTimeUtc>,
+        /// What a GitHub client renders the row with: author, assignees,
+        /// labels, comment count. Arrays are JSON.
+        pub author_login: Option<String>,
+        /// The author as GitHub's `user` object, JSON.
+        pub author_json: Option<String>,
+        pub assignees_json: Option<String>,
+        pub labels_json: Option<String>,
+        pub comments_count: Option<i64>,
+        pub locked: Option<bool>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -236,6 +245,16 @@ pub mod pull_requests {
         /// deletion-reconciliation watermark; `None` on rows from before
         /// the column existed.
         pub extracted_at: Option<DateTimeUtc>,
+        /// What a GitHub client renders the row with: author, assignees,
+        /// labels, comment count. Arrays are JSON.
+        pub author_login: Option<String>,
+        /// The author as GitHub's `user` object, JSON.
+        pub author_json: Option<String>,
+        pub assignees_json: Option<String>,
+        pub labels_json: Option<String>,
+        pub comments_count: Option<i64>,
+        pub locked: Option<bool>,
+        pub requested_reviewers_json: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

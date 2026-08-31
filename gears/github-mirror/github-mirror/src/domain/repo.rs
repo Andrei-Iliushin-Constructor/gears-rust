@@ -76,6 +76,72 @@ pub struct IssueRecord {
     pub updated_at: String,
     pub closed_at: Option<String>,
     pub html_url: Option<String>,
+    /// Who opened it; GitHub's `user`.
+    pub author_login: Option<String>,
+    /// The author as GitHub's own `user` object, JSON; `author_login` above
+    /// is the same person as an indexable identity.
+    pub author_json: Option<String>,
+    /// Assignee logins as a JSON array, and the labels it carries.
+    pub assignees_json: Option<String>,
+    pub labels_json: Option<String>,
+    /// How many comments GitHub reports on it.
+    pub comments_count: Option<i64>,
+    pub locked: Option<bool>,
+}
+
+/// GitHub's list-endpoint filters for issues and pull requests.
+///
+/// `sort`/`direction` are honored; the filters GitHub also accepts but the
+/// mirror does not yet apply (`labels`, `assignee`, `creator`, `mentioned`,
+/// `milestone`) are recorded as unsupported in PRD 4.3 rather than silently
+/// ignored here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListingFilter<'a> {
+    /// `open`/`closed`, or `None` for every state.
+    pub state: Option<&'a str>,
+    /// `created` (GitHub's default) or `updated`.
+    pub sort: ListingSort,
+    /// Ascending or descending; GitHub defaults to descending.
+    pub direction: ListingDirection,
+    /// Only rows updated at or after this RFC3339 instant.
+    pub since: Option<&'a str>,
+}
+
+/// The sort keys GitHub offers that the mirror stores a column for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ListingSort {
+    #[default]
+    Created,
+    Updated,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ListingDirection {
+    #[default]
+    Desc,
+    Asc,
+}
+
+impl ListingSort {
+    /// GitHub's `sort` value; anything else falls back to its default.
+    #[must_use]
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw {
+            Some("updated") => Self::Updated,
+            _ => Self::Created,
+        }
+    }
+}
+
+impl ListingDirection {
+    /// GitHub's `direction` value; anything else falls back to its default.
+    #[must_use]
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw {
+            Some("asc") => Self::Asc,
+            _ => Self::Desc,
+        }
+    }
 }
 
 #[async_trait]
@@ -95,7 +161,7 @@ pub trait IssueRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
-        state: Option<&str>,
+        filter: ListingFilter<'_>,
     ) -> Result<Vec<Issue>, DomainError>;
 
     async fn find_by_number<C: DBRunner>(
@@ -144,6 +210,19 @@ pub struct PullRequestRecord {
     /// Branch names of the pull request's head and base.
     pub head_ref: Option<String>,
     pub base_ref: Option<String>,
+    /// Who opened it; GitHub's `user`.
+    pub author_login: Option<String>,
+    /// The author as GitHub's own `user` object, JSON; `author_login` above
+    /// is the same person as an indexable identity.
+    pub author_json: Option<String>,
+    /// Assignee logins as a JSON array, and the labels it carries.
+    pub assignees_json: Option<String>,
+    pub labels_json: Option<String>,
+    /// How many comments GitHub reports on it.
+    pub comments_count: Option<i64>,
+    pub locked: Option<bool>,
+    /// Reviewers requested on the pull request, as a JSON array.
+    pub requested_reviewers_json: Option<String>,
 }
 
 #[async_trait]
@@ -164,7 +243,7 @@ pub trait PullRequestRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
-        state: Option<&str>,
+        filter: ListingFilter<'_>,
     ) -> Result<Vec<PullRequest>, DomainError>;
 
     async fn find_by_number<C: DBRunner>(
@@ -629,6 +708,14 @@ pub struct WorkflowRunRecord {
 
 #[async_trait]
 pub trait WorkflowRunRepository: Send + Sync {
+    /// How many runs this repository has in total, for GitHub's
+    /// `total_count`, which spans every page rather than the current one.
+    async fn count_by_repo<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+    ) -> Result<u64, DomainError>;
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,
@@ -991,6 +1078,14 @@ pub struct WorkflowJobRecord {
 
 #[async_trait]
 pub trait WorkflowJobRepository: Send + Sync {
+    /// How many jobs this run has in total, for GitHub's `total_count`.
+    async fn count_by_run<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        run_id: i64,
+    ) -> Result<u64, DomainError>;
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,
@@ -1065,6 +1160,15 @@ pub struct CheckRunRecord {
 
 #[async_trait]
 pub trait CheckRunRepository: Send + Sync {
+    /// How many check runs this commit has in total, for GitHub's
+    /// `total_count`.
+    async fn count_by_commit<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        head_sha: &str,
+    ) -> Result<u64, DomainError>;
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,

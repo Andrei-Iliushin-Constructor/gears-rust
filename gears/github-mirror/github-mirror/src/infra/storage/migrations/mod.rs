@@ -31,6 +31,8 @@ pub mod workflow_jobs_023;
 pub mod workflow_runs_013;
 pub mod z_contributor_derivation_032;
 pub mod z_extracted_at_030;
+pub mod z_issue_pull_author_038;
+pub mod z_issue_pull_people_037;
 pub mod z_node_id_034;
 pub mod z_pull_request_file_patch_036;
 pub mod z_release_assets_031;
@@ -75,6 +77,8 @@ impl MigratorTrait for Migrator {
             Box::new(z_extracted_at_030::Migration),
             Box::new(z_contributor_derivation_032::Migration),
             Box::new(z_release_assets_031::Migration),
+            Box::new(z_issue_pull_author_038::Migration),
+            Box::new(z_issue_pull_people_037::Migration),
             Box::new(z_node_id_034::Migration),
             Box::new(z_pull_request_file_patch_036::Migration),
             Box::new(z_review_comment_anchors_035::Migration),

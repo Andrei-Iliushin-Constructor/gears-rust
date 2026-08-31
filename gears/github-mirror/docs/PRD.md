@@ -257,6 +257,12 @@ so the unchecked boxes below read as "not yet", not "abandoned".
   the resolved commit SHA), so lightweight and annotated tags are indistinguishable
   and the annotated tag object's message/tagger/SHA are not captured — the Git Data
   API is not called in this increment
+- List-endpoint filters GitHub accepts but the mirror does not yet apply:
+  `labels`, `assignee`, `creator`, `mentioned` and `milestone` on issues and
+  pull requests, and `sha`/`path`/`author` on commits. `state`, `sort`,
+  `direction` and `since` are honored. An unsupported filter is ignored rather
+  than rejected, so a client relying on it gets a wider result set than it
+  asked for — the mirrored data is there, the narrowing is not
 - Security synchronization (§5.2 `cpt-cf-github-mirror-fr-security-sync`): security
   advisories, Dependabot alerts and code-scanning alerts have no entities, tables or
   endpoints yet; they need token scopes the shared credential cannot be assumed to

@@ -22,13 +22,13 @@ use crate::domain::repo::{
     CommitStatusRepository, ContributorRecord, ContributorRepository, DeploymentRecord,
     DeploymentRepository, IssueEventRecord, IssueEventRepository, IssueReactionRecord,
     IssueReactionRepository, IssueRecord, IssueRepository, IssueTimelineEventRecord,
-    IssueTimelineRepository, LabelRecord, LabelRepository, MilestoneRecord, MilestoneRepository,
-    PullRequestCommitRecord, PullRequestCommitRepository, PullRequestFileRecord,
-    PullRequestFileRepository, PullRequestRecord, PullRequestRepository, ReleaseRecord,
-    ReleaseRepository, RepoRecord, RepoRepository, ReviewCommentRecord, ReviewCommentRepository,
-    ReviewRecord, ReviewRepository, ReviewThreadRecord, ReviewThreadRepository, TagRecord,
-    TagRepository, WorkflowJobRecord, WorkflowJobRepository, WorkflowRunRecord,
-    WorkflowRunRepository,
+    IssueTimelineRepository, LabelRecord, LabelRepository, ListingDirection, ListingFilter,
+    ListingSort, MilestoneRecord, MilestoneRepository, PullRequestCommitRecord,
+    PullRequestCommitRepository, PullRequestFileRecord, PullRequestFileRepository,
+    PullRequestRecord, PullRequestRepository, ReleaseRecord, ReleaseRepository, RepoRecord,
+    RepoRepository, ReviewCommentRecord, ReviewCommentRepository, ReviewRecord, ReviewRepository,
+    ReviewThreadRecord, ReviewThreadRepository, TagRecord, TagRepository, WorkflowJobRecord,
+    WorkflowJobRepository, WorkflowRunRecord, WorkflowRunRepository,
 };
 
 use super::entity::branches::{self, Entity as BranchEntity};
@@ -220,6 +220,12 @@ fn issue_active_model(tenant_id: Uuid, r: &IssueRecord) -> issues::ActiveModel {
         closed_at: ActiveValue::Set(r.closed_at.clone()),
         html_url: ActiveValue::Set(r.html_url.clone()),
         extracted_at: ActiveValue::Set(Some(Utc::now())),
+        author_login: ActiveValue::Set(r.author_login.clone()),
+        author_json: ActiveValue::Set(r.author_json.clone()),
+        assignees_json: ActiveValue::Set(r.assignees_json.clone()),
+        labels_json: ActiveValue::Set(r.labels_json.clone()),
+        comments_count: ActiveValue::Set(r.comments_count),
+        locked: ActiveValue::Set(r.locked),
     }
 }
 
@@ -264,6 +270,12 @@ impl IssueRepository for SeaOrmIssueRepository {
             issues::Column::Id,
         ])
         .update_columns([
+            issues::Column::AuthorLogin,
+            issues::Column::AuthorJson,
+            issues::Column::AssigneesJson,
+            issues::Column::LabelsJson,
+            issues::Column::CommentsCount,
+            issues::Column::Locked,
             issues::Column::NodeId,
             issues::Column::RepoId,
             issues::Column::Number,
@@ -301,6 +313,12 @@ impl IssueRepository for SeaOrmIssueRepository {
             updated_at: record.updated_at,
             closed_at: record.closed_at,
             html_url: record.html_url,
+            author_login: record.author_login,
+            author_json: record.author_json,
+            assignees_json: record.assignees_json,
+            labels_json: record.labels_json,
+            comments_count: record.comments_count,
+            locked: record.locked,
         })
     }
 
@@ -310,16 +328,31 @@ impl IssueRepository for SeaOrmIssueRepository {
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
-        state: Option<&str>,
+        filter: ListingFilter<'_>,
     ) -> Result<Vec<Issue>, DomainError> {
         let mut condition = sea_orm::Condition::all().add(issues::Column::RepoId.eq(repo_id));
-        if let Some(state) = state {
+        if let Some(state) = filter.state {
             condition = condition.add(issues::Column::State.eq(state));
         }
+        if let Some(since) = filter.since {
+            condition = condition.add(issues::Column::UpdatedAt.gte(since));
+        }
+        let (sort_column, direction) = (
+            match filter.sort {
+                ListingSort::Created => issues::Column::CreatedAt,
+                ListingSort::Updated => issues::Column::UpdatedAt,
+            },
+            match filter.direction {
+                ListingDirection::Asc => Order::Asc,
+                ListingDirection::Desc => Order::Desc,
+            },
+        );
         let rows = IssueEntity::find()
             .secure()
             .scope_with(scope)
             .filter(condition)
+            .order_by(sort_column, direction)
+            // Unique tie-break: equal sort keys must not shuffle page windows.
             .order_by(issues::Column::Number, Order::Asc)
             .limit(limit)
             .all(conn)
@@ -385,6 +418,13 @@ fn pull_request_active_model(tenant_id: Uuid, r: &PullRequestRecord) -> pull_req
         head_ref: ActiveValue::Set(r.head_ref.clone()),
         base_ref: ActiveValue::Set(r.base_ref.clone()),
         extracted_at: ActiveValue::Set(Some(Utc::now())),
+        author_login: ActiveValue::Set(r.author_login.clone()),
+        author_json: ActiveValue::Set(r.author_json.clone()),
+        assignees_json: ActiveValue::Set(r.assignees_json.clone()),
+        labels_json: ActiveValue::Set(r.labels_json.clone()),
+        comments_count: ActiveValue::Set(r.comments_count),
+        locked: ActiveValue::Set(r.locked),
+        requested_reviewers_json: ActiveValue::Set(r.requested_reviewers_json.clone()),
     }
 }
 
@@ -429,6 +469,13 @@ impl PullRequestRepository for SeaOrmPullRequestRepository {
             pull_requests::Column::Id,
         ])
         .update_columns([
+            pull_requests::Column::AuthorLogin,
+            pull_requests::Column::AuthorJson,
+            pull_requests::Column::AssigneesJson,
+            pull_requests::Column::LabelsJson,
+            pull_requests::Column::CommentsCount,
+            pull_requests::Column::Locked,
+            pull_requests::Column::RequestedReviewersJson,
             pull_requests::Column::NodeId,
             pull_requests::Column::RepoId,
             pull_requests::Column::Number,
@@ -482,6 +529,13 @@ impl PullRequestRepository for SeaOrmPullRequestRepository {
             html_url: record.html_url,
             head_ref: record.head_ref,
             base_ref: record.base_ref,
+            author_login: record.author_login,
+            author_json: record.author_json,
+            assignees_json: record.assignees_json,
+            labels_json: record.labels_json,
+            comments_count: record.comments_count,
+            locked: record.locked,
+            requested_reviewers_json: record.requested_reviewers_json,
         })
     }
 
@@ -491,17 +545,32 @@ impl PullRequestRepository for SeaOrmPullRequestRepository {
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
-        state: Option<&str>,
+        filter: ListingFilter<'_>,
     ) -> Result<Vec<PullRequest>, DomainError> {
         let mut condition =
             sea_orm::Condition::all().add(pull_requests::Column::RepoId.eq(repo_id));
-        if let Some(state) = state {
+        if let Some(state) = filter.state {
             condition = condition.add(pull_requests::Column::State.eq(state));
         }
+        if let Some(since) = filter.since {
+            condition = condition.add(pull_requests::Column::UpdatedAt.gte(since));
+        }
+        let (sort_column, direction) = (
+            match filter.sort {
+                ListingSort::Created => pull_requests::Column::CreatedAt,
+                ListingSort::Updated => pull_requests::Column::UpdatedAt,
+            },
+            match filter.direction {
+                ListingDirection::Asc => Order::Asc,
+                ListingDirection::Desc => Order::Desc,
+            },
+        );
         let rows = PullRequestEntity::find()
             .secure()
             .scope_with(scope)
             .filter(condition)
+            .order_by(sort_column, direction)
+            // Unique tie-break: equal sort keys must not shuffle page windows.
             .order_by(pull_requests::Column::Number, Order::Asc)
             .limit(limit)
             .all(conn)
@@ -1696,6 +1765,21 @@ fn workflow_run_active_model(tenant_id: Uuid, r: &WorkflowRunRecord) -> workflow
 
 #[async_trait]
 impl WorkflowRunRepository for SeaOrmWorkflowRunRepository {
+    async fn count_by_repo<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+    ) -> Result<u64, DomainError> {
+        WorkflowRunEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(sea_orm::Condition::all().add(workflow_runs::Column::RepoId.eq(repo_id)))
+            .count(conn)
+            .await
+            .map_err(map_scope_error)
+    }
+
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,
@@ -2742,6 +2826,26 @@ fn workflow_job_active_model(tenant_id: Uuid, r: &WorkflowJobRecord) -> workflow
 
 #[async_trait]
 impl WorkflowJobRepository for SeaOrmWorkflowJobRepository {
+    async fn count_by_run<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        run_id: i64,
+    ) -> Result<u64, DomainError> {
+        WorkflowJobEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(workflow_jobs::Column::RepoId.eq(repo_id))
+                    .add(workflow_jobs::Column::RunId.eq(run_id)),
+            )
+            .count(conn)
+            .await
+            .map_err(map_scope_error)
+    }
+
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,
@@ -2951,6 +3055,26 @@ fn check_run_active_model(tenant_id: Uuid, r: &CheckRunRecord) -> check_runs::Ac
 
 #[async_trait]
 impl CheckRunRepository for SeaOrmCheckRunRepository {
+    async fn count_by_commit<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        head_sha: &str,
+    ) -> Result<u64, DomainError> {
+        CheckRunEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(check_runs::Column::RepoId.eq(repo_id))
+                    .add(check_runs::Column::HeadSha.eq(head_sha)),
+            )
+            .count(conn)
+            .await
+            .map_err(map_scope_error)
+    }
+
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,

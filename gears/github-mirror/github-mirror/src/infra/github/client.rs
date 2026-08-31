@@ -299,6 +299,12 @@ struct GhIssue {
     #[serde(default)]
     assignees: Vec<GhActor>,
     #[serde(default)]
+    labels: Vec<GhLabelRef>,
+    #[serde(default)]
+    comments: Option<i64>,
+    #[serde(default)]
+    locked: Option<bool>,
+    #[serde(default)]
     pull_request: Option<serde::de::IgnoredAny>,
     created_at: String,
     updated_at: String,
@@ -379,6 +385,13 @@ struct GhPullRequest {
     assignees: Vec<GhActor>,
     #[serde(default)]
     requested_reviewers: Vec<GhActor>,
+    #[serde(default)]
+    labels: Vec<GhLabelRef>,
+    #[serde(default)]
+    comments: Option<i64>,
+    #[serde(default)]
+    locked: Option<bool>,
+
     /// Present on the per-pull response, absent from the listing; when the
     /// payload carries them the record needs no file walk to be accurate.
     #[serde(default)]
@@ -414,12 +427,16 @@ struct GhActor {
     #[serde(default)]
     id: Option<i64>,
     login: String,
+    #[serde(default)]
+    node_id: Option<String>,
     #[serde(rename = "type", default)]
     user_type: Option<String>,
     #[serde(default)]
     avatar_url: Option<String>,
     #[serde(default)]
     html_url: Option<String>,
+    #[serde(default)]
+    site_admin: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -515,6 +532,25 @@ struct GhRelease {
     html_url: Option<String>,
     #[serde(default)]
     assets: Vec<GhReleaseAsset>,
+}
+
+/// A label as it appears embedded in an issue or pull-request payload.
+///
+/// Stored whole rather than by name: names are renameable, the id is not, and
+/// the colour is what a client paints the chip with.
+#[derive(Debug, serde::Serialize, Deserialize)]
+struct GhLabelRef {
+    #[serde(default)]
+    id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    node_id: Option<String>,
+    name: String,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(rename = "default", default, skip_serializing_if = "Option::is_none")]
+    is_default: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 /// The slice of a release asset the mirror keeps: enough to name it and
@@ -735,6 +771,8 @@ fn repository_record(r: GhRepository) -> RepoRecord {
 }
 
 fn issue_record(repo_id: i64, i: GhIssue) -> IssueRecord {
+    let assignees_json = actors_json(&i.assignees);
+    let labels_json = labels_json(&i.labels);
     IssueRecord {
         id: i.id,
         node_id: i.node_id,
@@ -748,12 +786,21 @@ fn issue_record(repo_id: i64, i: GhIssue) -> IssueRecord {
         updated_at: i.updated_at,
         closed_at: i.closed_at,
         html_url: i.html_url,
+        author_login: i.user.as_ref().map(|u| u.login.clone()),
+        author_json: actor_json(i.user.as_ref()),
+        assignees_json,
+        labels_json,
+        comments_count: i.comments,
+        locked: i.locked,
     }
 }
 
 fn pull_request_record(repo_id: i64, p: GhPullRequest) -> PullRequestRecord {
     let head = p.head;
     let base = p.base;
+    let assignees_json = actors_json(&p.assignees);
+    let labels_json = labels_json(&p.labels);
+    let requested_reviewers_json = actors_json(&p.requested_reviewers);
 
     PullRequestRecord {
         id: p.id,
@@ -776,6 +823,13 @@ fn pull_request_record(repo_id: i64, p: GhPullRequest) -> PullRequestRecord {
         html_url: p.html_url,
         head_ref: head.and_then(|r| r.ref_name),
         base_ref: base.and_then(|r| r.ref_name),
+        author_login: p.user.as_ref().map(|u| u.login.clone()),
+        author_json: actor_json(p.user.as_ref()),
+        assignees_json,
+        labels_json,
+        comments_count: p.comments,
+        locked: p.locked,
+        requested_reviewers_json,
     }
 }
 
@@ -1093,6 +1147,63 @@ impl DerivedContributors {
         records.sort_by_key(|r| r.user_id);
         records
     }
+}
+
+/// A person as the mirror stores them inside an issue or pull row: the login
+/// a client renders, plus the id it takes to join `gm_contributors`, since a
+/// login can be renamed and later reused by someone else.
+#[derive(Debug, serde::Serialize)]
+struct StoredActor<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<i64>,
+    login: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_id: Option<&'a str>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    user_type: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar_url: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    html_url: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    site_admin: Option<bool>,
+}
+
+impl<'a> StoredActor<'a> {
+    fn of(actor: &'a GhActor) -> Self {
+        Self {
+            id: actor.id,
+            login: actor.login.as_str(),
+            node_id: actor.node_id.as_deref(),
+            user_type: actor.user_type.as_deref(),
+            avatar_url: actor.avatar_url.as_deref(),
+            html_url: actor.html_url.as_deref(),
+            site_admin: actor.site_admin,
+        }
+    }
+}
+
+/// One actor as the stored JSON object, for the author of an issue or pull.
+fn actor_json(actor: Option<&GhActor>) -> Option<String> {
+    actor.and_then(|a| serde_json::to_string(&StoredActor::of(a)).ok())
+}
+
+/// A list of actors as a JSON array, or `None` when the list is empty — the
+/// column stays `NULL` rather than holding `[]`.
+fn actors_json(actors: &[GhActor]) -> Option<String> {
+    if actors.is_empty() {
+        return None;
+    }
+    let stored: Vec<StoredActor<'_>> = actors.iter().map(StoredActor::of).collect();
+    serde_json::to_string(&stored).ok()
+}
+
+/// Labels as a JSON array, on the same terms as [`actors_json`].
+fn labels_json(labels: &[GhLabelRef]) -> Option<String> {
+    if labels.is_empty() {
+        return None;
+    }
+    serde_json::to_string(labels).ok()
 }
 
 /// GitHub's RFC3339 text as an instant; `None` when it does not parse.

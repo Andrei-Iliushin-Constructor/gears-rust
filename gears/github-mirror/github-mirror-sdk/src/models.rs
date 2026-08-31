@@ -75,6 +75,17 @@ pub struct Issue {
     pub updated_at: String,
     pub closed_at: Option<String>,
     pub html_url: Option<String>,
+    /// Who opened it; GitHub's `user`.
+    pub author_login: Option<String>,
+    /// The author as GitHub's own `user` object, JSON; `author_login` above
+    /// is the same person as an indexable identity.
+    pub author_json: Option<String>,
+    /// Assignee logins as a JSON array, and the labels it carries.
+    pub assignees_json: Option<String>,
+    pub labels_json: Option<String>,
+    /// How many comments GitHub reports on it.
+    pub comments_count: Option<i64>,
+    pub locked: Option<bool>,
 }
 
 /// A mirrored GitHub pull request (read-slice shape).
@@ -105,6 +116,19 @@ pub struct PullRequest {
     /// Branch names of the pull request's head and base.
     pub head_ref: Option<String>,
     pub base_ref: Option<String>,
+    /// Who opened it; GitHub's `user`.
+    pub author_login: Option<String>,
+    /// The author as GitHub's own `user` object, JSON; `author_login` above
+    /// is the same person as an indexable identity.
+    pub author_json: Option<String>,
+    /// Assignee logins as a JSON array, and the labels it carries.
+    pub assignees_json: Option<String>,
+    pub labels_json: Option<String>,
+    /// How many comments GitHub reports on it.
+    pub comments_count: Option<i64>,
+    pub locked: Option<bool>,
+    /// Reviewers requested on the pull request, as a JSON array.
+    pub requested_reviewers_json: Option<String>,
 }
 
 /// A mirrored GitHub commit (read-slice shape).

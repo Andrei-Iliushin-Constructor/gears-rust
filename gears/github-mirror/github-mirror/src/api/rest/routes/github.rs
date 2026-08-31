@@ -5,7 +5,7 @@ use axum::Router;
 use axum::http::StatusCode;
 use toolkit::api::{OpenApiRegistry, OperationBuilder};
 
-use crate::api::rest::routes::{API_TAG, License, PAGE_DOC, PER_PAGE_DOC};
+use crate::api::rest::routes::{API_TAG, License, PAGE_DOC, PER_PAGE_DOC, STATE_DOC};
 use crate::api::rest::{dto, handlers};
 
 // ---------------------------------------------------------------------------
@@ -123,6 +123,7 @@ fn register_repo_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
         .path_param("name", "Repo name")
         .query_param("page", false, PAGE_DOC)
         .query_param("per_page", false, PER_PAGE_DOC)
+        .query_param("state", false, STATE_DOC)
         .handler(handlers::list_issues)
         .json_array_response_with_schema::<dto::IssueDto>(
             openapi,
@@ -553,6 +554,7 @@ fn register_pull_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Ro
         .path_param("name", "Repo name")
         .query_param("page", false, PAGE_DOC)
         .query_param("per_page", false, PER_PAGE_DOC)
+        .query_param("state", false, STATE_DOC)
         .handler(handlers::list_pull_requests)
         .json_array_response_with_schema::<dto::PullRequestDto>(
             openapi,

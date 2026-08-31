@@ -47,6 +47,12 @@ fn fetched() -> FetchedRepository {
             clone_url: None,
         },
         issues: vec![IssueRecord {
+            author_login: Some("alice".to_owned()),
+            author_json: None,
+            assignees_json: None,
+            labels_json: None,
+            comments_count: None,
+            locked: None,
             node_id: None,
             id: 1,
             repo_id: 42,
@@ -61,6 +67,13 @@ fn fetched() -> FetchedRepository {
             html_url: None,
         }],
         pull_requests: vec![PullRequestRecord {
+            author_login: Some("alice".to_owned()),
+            author_json: None,
+            assignees_json: None,
+            labels_json: None,
+            comments_count: None,
+            locked: None,
+            requested_reviewers_json: None,
             node_id: None,
             id: 2,
             repo_id: 42,
@@ -736,6 +749,12 @@ fn recon_fetched(issue_ids: &[i64], issues_complete: bool) -> FetchedRepository 
     result.issues = issue_ids
         .iter()
         .map(|id| IssueRecord {
+            author_login: Some("alice".to_owned()),
+            author_json: None,
+            assignees_json: None,
+            labels_json: None,
+            comments_count: None,
+            locked: None,
             node_id: None,
             id: *id,
             repo_id: 77,

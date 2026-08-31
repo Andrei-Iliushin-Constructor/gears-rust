@@ -33,6 +33,13 @@ fn repo_record() -> RepoRecord {
 
 fn pr_record(id: i64, number: i64, title: &str) -> PullRequestRecord {
     PullRequestRecord {
+        author_login: Some("alice".to_owned()),
+        author_json: None,
+        assignees_json: None,
+        labels_json: None,
+        comments_count: None,
+        locked: None,
+        requested_reviewers_json: None,
         node_id: None,
         id,
         repo_id: 0,
@@ -181,4 +188,64 @@ async fn pull_request_upsert_is_idempotent_and_updates_fields() {
     assert_eq!(items.len(), 1);
     assert!(items[0]["merged_at"].is_string());
     assert_eq!(items[0]["state"], "closed");
+}
+
+#[tokio::test]
+async fn pull_requests_honor_sort_and_direction() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let service = common::service("https://api.github.com").await;
+    service
+        .upsert_repo(&ctx, repo_record())
+        .await
+        .expect("repo seed must succeed");
+
+    let mut older = pr_record(10, 1, "older");
+    older.created_at = "2026-01-01T00:00:00Z".to_owned();
+    older.updated_at = "2026-09-01T00:00:00Z".to_owned();
+    let mut newer = pr_record(11, 2, "newer");
+    newer.created_at = "2026-06-01T00:00:00Z".to_owned();
+    newer.updated_at = "2026-07-01T00:00:00Z".to_owned();
+    for record in [older, newer] {
+        service
+            .upsert_pull_request(&ctx, "acme", "widget", record)
+            .await
+            .expect("pull seed must succeed");
+    }
+
+    let router = router_for(service, ctx);
+
+    // GitHub's default: newest created first.
+    let json = body_json(get(router.clone(), "/repos/acme/widget/pulls").await).await;
+    let numbers: Vec<i64> = json
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|p| p["number"].as_i64().expect("number"))
+        .collect();
+    assert_eq!(numbers, vec![2, 1], "created descending by default");
+
+    let json = body_json(
+        get(
+            router.clone(),
+            "/repos/acme/widget/pulls?sort=updated&direction=desc",
+        )
+        .await,
+    )
+    .await;
+    let numbers: Vec<i64> = json
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|p| p["number"].as_i64().expect("number"))
+        .collect();
+    assert_eq!(numbers, vec![1, 2], "the older pull was updated last");
+
+    let json = body_json(get(router, "/repos/acme/widget/pulls?direction=asc").await).await;
+    let numbers: Vec<i64> = json
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|p| p["number"].as_i64().expect("number"))
+        .collect();
+    assert_eq!(numbers, vec![1, 2], "created ascending on request");
 }

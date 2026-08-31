@@ -33,6 +33,12 @@ fn repo_record() -> RepoRecord {
 
 fn issue_record(id: i64, number: i64, title: &str) -> IssueRecord {
     IssueRecord {
+        author_login: Some("alice".to_owned()),
+        author_json: None,
+        assignees_json: None,
+        labels_json: None,
+        comments_count: None,
+        locked: None,
         node_id: None,
         id,
         repo_id: 0,
@@ -162,4 +168,89 @@ async fn issues_default_to_open_like_github() {
 
     let all = body_json(get(router, "/repos/acme/widget/issues?state=all").await).await;
     assert_eq!(all.as_array().expect("items").len(), 2);
+}
+
+#[tokio::test]
+async fn errors_on_the_compatible_surface_use_githubs_shape() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let service = common::service("https://api.github.com").await;
+    let router = router_for(service, ctx);
+
+    let response = get(router, "/repos/acme/nope/issues").await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json"),
+        "GitHub answers errors as application/json, not problem+json"
+    );
+
+    let json = body_json(response).await;
+    assert!(
+        json["message"].is_string(),
+        "a client reads `message` out of GitHub's error body: {json:?}"
+    );
+    assert!(json["documentation_url"].is_string(), "{json:?}");
+}
+
+#[tokio::test]
+async fn issues_carry_the_fields_a_github_client_renders() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let service = common::service("https://api.github.com").await;
+    service
+        .upsert_repo(&ctx, repo_record())
+        .await
+        .expect("repo seed must succeed");
+
+    let mut record = issue_record(9, 42, "needs review");
+    record.author_login = Some("alice".to_owned());
+    record.author_json = Some(
+        r#"{"id":71,"login":"alice","type":"User","avatar_url":"https://avatars.githubusercontent.com/u/71","html_url":"https://github.com/alice","site_admin":false}"#
+            .to_owned(),
+    );
+    record.assignees_json =
+        Some(r#"[{"id":72,"login":"bob"},{"id":73,"login":"carol"}]"#.to_owned());
+    record.labels_json =
+        Some(r#"[{"id":1,"name":"bug","color":"d73a4a"},{"id":2,"name":"p1"}]"#.to_owned());
+    record.comments_count = Some(7);
+    record.locked = Some(false);
+    service
+        .upsert_issue(&ctx, "acme", "widget", record)
+        .await
+        .expect("issue seed must succeed");
+
+    let router = router_for(service, ctx);
+    let json = body_json(get(router, "/repos/acme/widget/issues").await).await;
+    let issue = &json.as_array().expect("items")[0];
+
+    assert_eq!(issue["user"]["login"], "alice");
+    assert_eq!(
+        issue["user"]["id"], 71,
+        "the whole GitHub user object is mirrored"
+    );
+    assert_eq!(issue["user"]["type"], "User");
+    assert_eq!(
+        issue["user"]["avatar_url"],
+        "https://avatars.githubusercontent.com/u/71"
+    );
+    assert_eq!(issue["user"]["site_admin"], false);
+    assert_eq!(
+        issue["assignees"],
+        serde_json::json!([
+            {"login": "bob", "id": 72},
+            {"login": "carol", "id": 73}
+        ]),
+        "ids ride along so a consumer can join gm_contributors"
+    );
+    assert_eq!(
+        issue["labels"],
+        serde_json::json!([
+            {"id": 1, "name": "bug", "color": "d73a4a"},
+            {"id": 2, "name": "p1"}
+        ])
+    );
+    assert_eq!(issue["comments"], 7);
+    assert_eq!(issue["locked"], false);
 }
