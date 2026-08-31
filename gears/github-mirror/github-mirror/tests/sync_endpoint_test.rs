@@ -33,6 +33,7 @@ fn fetched() -> FetchedRepository {
     FetchedRepository {
         complete: ListingCompleteness::all_complete(),
         repository: RepoRecord {
+            node_id: None,
             id: 42,
             owner: "rust-lang".to_owned(),
             name: "rust".to_owned(),
@@ -46,6 +47,7 @@ fn fetched() -> FetchedRepository {
             clone_url: None,
         },
         issues: vec![IssueRecord {
+            node_id: None,
             id: 1,
             repo_id: 42,
             number: 11,
@@ -59,6 +61,7 @@ fn fetched() -> FetchedRepository {
             html_url: None,
         }],
         pull_requests: vec![PullRequestRecord {
+            node_id: None,
             id: 2,
             repo_id: 42,
             number: 12,
@@ -129,6 +132,13 @@ fn fetched() -> FetchedRepository {
             position: Some(7),
             original_position: Some(4),
             pull_request_review_id: Some(31),
+            line: Some(12),
+            original_line: Some(12),
+            start_line: None,
+            original_start_line: None,
+            side: Some("RIGHT".to_owned()),
+            start_side: None,
+            subject_type: Some("line".to_owned()),
         }],
         reviews: vec![ReviewRecord {
             id: 31,
@@ -213,6 +223,7 @@ fn fetched() -> FetchedRepository {
             actor_login: Some("alice".to_owned()),
         }],
         pull_request_files: vec![PullRequestFileRecord {
+            patch: None,
             repo_id: 42,
             pull_number: 12,
             filename: "src/lib.rs".to_owned(),
@@ -709,6 +720,7 @@ async fn a_concurrent_sync_for_the_same_repo_is_rejected_with_a_conflict() {
 fn recon_fetched(issue_ids: &[i64], issues_complete: bool) -> FetchedRepository {
     let mut result = fetched();
     result.repository = RepoRecord {
+        node_id: None,
         id: 77,
         owner: "acme".to_owned(),
         name: "recon".to_owned(),
@@ -724,6 +736,7 @@ fn recon_fetched(issue_ids: &[i64], issues_complete: bool) -> FetchedRepository 
     result.issues = issue_ids
         .iter()
         .map(|id| IssueRecord {
+            node_id: None,
             id: *id,
             repo_id: 77,
             number: *id,
@@ -887,4 +900,66 @@ async fn derived_contributor_roles_accumulate_across_syncs() {
         "the window keeps the earliest sighting"
     );
     assert_eq!(people[0]["last_seen_at"], "2026-08-01T00:00:00Z");
+}
+
+/// A repo whose only content is `events` timeline entries on issue 11.
+fn timeline_fetched(events: &[&str]) -> FetchedRepository {
+    let mut result = recon_fetched(&[11], true);
+    result.issue_timeline = events
+        .iter()
+        .enumerate()
+        .map(|(position, event)| IssueTimelineEventRecord {
+            repo_id: 77,
+            issue_number: 11,
+            position: i64::try_from(position).expect("test positions are small"),
+            event: (*event).to_owned(),
+            created_at: Some("2026-08-20T00:00:00Z".to_owned()),
+            actor_login: Some("kate".to_owned()),
+            payload_json: format!("{{\"event\":\"{event}\"}}"),
+        })
+        .collect();
+    result
+}
+
+#[tokio::test]
+async fn a_shorter_timeline_does_not_leave_the_previous_tail_behind() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let db = common::inmem_db().await;
+
+    // First sync sees four entries.
+    sync_recon(
+        db.clone(),
+        &ctx,
+        timeline_fetched(&["labeled", "commented", "assigned", "closed"]),
+    )
+    .await;
+
+    // The comment is deleted upstream, so its entry disappears and everything
+    // after it shifts down a position.
+    sync_recon(
+        db.clone(),
+        &ctx,
+        timeline_fetched(&["labeled", "assigned", "closed"]),
+    )
+    .await;
+
+    let service = common::service_with_github(
+        db,
+        "https://api.github.com",
+        Arc::new(common::FakeGithub { result: None }),
+    );
+    let router = router_for(service, ctx);
+    let json = body_json(get(router, "/repos/acme/recon/issues/11/timeline").await).await;
+    let events: Vec<&str> = json
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|e| e["event"].as_str().expect("event"))
+        .collect();
+
+    assert_eq!(
+        events,
+        vec!["labeled", "assigned", "closed"],
+        "re-syncing a shorter timeline must not keep the old tail"
+    );
 }

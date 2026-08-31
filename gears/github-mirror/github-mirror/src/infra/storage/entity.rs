@@ -41,6 +41,9 @@ pub mod repositories {
         /// GitHub repository id.
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: i64,
+        /// GitHub's GraphQL global id (DESIGN's `node_id`); `NULL` on
+        /// rows mirrored before the column existed.
+        pub node_id: Option<String>,
         pub owner: String,
         pub name: String,
         /// `owner/name` slug.
@@ -164,6 +167,9 @@ pub mod issues {
         /// GitHub issue id.
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: i64,
+        /// GitHub's GraphQL global id (DESIGN's `node_id`); `NULL` on
+        /// rows mirrored before the column existed.
+        pub node_id: Option<String>,
         /// Owning repository's GitHub id.
         pub repo_id: i64,
         pub number: i64,
@@ -202,6 +208,9 @@ pub mod pull_requests {
         /// GitHub pull-request id.
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: i64,
+        /// GitHub's GraphQL global id (DESIGN's `node_id`); `NULL` on
+        /// rows mirrored before the column existed.
+        pub node_id: Option<String>,
         /// Owning repository's GitHub id.
         pub repo_id: i64,
         pub number: i64,
@@ -390,6 +399,16 @@ pub mod review_comments {
         /// Line position at comment-creation time — the stable anchor for
         /// re-resolving where a comment pointed before later force-pushes.
         pub original_position: Option<i64>,
+        /// GitHub's current diff anchors, replacing `position`: the line
+        /// and side a comment sits on, plus the start of a multi-line
+        /// selection.
+        pub line: Option<i64>,
+        pub original_line: Option<i64>,
+        pub start_line: Option<i64>,
+        pub original_start_line: Option<i64>,
+        pub side: Option<String>,
+        pub start_side: Option<String>,
+        pub subject_type: Option<String>,
         /// The review this inline comment belongs to; `NULL` when it
         /// belongs to none.
         pub pull_request_review_id: Option<i64>,
@@ -716,6 +735,8 @@ pub mod pull_request_files {
         pub changes: i64,
         /// Present when status is renamed.
         pub previous_filename: Option<String>,
+        /// The file's unified diff; `NULL` when GitHub omitted it.
+        pub patch: Option<String>,
         /// Blob SHA of the file version in this pull request.
         pub sha: Option<String>,
         /// When a sync last wrote this row. Doubles as the

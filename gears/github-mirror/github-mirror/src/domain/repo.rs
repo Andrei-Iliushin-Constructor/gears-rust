@@ -18,6 +18,8 @@ use super::error::DomainError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoRecord {
     pub id: i64,
+    /// GitHub's GraphQL global id for this entity (DESIGN's `node_id`).
+    pub node_id: Option<String>,
     pub owner: String,
     pub name: String,
     pub full_name: String,
@@ -62,6 +64,8 @@ pub trait RepoRepository: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueRecord {
     pub id: i64,
+    /// GitHub's GraphQL global id for this entity (DESIGN's `node_id`).
+    pub node_id: Option<String>,
     pub repo_id: i64,
     pub number: i64,
     pub title: String,
@@ -119,6 +123,8 @@ pub trait IssueRepository: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequestRecord {
     pub id: i64,
+    /// GitHub's GraphQL global id for this entity (DESIGN's `node_id`).
+    pub node_id: Option<String>,
     pub repo_id: i64,
     pub number: i64,
     pub title: String,
@@ -301,6 +307,15 @@ pub struct ReviewCommentRecord {
     /// Line position at comment-creation time — GitHub's own stable anchor
     /// for resolving where a comment pointed before later force-pushes.
     pub original_position: Option<i64>,
+    /// GitHub's current diff anchors, replacing `position`: the line and
+    /// side a comment sits on, plus the start of a multi-line selection.
+    pub line: Option<i64>,
+    pub original_line: Option<i64>,
+    pub start_line: Option<i64>,
+    pub original_start_line: Option<i64>,
+    pub side: Option<String>,
+    pub start_side: Option<String>,
+    pub subject_type: Option<String>,
     /// The review this inline comment belongs to, when it belongs to one.
     pub pull_request_review_id: Option<i64>,
 }
@@ -644,6 +659,9 @@ pub struct PullRequestFileRecord {
     pub changes: i64,
     pub previous_filename: Option<String>,
     pub sha: Option<String>,
+    /// The file's unified diff as GitHub returned it; `None` when GitHub
+    /// omitted it, which it does for very large diffs.
+    pub patch: Option<String>,
 }
 
 #[async_trait]
@@ -1096,4 +1114,18 @@ pub trait IssueTimelineRepository: Send + Sync {
         issue_number: i64,
         limit: u64,
     ) -> Result<Vec<IssueTimelineEvent>, DomainError>;
+
+    /// Drop these issues' timelines before they are rewritten.
+    ///
+    /// Rows are keyed by their index in the fetched timeline, so a timeline
+    /// that grew shorter upstream — a deleted comment removes its entry —
+    /// would leave the tail of the previous, longer run behind. Clearing the
+    /// issues first is what keeps a re-sync idempotent (PRD 5.3).
+    async fn delete_by_issues<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        issue_numbers: &[i64],
+    ) -> Result<u64, DomainError>;
 }

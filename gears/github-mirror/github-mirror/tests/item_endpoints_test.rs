@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 fn repo_record() -> RepoRecord {
     RepoRecord {
+        node_id: None,
         id: 3001,
         owner: "acme".to_owned(),
         name: "widget".to_owned(),
@@ -115,6 +116,7 @@ async fn get_issue_returns_the_matching_number() {
             "acme",
             "widget",
             IssueRecord {
+                node_id: None,
                 id: 1,
                 repo_id: 0,
                 number: 11,
@@ -156,6 +158,7 @@ async fn get_pull_request_returns_the_matching_number() {
             "acme",
             "widget",
             PullRequestRecord {
+                node_id: None,
                 id: 2,
                 repo_id: 0,
                 number: 12,

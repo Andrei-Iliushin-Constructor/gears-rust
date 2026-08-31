@@ -14,6 +14,7 @@ use toolkit_odata::ODataQuery;
 
 fn record(id: i64, owner: &str, name: &str) -> RepoRecord {
     RepoRecord {
+        node_id: None,
         id,
         owner: owner.to_owned(),
         name: name.to_owned(),

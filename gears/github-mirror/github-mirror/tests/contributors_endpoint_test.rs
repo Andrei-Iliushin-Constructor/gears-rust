@@ -23,6 +23,7 @@ fn instant(raw: &str) -> chrono::DateTime<chrono::Utc> {
 
 fn repo_record() -> RepoRecord {
     RepoRecord {
+        node_id: None,
         id: 997,
         owner: "acme".to_owned(),
         name: "widget".to_owned(),

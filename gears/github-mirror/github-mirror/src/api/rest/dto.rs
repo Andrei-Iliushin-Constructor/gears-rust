@@ -77,6 +77,9 @@ pub struct PullRequestMarkerDto {}
 #[toolkit_macros::api_dto(response)]
 pub struct RepoDto {
     pub id: i64,
+    /// GitHub's GraphQL global id, as GitHub itself returns it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
     pub name: String,
     pub full_name: String,
     pub owner: ActorDto,
@@ -97,6 +100,7 @@ impl From<Repo> for RepoDto {
 
         Self {
             id: repo.id,
+            node_id: repo.node_id,
             name: repo.name,
             full_name: repo.full_name,
             owner: ActorDto { login: repo.owner },
@@ -116,6 +120,9 @@ impl From<Repo> for RepoDto {
 #[toolkit_macros::api_dto(response)]
 pub struct IssueDto {
     pub id: i64,
+    /// GitHub's GraphQL global id, as GitHub itself returns it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
     pub number: i64,
     pub title: String,
     pub body: Option<String>,
@@ -132,6 +139,7 @@ impl From<Issue> for IssueDto {
     fn from(i: Issue) -> Self {
         Self {
             id: i.id,
+            node_id: i.node_id,
             number: i.number,
             title: i.title,
             body: i.body,
@@ -175,6 +183,9 @@ impl From<Comment> for CommentDto {
 #[toolkit_macros::api_dto(response)]
 pub struct PullRequestDto {
     pub id: i64,
+    /// GitHub's GraphQL global id, as GitHub itself returns it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
     pub number: i64,
     pub title: String,
     pub body: Option<String>,
@@ -196,6 +207,7 @@ impl From<PullRequest> for PullRequestDto {
     fn from(p: PullRequest) -> Self {
         Self {
             id: p.id,
+            node_id: p.node_id,
             number: p.number,
             title: p.title,
             body: p.body,
@@ -268,6 +280,22 @@ pub struct ReviewCommentDto {
     /// Line position at comment-creation time — the stable anchor across
     /// later force-pushes.
     pub original_position: Option<i64>,
+    /// GitHub's current diff anchors, which its own UI positions inline
+    /// comments by; `position` above is the deprecated form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_line: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_start_line: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub side: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_side: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_type: Option<String>,
     /// The review this inline comment belongs to, as GitHub reports it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pull_request_review_id: Option<i64>,
@@ -288,6 +316,13 @@ impl From<ReviewComment> for ReviewCommentDto {
             html_url: c.html_url,
             position: c.position,
             original_position: c.original_position,
+            line: c.line,
+            original_line: c.original_line,
+            start_line: c.start_line,
+            original_start_line: c.original_start_line,
+            side: c.side,
+            start_side: c.start_side,
+            subject_type: c.subject_type,
             pull_request_review_id: c.pull_request_review_id,
         }
     }
@@ -305,6 +340,9 @@ pub struct PullRequestFileDto {
     pub changes: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_filename: Option<String>,
+    /// The file's unified diff, as GitHub returns it on this endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch: Option<String>,
 }
 
 impl From<PullRequestFile> for PullRequestFileDto {
@@ -317,6 +355,7 @@ impl From<PullRequestFile> for PullRequestFileDto {
             deletions: f.deletions,
             changes: f.changes,
             previous_filename: f.previous_filename,
+            patch: f.patch,
         }
     }
 }
@@ -331,6 +370,9 @@ impl From<CommitFile> for PullRequestFileDto {
             deletions: f.deletions,
             changes: f.changes,
             previous_filename: f.previous_filename,
+            // A commit file carries no diff text: GitHub returns `patch`
+            // only on the pull-request files endpoint.
+            patch: None,
         }
     }
 }

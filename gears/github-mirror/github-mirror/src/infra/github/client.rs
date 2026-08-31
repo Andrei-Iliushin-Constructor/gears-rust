@@ -272,6 +272,8 @@ struct GhOwner {
 struct GhRepository {
     clone_url: Option<String>,
     id: i64,
+    #[serde(default)]
+    node_id: Option<String>,
     name: String,
     full_name: String,
     owner: GhOwner,
@@ -286,6 +288,8 @@ struct GhRepository {
 #[derive(Debug, Deserialize)]
 struct GhIssue {
     id: i64,
+    #[serde(default)]
+    node_id: Option<String>,
     number: i64,
     title: String,
     body: Option<String>,
@@ -363,6 +367,8 @@ struct GhRef {
 #[derive(Debug, Deserialize)]
 struct GhPullRequest {
     id: i64,
+    #[serde(default)]
+    node_id: Option<String>,
     number: i64,
     title: String,
     body: Option<String>,
@@ -445,6 +451,23 @@ struct GhReviewComment {
     /// Absent once GitHub considers the commented-on line outdated.
     position: Option<i64>,
     original_position: Option<i64>,
+    /// GitHub's current diff anchors: the line and side a comment sits on,
+    /// plus the start of a multi-line selection. `position` above is the
+    /// deprecated single-line form GitHub still sends.
+    #[serde(default)]
+    line: Option<i64>,
+    #[serde(default)]
+    original_line: Option<i64>,
+    #[serde(default)]
+    start_line: Option<i64>,
+    #[serde(default)]
+    original_start_line: Option<i64>,
+    #[serde(default)]
+    side: Option<String>,
+    #[serde(default)]
+    start_side: Option<String>,
+    #[serde(default)]
+    subject_type: Option<String>,
     /// The review this inline comment belongs to; clients group comments
     /// under their review by it.
     #[serde(default)]
@@ -545,6 +568,9 @@ struct GhWorkflowRunsPage {
 #[derive(Debug, Deserialize)]
 struct GhPullFile {
     filename: String,
+    /// The file's unified diff; GitHub omits it for very large diffs.
+    #[serde(default)]
+    patch: Option<String>,
     status: String,
     additions: i64,
     deletions: i64,
@@ -694,6 +720,7 @@ struct GhCommit {
 fn repository_record(r: GhRepository) -> RepoRecord {
     RepoRecord {
         id: r.id,
+        node_id: r.node_id,
         owner: r.owner.login,
         name: r.name,
         full_name: r.full_name,
@@ -710,6 +737,7 @@ fn repository_record(r: GhRepository) -> RepoRecord {
 fn issue_record(repo_id: i64, i: GhIssue) -> IssueRecord {
     IssueRecord {
         id: i.id,
+        node_id: i.node_id,
         repo_id,
         number: i.number,
         title: i.title,
@@ -729,6 +757,7 @@ fn pull_request_record(repo_id: i64, p: GhPullRequest) -> PullRequestRecord {
 
     PullRequestRecord {
         id: p.id,
+        node_id: p.node_id,
         repo_id,
         number: p.number,
         title: p.title,
@@ -806,6 +835,13 @@ fn review_comment_record(repo_id: i64, c: GhReviewComment) -> Option<ReviewComme
         html_url: c.html_url,
         position: c.position,
         original_position: c.original_position,
+        line: c.line,
+        original_line: c.original_line,
+        start_line: c.start_line,
+        original_start_line: c.original_start_line,
+        side: c.side,
+        start_side: c.start_side,
+        subject_type: c.subject_type,
         pull_request_review_id: c.pull_request_review_id,
     })
 }
@@ -1119,6 +1155,7 @@ fn pull_request_file_record(
         changes: f.changes,
         previous_filename: f.previous_filename,
         sha: f.sha,
+        patch: f.patch,
     }
 }
 

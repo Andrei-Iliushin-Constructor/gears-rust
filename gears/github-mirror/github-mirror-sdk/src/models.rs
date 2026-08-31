@@ -25,6 +25,8 @@ pub struct MirrorStatus {
 pub struct Repo {
     /// GitHub's numeric repository id.
     pub id: i64,
+    /// GitHub's GraphQL global id for this entity (DESIGN's `node_id`).
+    pub node_id: Option<String>,
     pub owner: String,
     pub name: String,
     pub full_name: String,
@@ -60,6 +62,8 @@ impl Repo {
 pub struct Issue {
     /// GitHub's numeric issue id.
     pub id: i64,
+    /// GitHub's GraphQL global id for this entity (DESIGN's `node_id`).
+    pub node_id: Option<String>,
     /// Owning repository's GitHub id.
     pub repo_id: i64,
     pub number: i64,
@@ -79,6 +83,8 @@ pub struct Issue {
 pub struct PullRequest {
     /// GitHub's numeric pull-request id.
     pub id: i64,
+    /// GitHub's GraphQL global id for this entity (DESIGN's `node_id`).
+    pub node_id: Option<String>,
     /// Owning repository's GitHub id.
     pub repo_id: i64,
     pub number: i64,
@@ -198,6 +204,15 @@ pub struct ReviewComment {
     /// Line position at comment-creation time — GitHub's own stable anchor
     /// for resolving where a comment pointed before later force-pushes.
     pub original_position: Option<i64>,
+    /// GitHub's current diff anchors, replacing `position`: the line and
+    /// side a comment sits on, plus the start of a multi-line selection.
+    pub line: Option<i64>,
+    pub original_line: Option<i64>,
+    pub start_line: Option<i64>,
+    pub original_start_line: Option<i64>,
+    pub side: Option<String>,
+    pub start_side: Option<String>,
+    pub subject_type: Option<String>,
     /// The review this inline comment belongs to, when it belongs to one.
     pub pull_request_review_id: Option<i64>,
 }
@@ -366,6 +381,9 @@ pub struct PullRequestFile {
     pub previous_filename: Option<String>,
     /// Blob SHA of the file version in this pull request.
     pub sha: Option<String>,
+    /// The file's unified diff as GitHub returned it; `None` when GitHub
+    /// omitted it, which it does for very large diffs.
+    pub patch: Option<String>,
 }
 
 /// A mirrored GitHub tag (read-slice shape).

@@ -16,6 +16,7 @@ impl From<repositories::Model> for Repo {
     fn from(m: repositories::Model) -> Self {
         Self {
             id: m.id,
+            node_id: m.node_id,
             owner: m.owner,
             name: m.name,
             full_name: m.full_name,
@@ -34,6 +35,7 @@ impl From<issues::Model> for Issue {
     fn from(m: issues::Model) -> Self {
         Self {
             id: m.id,
+            node_id: m.node_id,
             repo_id: m.repo_id,
             number: m.number,
             title: m.title,
@@ -52,6 +54,7 @@ impl From<pull_requests::Model> for PullRequest {
     fn from(m: pull_requests::Model) -> Self {
         Self {
             id: m.id,
+            node_id: m.node_id,
             repo_id: m.repo_id,
             number: m.number,
             title: m.title,
@@ -122,6 +125,13 @@ impl From<review_comments::Model> for ReviewComment {
             html_url: m.html_url,
             position: m.position,
             original_position: m.original_position,
+            line: m.line,
+            original_line: m.original_line,
+            start_line: m.start_line,
+            original_start_line: m.original_start_line,
+            side: m.side,
+            start_side: m.start_side,
+            subject_type: m.subject_type,
             pull_request_review_id: m.pull_request_review_id,
         }
     }
@@ -265,6 +275,7 @@ impl From<pull_request_files::Model> for PullRequestFile {
             deletions: m.deletions,
             changes: m.changes,
             previous_filename: m.previous_filename,
+            patch: m.patch,
             sha: m.sha,
         }
     }

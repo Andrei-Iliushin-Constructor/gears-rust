@@ -83,6 +83,7 @@ fn active_model(tenant_id: Uuid, r: &RepoRecord) -> repositories::ActiveModel {
     repositories::ActiveModel {
         tenant_id: ActiveValue::Set(tenant_id),
         id: ActiveValue::Set(r.id),
+        node_id: ActiveValue::Set(r.node_id.clone()),
         owner: ActiveValue::Set(r.owner.clone()),
         name: ActiveValue::Set(r.name.clone()),
         full_name: ActiveValue::Set(r.full_name.clone()),
@@ -111,6 +112,7 @@ impl RepoRepository for SeaOrmRepoRepository {
             repositories::Column::Id,
         ])
         .update_columns([
+            repositories::Column::NodeId,
             repositories::Column::Owner,
             repositories::Column::Name,
             repositories::Column::FullName,
@@ -136,6 +138,7 @@ impl RepoRepository for SeaOrmRepoRepository {
 
         Ok(Repo {
             id: record.id,
+            node_id: record.node_id,
             owner: record.owner,
             name: record.name,
             full_name: record.full_name,
@@ -205,6 +208,7 @@ fn issue_active_model(tenant_id: Uuid, r: &IssueRecord) -> issues::ActiveModel {
     issues::ActiveModel {
         tenant_id: ActiveValue::Set(tenant_id),
         id: ActiveValue::Set(r.id),
+        node_id: ActiveValue::Set(r.node_id.clone()),
         repo_id: ActiveValue::Set(r.repo_id),
         number: ActiveValue::Set(r.number),
         title: ActiveValue::Set(r.title.clone()),
@@ -260,6 +264,7 @@ impl IssueRepository for SeaOrmIssueRepository {
             issues::Column::Id,
         ])
         .update_columns([
+            issues::Column::NodeId,
             issues::Column::RepoId,
             issues::Column::Number,
             issues::Column::Title,
@@ -285,6 +290,7 @@ impl IssueRepository for SeaOrmIssueRepository {
 
         Ok(Issue {
             id: record.id,
+            node_id: record.node_id,
             repo_id: record.repo_id,
             number: record.number,
             title: record.title,
@@ -359,6 +365,7 @@ fn pull_request_active_model(tenant_id: Uuid, r: &PullRequestRecord) -> pull_req
     pull_requests::ActiveModel {
         tenant_id: ActiveValue::Set(tenant_id),
         id: ActiveValue::Set(r.id),
+        node_id: ActiveValue::Set(r.node_id.clone()),
         repo_id: ActiveValue::Set(r.repo_id),
         number: ActiveValue::Set(r.number),
         title: ActiveValue::Set(r.title.clone()),
@@ -422,6 +429,7 @@ impl PullRequestRepository for SeaOrmPullRequestRepository {
             pull_requests::Column::Id,
         ])
         .update_columns([
+            pull_requests::Column::NodeId,
             pull_requests::Column::RepoId,
             pull_requests::Column::Number,
             pull_requests::Column::Title,
@@ -455,6 +463,7 @@ impl PullRequestRepository for SeaOrmPullRequestRepository {
 
         Ok(PullRequest {
             id: record.id,
+            node_id: record.node_id,
             repo_id: record.repo_id,
             number: record.number,
             title: record.title,
@@ -825,6 +834,13 @@ fn review_comment_active_model(
         html_url: ActiveValue::Set(r.html_url.clone()),
         position: ActiveValue::Set(r.position),
         original_position: ActiveValue::Set(r.original_position),
+        line: ActiveValue::Set(r.line),
+        original_line: ActiveValue::Set(r.original_line),
+        start_line: ActiveValue::Set(r.start_line),
+        original_start_line: ActiveValue::Set(r.original_start_line),
+        side: ActiveValue::Set(r.side.clone()),
+        start_side: ActiveValue::Set(r.start_side.clone()),
+        subject_type: ActiveValue::Set(r.subject_type.clone()),
         pull_request_review_id: ActiveValue::Set(r.pull_request_review_id),
         extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
@@ -883,6 +899,13 @@ impl ReviewCommentRepository for SeaOrmReviewCommentRepository {
             review_comments::Column::UpdatedAt,
             review_comments::Column::HtmlUrl,
             review_comments::Column::Position,
+            review_comments::Column::Line,
+            review_comments::Column::OriginalLine,
+            review_comments::Column::StartLine,
+            review_comments::Column::OriginalStartLine,
+            review_comments::Column::Side,
+            review_comments::Column::StartSide,
+            review_comments::Column::SubjectType,
             review_comments::Column::OriginalPosition,
             review_comments::Column::PullRequestReviewId,
             review_comments::Column::ExtractedAt,
@@ -913,6 +936,13 @@ impl ReviewCommentRepository for SeaOrmReviewCommentRepository {
             html_url: record.html_url,
             position: record.position,
             original_position: record.original_position,
+            line: record.line,
+            original_line: record.original_line,
+            start_line: record.start_line,
+            original_start_line: record.original_start_line,
+            side: record.side,
+            start_side: record.start_side,
+            subject_type: record.subject_type,
             pull_request_review_id: record.pull_request_review_id,
         })
     }
@@ -1771,6 +1801,7 @@ fn pull_request_file_active_model(
         deletions: ActiveValue::Set(r.deletions),
         changes: ActiveValue::Set(r.changes),
         previous_filename: ActiveValue::Set(r.previous_filename.clone()),
+        patch: ActiveValue::Set(r.patch.clone()),
         sha: ActiveValue::Set(r.sha.clone()),
         extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
@@ -1797,6 +1828,7 @@ impl PullRequestFileRepository for SeaOrmPullRequestFileRepository {
             pull_request_files::Column::Deletions,
             pull_request_files::Column::Changes,
             pull_request_files::Column::PreviousFilename,
+            pull_request_files::Column::Patch,
             pull_request_files::Column::Sha,
             pull_request_files::Column::ExtractedAt,
         ])
@@ -1820,6 +1852,7 @@ impl PullRequestFileRepository for SeaOrmPullRequestFileRepository {
             deletions: record.deletions,
             changes: record.changes,
             previous_filename: record.previous_filename,
+            patch: record.patch,
             sha: record.sha,
         })
     }
@@ -3033,6 +3066,32 @@ fn issue_timeline_active_model(
 
 #[async_trait]
 impl IssueTimelineRepository for SeaOrmIssueTimelineRepository {
+    async fn delete_by_issues<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        issue_numbers: &[i64],
+    ) -> Result<u64, DomainError> {
+        // `IN ()` is invalid SQL on some engines and means nothing on any.
+        if issue_numbers.is_empty() {
+            return Ok(0);
+        }
+
+        let result = IssueTimelineEntity::delete_many()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(issue_timeline::Column::RepoId.eq(repo_id))
+                    .add(issue_timeline::Column::IssueNumber.is_in(issue_numbers.iter().copied())),
+            )
+            .exec(conn)
+            .await
+            .map_err(map_scope_error)?;
+        Ok(result.rows_affected)
+    }
+
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,

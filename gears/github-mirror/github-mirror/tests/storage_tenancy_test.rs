@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 fn repo(id: i64, name: &str) -> RepoRecord {
     RepoRecord {
+        node_id: None,
         id,
         owner: "acme".to_owned(),
         name: name.to_owned(),

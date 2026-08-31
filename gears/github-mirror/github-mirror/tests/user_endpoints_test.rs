@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 fn repo_record(id: i64, name: &str, clone_url: Option<&str>) -> RepoRecord {
     RepoRecord {
+        node_id: None,
         id,
         owner: "acme".to_owned(),
         name: name.to_owned(),

@@ -3411,6 +3411,20 @@ impl<
                         check_runs,
                         fetched.check_runs
                     );
+                    // Rows are keyed by position, so a shorter timeline would
+                    // leave the old tail behind: clear each fetched issue
+                    // before rewriting it.
+                    let refetched: Vec<i64> = fetched
+                        .issue_timeline
+                        .iter()
+                        .map(|event| event.issue_number)
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .collect();
+                    service
+                        .issue_timeline
+                        .delete_by_issues(tx, &scope, repository.id, &refetched)
+                        .await?;
                     let issue_timeline_synced = sync_table!(
                         service,
                         tx,
