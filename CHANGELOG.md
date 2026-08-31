@@ -13,6 +13,136 @@ release-plz updates this file in the Release PR.
 
 ### Other
 
+- release (by @github-actions[bot]) - #4680
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-event-broker-sdk-v0.2.0...cf-gears-event-broker-sdk-v0.2.1) - 2026-08-31
+
+### Other
+
+- release (by @github-actions[bot]) - #4680
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.6](https://github.com/constructorfabric/gears-rust/compare/cf-gears-llm-gateway-sdk-v0.1.5...cf-gears-llm-gateway-sdk-v0.1.6) - 2026-08-31
+
+### Other
+
+- release (by @github-actions[bot]) - #4680
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.9](https://github.com/constructorfabric/gears-rust/compare/cf-gears-noop-usage-collector-plugin-v0.1.8...cf-gears-noop-usage-collector-plugin-v0.1.9) - 2026-08-31
+
+### Other
+
+- release (by @github-actions[bot]) - #4680
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.7](https://github.com/constructorfabric/gears-rust/compare/cf-gears-oidc-authn-plugin-v0.2.6...cf-gears-oidc-authn-plugin-v0.2.7) - 2026-08-31
+
+### Other
+
+- release (by @github-actions[bot]) - #4680
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.3.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-cluster-conformance-v0.3.1...cf-gears-cluster-conformance-v0.3.2) - 2026-08-31
+
+### Other
+
+- release (by @github-actions[bot]) - #4680
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-cluster-v0.2.1...cf-gears-cluster-v0.2.2) - 2026-08-31
+
+### Added
+
+- *(cluster)* the cluster gear becomes deployable out of process (by @asmith987)
+
+### Other
+
+- release (by @github-actions[bot]) - #4680
+
+### Contributors
+
+* @github-actions[bot]
+* @asmith987
+
+## [0.4.0](https://github.com/constructorfabric/gears-rust/compare/cf-postgres-cluster-plugin-v0.3.0...cf-postgres-cluster-plugin-v0.4.0) - 2026-08-31
+
+### Added
+
+- *(cluster)* the cluster gear becomes deployable out of process (by @asmith987)
+
+### Other
+
+- release (by @github-actions[bot]) - #4680
+
+### Contributors
+
+* @github-actions[bot]
+* @asmith987
+
+## [0.2.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-standalone-cluster-plugin-v0.2.1...cf-gears-standalone-cluster-plugin-v0.2.2) - 2026-08-31
+
+### Added
+
+- *(cluster)* the cluster gear becomes deployable out of process (by @asmith987)
+
+### Other
+
+- release (by @github-actions[bot]) - #4680
+
+### Contributors
+
+* @github-actions[bot]
+* @asmith987
+
+## [0.2.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-cluster-sdk-v0.2.1...cf-gears-cluster-sdk-v0.2.2) - 2026-08-31
+
+### Added
+
+- *(cluster)* the cluster gear becomes deployable out of process (by @asmith987)
+
+### Other
+
+- release (by @github-actions[bot]) - #4680
+
+### Contributors
+
+* @github-actions[bot]
+* @asmith987
+
+## [0.1.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-keycloak-idp-plugin-v0.1.0...cf-gears-keycloak-idp-plugin-v0.1.1) - 2026-08-31
+
+### Other
+
+- release (by @github-actions[bot]) - #4680
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-event-broker-v0.2.1...cf-gears-event-broker-v0.2.2) - 2026-08-31
+
+### Other
+
 - updated the following local packages: cf-gears-toolkit, cf-gears-cluster-sdk, cf-gears-cluster
 
 ## [0.2.1](https://github.com/constructorfabric/gears-rust/compare/cf-gears-event-broker-sdk-v0.2.0...cf-gears-event-broker-sdk-v0.2.1) - 2026-08-31
