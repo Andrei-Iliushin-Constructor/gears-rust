@@ -2406,6 +2406,14 @@
               "null"
             ]
           },
+          "tenant_id": {
+            "description": "Optional target tenant for the created group.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "type": {
             "description": "GTS chained type path. Must have prefix `gts.cf.core.rg.type.v1~`.",
             "type": "string"
