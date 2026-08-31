@@ -308,6 +308,16 @@ pub trait ResourceGroupReadHierarchy: Send + Sync {
 /// — the very same methods RG's own `seed_types` uses to seed its types at
 /// its own init, for the identical reason.
 ///
+/// That restriction is not just a promise on this doc comment. `ClientHub`
+/// has no notion of lifecycle phase, so nothing stops some later handler
+/// or background task from resolving this trait unless the impl closes the
+/// window itself: RG's `RgTypeBootstrapService` seals itself once
+/// `register_rest` runs, which the toolkit runtime only does after every
+/// gear's `init` and `post_init` have completed. Sealing fails every
+/// method closed from then on -- including for a caller that resolved and
+/// held onto an `Arc` from inside the window, which merely removing the
+/// `ClientHub` registration would not reach.
+///
 /// `ctx` is threaded through for audit correlation only (log/trace
 /// enrichment on the impl side) and is never used to enforce anything —
 /// exactly the shape [`ResourceGroupReadHierarchy`] uses its `_ctx` for.

@@ -31,6 +31,7 @@ pub type ConcreteGroupService = GroupService<GroupRepository, TypeRepository>;
 pub type ConcreteMembershipService =
     MembershipService<GroupRepository, TypeRepository, MembershipRepository>;
 pub type ConcreteRgService = RgService<GroupRepository, TypeRepository, MembershipRepository>;
+pub type ConcreteTypeBootstrapService = RgTypeBootstrapService<TypeRepository>;
 
 // @cpt-dod:cpt-cf-resource-group-dod-sdk-foundation-gear-scaffold:p1
 /// Main gear struct for the resource-group gear.
@@ -44,6 +45,11 @@ pub struct ResourceGroup {
     type_service: OnceLock<Arc<ConcreteTypeService>>,
     group_service: OnceLock<Arc<ConcreteGroupService>>,
     membership_service: OnceLock<Arc<ConcreteMembershipService>>,
+    /// Kept as the concrete type, not just the `Arc<dyn
+    /// ResourceGroupTypeBootstrap>` handed to `ClientHub` -- `register_rest`
+    /// needs to call `seal()` on this exact instance once the bootstrap
+    /// window closes, and that method isn't part of the SDK trait object.
+    type_bootstrap: OnceLock<Arc<ConcreteTypeBootstrapService>>,
 }
 
 impl Default for ResourceGroup {
@@ -52,6 +58,7 @@ impl Default for ResourceGroup {
             type_service: OnceLock::new(),
             group_service: OnceLock::new(),
             membership_service: OnceLock::new(),
+            type_bootstrap: OnceLock::new(),
         }
     }
 }
@@ -155,9 +162,16 @@ impl Gear for ResourceGroup {
         // TEMPORARY: bootstrap-only, un-gated surface for another gear's
         // `init` to register RG types before AuthZ is reachable — see
         // `ResourceGroupTypeBootstrap`'s doc comment ("Temporary — revisit
-        // when the type registry becomes its own gear").
-        let type_bootstrap_client: Arc<dyn ResourceGroupTypeBootstrap> =
-            Arc::new(RgTypeBootstrapService::new(type_svc));
+        // when the type registry becomes its own gear"). Kept in its own
+        // `OnceLock` as the concrete type, not just the `Arc<dyn
+        // ResourceGroupTypeBootstrap>` handed to `ClientHub` below --
+        // `register_rest` calls `.seal()` on this exact instance once the
+        // bootstrap window closes.
+        let type_bootstrap = Arc::new(RgTypeBootstrapService::new(type_svc));
+        self.type_bootstrap
+            .set(type_bootstrap.clone())
+            .map_err(|_| anyhow::anyhow!("{} gear already initialized", Self::MODULE_NAME))?;
+        let type_bootstrap_client: Arc<dyn ResourceGroupTypeBootstrap> = type_bootstrap;
         ctx.client_hub()
             .register::<dyn ResourceGroupTypeBootstrap>(type_bootstrap_client);
 
@@ -179,11 +193,25 @@ impl DatabaseCapability for ResourceGroup {
 impl RestApiCapability for ResourceGroup {
     fn register_rest(
         &self,
-        _ctx: &GearCtx,
+        ctx: &GearCtx,
         router: axum::Router,
         openapi: &dyn OpenApiRegistry,
     ) -> anyhow::Result<axum::Router> {
         info!("Registering resource_group REST routes");
+
+        // The bootstrap window closes here. The toolkit runtime calls
+        // `register_rest` only after every gear's `init` and `post_init`
+        // have completed -- in both the in-process and out-of-process
+        // profiles -- so the one sanctioned caller
+        // (account-management's `Gear::init`) has already run by now.
+        // `ClientHub::remove` stops a future lookup; `seal()` on the kept
+        // instance also fails every method for a caller that resolved and
+        // held onto an `Arc` from inside the window, which removal alone
+        // would not reach. See `ResourceGroupTypeBootstrap`'s doc comment.
+        ctx.client_hub().remove::<dyn ResourceGroupTypeBootstrap>();
+        if let Some(type_bootstrap) = self.type_bootstrap.get() {
+            type_bootstrap.seal();
+        }
 
         let type_service = self
             .type_service

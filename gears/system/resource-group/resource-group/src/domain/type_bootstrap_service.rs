@@ -14,6 +14,7 @@
 //! section on `ResourceGroupTypeBootstrap`'s doc comment.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use resource_group_sdk::ResourceGroupTypeBootstrap;
@@ -32,16 +33,51 @@ use crate::domain::type_service::TypeService;
 /// paths, at a point in the toolkit lifecycle where `PolicyEnforcer` is
 /// structurally unavailable (see the trait doc comment for the full
 /// rationale). The in-process `ClientHub` path therefore skips `AuthZ`.
+///
+/// **Sealed after the bootstrap window closes.** `ClientHub` has no notion
+/// of lifecycle phase, so removing this service's registration stops a
+/// *new* lookup but does nothing about an `Arc` some caller already
+/// cloned — and the doc comment's "never through REST, only from another
+/// gear's `init`" promise was otherwise resting on that doc comment alone.
+/// `seal` is called once, from `gear.rs`'s `register_rest` (which the
+/// toolkit runtime only invokes after every gear's `init` and `post_init`
+/// have completed, in both the in-process and out-of-process profiles), so
+/// every method fails closed for a lookup and a retained handle alike from
+/// that point on.
 #[allow(unknown_lints, de0309_must_have_domain_model)]
 pub struct RgTypeBootstrapService<TR: TypeRepositoryTrait> {
     type_service: Arc<TypeService<TR>>,
+    sealed: AtomicBool,
 }
 
 impl<TR: TypeRepositoryTrait> RgTypeBootstrapService<TR> {
-    /// Create a new `RgTypeBootstrapService`.
+    /// Create a new `RgTypeBootstrapService`, open for calls until [`Self::seal`].
     #[must_use]
     pub fn new(type_service: Arc<TypeService<TR>>) -> Self {
-        Self { type_service }
+        Self {
+            type_service,
+            sealed: AtomicBool::new(false),
+        }
+    }
+
+    /// Close the bootstrap window. Idempotent, and irreversible for the
+    /// lifetime of this instance -- there is no unseal, because there is no
+    /// legitimate caller left to unseal it for.
+    pub fn seal(&self) {
+        self.sealed.store(true, Ordering::Release);
+    }
+
+    /// `Err` once sealed, naming neither the caller nor the method: this
+    /// path is meant to be unreachable, not diagnosed.
+    fn check_open(&self) -> Result<(), CanonicalError> {
+        if self.sealed.load(Ordering::Acquire) {
+            return Err(CanonicalError::internal(
+                "ResourceGroupTypeBootstrap is only callable during gear init; \
+                 the bootstrap window has closed",
+            )
+            .create());
+        }
+        Ok(())
     }
 }
 
@@ -56,6 +92,7 @@ impl<TR: TypeRepositoryTrait> ResourceGroupTypeBootstrap for RgTypeBootstrapServ
         // `ResourceGroupTypeBootstrap`. `_ctx` carries no enforcement
         // weight here; it exists only so a future audit-correlation hook
         // has something to thread through.
+        self.check_open()?;
         self.type_service
             .get_type_unscoped(code)
             .await
@@ -68,6 +105,7 @@ impl<TR: TypeRepositoryTrait> ResourceGroupTypeBootstrap for RgTypeBootstrapServ
         request: CreateTypeRequest,
     ) -> Result<ResourceGroupType, CanonicalError> {
         // Bypass AuthZ — see the trait-level doc comment.
+        self.check_open()?;
         self.type_service
             .create_type_unscoped(request)
             .await
@@ -81,6 +119,7 @@ impl<TR: TypeRepositoryTrait> ResourceGroupTypeBootstrap for RgTypeBootstrapServ
         request: UpdateTypeRequest,
     ) -> Result<ResourceGroupType, CanonicalError> {
         // Bypass AuthZ — see the trait-level doc comment.
+        self.check_open()?;
         self.type_service
             .update_type_unscoped(code, request)
             .await

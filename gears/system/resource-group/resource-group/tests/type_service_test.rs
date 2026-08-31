@@ -1977,6 +1977,96 @@ async fn bootstrap_bypasses_policy_enforcer_while_gated_path_denies() {
     assert_eq!(updated.metadata_schema, Some(json!({"patched": true})));
 }
 
+/// Sealing closes the bootstrap window for every method, including one an
+/// already-cloned `Arc` still holds -- not just a fresh `ClientHub` lookup.
+///
+/// `RgTypeBootstrapService::seal` is `gear.rs`'s answer to "nothing enforces
+/// the 'init only' contract beyond the doc comment": `register_rest` calls
+/// it once the runtime has finished every gear's `init`/`post_init`, and
+/// this test is the negative control that `check_open` actually fires on
+/// all three methods, before either the AuthZ gate (there is none here) or
+/// `TypeService` itself ever gets a chance to answer.
+#[tokio::test]
+async fn bootstrap_fails_closed_once_sealed() {
+    let db = common::test_db().await;
+    let type_svc = std::sync::Arc::new(common::make_type_service(db));
+    let bootstrap = RgTypeBootstrapService::new(type_svc);
+    let ctx = common::make_ctx(Uuid::now_v7());
+    let code = type_code("bootstrapseal");
+
+    // Open: succeeds, same as the bypass test above.
+    bootstrap
+        .create_type(
+            &ctx,
+            CreateTypeRequest {
+                code: code.clone(),
+                can_be_root: true,
+                allowed_parent_types: vec![],
+                allowed_membership_types: vec![],
+                metadata_schema: None,
+            },
+        )
+        .await
+        .expect("create_type must succeed before the bootstrap window closes");
+
+    bootstrap.seal();
+
+    // Sealed: every method fails closed from here, including one racing a
+    // caller that resolved this same instance before the seal.
+    // `CanonicalError::internal`'s `Display` deliberately redacts the real
+    // message behind a generic "retry later" text -- internal errors never
+    // leak detail to a caller. The message this test actually cares about
+    // survives in `Debug` (the `InternalV1` context struct's `description`
+    // field), which is what the assertions below check.
+    let get_err = bootstrap
+        .get_type(&ctx, &code)
+        .await
+        .expect_err("get_type must fail once sealed");
+    assert!(
+        format!("{get_err:?}").contains("bootstrap window has closed"),
+        "expected the sealed-window error, got: {get_err:?}"
+    );
+
+    let create_err = bootstrap
+        .create_type(
+            &ctx,
+            CreateTypeRequest {
+                code: type_code("bootstrapsealcreate"),
+                can_be_root: true,
+                allowed_parent_types: vec![],
+                allowed_membership_types: vec![],
+                metadata_schema: None,
+            },
+        )
+        .await
+        .expect_err("create_type must fail once sealed");
+    assert!(format!("{create_err:?}").contains("bootstrap window has closed"));
+
+    let update_err = bootstrap
+        .update_type(
+            &ctx,
+            &code,
+            UpdateTypeRequest {
+                can_be_root: true,
+                allowed_parent_types: vec![],
+                allowed_membership_types: vec![],
+                metadata_schema: None,
+            },
+        )
+        .await
+        .expect_err("update_type must fail once sealed");
+    assert!(format!("{update_err:?}").contains("bootstrap window has closed"));
+
+    // Sealing again is a no-op, not a panic -- `register_rest` runs once per
+    // gear, but nothing about the flag says a second call couldn't happen.
+    bootstrap.seal();
+    let still_err = bootstrap
+        .get_type(&ctx, &code)
+        .await
+        .expect_err("get_type must still fail after a second seal() call");
+    assert!(format!("{still_err:?}").contains("bootstrap window has closed"));
+}
+
 // =========================================================================
 // Source-scan: `ResourceGroupTypeBootstrap` must never reach the REST layer
 //
