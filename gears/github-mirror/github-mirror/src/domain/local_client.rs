@@ -22,6 +22,10 @@ use crate::domain::service::Service;
 #[resource_error(gts_id!("cf.core.github_mirror.repository.v1~"))]
 pub struct RepositoryError;
 
+/// What a caller is told about an internal failure. The cause is logged, not
+/// returned: the messages name upstream GitHub paths and storage internals.
+const INTERNAL_DETAIL: &str = "The mirror could not complete this request";
+
 impl From<DomainError> for CanonicalError {
     // Flat match on the domain enum is the whole point of this conversion;
     // the structured `tracing::*!` macros count toward cognitive complexity
@@ -50,13 +54,18 @@ impl From<DomainError> for CanonicalError {
                     .with_resource("repository")
                     .create()
             }
+            // Both arms keep the detail in the log and hand the caller a
+            // fixed message: an internal failure's text names upstream
+            // GitHub paths and storage internals, and a repository that is
+            // private to one tenant should not be inferable from another
+            // tenant's error body.
             DomainError::Internal(msg) => {
                 tracing::error!(msg = %msg, "github-mirror internal error");
-                CanonicalError::internal(msg).create()
+                CanonicalError::internal(INTERNAL_DETAIL).create()
             }
             DomainError::Database(db_err) => {
                 tracing::error!(error = ?db_err, "github-mirror database error");
-                CanonicalError::internal(db_err.to_string()).create()
+                CanonicalError::internal(INTERNAL_DETAIL).create()
             }
         }
     }

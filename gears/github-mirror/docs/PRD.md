@@ -257,6 +257,17 @@ so the unchecked boxes below read as "not yet", not "abandoned".
   the resolved commit SHA), so lightweight and annotated tags are indistinguishable
   and the annotated tag object's message/tagger/SHA are not captured — the Git Data
   API is not called in this increment
+- Security synchronization (§5.2 `cpt-cf-github-mirror-fr-security-sync`): security
+  advisories, Dependabot alerts and code-scanning alerts have no entities, tables or
+  endpoints yet; they need token scopes the shared credential cannot be assumed to
+  carry, so they land with per-tenant credentials
+  ([gears-rust#4534](https://github.com/constructorfabric/gears-rust/issues/4534))
+- PR-specific refinement tasks (§5.2 `cpt-cf-github-mirror-fr-issue-pr-detection`):
+  an issue carrying `pull_request` is flagged as one, but no refinement task is
+  enqueued for it — pull requests are instead picked up by the `/pulls` listing, so
+  one outside that listing's reach keeps `is_pull_request` without reviews, files or
+  commits until the task queue arrives
+  ([gears-rust#4632](https://github.com/constructorfabric/gears-rust/issues/4632))
 
 **Decisions recorded for the current increment**:
 

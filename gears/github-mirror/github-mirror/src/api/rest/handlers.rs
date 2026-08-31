@@ -74,8 +74,14 @@ impl GithubPage {
     }
 
     fn link_header(&self, path: &str, returned: usize) -> HeaderMap {
+        // A short page is the final one, which is the only case where the
+        // total is known without counting every row: the listing is served
+        // from a bounded read, not a `COUNT(*)`. On a full page GitHub's
+        // `rel="last"` is therefore omitted rather than guessed.
+        let is_last_page = returned as u64 != self.per_page;
+
         let mut links = Vec::new();
-        if returned as u64 == self.per_page {
+        if !is_last_page {
             links.push(format!(
                 "<{path}?page={}&per_page={}>; rel=\"next\"",
                 self.page + 1,
@@ -91,6 +97,12 @@ impl GithubPage {
             links.push(format!(
                 "<{path}?page=1&per_page={}>; rel=\"first\"",
                 self.per_page
+            ));
+        }
+        if is_last_page {
+            links.push(format!(
+                "<{path}?page={}&per_page={}>; rel=\"last\"",
+                self.page, self.per_page
             ));
         }
 

@@ -143,3 +143,50 @@ async fn user_repos_paginates_github_style() {
         "the second page must hold the next two rows"
     );
 }
+
+#[tokio::test]
+async fn the_last_page_advertises_itself_in_the_link_header() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let service = common::service("https://api.github.com").await;
+    for id in 20..23 {
+        service
+            .upsert_repo(&ctx, repo_record(id, &format!("repo{id}"), None))
+            .await
+            .expect("repo seed must succeed");
+    }
+
+    let router = router_for(service, ctx);
+
+    // Three rows, two per page: page 1 is full, so where the listing ends is
+    // not yet known and only `next` is offered.
+    let first = get(router.clone(), "/user/repos?per_page=2&page=1").await;
+    let links = first
+        .headers()
+        .get(axum::http::header::LINK)
+        .expect("a full page must link onward")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(links.contains(r#"rel="next""#), "{links}");
+    assert!(
+        !links.contains(r#"rel="last""#),
+        "a full page cannot know the last page without counting: {links}"
+    );
+
+    // Page 2 holds the single remaining row, which makes it the last page.
+    let second = get(router, "/user/repos?per_page=2&page=2").await;
+    let links = second
+        .headers()
+        .get(axum::http::header::LINK)
+        .expect("a later page must link back")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(links.contains(r#"rel="prev""#), "{links}");
+    assert!(links.contains(r#"rel="first""#), "{links}");
+    assert!(
+        links.contains(r#"</user/repos?page=2&per_page=2>; rel="last""#),
+        "the short page is the last one: {links}"
+    );
+    assert!(!links.contains(r#"rel="next""#), "{links}");
+}

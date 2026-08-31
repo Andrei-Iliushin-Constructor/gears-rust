@@ -2604,9 +2604,12 @@
               "null"
             ]
           },
-          "contributions": {
-            "format": "int64",
-            "type": "integer"
+          "first_seen_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "html_url": {
             "type": [
@@ -2618,6 +2621,13 @@
             "format": "int64",
             "type": "integer"
           },
+          "last_seen_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "login": {
             "description": "Omitted for anonymous contributors, matching GitHub's shape.",
             "type": [
@@ -2625,14 +2635,20 @@
               "null"
             ]
           },
+          "roles": {
+            "description": "Beyond GitHub's shape: the capacities this person was seen in, and\nthe window they were seen across.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "type": {
             "type": "string"
           }
         },
         "required": [
           "id",
-          "type",
-          "contributions"
+          "type"
         ],
         "type": "object"
       },

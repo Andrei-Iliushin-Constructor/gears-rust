@@ -368,6 +368,12 @@ struct GhPullRequest {
     assignees: Vec<GhActor>,
     #[serde(default)]
     requested_reviewers: Vec<GhActor>,
+    /// Present on the per-pull response, absent from the listing; when the
+    /// payload carries them the record needs no file walk to be accurate.
+    #[serde(default)]
+    additions: Option<i64>,
+    #[serde(default)]
+    deletions: Option<i64>,
     draft: Option<bool>,
     merged_at: Option<String>,
     head: Option<GhRef>,
@@ -723,8 +729,8 @@ fn pull_request_record(repo_id: i64, p: GhPullRequest) -> PullRequestRecord {
         merged: p.merged_at.is_some(),
         head_sha: head.as_ref().and_then(|r| r.sha.clone()),
         base_sha: base.as_ref().and_then(|r| r.sha.clone()),
-        lines_added: 0,
-        lines_removed: 0,
+        lines_added: p.additions.unwrap_or(0),
+        lines_removed: p.deletions.unwrap_or(0),
         created_at: p.created_at,
         updated_at: p.updated_at,
         closed_at: p.closed_at,
@@ -1533,8 +1539,14 @@ impl GithubClient {
                     pull.number
                 ))
                 .await?;
-            pull.lines_added = files.iter().map(|f| f.additions).sum();
-            pull.lines_removed = files.iter().map(|f| f.deletions).sum();
+            // Only when the payload did not carry the totals: a full file
+            // walk is the fallback, not the source of truth.
+            if pull.lines_added == 0 {
+                pull.lines_added = files.iter().map(|f| f.additions).sum();
+            }
+            if pull.lines_removed == 0 {
+                pull.lines_removed = files.iter().map(|f| f.deletions).sum();
+            }
             pull_request_files.extend(
                 files
                     .into_iter()
