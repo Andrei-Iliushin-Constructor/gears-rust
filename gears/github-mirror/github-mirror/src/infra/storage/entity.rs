@@ -390,6 +390,9 @@ pub mod review_comments {
         /// Line position at comment-creation time — the stable anchor for
         /// re-resolving where a comment pointed before later force-pushes.
         pub original_position: Option<i64>,
+        /// The review this inline comment belongs to; `NULL` when it
+        /// belongs to none.
+        pub pull_request_review_id: Option<i64>,
         /// When a sync last wrote this row. Doubles as the
         /// deletion-reconciliation watermark; `None` on rows from before
         /// the column existed.

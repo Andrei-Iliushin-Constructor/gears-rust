@@ -124,3 +124,40 @@ async fn issues_are_tenant_scoped() {
         "another tenant must not even learn the repository is mirrored"
     );
 }
+
+#[tokio::test]
+async fn issues_default_to_open_like_github() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let service = common::service("https://api.github.com").await;
+    service
+        .upsert_repo(&ctx, repo_record())
+        .await
+        .expect("repo seed must succeed");
+
+    let mut open = issue_record(1, 11, "still open");
+    open.state = "open".to_owned();
+    let mut closed = issue_record(2, 12, "done");
+    closed.state = "closed".to_owned();
+    for record in [open, closed] {
+        service
+            .upsert_issue(&ctx, "acme", "widget", record)
+            .await
+            .expect("issue seed must succeed");
+    }
+
+    let router = router_for(service, ctx);
+
+    let default = body_json(get(router.clone(), "/repos/acme/widget/issues").await).await;
+    let items = default.as_array().expect("items");
+    assert_eq!(items.len(), 1, "GitHub's default filter is state=open");
+    assert_eq!(items[0]["number"], 11);
+
+    let closed =
+        body_json(get(router.clone(), "/repos/acme/widget/issues?state=closed").await).await;
+    let items = closed.as_array().expect("items");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["number"], 12);
+
+    let all = body_json(get(router, "/repos/acme/widget/issues?state=all").await).await;
+    assert_eq!(all.as_array().expect("items").len(), 2);
+}

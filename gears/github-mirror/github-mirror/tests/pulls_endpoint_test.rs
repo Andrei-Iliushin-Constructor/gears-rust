@@ -163,7 +163,17 @@ async fn pull_request_upsert_is_idempotent_and_updates_fields() {
         .expect("second upsert must succeed");
 
     let router = router_for(service, ctx);
-    let response = get(router, "/repos/acme/widget/pulls").await;
+
+    // The upsert closed it, and GitHub's default filter is `state=open`, so
+    // the default listing must no longer show it.
+    let open_only = body_json(get(router.clone(), "/repos/acme/widget/pulls").await).await;
+    assert_eq!(
+        open_only.as_array().expect("items").len(),
+        0,
+        "a closed pull request is not open"
+    );
+
+    let response = get(router, "/repos/acme/widget/pulls?state=all").await;
     let json = body_json(response).await;
     let items = json.as_array().expect("items");
     assert_eq!(items.len(), 1);

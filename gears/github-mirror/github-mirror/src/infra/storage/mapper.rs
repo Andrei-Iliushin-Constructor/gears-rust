@@ -122,6 +122,7 @@ impl From<review_comments::Model> for ReviewComment {
             html_url: m.html_url,
             position: m.position,
             original_position: m.original_position,
+            pull_request_review_id: m.pull_request_review_id,
         }
     }
 }

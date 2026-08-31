@@ -30,6 +30,10 @@ const PER_RUN_SYNC_CAP: usize = 10;
 /// issues of the page for the same reason.
 const PER_ISSUE_SYNC_CAP: usize = 10;
 const USER_AGENT: &str = concat!("cf-gears-github-mirror/", env!("CARGO_PKG_VERSION"));
+
+/// The REST API version every request pins (DESIGN 3.5). Without it the
+/// response schema follows GitHub's default, which can change under us.
+const GITHUB_API_VERSION: &str = "2022-11-28";
 /// Attempts after the first request when GitHub answers with a rate limit.
 const RATE_LIMIT_RETRIES: u32 = 3;
 /// Longest single back-off sleep, whatever `Retry-After` asks for.
@@ -139,7 +143,8 @@ impl GithubClient {
             let mut request = self
                 .http
                 .get(&url)
-                .header("Accept", "application/vnd.github+json");
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", GITHUB_API_VERSION);
             if let Some(token) = &self.token {
                 request = request.bearer_auth(token);
             }
@@ -440,6 +445,10 @@ struct GhReviewComment {
     /// Absent once GitHub considers the commented-on line outdated.
     position: Option<i64>,
     original_position: Option<i64>,
+    /// The review this inline comment belongs to; clients group comments
+    /// under their review by it.
+    #[serde(default)]
+    pull_request_review_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -741,16 +750,27 @@ fn pull_request_record(repo_id: i64, p: GhPullRequest) -> PullRequestRecord {
     }
 }
 
-fn issue_number_from_url(issue_url: Option<&str>) -> i64 {
+/// The trailing number of an `.../issues/11` or `.../pulls/13` URL.
+///
+/// `None` when the URL is absent or does not end in a number: the row's
+/// parent is then unknown, and storing it under number 0 would file it
+/// against an issue that cannot exist.
+fn issue_number_from_url(issue_url: Option<&str>) -> Option<i64> {
     issue_url
         .and_then(|u| u.rsplit('/').next())
         .and_then(|n| n.parse().ok())
-        .unwrap_or(0)
 }
 
-fn comment_record(repo_id: i64, c: GhComment) -> CommentRecord {
-    let issue_number = issue_number_from_url(c.issue_url.as_deref());
-    CommentRecord {
+fn comment_record(repo_id: i64, c: GhComment) -> Option<CommentRecord> {
+    let Some(issue_number) = issue_number_from_url(c.issue_url.as_deref()) else {
+        tracing::warn!(
+            comment_id = c.id,
+            issue_url = ?c.issue_url,
+            "issue comment has no resolvable issue number; skipping"
+        );
+        return None;
+    };
+    Some(CommentRecord {
         id: c.id,
         repo_id,
         issue_number,
@@ -759,12 +779,19 @@ fn comment_record(repo_id: i64, c: GhComment) -> CommentRecord {
         created_at: c.created_at,
         updated_at: c.updated_at,
         html_url: c.html_url,
-    }
+    })
 }
 
-fn review_comment_record(repo_id: i64, c: GhReviewComment) -> ReviewCommentRecord {
-    let pull_number = issue_number_from_url(c.pull_request_url.as_deref());
-    ReviewCommentRecord {
+fn review_comment_record(repo_id: i64, c: GhReviewComment) -> Option<ReviewCommentRecord> {
+    let Some(pull_number) = issue_number_from_url(c.pull_request_url.as_deref()) else {
+        tracing::warn!(
+            comment_id = c.id,
+            pull_request_url = ?c.pull_request_url,
+            "review comment has no resolvable pull number; skipping"
+        );
+        return None;
+    };
+    Some(ReviewCommentRecord {
         id: c.id,
         repo_id,
         pull_number,
@@ -779,7 +806,8 @@ fn review_comment_record(repo_id: i64, c: GhReviewComment) -> ReviewCommentRecor
         html_url: c.html_url,
         position: c.position,
         original_position: c.original_position,
-    }
+        pull_request_review_id: c.pull_request_review_id,
+    })
 }
 
 fn label_record(repo_id: i64, l: GhLabel) -> LabelRecord {
@@ -1788,11 +1816,11 @@ impl GithubPort for GithubClient {
             commits: commit_records,
             comments: comments
                 .into_iter()
-                .map(|c| comment_record(repo_id, c))
+                .filter_map(|c| comment_record(repo_id, c))
                 .collect(),
             review_comments: review_comments
                 .into_iter()
-                .map(|c| review_comment_record(repo_id, c))
+                .filter_map(|c| review_comment_record(repo_id, c))
                 .collect(),
             reviews,
             labels: labels

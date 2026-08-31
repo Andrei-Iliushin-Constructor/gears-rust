@@ -268,6 +268,9 @@ pub struct ReviewCommentDto {
     /// Line position at comment-creation time — the stable anchor across
     /// later force-pushes.
     pub original_position: Option<i64>,
+    /// The review this inline comment belongs to, as GitHub reports it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pull_request_review_id: Option<i64>,
 }
 
 impl From<ReviewComment> for ReviewCommentDto {
@@ -285,6 +288,7 @@ impl From<ReviewComment> for ReviewCommentDto {
             html_url: c.html_url,
             position: c.position,
             original_position: c.original_position,
+            pull_request_review_id: c.pull_request_review_id,
         }
     }
 }

@@ -734,12 +734,15 @@ impl<
     /// # Errors
     /// `DomainError::NotFound` when the repository is not mirrored for this
     /// tenant; `Forbidden`/`Database`/`Internal` as usual.
+    /// `state`: GitHub's filter — `Some("open")`, `Some("closed")`, or `None`
+    /// for every state. GitHub's own default is `open`, applied by the handler.
     pub async fn list_issues(
         &self,
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
         query: &ODataQuery,
+        state: Option<&str>,
     ) -> Result<Page<Issue>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -764,7 +767,7 @@ impl<
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .issues
-            .list_by_repo(&conn, &scope, repository.id, limit)
+            .list_by_repo(&conn, &scope, repository.id, limit, state)
             .await?;
 
         Ok(Page::new(
@@ -824,12 +827,15 @@ impl<
     /// # Errors
     /// `DomainError::NotFound` when the repository is not mirrored for this
     /// tenant; `Forbidden`/`Database`/`Internal` as usual.
+    /// `state`: GitHub's filter — `Some("open")`, `Some("closed")`, or `None`
+    /// for every state. GitHub's own default is `open`, applied by the handler.
     pub async fn list_pull_requests(
         &self,
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
         query: &ODataQuery,
+        state: Option<&str>,
     ) -> Result<Page<PullRequest>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -854,7 +860,7 @@ impl<
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .pull_requests
-            .list_by_repo(&conn, &scope, repository.id, limit)
+            .list_by_repo(&conn, &scope, repository.id, limit, state)
             .await?;
 
         Ok(Page::new(

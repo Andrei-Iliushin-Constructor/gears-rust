@@ -84,12 +84,14 @@ pub trait IssueRepository: Send + Sync {
         record: IssueRecord,
     ) -> Result<Issue, DomainError>;
 
+    /// `state`: GitHub's `open`/`closed` filter, or `None` for every state.
     async fn list_by_repo<C: DBRunner>(
         &self,
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
+        state: Option<&str>,
     ) -> Result<Vec<Issue>, DomainError>;
 
     async fn find_by_number<C: DBRunner>(
@@ -148,12 +150,15 @@ pub trait PullRequestRepository: Send + Sync {
         record: PullRequestRecord,
     ) -> Result<PullRequest, DomainError>;
 
+    /// `state`: GitHub's `open`/`closed` filter, or `None` for every state.
+    /// A merged pull request is `closed` upstream, so no extra case is needed.
     async fn list_by_repo<C: DBRunner>(
         &self,
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
+        state: Option<&str>,
     ) -> Result<Vec<PullRequest>, DomainError>;
 
     async fn find_by_number<C: DBRunner>(
@@ -296,6 +301,8 @@ pub struct ReviewCommentRecord {
     /// Line position at comment-creation time — GitHub's own stable anchor
     /// for resolving where a comment pointed before later force-pushes.
     pub original_position: Option<i64>,
+    /// The review this inline comment belongs to, when it belongs to one.
+    pub pull_request_review_id: Option<i64>,
 }
 
 #[async_trait]

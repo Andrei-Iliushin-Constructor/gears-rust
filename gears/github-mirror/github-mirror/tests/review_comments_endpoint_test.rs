@@ -46,6 +46,7 @@ fn review_comment_record(id: i64, pull_number: i64, created_at: &str) -> ReviewC
         html_url: None,
         position: Some(5),
         original_position: Some(3),
+        pull_request_review_id: Some(31),
     }
 }
 

@@ -32,6 +32,7 @@ pub mod workflow_runs_013;
 pub mod z_contributor_derivation_032;
 pub mod z_extracted_at_030;
 pub mod z_release_assets_031;
+pub mod z_review_comment_review_id_033;
 
 pub struct Migrator;
 
@@ -71,6 +72,7 @@ impl MigratorTrait for Migrator {
             Box::new(z_extracted_at_030::Migration),
             Box::new(z_contributor_derivation_032::Migration),
             Box::new(z_release_assets_031::Migration),
+            Box::new(z_review_comment_review_id_033::Migration),
         ]
     }
 }

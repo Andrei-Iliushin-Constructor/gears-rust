@@ -304,11 +304,16 @@ impl IssueRepository for SeaOrmIssueRepository {
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
+        state: Option<&str>,
     ) -> Result<Vec<Issue>, DomainError> {
+        let mut condition = sea_orm::Condition::all().add(issues::Column::RepoId.eq(repo_id));
+        if let Some(state) = state {
+            condition = condition.add(issues::Column::State.eq(state));
+        }
         let rows = IssueEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(sea_orm::Condition::all().add(issues::Column::RepoId.eq(repo_id)))
+            .filter(condition)
             .order_by(issues::Column::Number, Order::Asc)
             .limit(limit)
             .all(conn)
@@ -477,11 +482,17 @@ impl PullRequestRepository for SeaOrmPullRequestRepository {
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
+        state: Option<&str>,
     ) -> Result<Vec<PullRequest>, DomainError> {
+        let mut condition =
+            sea_orm::Condition::all().add(pull_requests::Column::RepoId.eq(repo_id));
+        if let Some(state) = state {
+            condition = condition.add(pull_requests::Column::State.eq(state));
+        }
         let rows = PullRequestEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(sea_orm::Condition::all().add(pull_requests::Column::RepoId.eq(repo_id)))
+            .filter(condition)
             .order_by(pull_requests::Column::Number, Order::Asc)
             .limit(limit)
             .all(conn)
@@ -814,6 +825,7 @@ fn review_comment_active_model(
         html_url: ActiveValue::Set(r.html_url.clone()),
         position: ActiveValue::Set(r.position),
         original_position: ActiveValue::Set(r.original_position),
+        pull_request_review_id: ActiveValue::Set(r.pull_request_review_id),
         extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
@@ -872,6 +884,7 @@ impl ReviewCommentRepository for SeaOrmReviewCommentRepository {
             review_comments::Column::HtmlUrl,
             review_comments::Column::Position,
             review_comments::Column::OriginalPosition,
+            review_comments::Column::PullRequestReviewId,
             review_comments::Column::ExtractedAt,
         ])
         .map_err(map_scope_error)?;
@@ -900,6 +913,7 @@ impl ReviewCommentRepository for SeaOrmReviewCommentRepository {
             html_url: record.html_url,
             position: record.position,
             original_position: record.original_position,
+            pull_request_review_id: record.pull_request_review_id,
         })
     }
 

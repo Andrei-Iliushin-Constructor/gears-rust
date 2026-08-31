@@ -128,6 +128,7 @@ fn fetched() -> FetchedRepository {
             html_url: None,
             position: Some(7),
             original_position: Some(4),
+            pull_request_review_id: Some(31),
         }],
         reviews: vec![ReviewRecord {
             id: 31,

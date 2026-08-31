@@ -28,11 +28,25 @@ use super::dto::{
 const DEFAULT_PER_PAGE: u64 = 30;
 const MAX_PER_PAGE: u64 = 100;
 
-/// GitHub-style pagination query (`?page=2&per_page=50`).
+/// GitHub-style pagination query (`?page=2&per_page=50`), plus the `state`
+/// filter the issue and pull listings accept.
 #[derive(Debug, Deserialize)]
 pub struct GithubPageQuery {
     pub page: Option<u64>,
     pub per_page: Option<u64>,
+    pub state: Option<String>,
+}
+
+impl GithubPageQuery {
+    /// The state to filter on, following GitHub: no `state` means `open`,
+    /// `all` means no filter, anything else is passed through as given.
+    fn state_filter(&self) -> Option<&str> {
+        match self.state.as_deref() {
+            None => Some("open"),
+            Some("all") => None,
+            Some(state) => Some(state),
+        }
+    }
 }
 
 struct GithubPage {
@@ -159,7 +173,7 @@ pub async fn list_issues(
 ) -> GithubList<IssueDto> {
     let page = query.normalized();
     let items = svc
-        .list_issues(&ctx, &owner, &name, &page.odata())
+        .list_issues(&ctx, &owner, &name, &page.odata(), query.state_filter())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/issues");
@@ -189,7 +203,7 @@ pub async fn list_pull_requests(
 ) -> GithubList<PullRequestDto> {
     let page = query.normalized();
     let items = svc
-        .list_pull_requests(&ctx, &owner, &name, &page.odata())
+        .list_pull_requests(&ctx, &owner, &name, &page.odata(), query.state_filter())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/pulls");

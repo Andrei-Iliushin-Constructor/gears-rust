@@ -83,6 +83,14 @@ async fn migrations_apply_and_roll_back_on_a_clean_database() {
         "gm_releases.assets_json must exist after up()"
     );
 
+    assert!(
+        manager
+            .has_column("gm_review_comments", "pull_request_review_id")
+            .await
+            .unwrap(),
+        "gm_review_comments.pull_request_review_id must exist after up()"
+    );
+
     for column in ["roles", "first_seen_at", "last_seen_at"] {
         assert!(
             manager.has_column("gm_contributors", column).await.unwrap(),

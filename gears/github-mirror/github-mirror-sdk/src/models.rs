@@ -198,6 +198,8 @@ pub struct ReviewComment {
     /// Line position at comment-creation time — GitHub's own stable anchor
     /// for resolving where a comment pointed before later force-pushes.
     pub original_position: Option<i64>,
+    /// The review this inline comment belongs to, when it belongs to one.
+    pub pull_request_review_id: Option<i64>,
 }
 
 /// A mirrored GitHub pull-request review (the verdict object).
