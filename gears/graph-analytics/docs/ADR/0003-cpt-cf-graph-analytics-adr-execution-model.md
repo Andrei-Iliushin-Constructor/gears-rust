@@ -136,7 +136,7 @@ What stays here regardless, because it is about graphs rather than about tasks:
 |---|---|
 | Estimate-and-reserve against a process-wide **memory** pool (3) | A generic engine bounds *how many* tasks run, not how many gigabytes they hold. An analytics job's peak is a function of node and edge counts, knowable only here, and the failure it prevents — the process being the wrong size before an allocation fails — is not a scheduling failure |
 | Revision supersession inside deduplication (5) | The Task Engine's idempotency key is caller-supplied and returns the existing task. Ours is derived from graph state, and a *newer* graph revision must **cancel** an in-flight job rather than join it. That is a domain predicate on task identity, not a duplicate-submission rule |
-| Conditional publication (6) and the metrics cache | The result is a graph artifact keyed by `(source_epoch, graph_revision, metric, parameters, contract version)`, and it is bigger than a task payload should be — the Task Engine caps payloads at 64 KiB and refers larger artifacts out by URI, while `metrics_max_entry_bytes` is 4 MiB |
+| Conditional publication (6) and the metrics cache | The result is a graph artifact keyed by `(source_epoch, graph_revision, metric, parameters, contract version)`, and it is bigger than a task payload should be — the Task Engine caps a task's aggregate payload at 64 KB and refers larger artifacts out by URI, while `metrics_max_entry_bytes` is 4 MiB |
 
 Two questions the Task Engine's contract has to answer before the control plane
 can move, both raised on that PR:
