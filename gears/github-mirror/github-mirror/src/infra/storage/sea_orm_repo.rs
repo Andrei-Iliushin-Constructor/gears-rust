@@ -231,6 +231,29 @@ fn issue_active_model(tenant_id: Uuid, r: &IssueRecord) -> issues::ActiveModel {
 
 #[async_trait]
 impl IssueRepository for SeaOrmIssueRepository {
+    async fn count_by_repo<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        filter: ListingFilter<'_>,
+    ) -> Result<u64, DomainError> {
+        let mut condition = sea_orm::Condition::all().add(issues::Column::RepoId.eq(repo_id));
+        if let Some(state) = filter.state {
+            condition = condition.add(issues::Column::State.eq(state));
+        }
+        if let Some(since) = filter.since {
+            condition = condition.add(issues::Column::UpdatedAt.gte(since));
+        }
+        IssueEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(condition)
+            .count(conn)
+            .await
+            .map_err(map_scope_error)
+    }
+
     async fn delete_stale<C: DBRunner>(
         &self,
         conn: &C,
@@ -430,6 +453,29 @@ fn pull_request_active_model(tenant_id: Uuid, r: &PullRequestRecord) -> pull_req
 
 #[async_trait]
 impl PullRequestRepository for SeaOrmPullRequestRepository {
+    async fn count_by_repo<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        filter: ListingFilter<'_>,
+    ) -> Result<u64, DomainError> {
+        let mut condition = sea_orm::Condition::all().add(pull_requests::Column::RepoId.eq(repo_id));
+        if let Some(state) = filter.state {
+            condition = condition.add(pull_requests::Column::State.eq(state));
+        }
+        if let Some(since) = filter.since {
+            condition = condition.add(pull_requests::Column::UpdatedAt.gte(since));
+        }
+        PullRequestEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(condition)
+            .count(conn)
+            .await
+            .map_err(map_scope_error)
+    }
+
     async fn delete_stale<C: DBRunner>(
         &self,
         conn: &C,
@@ -630,6 +676,21 @@ fn commit_active_model(tenant_id: Uuid, r: &CommitRecord) -> commits::ActiveMode
 
 #[async_trait]
 impl CommitRepository for SeaOrmCommitRepository {
+    async fn count_by_repo<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+    ) -> Result<u64, DomainError> {
+        CommitEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(sea_orm::Condition::all().add(commits::Column::RepoId.eq(repo_id)))
+            .count(conn)
+            .await
+            .map_err(map_scope_error)
+    }
+
     async fn delete_stale<C: DBRunner>(
         &self,
         conn: &C,

@@ -39,6 +39,7 @@
 - [6. Non-Functional Requirements](#6-non-functional-requirements)
   - [6.1 Gear-Specific NFRs](#61-gear-specific-nfrs)
   - [6.2 NFR Exclusions](#62-nfr-exclusions)
+  - [6.3 Data Governance](#63-data-governance)
 - [7. Public Library Interfaces](#7-public-library-interfaces)
   - [7.1 Public API Surface](#71-public-api-surface)
   - [7.2 External Integration Contracts](#72-external-integration-contracts)
@@ -666,9 +667,22 @@ The system **MUST** emit structured logs via `tracing`, organized into independe
 
 - **`info`**: startup config dump, critical-phase counts per entity family, end-of-run summary (storage size, REST/GraphQL totals, remaining budgets, reset time in local timezone, elapsed, cache-hit ratio), rate-limit pauses, retry/backoff events
 - **`debug`**: per-API-action intent and completion (method, endpoint family, conditional-request decision, remaining quota, duration), task enqueue/dequeue, per-entity DB operations (table, operation, key — not raw SQL)
-- **`trace`**: exact request/response wire detail, cache hit/miss with canonical cache keys, exact SQL statements, filesystem operations
+- **`trace`**: request/response wire detail, cache hit/miss with canonical cache keys, SQL statements, filesystem operations — subject to the redaction rules below
 
-- **Rationale**: Layered logging lets operators dial in the right verbosity for their use case.
+#### Redaction and Retention
+
+- [ ] `p1` - **ID**: `cpt-cf-github-mirror-fr-log-redaction`
+
+`trace` carries mirrored GitHub content, which includes private repository bodies and the personal data attached to every author, so what it may contain is bounded rather than left to the verbosity switch:
+
+- Response and request **bodies MUST be opt-in**, off by default, behind their own configuration flag rather than implied by `trace`. With the flag off, a wire-detail line records method, URL, status, size and duration only.
+- SQL **MUST** be logged as the statement with its bind values elided; a bind value can be an issue body, a token expansion, or a contributor's name. Logging bound values **MUST** require the same explicit opt-in as bodies.
+- `Authorization`, `Cookie`, `Set-Cookie` and `X-Hub-Signature*` **MUST** be redacted wherever headers are logged, in addition to the token prohibition above. Redaction **MUST** be applied by the logging layer, not by each call site.
+- Cache keys **MUST NOT** embed credentials; the canonical key is derived from method, URL and `Accept` (DESIGN §3.5).
+- **Production defaults MUST be `info`** with bodies and bind values off. A deployment raising verbosity beyond `debug` **MUST** be a deliberate, temporary act.
+- Log **retention MUST be bounded** by the platform's own log policy; the gear **MUST NOT** write logs to its own files outside the runtime's logging configuration, so that policy is the single place retention is enforced.
+
+- **Rationale**: Layered logging lets operators dial in the right verbosity for their use case, but the mirror's `trace` layer would otherwise carry private repository content and personal data into whatever collects logs.
 - **Actors**: `cpt-cf-github-mirror-actor-lib-consumer`, `cpt-cf-github-mirror-actor-cli-operator`
 
 #### Composite Synchronization Summary
@@ -898,7 +912,22 @@ The system **MUST** support parallel synchronization of multiple repositories wi
 
 - **Accessibility** (UX-PRD-002): Not applicable — the gear has no graphical interface
 - **Internationalization** (UX-PRD-003): Not applicable — English-only developer tooling
-- **Regulatory Compliance** (COMPL-PRD-001/002/003): Not applicable — the gear does not store PII; data governance is the consumer's responsibility
+- **Regulatory Compliance** (COMPL-PRD-001/002/003): **Applicable** — see §6.3. The gear stores personal data by design: contributor records key on GitHub user identity, and mirrored issues, comments and commits carry author identities and user-authored text.
+
+### 6.3 Data Governance
+
+The mirror is a replica of personal data: every contributor row is a person, and every mirrored issue, comment, review and commit carries an author identity alongside user-authored text. The raw-response store (§5.2) keeps GitHub's payloads verbatim, including those identities. The following requirements apply to a deployment holding that data.
+
+- [ ] `p1` - **ID**: `cpt-cf-github-mirror-nfr-data-governance`
+
+- **Lawful basis and scope**: the mirror holds only what its configured repositories expose to the credential it syncs with. It **MUST NOT** fetch user-profile or organization-membership endpoints (§5.2), so it never widens the personal data beyond what the mirrored entities already carry.
+- **Retention**: mirrored data **MUST** be deletable per repository and per tenant. Removing a repository from a tenant's scope **MUST** remove its mirrored rows and its raw responses; the raw-response store **MUST** honor a configurable maximum age independent of the normalized rows.
+- **Erasure**: a deployment **MUST** be able to delete a person's mirrored footprint — contributor row, and the author identity on their entities — without deleting the entities themselves, so an erasure request can be answered without discarding the repository's history.
+- **Access control**: personal data **MUST** be reachable only through the tenant-scoped surfaces (§5.11); no endpoint may return rows outside the caller's tenant, which is enforced in storage rather than per handler.
+- **Audit**: reads and deletions of mirrored data **MUST** be attributable to a caller through the platform's `SecurityContext`, and sync runs **MUST** be attributable through their session records (§5.1).
+- **Onward transfer**: mirrored content **MUST NOT** be sent to third parties by the gear itself; telemetry and logs are bounded by `cpt-cf-github-mirror-fr-log-redaction`.
+
+- **Rationale**: The gear cannot claim regulatory exclusion while storing contributor identities and raw responses. Stating retention, erasure, access and audit requirements makes a deployment's obligations explicit rather than implicitly the consumer's.
 
 ## 7. Public Library Interfaces
 

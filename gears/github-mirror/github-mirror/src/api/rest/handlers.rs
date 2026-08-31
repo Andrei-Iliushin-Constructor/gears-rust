@@ -103,11 +103,19 @@ impl GithubPage {
     }
 
     fn link_header(&self, path: &str, returned: usize) -> HeaderMap {
-        // A short page is the final one, which is the only case where the
-        // total is known without counting every row: the listing is served
-        // from a bounded read, not a `COUNT(*)`. On a full page GitHub's
-        // `rel="last"` is therefore omitted rather than guessed.
-        let is_last_page = returned as u64 != self.per_page;
+        self.link_header_with_total(path, returned, None)
+    }
+
+    /// The `Link` header, with `rel="last"` resolved from `total` when the
+    /// listing can count itself.
+    ///
+    /// Without a total the last page is only knowable when the current one
+    /// came back short, so on a full page `rel="last"` is omitted rather than
+    /// guessed — GitHub itself always knows the total and always sends it.
+    fn link_header_with_total(&self, path: &str, returned: usize, total: Option<u64>) -> HeaderMap {
+        let last_page = total.map(|total| total.div_ceil(self.per_page).max(1));
+        let is_last_page = last_page
+            .map_or(returned as u64 != self.per_page, |last| self.page >= last);
 
         let mut links = Vec::new();
         if !is_last_page {
@@ -128,7 +136,14 @@ impl GithubPage {
                 self.per_page
             ));
         }
-        if is_last_page {
+        // With a total the last page is known outright; without one, only a
+        // short page proves it is the end.
+        if let Some(last) = last_page {
+            links.push(format!(
+                "<{path}?page={last}&per_page={}>; rel=\"last\"",
+                self.per_page
+            ));
+        } else if is_last_page {
             links.push(format!(
                 "<{path}?page={}&per_page={}>; rel=\"last\"",
                 self.page, self.per_page
@@ -149,6 +164,18 @@ type GithubList<D> = ApiResult<(HeaderMap, JsonBody<Vec<D>>)>;
 
 fn respond<D>(page: &GithubPage, path: &str, items: Vec<D>) -> (HeaderMap, JsonBody<Vec<D>>) {
     let headers = page.link_header(path, items.len());
+    (headers, Json(items))
+}
+
+/// [`respond`] for a listing that knows how many rows it has in total, so the
+/// `Link` header can name the last page even from a full one.
+fn respond_counted<D>(
+    page: &GithubPage,
+    path: &str,
+    items: Vec<D>,
+    total: u64,
+) -> (HeaderMap, JsonBody<Vec<D>>) {
+    let headers = page.link_header_with_total(path, items.len(), Some(total));
     (headers, Json(items))
 }
 

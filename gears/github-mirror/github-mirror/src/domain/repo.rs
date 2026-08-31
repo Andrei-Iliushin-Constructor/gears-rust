@@ -146,6 +146,15 @@ impl ListingDirection {
 
 #[async_trait]
 pub trait IssueRepository: Send + Sync {
+    /// How many issues match `filter` in total, for the `Link` header's
+    /// `rel="last"` — it spans every page, so it cannot be read off one.
+    async fn count_by_repo<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        filter: ListingFilter<'_>,
+    ) -> Result<u64, DomainError>;
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,
@@ -227,6 +236,14 @@ pub struct PullRequestRecord {
 
 #[async_trait]
 pub trait PullRequestRepository: Send + Sync {
+    /// How many pull requests match `filter` in total.
+    async fn count_by_repo<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        filter: ListingFilter<'_>,
+    ) -> Result<u64, DomainError>;
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,
@@ -283,6 +300,13 @@ pub struct CommitRecord {
 
 #[async_trait]
 pub trait CommitRepository: Send + Sync {
+    /// How many commits this repository has in total.
+    async fn count_by_repo<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+    ) -> Result<u64, DomainError>;
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,
