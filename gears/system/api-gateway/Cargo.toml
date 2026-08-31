@@ -21,8 +21,10 @@ workspace = true
 [dependencies]
 toolkit = { workspace = true }
 toolkit-http = { workspace = true }
+toolkit-http-middleware = { workspace = true }
 toolkit-gateway = { workspace = true }
-toolkit-security = { workspace = true }
+toolkit-security = { workspace = true, features = ["internal-auth-cache"] }
+toolkit-k8s-auth = { workspace = true, optional = true }
 toolkit-transport-grpc = { workspace = true }
 toolkit-canonical-errors = { workspace = true, features = ["axum"] }
 cf-gears-system-sdks = { workspace = true, features = ["directory_grpc"] }
@@ -71,6 +73,7 @@ uuid = { workspace = true }
 grpc = []
 embed_elements = []
 otel = []
+k8s-auth = ["dep:toolkit-k8s-auth"]
 
 [build-dependencies]
 ureq = { workspace = true }
