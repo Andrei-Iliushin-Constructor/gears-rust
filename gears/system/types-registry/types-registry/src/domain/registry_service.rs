@@ -207,6 +207,15 @@ impl RegistryService {
 
     /// Accept a submission, and — while admission is inline — admit it.
     ///
+    /// NOT cancel-safe, and cannot be: the acceptance transaction commits before
+    /// inline admission starts, so a future dropped in between — the caller's
+    /// connection closed, a `timeout` fired — leaves the operation `pending` with
+    /// its work undone. Nothing here can undo the commit, and nothing should: the
+    /// operation and its idempotency key are the record that the submission was
+    /// accepted. Recovery is a replay under the same key, which re-enters the
+    /// non-terminal branch below and drives the operation to completion; that is
+    /// the only recovery path until T21's outbox exists.
+    ///
     /// # Errors
     /// [`ServiceError::Acceptance`] for every synchronous refusal, including the
     /// fingerprint conflict; [`ServiceError::Worker`] only for an infrastructure

@@ -515,7 +515,7 @@ fn check_dialect(gts_id: &str, content: &Value) -> Result<(), AcceptanceError> {
             found: declared.to_owned(),
         });
     }
-    if let Some(path) = conflicting_dialect(content, "$", true) {
+    if let Some(path) = conflicting_dialect(content) {
         return Err(AcceptanceError::ConflictingDialect {
             gts_id: gts_id.to_owned(),
             path,
@@ -532,27 +532,41 @@ fn normalize_dialect(declared: &str) -> Option<&'static str> {
 /// the same dialect. A nested `$schema` equal to the root's — after
 /// normalization, so `…/schema` and `…/schema#` agree — is not a conflict
 /// (ADR-0014).
-fn conflicting_dialect(value: &Value, path: &str, is_root: bool) -> Option<String> {
+///
+/// The root's own `$schema` belongs to [`check_dialect`], which has already
+/// judged it, so this walk starts one level down rather than threading a
+/// "you are the exempt node" flag through every frame of the recursion.
+fn conflicting_dialect(root: &Value) -> Option<String> {
+    conflicting_dialect_below(root, "$")
+}
+
+/// The same search over `value`'s children only.
+fn conflicting_dialect_below(value: &Value, path: &str) -> Option<String> {
     match value {
-        Value::Object(map) => {
-            if !is_root && let Some(declared) = map.get("$schema") {
-                let supported = declared
-                    .as_str()
-                    .is_some_and(|declared| normalize_dialect(declared).is_some());
-                if !supported {
-                    return Some(path.to_owned());
-                }
-            }
-            map.iter().find_map(|(key, child)| {
-                conflicting_dialect(child, &format!("{path}.{key}"), false)
-            })
-        }
+        Value::Object(map) => map
+            .iter()
+            .find_map(|(key, child)| conflicting_dialect_at(child, &format!("{path}.{key}"))),
         Value::Array(items) => items
             .iter()
             .enumerate()
-            .find_map(|(i, child)| conflicting_dialect(child, &format!("{path}[{i}]"), false)),
+            .find_map(|(i, child)| conflicting_dialect_at(child, &format!("{path}[{i}]"))),
         _ => None,
     }
+}
+
+/// One node below the root: its own `$schema` first, then its children's.
+fn conflicting_dialect_at(value: &Value, path: &str) -> Option<String> {
+    if let Value::Object(map) = value
+        && let Some(declared) = map.get("$schema")
+    {
+        let supported = declared
+            .as_str()
+            .is_some_and(|declared| normalize_dialect(declared).is_some());
+        if !supported {
+            return Some(path.to_owned());
+        }
+    }
+    conflicting_dialect_below(value, path)
 }
 
 /// Whether the candidate has a cross-minor compatibility check for `force` to

@@ -491,6 +491,32 @@ fn a_nested_dialect_must_be_a_supported_string() {
     }
 }
 
+/// The walk descends through array elements and more than one level of nesting,
+/// and names the offender by its indexed path.
+#[test]
+fn a_nested_dialect_is_found_through_arrays_and_at_depth() {
+    let pair = closed();
+
+    let mut req = request(vec![candidate(CF_TYPE)]);
+    req.candidates[0].content = Some(json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "anyOf": [
+            { "type": "object" },
+            {
+                "properties": {
+                    "inner": { "$schema": "https://json-schema.org/draft/2020-12/schema" },
+                },
+            },
+        ],
+    }));
+    match run(&pair, &req) {
+        Err(AcceptanceError::ConflictingDialect { path, .. }) => {
+            assert_eq!(path, "$.anyOf[1].properties.inner");
+        }
+        other => panic!("expected ConflictingDialect, got {other:?}"),
+    }
+}
+
 #[test]
 fn a_registration_without_a_document_is_refused() {
     let pair = closed();

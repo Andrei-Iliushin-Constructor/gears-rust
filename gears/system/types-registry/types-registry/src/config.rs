@@ -209,9 +209,12 @@ impl ByteSize {
         if digits.is_empty() {
             return Err(format!("'{trimmed}' does not start with a number"));
         }
+        // `digits` is non-empty and all-ASCII-digit by construction, so the only
+        // reachable failure is an overflow — hence the cause: it names which of
+        // the two it was instead of leaving the operator to guess.
         let value: usize = digits
             .parse()
-            .map_err(|_| format!("'{digits}' is not a byte count"))?;
+            .map_err(|e| format!("'{digits}' is not a byte count: {e}"))?;
         let multiplier: usize = match suffix.trim().to_ascii_uppercase().as_str() {
             "" | "B" => 1,
             "KB" | "KIB" => 1024,
