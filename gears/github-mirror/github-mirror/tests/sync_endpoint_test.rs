@@ -22,6 +22,13 @@ use toolkit_security::SecurityContext;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+/// An RFC3339 literal as the instant the mirror stores.
+fn instant(raw: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .expect("test timestamps must be valid RFC3339")
+        .with_timezone(&chrono::Utc)
+}
+
 fn fetched() -> FetchedRepository {
     FetchedRepository {
         complete: ListingCompleteness::all_complete(),
@@ -180,10 +187,12 @@ fn fetched() -> FetchedRepository {
             repo_id: 42,
             user_id: 71,
             login: Some("alice".to_owned()),
-            contributions: 120,
-            user_type: "User".to_owned(),
+            account_type: "User".to_owned(),
             avatar_url: None,
             html_url: None,
+            roles: vec!["author".to_owned()],
+            first_seen_at: Some(instant("2026-08-18T00:00:00Z")),
+            last_seen_at: Some(instant("2026-08-20T00:00:00Z")),
         }],
         workflow_runs: vec![WorkflowRunRecord {
             id: 81,
@@ -478,7 +487,6 @@ async fn sync_fills_all_twenty_six_tables_and_reads_serve_them() {
         body_json(get(router2.clone(), "/repos/rust-lang/rust/contributors").await).await;
     assert_eq!(contributors.as_array().expect("items").len(), 1);
     assert_eq!(contributors[0]["login"], "alice");
-    assert_eq!(contributors[0]["contributions"], 120);
 
     let workflow_runs =
         body_json(get(router2.clone(), "/repos/rust-lang/rust/actions/runs").await).await;
@@ -815,4 +823,67 @@ async fn reconciliation_deletes_upstream_removals_but_only_from_complete_listing
         vec![11],
         "a complete listing reconciles the upstream deletion"
     );
+}
+
+/// A repo whose only content is one issue authored by `user_id`, with the
+/// issues listing complete.
+fn contributor_fetched(user_id: i64, login: &str, roles: &[&str], seen: &str) -> FetchedRepository {
+    let mut result = recon_fetched(&[11], true);
+    result.contributors = vec![ContributorRecord {
+        repo_id: 77,
+        user_id,
+        login: Some(login.to_owned()),
+        account_type: "User".to_owned(),
+        avatar_url: None,
+        html_url: None,
+        roles: roles.iter().map(|r| (*r).to_owned()).collect(),
+        first_seen_at: Some(instant(seen)),
+        last_seen_at: Some(instant(seen)),
+    }];
+    result
+}
+
+#[tokio::test]
+async fn derived_contributor_roles_accumulate_across_syncs() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let db = common::inmem_db().await;
+
+    // A first sync sees alice only as an issue author.
+    sync_recon(
+        db.clone(),
+        &ctx,
+        contributor_fetched(71, "alice", &["author"], "2026-05-01T00:00:00Z"),
+    )
+    .await;
+
+    // A later, narrower sync sees her only reviewing. Neither run knows the
+    // whole story, so the stored row must hold both.
+    sync_recon(
+        db.clone(),
+        &ctx,
+        contributor_fetched(71, "alice", &["reviewer"], "2026-08-01T00:00:00Z"),
+    )
+    .await;
+
+    let service = common::service_with_github(
+        db,
+        "https://api.github.com",
+        Arc::new(common::FakeGithub { result: None }),
+    );
+    let router = router_for(service, ctx);
+    let json = body_json(get(router, "/repos/acme/recon/contributors").await).await;
+    let people = json.as_array().expect("items");
+
+    assert_eq!(people.len(), 1, "the same person must not be duplicated");
+    assert_eq!(people[0]["login"], "alice");
+    assert_eq!(
+        people[0]["roles"],
+        serde_json::json!(["author", "reviewer"]),
+        "a narrower run must not erase what an earlier one saw"
+    );
+    assert_eq!(
+        people[0]["first_seen_at"], "2026-05-01T00:00:00Z",
+        "the window keeps the earliest sighting"
+    );
+    assert_eq!(people[0]["last_seen_at"], "2026-08-01T00:00:00Z");
 }

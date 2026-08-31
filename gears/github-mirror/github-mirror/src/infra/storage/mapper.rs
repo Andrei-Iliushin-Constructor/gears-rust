@@ -212,8 +212,19 @@ impl From<contributors::Model> for Contributor {
             user_id: m.user_id,
             // '' is the NOT NULL column's stand-in for "no login".
             login: (!m.login.is_empty()).then_some(m.login),
-            contributions: m.contributions,
-            user_type: m.user_type,
+            roles: m
+                .roles
+                .as_deref()
+                .map(|raw| {
+                    raw.split(',')
+                        .filter(|role| !role.is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            first_seen_at: m.first_seen_at,
+            last_seen_at: m.last_seen_at,
+            account_type: m.account_type,
             avatar_url: m.avatar_url,
             html_url: m.html_url,
         }

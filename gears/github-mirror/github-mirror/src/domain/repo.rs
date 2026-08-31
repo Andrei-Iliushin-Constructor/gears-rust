@@ -5,6 +5,7 @@ use github_mirror_sdk::{
     PullRequest, PullRequestCommit, PullRequestFile, Release, Repo, Review, ReviewComment,
     ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
+use sea_orm::prelude::DateTimeUtc;
 use toolkit_db::secure::DBRunner;
 use toolkit_macros::domain_model;
 use toolkit_security::AccessScope;
@@ -107,7 +108,7 @@ pub trait IssueRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -171,7 +172,7 @@ pub trait PullRequestRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -224,7 +225,7 @@ pub trait CommitRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -269,7 +270,7 @@ pub trait CommentRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -324,7 +325,7 @@ pub trait ReviewCommentRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -401,7 +402,7 @@ pub trait LabelRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -450,7 +451,7 @@ pub trait MilestoneRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -500,7 +501,7 @@ pub trait ReleaseRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -540,7 +541,7 @@ pub trait BranchRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -552,10 +553,16 @@ pub struct ContributorRecord {
     pub user_id: i64,
     /// `None` for anonymous contributors.
     pub login: Option<String>,
-    pub contributions: i64,
-    pub user_type: String,
+    pub account_type: String,
     pub avatar_url: Option<String>,
     pub html_url: Option<String>,
+    /// PRD 5.2's association roles: `author`, `assignee`, `reviewer`,
+    /// `commenter`, `committer`. Sorted and deduplicated; unioned across
+    /// syncs, never replaced.
+    pub roles: Vec<String>,
+    /// When this person was first and last seen in mirrored data.
+    pub first_seen_at: Option<DateTimeUtc>,
+    pub last_seen_at: Option<DateTimeUtc>,
 }
 
 #[async_trait]
@@ -687,7 +694,7 @@ pub trait TagRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 

@@ -1,10 +1,12 @@
 use async_trait::async_trait;
+use chrono::Utc;
 use github_mirror_sdk::{
     Branch, CheckRun, Comment, Commit, CommitComment, CommitFile, CommitStatus, Contributor,
     Deployment, Issue, IssueEvent, IssueReaction, IssueTimelineEvent, Label, Milestone,
     PullRequest, PullRequestCommit, PullRequestFile, Release, Repo, Review, ReviewComment,
     ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
+use sea_orm::prelude::DateTimeUtc;
 use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, Order};
 use toolkit_db::secure::{
     DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureOnConflict,
@@ -66,13 +68,6 @@ impl SeaOrmRepoRepository {
     }
 }
 
-/// The current instant as RFC3339 text, matching every other stored timestamp.
-fn now_rfc3339() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default()
-}
-
 fn map_scope_error(e: ScopeError) -> DomainError {
     match e {
         ScopeError::Denied(msg) => DomainError::forbidden(msg),
@@ -98,7 +93,7 @@ fn active_model(tenant_id: Uuid, r: &RepoRecord) -> repositories::ActiveModel {
         forks: ActiveValue::Set(r.forks),
         description: ActiveValue::Set(r.description.clone()),
         clone_url: ActiveValue::Set(r.clone_url.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -220,7 +215,7 @@ fn issue_active_model(tenant_id: Uuid, r: &IssueRecord) -> issues::ActiveModel {
         updated_at: ActiveValue::Set(r.updated_at.clone()),
         closed_at: ActiveValue::Set(r.closed_at.clone()),
         html_url: ActiveValue::Set(r.html_url.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -231,7 +226,7 @@ impl IssueRepository for SeaOrmIssueRepository {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError> {
         // RFC3339 strings order lexicographically; the pre-column default ''
         // sorts before any stamp, so unstamped legacy rows count as stale.
@@ -241,7 +236,11 @@ impl IssueRepository for SeaOrmIssueRepository {
             .filter(
                 sea_orm::Condition::all()
                     .add(issues::Column::RepoId.eq(repo_id))
-                    .add(issues::Column::ExtractedAt.lt(extracted_before)),
+                    .add(
+                        sea_orm::Condition::any()
+                            .add(issues::Column::ExtractedAt.lt(extracted_before))
+                            .add(issues::Column::ExtractedAt.is_null()),
+                    ),
             )
             .exec(conn)
             .await
@@ -373,7 +372,7 @@ fn pull_request_active_model(tenant_id: Uuid, r: &PullRequestRecord) -> pull_req
         html_url: ActiveValue::Set(r.html_url.clone()),
         head_ref: ActiveValue::Set(r.head_ref.clone()),
         base_ref: ActiveValue::Set(r.base_ref.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -384,7 +383,7 @@ impl PullRequestRepository for SeaOrmPullRequestRepository {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError> {
         // RFC3339 strings order lexicographically; the pre-column default ''
         // sorts before any stamp, so unstamped legacy rows count as stale.
@@ -394,7 +393,11 @@ impl PullRequestRepository for SeaOrmPullRequestRepository {
             .filter(
                 sea_orm::Condition::all()
                     .add(pull_requests::Column::RepoId.eq(repo_id))
-                    .add(pull_requests::Column::ExtractedAt.lt(extracted_before)),
+                    .add(
+                        sea_orm::Condition::any()
+                            .add(pull_requests::Column::ExtractedAt.lt(extracted_before))
+                            .add(pull_requests::Column::ExtractedAt.is_null()),
+                    ),
             )
             .exec(conn)
             .await
@@ -532,7 +535,7 @@ fn commit_active_model(tenant_id: Uuid, r: &CommitRecord) -> commits::ActiveMode
         committed_at: ActiveValue::Set(r.committed_at.clone()),
         additions: ActiveValue::Set(r.additions),
         deletions: ActiveValue::Set(r.deletions),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -543,7 +546,7 @@ impl CommitRepository for SeaOrmCommitRepository {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError> {
         // RFC3339 strings order lexicographically; the pre-column default ''
         // sorts before any stamp, so unstamped legacy rows count as stale.
@@ -553,7 +556,11 @@ impl CommitRepository for SeaOrmCommitRepository {
             .filter(
                 sea_orm::Condition::all()
                     .add(commits::Column::RepoId.eq(repo_id))
-                    .add(commits::Column::ExtractedAt.lt(extracted_before)),
+                    .add(
+                        sea_orm::Condition::any()
+                            .add(commits::Column::ExtractedAt.lt(extracted_before))
+                            .add(commits::Column::ExtractedAt.is_null()),
+                    ),
             )
             .exec(conn)
             .await
@@ -672,7 +679,7 @@ fn comment_active_model(tenant_id: Uuid, r: &CommentRecord) -> comments::ActiveM
         created_at: ActiveValue::Set(r.created_at.clone()),
         updated_at: ActiveValue::Set(r.updated_at.clone()),
         html_url: ActiveValue::Set(r.html_url.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -683,7 +690,7 @@ impl CommentRepository for SeaOrmCommentRepository {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError> {
         // RFC3339 strings order lexicographically; the pre-column default ''
         // sorts before any stamp, so unstamped legacy rows count as stale.
@@ -693,7 +700,11 @@ impl CommentRepository for SeaOrmCommentRepository {
             .filter(
                 sea_orm::Condition::all()
                     .add(comments::Column::RepoId.eq(repo_id))
-                    .add(comments::Column::ExtractedAt.lt(extracted_before)),
+                    .add(
+                        sea_orm::Condition::any()
+                            .add(comments::Column::ExtractedAt.lt(extracted_before))
+                            .add(comments::Column::ExtractedAt.is_null()),
+                    ),
             )
             .exec(conn)
             .await
@@ -803,7 +814,7 @@ fn review_comment_active_model(
         html_url: ActiveValue::Set(r.html_url.clone()),
         position: ActiveValue::Set(r.position),
         original_position: ActiveValue::Set(r.original_position),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -814,7 +825,7 @@ impl ReviewCommentRepository for SeaOrmReviewCommentRepository {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError> {
         // RFC3339 strings order lexicographically; the pre-column default ''
         // sorts before any stamp, so unstamped legacy rows count as stale.
@@ -824,7 +835,11 @@ impl ReviewCommentRepository for SeaOrmReviewCommentRepository {
             .filter(
                 sea_orm::Condition::all()
                     .add(review_comments::Column::RepoId.eq(repo_id))
-                    .add(review_comments::Column::ExtractedAt.lt(extracted_before)),
+                    .add(
+                        sea_orm::Condition::any()
+                            .add(review_comments::Column::ExtractedAt.lt(extracted_before))
+                            .add(review_comments::Column::ExtractedAt.is_null()),
+                    ),
             )
             .exec(conn)
             .await
@@ -938,7 +953,7 @@ fn review_active_model(tenant_id: Uuid, r: &ReviewRecord) -> reviews::ActiveMode
         commit_id: ActiveValue::Set(r.commit_id.clone()),
         submitted_at: ActiveValue::Set(r.submitted_at.clone()),
         html_url: ActiveValue::Set(r.html_url.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -1035,7 +1050,7 @@ fn label_active_model(tenant_id: Uuid, r: &LabelRecord) -> labels::ActiveModel {
         color: ActiveValue::Set(r.color.clone()),
         is_default: ActiveValue::Set(r.is_default),
         description: ActiveValue::Set(r.description.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -1046,7 +1061,7 @@ impl LabelRepository for SeaOrmLabelRepository {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError> {
         // RFC3339 strings order lexicographically; the pre-column default ''
         // sorts before any stamp, so unstamped legacy rows count as stale.
@@ -1056,7 +1071,11 @@ impl LabelRepository for SeaOrmLabelRepository {
             .filter(
                 sea_orm::Condition::all()
                     .add(labels::Column::RepoId.eq(repo_id))
-                    .add(labels::Column::ExtractedAt.lt(extracted_before)),
+                    .add(
+                        sea_orm::Condition::any()
+                            .add(labels::Column::ExtractedAt.lt(extracted_before))
+                            .add(labels::Column::ExtractedAt.is_null()),
+                    ),
             )
             .exec(conn)
             .await
@@ -1151,7 +1170,7 @@ fn milestone_active_model(tenant_id: Uuid, r: &MilestoneRecord) -> milestones::A
         updated_at: ActiveValue::Set(r.updated_at.clone()),
         closed_at: ActiveValue::Set(r.closed_at.clone()),
         html_url: ActiveValue::Set(r.html_url.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -1162,7 +1181,7 @@ impl MilestoneRepository for SeaOrmMilestoneRepository {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError> {
         // RFC3339 strings order lexicographically; the pre-column default ''
         // sorts before any stamp, so unstamped legacy rows count as stale.
@@ -1172,7 +1191,11 @@ impl MilestoneRepository for SeaOrmMilestoneRepository {
             .filter(
                 sea_orm::Condition::all()
                     .add(milestones::Column::RepoId.eq(repo_id))
-                    .add(milestones::Column::ExtractedAt.lt(extracted_before)),
+                    .add(
+                        sea_orm::Condition::any()
+                            .add(milestones::Column::ExtractedAt.lt(extracted_before))
+                            .add(milestones::Column::ExtractedAt.is_null()),
+                    ),
             )
             .exec(conn)
             .await
@@ -1280,7 +1303,7 @@ fn release_active_model(tenant_id: Uuid, r: &ReleaseRecord) -> releases::ActiveM
         published_at: ActiveValue::Set(r.published_at.clone()),
         html_url: ActiveValue::Set(r.html_url.clone()),
         assets_json: ActiveValue::Set(r.assets_json.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -1291,7 +1314,7 @@ impl ReleaseRepository for SeaOrmReleaseRepository {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError> {
         // RFC3339 strings order lexicographically; the pre-column default ''
         // sorts before any stamp, so unstamped legacy rows count as stale.
@@ -1301,7 +1324,11 @@ impl ReleaseRepository for SeaOrmReleaseRepository {
             .filter(
                 sea_orm::Condition::all()
                     .add(releases::Column::RepoId.eq(repo_id))
-                    .add(releases::Column::ExtractedAt.lt(extracted_before)),
+                    .add(
+                        sea_orm::Condition::any()
+                            .add(releases::Column::ExtractedAt.lt(extracted_before))
+                            .add(releases::Column::ExtractedAt.is_null()),
+                    ),
             )
             .exec(conn)
             .await
@@ -1401,7 +1428,7 @@ fn branch_active_model(tenant_id: Uuid, r: &BranchRecord) -> branches::ActiveMod
         name: ActiveValue::Set(r.name.clone()),
         commit_sha: ActiveValue::Set(r.commit_sha.clone()),
         protected: ActiveValue::Set(r.protected),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -1412,7 +1439,7 @@ impl BranchRepository for SeaOrmBranchRepository {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError> {
         // RFC3339 strings order lexicographically; the pre-column default ''
         // sorts before any stamp, so unstamped legacy rows count as stale.
@@ -1422,7 +1449,11 @@ impl BranchRepository for SeaOrmBranchRepository {
             .filter(
                 sea_orm::Condition::all()
                     .add(branches::Column::RepoId.eq(repo_id))
-                    .add(branches::Column::ExtractedAt.lt(extracted_before)),
+                    .add(
+                        sea_orm::Condition::any()
+                            .add(branches::Column::ExtractedAt.lt(extracted_before))
+                            .add(branches::Column::ExtractedAt.is_null()),
+                    ),
             )
             .exec(conn)
             .await
@@ -1504,11 +1535,15 @@ fn contributor_active_model(tenant_id: Uuid, r: &ContributorRecord) -> contribut
         user_id: ActiveValue::Set(r.user_id),
         // The column stays NOT NULL; anonymous contributors store ''.
         login: ActiveValue::Set(r.login.clone().unwrap_or_default()),
-        contributions: ActiveValue::Set(r.contributions),
-        user_type: ActiveValue::Set(r.user_type.clone()),
+        account_type: ActiveValue::Set(r.account_type.clone()),
         avatar_url: ActiveValue::Set(r.avatar_url.clone()),
         html_url: ActiveValue::Set(r.html_url.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        // Comma-separated, as DESIGN's contributors table specifies; the
+        // role names are fixed identifiers, so nothing needs escaping.
+        roles: ActiveValue::Set(Some(r.roles.join(","))),
+        first_seen_at: ActiveValue::Set(r.first_seen_at),
+        last_seen_at: ActiveValue::Set(r.last_seen_at),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -1528,10 +1563,12 @@ impl ContributorRepository for SeaOrmContributorRepository {
         ])
         .update_columns([
             contributors::Column::Login,
-            contributors::Column::Contributions,
-            contributors::Column::UserType,
+            contributors::Column::AccountType,
             contributors::Column::AvatarUrl,
             contributors::Column::HtmlUrl,
+            contributors::Column::Roles,
+            contributors::Column::FirstSeenAt,
+            contributors::Column::LastSeenAt,
             contributors::Column::ExtractedAt,
         ])
         .map_err(map_scope_error)?;
@@ -1549,10 +1586,12 @@ impl ContributorRepository for SeaOrmContributorRepository {
             repo_id: record.repo_id,
             user_id: record.user_id,
             login: record.login,
-            contributions: record.contributions,
-            user_type: record.user_type,
+            account_type: record.account_type,
             avatar_url: record.avatar_url,
             html_url: record.html_url,
+            roles: record.roles,
+            first_seen_at: record.first_seen_at,
+            last_seen_at: record.last_seen_at,
         })
     }
 
@@ -1567,8 +1606,8 @@ impl ContributorRepository for SeaOrmContributorRepository {
             .secure()
             .scope_with(scope)
             .filter(sea_orm::Condition::all().add(contributors::Column::RepoId.eq(repo_id)))
-            .order_by(contributors::Column::Contributions, Order::Desc)
-            // Unique tie-break: equal sort keys must not shuffle page windows.
+            // Derived contributors carry no activity count to rank by, so
+            // the unique key is the whole ordering.
             .order_by(contributors::Column::UserId, Order::Asc)
             .limit(limit)
             .all(conn)
@@ -1607,7 +1646,7 @@ fn workflow_run_active_model(tenant_id: Uuid, r: &WorkflowRunRecord) -> workflow
         updated_at: ActiveValue::Set(r.updated_at.clone()),
         html_url: ActiveValue::Set(r.html_url.clone()),
         actor_login: ActiveValue::Set(r.actor_login.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -1719,7 +1758,7 @@ fn pull_request_file_active_model(
         changes: ActiveValue::Set(r.changes),
         previous_filename: ActiveValue::Set(r.previous_filename.clone()),
         sha: ActiveValue::Set(r.sha.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -1813,7 +1852,7 @@ fn tag_active_model(tenant_id: Uuid, r: &TagRecord) -> tags::ActiveModel {
         repo_id: ActiveValue::Set(r.repo_id),
         name: ActiveValue::Set(r.name.clone()),
         commit_sha: ActiveValue::Set(r.commit_sha.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -1824,7 +1863,7 @@ impl TagRepository for SeaOrmTagRepository {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError> {
         // RFC3339 strings order lexicographically; the pre-column default ''
         // sorts before any stamp, so unstamped legacy rows count as stale.
@@ -1834,7 +1873,11 @@ impl TagRepository for SeaOrmTagRepository {
             .filter(
                 sea_orm::Condition::all()
                     .add(tags::Column::RepoId.eq(repo_id))
-                    .add(tags::Column::ExtractedAt.lt(extracted_before)),
+                    .add(
+                        sea_orm::Condition::any()
+                            .add(tags::Column::ExtractedAt.lt(extracted_before))
+                            .add(tags::Column::ExtractedAt.is_null()),
+                    ),
             )
             .exec(conn)
             .await
@@ -1916,7 +1959,7 @@ fn commit_file_active_model(tenant_id: Uuid, r: &CommitFileRecord) -> commit_fil
         changes: ActiveValue::Set(r.changes),
         previous_filename: ActiveValue::Set(r.previous_filename.clone()),
         sha: ActiveValue::Set(r.sha.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -2019,7 +2062,7 @@ fn review_thread_active_model(
         line: ActiveValue::Set(r.line),
         resolved_by: ActiveValue::Set(r.resolved_by.clone()),
         comments_count: ActiveValue::Set(r.comments_count),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -2123,7 +2166,7 @@ fn commit_comment_active_model(
         created_at: ActiveValue::Set(r.created_at.clone()),
         updated_at: ActiveValue::Set(r.updated_at.clone()),
         html_url: ActiveValue::Set(r.html_url.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -2228,7 +2271,7 @@ fn issue_event_active_model(tenant_id: Uuid, r: &IssueEventRecord) -> issue_even
         milestone_title: ActiveValue::Set(r.milestone_title.clone()),
         commit_id: ActiveValue::Set(r.commit_id.clone()),
         created_at: ActiveValue::Set(r.created_at.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -2333,7 +2376,7 @@ fn deployment_active_model(tenant_id: Uuid, r: &DeploymentRecord) -> deployments
         creator_login: ActiveValue::Set(r.creator_login.clone()),
         created_at: ActiveValue::Set(r.created_at.clone()),
         updated_at: ActiveValue::Set(r.updated_at.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -2434,7 +2477,7 @@ fn pull_request_commit_active_model(
         committer_login: ActiveValue::Set(r.committer_login.clone()),
         authored_at: ActiveValue::Set(r.authored_at.clone()),
         committed_at: ActiveValue::Set(r.committed_at.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -2538,7 +2581,7 @@ fn commit_status_active_model(
         creator_login: ActiveValue::Set(r.creator_login.clone()),
         created_at: ActiveValue::Set(r.created_at.clone()),
         updated_at: ActiveValue::Set(r.updated_at.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -2646,7 +2689,7 @@ fn workflow_job_active_model(tenant_id: Uuid, r: &WorkflowJobRecord) -> workflow
         completed_at: ActiveValue::Set(r.completed_at.clone()),
         html_url: ActiveValue::Set(r.html_url.clone()),
         steps_json: ActiveValue::Set(r.steps_json.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -2754,7 +2797,7 @@ fn issue_reaction_active_model(
         content: ActiveValue::Set(r.content.clone()),
         user_login: ActiveValue::Set(r.user_login.clone()),
         created_at: ActiveValue::Set(r.created_at.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -2855,7 +2898,7 @@ fn check_run_active_model(tenant_id: Uuid, r: &CheckRunRecord) -> check_runs::Ac
         output_title: ActiveValue::Set(r.output_title.clone()),
         output_summary: ActiveValue::Set(r.output_summary.clone()),
         annotations_count: ActiveValue::Set(r.annotations_count),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 
@@ -2970,7 +3013,7 @@ fn issue_timeline_active_model(
         created_at: ActiveValue::Set(r.created_at.clone()),
         actor_login: ActiveValue::Set(r.actor_login.clone()),
         payload_json: ActiveValue::Set(r.payload_json.clone()),
-        extracted_at: ActiveValue::Set(now_rfc3339()),
+        extracted_at: ActiveValue::Set(Some(Utc::now())),
     }
 }
 

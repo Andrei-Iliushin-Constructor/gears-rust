@@ -593,10 +593,17 @@ pub struct ContributorDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login: Option<String>,
     #[serde(rename = "type")]
-    pub user_type: String,
-    pub contributions: i64,
+    pub account_type: String,
     pub avatar_url: Option<String>,
     pub html_url: Option<String>,
+    /// Beyond GitHub's shape: the capacities this person was seen in, and
+    /// the window they were seen across.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_seen_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl From<Contributor> for ContributorDto {
@@ -604,10 +611,12 @@ impl From<Contributor> for ContributorDto {
         Self {
             id: c.user_id,
             login: c.login,
-            user_type: c.user_type,
-            contributions: c.contributions,
+            account_type: c.account_type,
             avatar_url: c.avatar_url,
             html_url: c.html_url,
+            roles: c.roles,
+            first_seen_at: c.first_seen_at,
+            last_seen_at: c.last_seen_at,
         }
     }
 }

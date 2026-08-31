@@ -50,18 +50,19 @@ impl MigrationTrait for Migration {
         let conn = manager.get_connection();
 
         for table in TABLES {
-            // NOT NULL with an empty default: rows from before the column
-            // existed read as "never stamped", which reconciliation treats
-            // the same as "older than any sync".
+            // Nullable on purpose: a row from before the column existed was
+            // never stamped, and `NULL` says exactly that — reconciliation
+            // reads it as older than any sync. SQLite has no timestamp type,
+            // so the column is TEXT there; SeaORM decodes both.
             let sql = match backend {
                 sea_orm::DatabaseBackend::Postgres => format!(
-                    "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS extracted_at VARCHAR(64) NOT NULL DEFAULT '';"
+                    "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS extracted_at TIMESTAMPTZ;"
                 ),
-                sea_orm::DatabaseBackend::MySql => format!(
-                    "ALTER TABLE {table} ADD COLUMN extracted_at VARCHAR(64) NOT NULL DEFAULT '';"
-                ),
+                sea_orm::DatabaseBackend::MySql => {
+                    format!("ALTER TABLE {table} ADD COLUMN extracted_at DATETIME(6);")
+                }
                 sea_orm::DatabaseBackend::Sqlite => {
-                    format!("ALTER TABLE {table} ADD COLUMN extracted_at TEXT NOT NULL DEFAULT '';")
+                    format!("ALTER TABLE {table} ADD COLUMN extracted_at TEXT;")
                 }
                 other => {
                     return Err(DbErr::Custom(format!(

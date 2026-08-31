@@ -14,6 +14,13 @@ use toolkit_security::SecurityContext;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+/// An RFC3339 literal as the instant the mirror stores.
+fn instant(raw: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .expect("test timestamps must be valid RFC3339")
+        .with_timezone(&chrono::Utc)
+}
+
 fn repo_record() -> RepoRecord {
     RepoRecord {
         id: 997,
@@ -30,15 +37,17 @@ fn repo_record() -> RepoRecord {
     }
 }
 
-fn contributor_record(user_id: i64, login: &str, contributions: i64) -> ContributorRecord {
+fn contributor_record(user_id: i64, login: &str, roles: &[&str]) -> ContributorRecord {
     ContributorRecord {
         repo_id: 0,
         user_id,
         login: Some(login.to_owned()),
-        contributions,
-        user_type: "User".to_owned(),
+        account_type: "User".to_owned(),
         avatar_url: None,
         html_url: None,
+        roles: roles.iter().map(|r| (*r).to_owned()).collect(),
+        first_seen_at: Some(instant("2026-03-02T09:14:00Z")),
+        last_seen_at: Some(instant("2026-08-19T17:02:00Z")),
     }
 }
 
@@ -58,7 +67,7 @@ async fn get(router: Router, uri: &str) -> axum::http::Response<Body> {
 }
 
 #[tokio::test]
-async fn contributors_are_listed_most_contributions_first() {
+async fn contributors_are_listed_by_user_id() {
     let ctx = common::caller_in(Uuid::new_v4());
     let service = common::service("https://api.github.com").await;
     service
@@ -66,11 +75,21 @@ async fn contributors_are_listed_most_contributions_first() {
         .await
         .expect("repo seed must succeed");
     service
-        .upsert_contributor(&ctx, "acme", "widget", contributor_record(1, "bob", 5))
+        .upsert_contributor(
+            &ctx,
+            "acme",
+            "widget",
+            contributor_record(1, "bob", &["commenter"]),
+        )
         .await
         .expect("contributor seed must succeed");
     service
-        .upsert_contributor(&ctx, "acme", "widget", contributor_record(2, "alice", 120))
+        .upsert_contributor(
+            &ctx,
+            "acme",
+            "widget",
+            contributor_record(2, "alice", &["author", "reviewer"]),
+        )
         .await
         .expect("contributor seed must succeed");
 
@@ -81,9 +100,13 @@ async fn contributors_are_listed_most_contributions_first() {
     let json = body_json(response).await;
     let items = json.as_array().expect("items");
     assert_eq!(items.len(), 2);
-    assert_eq!(items[0]["login"], "alice");
-    assert_eq!(items[0]["contributions"], 120);
-    assert_eq!(items[1]["login"], "bob");
+    assert_eq!(items[0]["login"], "bob", "ordered by GitHub user id");
+    assert_eq!(items[1]["login"], "alice");
+    assert_eq!(
+        items[1]["roles"],
+        serde_json::json!(["author", "reviewer"]),
+        "PRD 5.2's association roles ride along with each person"
+    );
 }
 
 #[tokio::test]
@@ -107,7 +130,12 @@ async fn contributors_are_tenant_scoped() {
         .await
         .expect("repo seed must succeed");
     service
-        .upsert_contributor(&owner, "acme", "widget", contributor_record(3, "carol", 9))
+        .upsert_contributor(
+            &owner,
+            "acme",
+            "widget",
+            contributor_record(3, "carol", &["commenter"]),
+        )
         .await
         .expect("contributor seed must succeed");
 
@@ -131,11 +159,16 @@ async fn contributor_upsert_is_idempotent_by_user() {
         .await
         .expect("repo seed must succeed");
     service
-        .upsert_contributor(&ctx, "acme", "widget", contributor_record(4, "dave", 10))
+        .upsert_contributor(
+            &ctx,
+            "acme",
+            "widget",
+            contributor_record(4, "dave", &["commenter"]),
+        )
         .await
         .expect("first upsert must succeed");
 
-    let updated = contributor_record(4, "dave", 25);
+    let updated = contributor_record(4, "dave", &["assignee"]);
     service
         .upsert_contributor(&ctx, "acme", "widget", updated)
         .await
@@ -146,5 +179,5 @@ async fn contributor_upsert_is_idempotent_by_user() {
     let json = body_json(response).await;
     let items = json.as_array().expect("items");
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["contributions"], 25);
+    assert_eq!(items[0]["roles"], serde_json::json!(["assignee"]));
 }

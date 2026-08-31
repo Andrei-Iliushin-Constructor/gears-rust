@@ -2458,6 +2458,7 @@ dependencies = [
  "cf-gears-toolkit-odata",
  "cf-gears-toolkit-security",
  "cf-gears-toolkit-utils",
+ "chrono",
  "httpmock",
  "inventory",
  "reqwest",
@@ -2486,6 +2487,7 @@ dependencies = [
  "cf-gears-toolkit-macros",
  "cf-gears-toolkit-odata",
  "cf-gears-toolkit-security",
+ "chrono",
 ]
 
 [[package]]

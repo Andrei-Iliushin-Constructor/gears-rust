@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
+use sea_orm::prelude::DateTimeUtc;
+
 use crate::domain::error::DomainError;
 use crate::domain::ports::github::{FetchedRepository, GithubPort, ListingCompleteness};
 use crate::domain::repo::{
@@ -284,6 +286,10 @@ struct GhIssue {
     body: Option<String>,
     state: String,
     #[serde(default)]
+    user: Option<GhActor>,
+    #[serde(default)]
+    assignees: Vec<GhActor>,
+    #[serde(default)]
     pull_request: Option<serde::de::IgnoredAny>,
     created_at: String,
     updated_at: String,
@@ -356,6 +362,12 @@ struct GhPullRequest {
     title: String,
     body: Option<String>,
     state: String,
+    #[serde(default)]
+    user: Option<GhActor>,
+    #[serde(default)]
+    assignees: Vec<GhActor>,
+    #[serde(default)]
+    requested_reviewers: Vec<GhActor>,
     draft: Option<bool>,
     merged_at: Option<String>,
     head: Option<GhRef>,
@@ -380,7 +392,17 @@ struct GhCommitDetails {
 
 #[derive(Debug, Deserialize)]
 struct GhActor {
+    /// Every real GitHub user object carries one; kept optional so a
+    /// stripped-down or anonymous actor still yields its login.
+    #[serde(default)]
+    id: Option<i64>,
     login: String,
+    #[serde(rename = "type", default)]
+    user_type: Option<String>,
+    #[serde(default)]
+    avatar_url: Option<String>,
+    #[serde(default)]
+    html_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -477,21 +499,6 @@ struct GhBranch {
     commit: GhBranchCommit,
     #[serde(default)]
     protected: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct GhContributor {
-    id: i64,
-    /// Absent for anonymous contributors (`?anon=1`, which the mirror does
-    /// not request today — kept optional so a future query change degrades
-    /// gracefully instead of failing deserialization).
-    #[serde(default)]
-    login: Option<String>,
-    contributions: i64,
-    #[serde(rename = "type")]
-    user_type: String,
-    avatar_url: Option<String>,
-    html_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -831,15 +838,215 @@ fn branch_record(repo_id: i64, b: GhBranch) -> BranchRecord {
     }
 }
 
-fn contributor_record(repo_id: i64, c: GhContributor) -> ContributorRecord {
-    ContributorRecord {
-        repo_id,
-        user_id: c.id,
-        login: c.login,
-        contributions: c.contributions,
-        user_type: c.user_type,
-        avatar_url: c.avatar_url,
-        html_url: c.html_url,
+/// Contributors as they appear across one fetch: PRD 5.2's derivation, run
+/// over the entities the sync already downloaded. Reviewers join later, from
+/// the per-pull fetch that owns the review objects.
+fn derive_people(
+    repo_id: i64,
+    issues: &[GhIssue],
+    pulls: &[GhPullRequest],
+    commits: &[GhCommit],
+    comments: &[GhComment],
+    review_comments: &[GhReviewComment],
+    commit_comments: &[GhCommitComment],
+) -> DerivedContributors {
+    let mut people = DerivedContributors::default();
+    for issue in issues {
+        people.track(
+            repo_id,
+            issue.user.as_ref(),
+            roles::AUTHOR,
+            Some(&issue.created_at),
+        );
+        for assignee in &issue.assignees {
+            people.track(
+                repo_id,
+                Some(assignee),
+                roles::ASSIGNEE,
+                Some(&issue.created_at),
+            );
+        }
+    }
+    for pull in pulls {
+        people.track(
+            repo_id,
+            pull.user.as_ref(),
+            roles::AUTHOR,
+            Some(&pull.created_at),
+        );
+        for assignee in &pull.assignees {
+            people.track(
+                repo_id,
+                Some(assignee),
+                roles::ASSIGNEE,
+                Some(&pull.created_at),
+            );
+        }
+        for reviewer in &pull.requested_reviewers {
+            people.track(
+                repo_id,
+                Some(reviewer),
+                roles::REVIEWER,
+                Some(&pull.created_at),
+            );
+        }
+    }
+    for commit in commits {
+        people.track(
+            repo_id,
+            commit.author.as_ref(),
+            roles::AUTHOR,
+            commit
+                .commit
+                .author
+                .as_ref()
+                .and_then(|p| p.date.as_deref()),
+        );
+        people.track(
+            repo_id,
+            commit.committer.as_ref(),
+            roles::COMMITTER,
+            commit
+                .commit
+                .committer
+                .as_ref()
+                .and_then(|p| p.date.as_deref()),
+        );
+    }
+    for comment in comments {
+        people.track(
+            repo_id,
+            comment.user.as_ref(),
+            roles::COMMENTER,
+            Some(&comment.created_at),
+        );
+    }
+    for comment in review_comments {
+        people.track(
+            repo_id,
+            comment.user.as_ref(),
+            roles::COMMENTER,
+            Some(&comment.created_at),
+        );
+    }
+    for comment in commit_comments {
+        people.track(
+            repo_id,
+            comment.user.as_ref(),
+            roles::COMMENTER,
+            Some(&comment.created_at),
+        );
+    }
+    people
+}
+
+/// The capacities a person can be seen in. PRD 5.2 wants contributors
+/// derived from the entities themselves, and the entity a user object came
+/// out of is what names their role.
+mod roles {
+    pub const AUTHOR: &str = "author";
+    pub const ASSIGNEE: &str = "assignee";
+    pub const REVIEWER: &str = "reviewer";
+    pub const COMMENTER: &str = "commenter";
+    pub const COMMITTER: &str = "committer";
+}
+
+/// Contributors assembled from the user objects embedded in data the sync
+/// already fetched — no `/contributors` request, which PRD 5.2 forbids.
+///
+/// Keyed by GitHub user id; an actor without one (anonymous or stripped) is
+/// skipped, since the mirrored row is keyed by that id.
+#[derive(Default)]
+struct DerivedContributors {
+    by_user: std::collections::HashMap<i64, ContributorRecord>,
+}
+
+impl DerivedContributors {
+    /// Track one sighting: the person, the capacity, and when it happened.
+    ///
+    /// `at` is GitHub's own RFC3339 text; it is parsed here so the stored
+    /// window is a real instant. An unparseable stamp is ignored rather than
+    /// dropping the sighting.
+    fn track(&mut self, repo_id: i64, actor: Option<&GhActor>, role: &str, at: Option<&str>) {
+        let Some(actor) = actor else { return };
+        let Some(user_id) = actor.id else { return };
+
+        let entry = self
+            .by_user
+            .entry(user_id)
+            .or_insert_with(|| ContributorRecord {
+                repo_id,
+                user_id,
+                login: Some(actor.login.clone()),
+                account_type: actor.user_type.clone().unwrap_or_else(|| "User".to_owned()),
+                avatar_url: actor.avatar_url.clone(),
+                html_url: actor.html_url.clone(),
+                roles: Vec::new(),
+                first_seen_at: None,
+                last_seen_at: None,
+            });
+
+        if !entry.roles.iter().any(|r| r == role) {
+            entry.roles.push(role.to_owned());
+        }
+        let at = at.and_then(parse_github_timestamp);
+        merge_seen_window(entry, at, at);
+    }
+
+    /// Fold another family's sightings in: roles union, counts add, the
+    /// seen-at window widens.
+    fn absorb(&mut self, other: Self) {
+        for (user_id, record) in other.by_user {
+            match self.by_user.entry(user_id) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(record);
+                }
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    let mine = slot.get_mut();
+                    for role in record.roles {
+                        if !mine.roles.contains(&role) {
+                            mine.roles.push(role);
+                        }
+                    }
+                    merge_seen_window(mine, record.first_seen_at, record.last_seen_at);
+                }
+            }
+        }
+    }
+
+    /// Stable output: by user id, each record's roles sorted.
+    fn into_records(self) -> Vec<ContributorRecord> {
+        let mut records: Vec<ContributorRecord> = self.by_user.into_values().collect();
+        for record in &mut records {
+            record.roles.sort();
+        }
+        records.sort_by_key(|r| r.user_id);
+        records
+    }
+}
+
+/// GitHub's RFC3339 text as an instant; `None` when it does not parse.
+fn parse_github_timestamp(raw: &str) -> Option<DateTimeUtc> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|stamp| stamp.with_timezone(&chrono::Utc))
+}
+
+/// Widen a record's first/last-seen window with another observation.
+fn merge_seen_window(
+    record: &mut ContributorRecord,
+    first_seen_at: Option<DateTimeUtc>,
+    last_seen_at: Option<DateTimeUtc>,
+) {
+    if let Some(first) = first_seen_at
+        && record.first_seen_at.is_none_or(|held| first < held)
+    {
+        record.first_seen_at = Some(first);
+    }
+    if let Some(last) = last_seen_at
+        && record.last_seen_at.is_none_or(|held| last > held)
+    {
+        record.last_seen_at = Some(last);
     }
 }
 
@@ -1141,6 +1348,9 @@ struct PullDetails {
     pull_request_files: Vec<PullRequestFileRecord>,
     review_threads: Vec<ReviewThreadRecord>,
     pull_request_commits: Vec<PullRequestCommitRecord>,
+    /// People seen reviewing, harvested here because the review objects do
+    /// not survive the mapping to `ReviewRecord`.
+    reviewers: DerivedContributors,
 }
 
 impl GithubClient {
@@ -1296,6 +1506,7 @@ impl GithubClient {
         let mut pull_request_files: Vec<PullRequestFileRecord> = Vec::new();
         let mut review_threads: Vec<ReviewThreadRecord> = Vec::new();
         let mut pull_request_commits: Vec<PullRequestCommitRecord> = Vec::new();
+        let mut reviewers = DerivedContributors::default();
         for pull in pull_records.iter_mut().take(PER_PULL_SYNC_CAP) {
             let page: Vec<GhReview> = self
                 .get_json(&format!(
@@ -1303,6 +1514,14 @@ impl GithubClient {
                     pull.number
                 ))
                 .await?;
+            for review in &page {
+                reviewers.track(
+                    repo_id,
+                    review.user.as_ref(),
+                    roles::REVIEWER,
+                    review.submitted_at.as_deref(),
+                );
+            }
             reviews.extend(
                 page.into_iter()
                     .map(|r| review_record(repo_id, pull.number, r)),
@@ -1371,6 +1590,7 @@ impl GithubClient {
             pull_request_files,
             review_threads,
             pull_request_commits,
+            reviewers,
         })
     }
 }
@@ -1435,12 +1655,6 @@ impl GithubPort for GithubClient {
             ))
             .await?;
 
-        let (contributors, contributors_complete): (Vec<GhContributor>, bool) = self
-            .get_list(&format!(
-                "/repos/{owner}/{name}/contributors?per_page={FIRST_PAGE_SIZE}"
-            ))
-            .await?;
-
         let workflow_runs: GhWorkflowRunsPage = self
             .get_json(&format!(
                 "/repos/{owner}/{name}/actions/runs?per_page={FIRST_PAGE_SIZE}"
@@ -1470,6 +1684,19 @@ impl GithubPort for GithubClient {
                 "/repos/{owner}/{name}/tags?per_page={FIRST_PAGE_SIZE}"
             ))
             .await?;
+
+        // PRD 5.2: contributors are derived from the user objects embedded in
+        // the entities above, so the set costs no extra request. Reviewers are
+        // added further down, where the review objects are fetched.
+        let mut people = derive_people(
+            repo_id,
+            &issues,
+            &pulls,
+            &commits,
+            &comments,
+            &review_comments,
+            &commit_comments,
+        );
 
         let issue_records: Vec<IssueRecord> = issues
             .into_iter()
@@ -1511,9 +1738,11 @@ impl GithubPort for GithubClient {
             pull_request_files,
             review_threads,
             pull_request_commits,
+            reviewers,
         } = self
             .fetch_pull_details(owner, name, repo_id, &mut pull_records)
             .await?;
+        people.absorb(reviewers);
 
         let complete = ListingCompleteness {
             issues: issues_complete,
@@ -1526,7 +1755,14 @@ impl GithubPort for GithubClient {
             releases: releases_complete,
             branches: branches_complete,
             tags: tags_complete,
-            contributors: contributors_complete,
+            // Derived, so it is exactly as complete as the listings it was
+            // read out of.
+            contributors: issues_complete
+                && pulls_complete
+                && commits_complete
+                && comments_complete
+                && review_comments_complete
+                && commit_comments_complete,
             issue_events: issue_events_complete,
             commit_comments: commit_comments_complete,
             deployments: deployments_complete,
@@ -1563,10 +1799,7 @@ impl GithubPort for GithubClient {
                 .into_iter()
                 .map(|b| branch_record(repo_id, b))
                 .collect(),
-            contributors: contributors
-                .into_iter()
-                .map(|c| contributor_record(repo_id, c))
-                .collect(),
+            contributors: people.into_records(),
             workflow_runs: workflow_runs
                 .workflow_runs
                 .into_iter()

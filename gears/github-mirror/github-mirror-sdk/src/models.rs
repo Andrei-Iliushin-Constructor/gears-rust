@@ -306,11 +306,15 @@ pub struct Contributor {
     pub user_id: i64,
     /// `None` for anonymous contributors.
     pub login: Option<String>,
-    pub contributions: i64,
     /// User, Bot, or Organization.
-    pub user_type: String,
+    pub account_type: String,
     pub avatar_url: Option<String>,
     pub html_url: Option<String>,
+    /// PRD 5.2's association roles for this person in this repository.
+    pub roles: Vec<String>,
+    /// When this person was first and last seen in mirrored data.
+    pub first_seen_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// A mirrored GitHub Actions workflow run (read-slice shape).

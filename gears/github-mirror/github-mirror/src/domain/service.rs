@@ -8,6 +8,7 @@ use github_mirror_sdk::{
     PullRequest, PullRequestCommit, PullRequestFile, Release, Repo, Review, ReviewComment,
     ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
+use sea_orm::prelude::DateTimeUtc;
 use toolkit_macros::domain_model;
 use toolkit_odata::{CursorV1, ODataQuery, Page, PageInfo, SortDir};
 use toolkit_security::{AccessScope, SecurityContext, pep_properties};
@@ -34,14 +35,22 @@ use super::repo::{
 /// literal exists in exactly one place.
 pub const GEAR_NAME: &str = crate::gear::GithubMirrorGear::MODULE_NAME;
 
-/// The current instant as RFC3339 text, matching how every other timestamp
-/// in the mirror is stored.
-fn now_rfc3339() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default()
+/// How many stored contributors one merge reads back. A repository with more
+/// distinct people than this loses nothing already written — the merge simply
+/// cannot widen the rows it did not see.
+const CONTRIBUTOR_MERGE_LIMIT: u64 = 10_000;
+
+/// The earlier of two optional instants, ignoring a missing one.
+///
+/// `flatten()` first, because `Option`'s own ordering puts `None` below every
+/// `Some`: plain `a.min(b)` would answer `None` whenever one side is missing.
+/// The mirror image needs no helper — `Option::max` already skips `None` for
+/// the same reason, which is why only this direction is written out.
+fn earliest(a: Option<DateTimeUtc>, b: Option<DateTimeUtc>) -> Option<DateTimeUtc> {
+    [a, b].into_iter().flatten().min()
 }
 
+/// The current instant as RFC3339 text, matching how every other timestamp
 const DEFAULT_LIST_LIMIT: u64 = 50;
 
 pub(crate) type DbProvider = toolkit_db::DBProvider<toolkit_db::DbError>;
@@ -3004,6 +3013,49 @@ impl<
         self.db.conn().is_ok()
     }
 
+    /// Fold this sync's derived contributors into the rows already stored.
+    ///
+    /// A derived contributor is only ever evidence of what the sync saw: a
+    /// run narrowed to issues cannot know that someone also reviewed pull
+    /// requests last month. So roles union and the seen-at window widens — a
+    /// person is never demoted by a narrower run.
+    async fn merge_known_contributors<DBR: toolkit_db::secure::DBRunner>(
+        &self,
+        conn: &DBR,
+        scope: &AccessScope,
+        repo_id: i64,
+        derived: Vec<ContributorRecord>,
+    ) -> Result<Vec<ContributorRecord>, DomainError> {
+        if derived.is_empty() {
+            return Ok(derived);
+        }
+
+        let known = self
+            .contributors
+            .list_by_repo(conn, scope, repo_id, CONTRIBUTOR_MERGE_LIMIT)
+            .await?;
+        let known: std::collections::HashMap<i64, Contributor> =
+            known.into_iter().map(|c| (c.user_id, c)).collect();
+
+        Ok(derived
+            .into_iter()
+            .map(|mut record| {
+                let Some(stored) = known.get(&record.user_id) else {
+                    return record;
+                };
+                for role in &stored.roles {
+                    if !record.roles.iter().any(|held| held == role) {
+                        record.roles.push(role.clone());
+                    }
+                }
+                record.roles.sort();
+                record.first_seen_at = earliest(record.first_seen_at, stored.first_seen_at);
+                record.last_seen_at = record.last_seen_at.max(stored.last_seen_at);
+                record
+            })
+            .collect())
+    }
+
     /// Hard-delete rows this sync did not see, family by family, but only
     /// where the listing was walked to its final page: absence from a
     /// truncated listing proves nothing (PRD 5.2's "complete and verifiable
@@ -3018,7 +3070,7 @@ impl<
         scope: &AccessScope,
         complete: ListingCompleteness,
         repo_id: i64,
-        watermark: &str,
+        watermark: DateTimeUtc,
     ) -> Result<u64, DomainError> {
         let mut deleted = 0;
         if complete.issues {
@@ -3168,7 +3220,7 @@ impl<
         // Captured before any row is written: every upsert in this sync stamps
         // `extracted_at` with a later instant, so "extracted_at < watermark"
         // identifies exactly the rows this sync did not touch.
-        let watermark = now_rfc3339();
+        let watermark = chrono::Utc::now();
         let fetched = self.github.fetch_repository(owner, name).await?;
         let complete = fetched.complete;
 
@@ -3233,14 +3285,15 @@ impl<
                     let branches_synced =
                         sync_table!(service, tx, &scope, tenant_id, branches, fetched.branches);
 
-                    let contributors_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        contributors,
-                        fetched.contributors
-                    );
+                    // Contributors are derived from whatever this sync
+                    // happened to fetch, so writing them straight would
+                    // narrow the set every time the scope narrows. Merge
+                    // with what earlier syncs already learned instead.
+                    let contributors = service
+                        .merge_known_contributors(tx, &scope, repository.id, fetched.contributors)
+                        .await?;
+                    let contributors_synced =
+                        sync_table!(service, tx, &scope, tenant_id, contributors, contributors);
 
                     let workflow_runs_synced = sync_table!(
                         service,
@@ -3362,7 +3415,7 @@ impl<
                     );
 
                     let stale_rows_deleted = service
-                        .reconcile_stale(tx, &scope, complete, repository.id, &watermark)
+                        .reconcile_stale(tx, &scope, complete, repository.id, watermark)
                         .await?;
                     if stale_rows_deleted > 0 {
                         tracing::info!(

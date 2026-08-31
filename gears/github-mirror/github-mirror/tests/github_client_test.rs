@@ -6,6 +6,13 @@ use github_mirror::infra::github::client::GithubClient;
 use httpmock::MockServer;
 use serde_json::json;
 
+/// An RFC3339 literal as the instant the mirror stores.
+fn instant(raw: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .expect("test timestamps must be valid RFC3339")
+        .with_timezone(&chrono::Utc)
+}
+
 fn gh_repo_json() -> serde_json::Value {
     json!({
         "id": 42,
@@ -26,6 +33,10 @@ fn gh_issues_json() -> serde_json::Value {
     json!([
         {
             "id": 1, "number": 11, "title": "an issue", "body": "text",
+            "user": { "id": 71, "login": "alice", "type": "User",
+                      "avatar_url": "https://avatars.githubusercontent.com/u/71",
+                      "html_url": "https://github.com/alice" },
+            "assignees": [ { "id": 73, "login": "carol", "type": "User" } ],
             "state": "open", "created_at": "2026-08-20T00:00:00Z",
             "updated_at": "2026-08-20T00:00:00Z", "closed_at": null,
             "html_url": "https://github.com/rust-lang/rust/issues/11"
@@ -43,6 +54,7 @@ fn gh_pulls_json() -> serde_json::Value {
     json!([
         {
             "id": 3, "number": 13, "title": "a pr", "state": "open",
+            "user": { "id": 75, "login": "erin", "type": "User" },
             "draft": true, "merged_at": null,
             "head": { "sha": "h1", "ref": "feature" },
             "base": { "sha": "b1", "ref": "master" },
@@ -62,8 +74,8 @@ fn gh_commits_json() -> serde_json::Value {
                 "author": { "date": "2026-08-19T00:00:00Z" },
                 "committer": { "date": "2026-08-19T00:00:00Z" }
             },
-            "author": { "login": "alice" },
-            "committer": { "login": "bob" }
+            "author": { "id": 71, "login": "alice", "type": "User" },
+            "committer": { "id": 72, "login": "bob", "type": "User" }
         }
     ])
 }
@@ -72,7 +84,7 @@ fn gh_comments_json() -> serde_json::Value {
     json!([
         {
             "id": 7,
-            "user": { "login": "carol" },
+            "user": { "id": 73, "login": "carol", "type": "User" },
             "body": "looks good",
             "created_at": "2026-08-20T00:00:00Z",
             "updated_at": "2026-08-20T00:00:00Z",
@@ -86,7 +98,7 @@ fn gh_review_comments_json() -> serde_json::Value {
     json!([
         {
             "id": 21,
-            "user": { "login": "dave" },
+            "user": { "id": 74, "login": "dave", "type": "User" },
             "body": "rename this",
             "path": "src/lib.rs",
             "diff_hunk": "@@ -1 +1 @@",
@@ -104,7 +116,7 @@ fn gh_reviews_json() -> serde_json::Value {
     json!([
         {
             "id": 31,
-            "user": { "login": "erin" },
+            "user": { "id": 75, "login": "erin", "type": "User" },
             "state": "APPROVED",
             "body": "ship it",
             "commit_id": "h1",
@@ -168,19 +180,6 @@ fn gh_branches_json() -> serde_json::Value {
             "name": "master",
             "commit": { "sha": "c1" },
             "protected": true
-        }
-    ])
-}
-
-fn gh_contributors_json() -> serde_json::Value {
-    json!([
-        {
-            "id": 71,
-            "login": "alice",
-            "contributions": 120,
-            "type": "User",
-            "avatar_url": "https://avatars.githubusercontent.com/u/71",
-            "html_url": "https://github.com/alice"
         }
     ])
 }
@@ -575,13 +574,6 @@ async fn fetch_repository_maps_github_payloads_into_records() {
     server
         .mock_async(|when, then| {
             when.method("GET")
-                .path("/repos/rust-lang/rust/contributors");
-            then.status(200).json_body(gh_contributors_json());
-        })
-        .await;
-    server
-        .mock_async(|when, then| {
-            when.method("GET")
                 .path("/repos/rust-lang/rust/actions/runs");
             then.status(200).json_body(gh_workflow_runs_json());
         })
@@ -769,11 +761,46 @@ async fn fetch_repository_maps_github_payloads_into_records() {
     );
     assert_eq!(fetched.review_threads[0].comments_count, 3);
 
-    assert_eq!(fetched.contributors.len(), 1);
-    assert_eq!(fetched.contributors[0].user_id, 71);
-    assert_eq!(fetched.contributors[0].login.as_deref(), Some("alice"));
-    assert_eq!(fetched.contributors[0].contributions, 120);
-    assert_eq!(fetched.contributors[0].user_type, "User");
+    // Contributors are derived from the user objects in the entities above,
+    // never from `/repos/{owner}/{name}/contributors` — which this server
+    // does not serve, so a request for it would fail the fetch outright.
+    let people: std::collections::HashMap<i64, _> = fetched
+        .contributors
+        .iter()
+        .map(|c| (c.user_id, c))
+        .collect();
+    assert_eq!(people.len(), 5, "alice, bob, carol, dave, erin");
+
+    let alice = people.get(&71).expect("alice");
+    assert_eq!(alice.login.as_deref(), Some("alice"));
+    assert_eq!(
+        alice.roles,
+        vec!["author".to_owned()],
+        "issue author and commit author are both PRD's `author` role"
+    );
+    assert_eq!(alice.account_type, "User");
+    assert_eq!(
+        alice.avatar_url.as_deref(),
+        Some("https://avatars.githubusercontent.com/u/71"),
+        "profile details ride along with the embedded user object"
+    );
+    assert_eq!(
+        alice.first_seen_at,
+        Some(instant("2026-08-19T00:00:00Z")),
+        "the commit predates the issue"
+    );
+    assert_eq!(alice.last_seen_at, Some(instant("2026-08-20T00:00:00Z")));
+
+    assert_eq!(people.get(&72).expect("bob").roles, vec!["committer"]);
+    assert_eq!(
+        people.get(&73).expect("carol").roles,
+        vec!["assignee".to_owned(), "commenter".to_owned()]
+    );
+    assert_eq!(people.get(&74).expect("dave").roles, vec!["commenter"]);
+    assert_eq!(
+        people.get(&75).expect("erin").roles,
+        vec!["author".to_owned(), "reviewer".to_owned()]
+    );
 
     assert_eq!(fetched.pull_request_files.len(), 2);
     assert_eq!(fetched.pull_request_files[0].pull_number, 13);
