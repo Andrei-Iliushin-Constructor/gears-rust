@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS gm_check_runs (
     app_slug VARCHAR(255),
     app_name VARCHAR(255),
     output_title VARCHAR(1024),
-    output_summary TEXT,
+    output_summary MEDIUMTEXT,
     annotations_count BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, id),
     KEY idx_gm_check_runs_tenant_repo_sha (tenant_id, repo_id, head_sha)

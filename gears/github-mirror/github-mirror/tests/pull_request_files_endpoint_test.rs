@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 fn repo_record() -> RepoRecord {
     RepoRecord {
+        node_id: None,
         id: 999,
         owner: "acme".to_owned(),
         name: "widget".to_owned(),
@@ -32,6 +33,7 @@ fn repo_record() -> RepoRecord {
 
 fn file_record(pull_number: i64, filename: &str, additions: i64) -> PullRequestFileRecord {
     PullRequestFileRecord {
+        patch: None,
         repo_id: 0,
         pull_number,
         filename: filename.to_owned(),

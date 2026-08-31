@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 fn repo_record() -> RepoRecord {
     RepoRecord {
+        node_id: None,
         id: 1001,
         owner: "acme".to_owned(),
         name: "widget".to_owned(),

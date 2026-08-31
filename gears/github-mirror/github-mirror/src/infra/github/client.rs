@@ -3,6 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 
+use sea_orm::prelude::DateTimeUtc;
+
 use crate::domain::error::DomainError;
 use crate::domain::ports::github::{
     FetchOptions, FetchedRepository, GithubPort, ListingCompleteness,
@@ -45,6 +47,10 @@ const ACCEPT_JSON: &str = "application/vnd.github+json";
 const MAX_PAGES: usize = 10;
 
 const USER_AGENT: &str = concat!("cf-gears-github-mirror/", env!("CARGO_PKG_VERSION"));
+
+/// The REST API version every request pins (DESIGN 3.5). Without it the
+/// response schema follows GitHub's default, which can change under us.
+const GITHUB_API_VERSION: &str = "2022-11-28";
 /// Attempts after the first request when GitHub answers with a rate limit.
 const RATE_LIMIT_RETRIES: u32 = 3;
 /// Longest single back-off sleep, whatever `Retry-After` asks for.
@@ -169,7 +175,11 @@ impl GithubClient {
         url: &str,
         cached: Option<&CachedResponse>,
     ) -> reqwest::RequestBuilder {
-        let mut request = self.http.get(url).header("Accept", ACCEPT_JSON);
+        let mut request = self
+            .http
+            .get(url)
+            .header("Accept", ACCEPT_JSON)
+            .header("X-GitHub-Api-Version", GITHUB_API_VERSION);
         if let Some(token) = &self.token {
             request = request.bearer_auth(token);
         }
@@ -438,6 +448,8 @@ struct GhOwner {
 struct GhRepository {
     clone_url: Option<String>,
     id: i64,
+    #[serde(default)]
+    node_id: Option<String>,
     name: String,
     full_name: String,
     owner: GhOwner,
@@ -452,10 +464,22 @@ struct GhRepository {
 #[derive(Debug, Deserialize)]
 struct GhIssue {
     id: i64,
+    #[serde(default)]
+    node_id: Option<String>,
     number: i64,
     title: String,
     body: Option<String>,
     state: String,
+    #[serde(default)]
+    user: Option<GhActor>,
+    #[serde(default)]
+    assignees: Vec<GhActor>,
+    #[serde(default)]
+    labels: Vec<GhLabelRef>,
+    #[serde(default)]
+    comments: Option<i64>,
+    #[serde(default)]
+    locked: Option<bool>,
     #[serde(default)]
     pull_request: Option<serde::de::IgnoredAny>,
     created_at: String,
@@ -525,10 +549,31 @@ struct GhRef {
 #[derive(Debug, Deserialize)]
 struct GhPullRequest {
     id: i64,
+    #[serde(default)]
+    node_id: Option<String>,
     number: i64,
     title: String,
     body: Option<String>,
     state: String,
+    #[serde(default)]
+    user: Option<GhActor>,
+    #[serde(default)]
+    assignees: Vec<GhActor>,
+    #[serde(default)]
+    requested_reviewers: Vec<GhActor>,
+    #[serde(default)]
+    labels: Vec<GhLabelRef>,
+    #[serde(default)]
+    comments: Option<i64>,
+    #[serde(default)]
+    locked: Option<bool>,
+
+    /// Present on the per-pull response, absent from the listing; when the
+    /// payload carries them the record needs no file walk to be accurate.
+    #[serde(default)]
+    additions: Option<i64>,
+    #[serde(default)]
+    deletions: Option<i64>,
     draft: Option<bool>,
     merged_at: Option<String>,
     head: Option<GhRef>,
@@ -553,7 +598,21 @@ struct GhCommitDetails {
 
 #[derive(Debug, Deserialize)]
 struct GhActor {
+    /// Every real GitHub user object carries one; kept optional so a
+    /// stripped-down or anonymous actor still yields its login.
+    #[serde(default)]
+    id: Option<i64>,
     login: String,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(rename = "type", default)]
+    user_type: Option<String>,
+    #[serde(default)]
+    avatar_url: Option<String>,
+    #[serde(default)]
+    html_url: Option<String>,
+    #[serde(default)]
+    site_admin: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -585,6 +644,27 @@ struct GhReviewComment {
     /// Absent once GitHub considers the commented-on line outdated.
     position: Option<i64>,
     original_position: Option<i64>,
+    /// GitHub's current diff anchors: the line and side a comment sits on,
+    /// plus the start of a multi-line selection. `position` above is the
+    /// deprecated single-line form GitHub still sends.
+    #[serde(default)]
+    line: Option<i64>,
+    #[serde(default)]
+    original_line: Option<i64>,
+    #[serde(default)]
+    start_line: Option<i64>,
+    #[serde(default)]
+    original_start_line: Option<i64>,
+    #[serde(default)]
+    side: Option<String>,
+    #[serde(default)]
+    start_side: Option<String>,
+    #[serde(default)]
+    subject_type: Option<String>,
+    /// The review this inline comment belongs to; clients group comments
+    /// under their review by it.
+    #[serde(default)]
+    pull_request_review_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -630,6 +710,25 @@ struct GhRelease {
     assets: Vec<GhReleaseAsset>,
 }
 
+/// A label as it appears embedded in an issue or pull-request payload.
+///
+/// Stored whole rather than by name: names are renameable, the id is not, and
+/// the colour is what a client paints the chip with.
+#[derive(Debug, serde::Serialize, Deserialize)]
+struct GhLabelRef {
+    #[serde(default)]
+    id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    node_id: Option<String>,
+    name: String,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(rename = "default", default, skip_serializing_if = "Option::is_none")]
+    is_default: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+}
+
 /// The slice of a release asset the mirror keeps: enough to name it and
 /// download it.
 #[derive(Debug, serde::Serialize, Deserialize)]
@@ -650,21 +749,6 @@ struct GhBranch {
     commit: GhBranchCommit,
     #[serde(default)]
     protected: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct GhContributor {
-    id: i64,
-    /// Absent for anonymous contributors (`?anon=1`, which the mirror does
-    /// not request today — kept optional so a future query change degrades
-    /// gracefully instead of failing deserialization).
-    #[serde(default)]
-    login: Option<String>,
-    contributions: i64,
-    #[serde(rename = "type")]
-    user_type: String,
-    avatar_url: Option<String>,
-    html_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -696,6 +780,9 @@ struct GhWorkflowRunsPage {
 #[derive(Debug, Deserialize)]
 struct GhPullFile {
     filename: String,
+    /// The file's unified diff; GitHub omits it for very large diffs.
+    #[serde(default)]
+    patch: Option<String>,
     status: String,
     additions: i64,
     deletions: i64,
@@ -845,6 +932,7 @@ struct GhCommit {
 fn repository_record(r: GhRepository) -> RepoRecord {
     RepoRecord {
         id: r.id,
+        node_id: r.node_id,
         owner: r.owner.login,
         name: r.name,
         full_name: r.full_name,
@@ -859,8 +947,11 @@ fn repository_record(r: GhRepository) -> RepoRecord {
 }
 
 fn issue_record(repo_id: i64, i: GhIssue) -> IssueRecord {
+    let assignees_json = actors_json(&i.assignees);
+    let labels_json = labels_json(&i.labels);
     IssueRecord {
         id: i.id,
+        node_id: i.node_id,
         repo_id,
         number: i.number,
         title: i.title,
@@ -871,15 +962,25 @@ fn issue_record(repo_id: i64, i: GhIssue) -> IssueRecord {
         updated_at: i.updated_at,
         closed_at: i.closed_at,
         html_url: i.html_url,
+        author_login: i.user.as_ref().map(|u| u.login.clone()),
+        author_json: actor_json(i.user.as_ref()),
+        assignees_json,
+        labels_json,
+        comments_count: i.comments,
+        locked: i.locked,
     }
 }
 
 fn pull_request_record(repo_id: i64, p: GhPullRequest) -> PullRequestRecord {
     let head = p.head;
     let base = p.base;
+    let assignees_json = actors_json(&p.assignees);
+    let labels_json = labels_json(&p.labels);
+    let requested_reviewers_json = actors_json(&p.requested_reviewers);
 
     PullRequestRecord {
         id: p.id,
+        node_id: p.node_id,
         repo_id,
         number: p.number,
         title: p.title,
@@ -889,8 +990,8 @@ fn pull_request_record(repo_id: i64, p: GhPullRequest) -> PullRequestRecord {
         merged: p.merged_at.is_some(),
         head_sha: head.as_ref().and_then(|r| r.sha.clone()),
         base_sha: base.as_ref().and_then(|r| r.sha.clone()),
-        lines_added: 0,
-        lines_removed: 0,
+        lines_added: p.additions.unwrap_or(0),
+        lines_removed: p.deletions.unwrap_or(0),
         created_at: p.created_at,
         updated_at: p.updated_at,
         closed_at: p.closed_at,
@@ -898,19 +999,37 @@ fn pull_request_record(repo_id: i64, p: GhPullRequest) -> PullRequestRecord {
         html_url: p.html_url,
         head_ref: head.and_then(|r| r.ref_name),
         base_ref: base.and_then(|r| r.ref_name),
+        author_login: p.user.as_ref().map(|u| u.login.clone()),
+        author_json: actor_json(p.user.as_ref()),
+        assignees_json,
+        labels_json,
+        comments_count: p.comments,
+        locked: p.locked,
+        requested_reviewers_json,
     }
 }
 
-fn issue_number_from_url(issue_url: Option<&str>) -> i64 {
+/// The trailing number of an `.../issues/11` or `.../pulls/13` URL.
+///
+/// `None` when the URL is absent or does not end in a number: the row's
+/// parent is then unknown, and storing it under number 0 would file it
+/// against an issue that cannot exist.
+fn issue_number_from_url(issue_url: Option<&str>) -> Option<i64> {
     issue_url
         .and_then(|u| u.rsplit('/').next())
         .and_then(|n| n.parse().ok())
-        .unwrap_or(0)
 }
 
-fn comment_record(repo_id: i64, c: GhComment) -> CommentRecord {
-    let issue_number = issue_number_from_url(c.issue_url.as_deref());
-    CommentRecord {
+fn comment_record(repo_id: i64, c: GhComment) -> Option<CommentRecord> {
+    let Some(issue_number) = issue_number_from_url(c.issue_url.as_deref()) else {
+        tracing::warn!(
+            comment_id = c.id,
+            issue_url = ?c.issue_url,
+            "issue comment has no resolvable issue number; skipping"
+        );
+        return None;
+    };
+    Some(CommentRecord {
         id: c.id,
         repo_id,
         issue_number,
@@ -919,12 +1038,19 @@ fn comment_record(repo_id: i64, c: GhComment) -> CommentRecord {
         created_at: c.created_at,
         updated_at: c.updated_at,
         html_url: c.html_url,
-    }
+    })
 }
 
-fn review_comment_record(repo_id: i64, c: GhReviewComment) -> ReviewCommentRecord {
-    let pull_number = issue_number_from_url(c.pull_request_url.as_deref());
-    ReviewCommentRecord {
+fn review_comment_record(repo_id: i64, c: GhReviewComment) -> Option<ReviewCommentRecord> {
+    let Some(pull_number) = issue_number_from_url(c.pull_request_url.as_deref()) else {
+        tracing::warn!(
+            comment_id = c.id,
+            pull_request_url = ?c.pull_request_url,
+            "review comment has no resolvable pull number; skipping"
+        );
+        return None;
+    };
+    Some(ReviewCommentRecord {
         id: c.id,
         repo_id,
         pull_number,
@@ -939,7 +1065,15 @@ fn review_comment_record(repo_id: i64, c: GhReviewComment) -> ReviewCommentRecor
         html_url: c.html_url,
         position: c.position,
         original_position: c.original_position,
-    }
+        line: c.line,
+        original_line: c.original_line,
+        start_line: c.start_line,
+        original_start_line: c.original_start_line,
+        side: c.side,
+        start_side: c.start_side,
+        subject_type: c.subject_type,
+        pull_request_review_id: c.pull_request_review_id,
+    })
 }
 
 fn label_record(repo_id: i64, l: GhLabel) -> LabelRecord {
@@ -1004,15 +1138,291 @@ fn branch_record(repo_id: i64, b: GhBranch) -> BranchRecord {
     }
 }
 
-fn contributor_record(repo_id: i64, c: GhContributor) -> ContributorRecord {
-    ContributorRecord {
-        repo_id,
-        user_id: c.id,
-        login: c.login,
-        contributions: c.contributions,
-        user_type: c.user_type,
-        avatar_url: c.avatar_url,
-        html_url: c.html_url,
+/// PRD 5.2's derivation, split the way the fetch is: each family harvests the
+/// people out of the entities it downloaded, and `fetch_repository` folds the
+/// three together. No `/contributors` request, which PRD 5.2 forbids.
+fn derive_issue_people(
+    repo_id: i64,
+    issues: &[GhIssue],
+    comments: &[GhComment],
+) -> DerivedContributors {
+    let mut people = DerivedContributors::default();
+    for issue in issues {
+        people.track(
+            repo_id,
+            issue.user.as_ref(),
+            roles::AUTHOR,
+            Some(&issue.created_at),
+        );
+        for assignee in &issue.assignees {
+            people.track(
+                repo_id,
+                Some(assignee),
+                roles::ASSIGNEE,
+                Some(&issue.created_at),
+            );
+        }
+    }
+    for comment in comments {
+        people.track(
+            repo_id,
+            comment.user.as_ref(),
+            roles::COMMENTER,
+            Some(&comment.created_at),
+        );
+    }
+    people
+}
+
+/// The pull-request half: authors, assignees, requested reviewers, and the
+/// people who left inline comments. Reviewers who actually submitted a review
+/// join from `fetch_pull_details`.
+fn derive_pull_people(
+    repo_id: i64,
+    pulls: &[GhPullRequest],
+    review_comments: &[GhReviewComment],
+) -> DerivedContributors {
+    let mut people = DerivedContributors::default();
+    for pull in pulls {
+        people.track(
+            repo_id,
+            pull.user.as_ref(),
+            roles::AUTHOR,
+            Some(&pull.created_at),
+        );
+        for assignee in &pull.assignees {
+            people.track(
+                repo_id,
+                Some(assignee),
+                roles::ASSIGNEE,
+                Some(&pull.created_at),
+            );
+        }
+        for reviewer in &pull.requested_reviewers {
+            people.track(
+                repo_id,
+                Some(reviewer),
+                roles::REVIEWER,
+                Some(&pull.created_at),
+            );
+        }
+    }
+    for comment in review_comments {
+        people.track(
+            repo_id,
+            comment.user.as_ref(),
+            roles::COMMENTER,
+            Some(&comment.created_at),
+        );
+    }
+    people
+}
+
+/// The commit half: the GitHub accounts behind `author` and `committer`, plus
+/// commit commenters.
+fn derive_commit_people(
+    repo_id: i64,
+    commits: &[GhCommit],
+    commit_comments: &[GhCommitComment],
+) -> DerivedContributors {
+    let mut people = DerivedContributors::default();
+    for commit in commits {
+        people.track(
+            repo_id,
+            commit.author.as_ref(),
+            roles::AUTHOR,
+            commit
+                .commit
+                .author
+                .as_ref()
+                .and_then(|p| p.date.as_deref()),
+        );
+        people.track(
+            repo_id,
+            commit.committer.as_ref(),
+            roles::COMMITTER,
+            commit
+                .commit
+                .committer
+                .as_ref()
+                .and_then(|p| p.date.as_deref()),
+        );
+    }
+    for comment in commit_comments {
+        people.track(
+            repo_id,
+            comment.user.as_ref(),
+            roles::COMMENTER,
+            Some(&comment.created_at),
+        );
+    }
+    people
+}
+
+/// The capacities a person can be seen in. PRD 5.2 wants contributors
+/// derived from the entities themselves, and the entity a user object came
+/// out of is what names their role.
+mod roles {
+    pub const AUTHOR: &str = "author";
+    pub const ASSIGNEE: &str = "assignee";
+    pub const REVIEWER: &str = "reviewer";
+    pub const COMMENTER: &str = "commenter";
+    pub const COMMITTER: &str = "committer";
+}
+
+/// Contributors assembled from the user objects embedded in data the sync
+/// already fetched — no `/contributors` request, which PRD 5.2 forbids.
+///
+/// Keyed by GitHub user id; an actor without one (anonymous or stripped) is
+/// skipped, since the mirrored row is keyed by that id.
+#[derive(Default)]
+struct DerivedContributors {
+    by_user: std::collections::HashMap<i64, ContributorRecord>,
+}
+
+impl DerivedContributors {
+    /// Track one sighting: the person, the capacity, and when it happened.
+    ///
+    /// `at` is GitHub's own RFC3339 text; it is parsed here so the stored
+    /// window is a real instant. An unparseable stamp is ignored rather than
+    /// dropping the sighting.
+    fn track(&mut self, repo_id: i64, actor: Option<&GhActor>, role: &str, at: Option<&str>) {
+        let Some(actor) = actor else { return };
+        let Some(user_id) = actor.id else { return };
+
+        let entry = self
+            .by_user
+            .entry(user_id)
+            .or_insert_with(|| ContributorRecord {
+                repo_id,
+                user_id,
+                login: Some(actor.login.clone()),
+                account_type: actor.user_type.clone().unwrap_or_else(|| "User".to_owned()),
+                avatar_url: actor.avatar_url.clone(),
+                html_url: actor.html_url.clone(),
+                roles: Vec::new(),
+                first_seen_at: None,
+                last_seen_at: None,
+            });
+
+        if !entry.roles.iter().any(|r| r == role) {
+            entry.roles.push(role.to_owned());
+        }
+        let at = at.and_then(parse_github_timestamp);
+        merge_seen_window(entry, at, at);
+    }
+
+    /// Fold another family's sightings in: roles union, counts add, the
+    /// seen-at window widens.
+    fn absorb(&mut self, other: Self) {
+        for (user_id, record) in other.by_user {
+            match self.by_user.entry(user_id) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(record);
+                }
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    let mine = slot.get_mut();
+                    for role in record.roles {
+                        if !mine.roles.contains(&role) {
+                            mine.roles.push(role);
+                        }
+                    }
+                    merge_seen_window(mine, record.first_seen_at, record.last_seen_at);
+                }
+            }
+        }
+    }
+
+    /// Stable output: by user id, each record's roles sorted.
+    fn into_records(self) -> Vec<ContributorRecord> {
+        let mut records: Vec<ContributorRecord> = self.by_user.into_values().collect();
+        for record in &mut records {
+            record.roles.sort();
+        }
+        records.sort_by_key(|r| r.user_id);
+        records
+    }
+}
+
+/// A person as the mirror stores them inside an issue or pull row: the login
+/// a client renders, plus the id it takes to join `gm_contributors`, since a
+/// login can be renamed and later reused by someone else.
+#[derive(Debug, serde::Serialize)]
+struct StoredActor<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<i64>,
+    login: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_id: Option<&'a str>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    user_type: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar_url: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    html_url: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    site_admin: Option<bool>,
+}
+
+impl<'a> StoredActor<'a> {
+    fn of(actor: &'a GhActor) -> Self {
+        Self {
+            id: actor.id,
+            login: actor.login.as_str(),
+            node_id: actor.node_id.as_deref(),
+            user_type: actor.user_type.as_deref(),
+            avatar_url: actor.avatar_url.as_deref(),
+            html_url: actor.html_url.as_deref(),
+            site_admin: actor.site_admin,
+        }
+    }
+}
+
+/// One actor as the stored JSON object, for the author of an issue or pull.
+fn actor_json(actor: Option<&GhActor>) -> Option<String> {
+    actor.and_then(|a| serde_json::to_string(&StoredActor::of(a)).ok())
+}
+
+/// A list of actors as a JSON array, or `None` when the list is empty — the
+/// column stays `NULL` rather than holding `[]`.
+fn actors_json(actors: &[GhActor]) -> Option<String> {
+    if actors.is_empty() {
+        return None;
+    }
+    let stored: Vec<StoredActor<'_>> = actors.iter().map(StoredActor::of).collect();
+    serde_json::to_string(&stored).ok()
+}
+
+/// Labels as a JSON array, on the same terms as [`actors_json`].
+fn labels_json(labels: &[GhLabelRef]) -> Option<String> {
+    if labels.is_empty() {
+        return None;
+    }
+    serde_json::to_string(labels).ok()
+}
+
+/// GitHub's RFC3339 text as an instant; `None` when it does not parse.
+fn parse_github_timestamp(raw: &str) -> Option<DateTimeUtc> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|stamp| stamp.with_timezone(&chrono::Utc))
+}
+
+/// Widen a record's first/last-seen window with another observation.
+fn merge_seen_window(
+    record: &mut ContributorRecord,
+    first_seen_at: Option<DateTimeUtc>,
+    last_seen_at: Option<DateTimeUtc>,
+) {
+    if let Some(first) = first_seen_at
+        && record.first_seen_at.is_none_or(|held| first < held)
+    {
+        record.first_seen_at = Some(first);
+    }
+    if let Some(last) = last_seen_at
+        && record.last_seen_at.is_none_or(|held| last > held)
+    {
+        record.last_seen_at = Some(last);
     }
 }
 
@@ -1051,6 +1461,7 @@ fn pull_request_file_record(
         changes: f.changes,
         previous_filename: f.previous_filename,
         sha: f.sha,
+        patch: f.patch,
     }
 }
 
@@ -1327,6 +1738,8 @@ fn in_collection_mode(issues: &[IssueRecord], mode: CollectionMode) -> Vec<Issue
 /// The issue slice of one sync pass: issues and everything hanging off them.
 #[derive(Default)]
 struct IssueFamily {
+    /// People seen in this family's entities (PRD 5.2's derivation).
+    people: DerivedContributors,
     /// Which of this family's listings were walked to their end; a family the
     /// scope switched off stays all-`false`, so absence proves nothing.
     complete: ListingCompleteness,
@@ -1340,6 +1753,7 @@ struct IssueFamily {
 /// The pull-request slice of one sync pass.
 #[derive(Default)]
 struct PullFamily {
+    people: DerivedContributors,
     complete: ListingCompleteness,
     pull_requests: Vec<PullRequestRecord>,
     review_comments: Vec<ReviewCommentRecord>,
@@ -1352,6 +1766,7 @@ struct PullFamily {
 /// The commit slice of one sync pass.
 #[derive(Default)]
 struct CommitFamily {
+    people: DerivedContributors,
     complete: ListingCompleteness,
     commits: Vec<CommitRecord>,
     commit_files: Vec<CommitFileRecord>,
@@ -1369,7 +1784,6 @@ struct MetadataFamily {
     releases: Vec<ReleaseRecord>,
     branches: Vec<BranchRecord>,
     tags: Vec<TagRecord>,
-    contributors: Vec<ContributorRecord>,
 }
 
 /// The GitHub Actions slice: workflow runs, their jobs, and deployments.
@@ -1387,6 +1801,9 @@ struct PullDetails {
     pull_request_files: Vec<PullRequestFileRecord>,
     review_threads: Vec<ReviewThreadRecord>,
     pull_request_commits: Vec<PullRequestCommitRecord>,
+    /// People seen reviewing, harvested here because the review objects do
+    /// not survive the mapping to `ReviewRecord`.
+    reviewers: DerivedContributors,
 }
 
 impl GithubClient {
@@ -1593,6 +2010,7 @@ impl GithubClient {
             )
             .await?;
 
+        let people = derive_issue_people(repo_id, &issues, &comments);
         let issue_records: Vec<IssueRecord> = issues
             .into_iter()
             .map(|i| issue_record(repo_id, i))
@@ -1609,6 +2027,7 @@ impl GithubClient {
             .await?;
 
         Ok(IssueFamily {
+            people,
             complete: ListingCompleteness {
                 issues: issues_complete,
                 comments: comments_complete,
@@ -1618,7 +2037,7 @@ impl GithubClient {
             issues: issue_records,
             comments: comments
                 .into_iter()
-                .map(|c| comment_record(repo_id, c))
+                .filter_map(|c| comment_record(repo_id, c))
                 .collect(),
             issue_events: issue_events
                 .into_iter()
@@ -1654,6 +2073,7 @@ impl GithubClient {
             )
             .await?;
 
+        let mut people = derive_pull_people(repo_id, &pulls, &review_comments);
         let mut pull_records: Vec<PullRequestRecord> = pulls
             .into_iter()
             .map(|p| pull_request_record(repo_id, p))
@@ -1664,11 +2084,14 @@ impl GithubClient {
             pull_request_files,
             review_threads,
             pull_request_commits,
+            reviewers,
         } = self
             .fetch_pull_details(owner, name, repo_id, &mut pull_records, options)
             .await?;
+        people.absorb(reviewers);
 
         Ok(PullFamily {
+            people,
             complete: ListingCompleteness {
                 pull_requests: pull_requests_complete,
                 review_comments: review_comments_complete,
@@ -1677,7 +2100,7 @@ impl GithubClient {
             pull_requests: pull_records,
             review_comments: review_comments
                 .into_iter()
-                .map(|c| review_comment_record(repo_id, c))
+                .filter_map(|c| review_comment_record(repo_id, c))
                 .collect(),
             reviews,
             pull_request_files,
@@ -1714,6 +2137,7 @@ impl GithubClient {
             )
             .await?;
 
+        let people = derive_commit_people(repo_id, &commits, &commit_comments);
         let mut commit_records: Vec<CommitRecord> = commits
             .into_iter()
             .map(|c| commit_record(repo_id, c))
@@ -1729,6 +2153,7 @@ impl GithubClient {
             .await?;
 
         Ok(CommitFamily {
+            people,
             complete: ListingCompleteness {
                 commits: commits_complete,
                 commit_comments: commit_comments_complete,
@@ -1822,20 +2247,6 @@ impl GithubClient {
             family.tags = tags.into_iter().map(|t| tag_record(repo_id, t)).collect();
         }
 
-        if options.scope.objects.contributors {
-            let (contributors, contributors_complete): (Vec<GhContributor>, bool) = self
-                .get_json_all(
-                    &format!("/repos/{owner}/{name}/contributors?per_page={FIRST_PAGE_SIZE}"),
-                    options,
-                )
-                .await?;
-            family.complete.contributors = contributors_complete;
-            family.contributors = contributors
-                .into_iter()
-                .map(|c| contributor_record(repo_id, c))
-                .collect();
-        }
-
         Ok(family)
     }
 
@@ -1901,6 +2312,7 @@ impl GithubClient {
         let mut pull_request_files: Vec<PullRequestFileRecord> = Vec::new();
         let mut review_threads: Vec<ReviewThreadRecord> = Vec::new();
         let mut pull_request_commits: Vec<PullRequestCommitRecord> = Vec::new();
+        let mut reviewers = DerivedContributors::default();
         for pull in pull_records.iter_mut().take(PER_PULL_SYNC_CAP) {
             let (page, _): (Vec<GhReview>, bool) = self
                 .get_json_all(
@@ -1911,6 +2323,14 @@ impl GithubClient {
                     options,
                 )
                 .await?;
+            for review in &page {
+                reviewers.track(
+                    repo_id,
+                    review.user.as_ref(),
+                    roles::REVIEWER,
+                    review.submitted_at.as_deref(),
+                );
+            }
             reviews.extend(
                 page.into_iter()
                     .map(|r| review_record(repo_id, pull.number, r)),
@@ -1925,8 +2345,14 @@ impl GithubClient {
                     options,
                 )
                 .await?;
-            pull.lines_added = files.iter().map(|f| f.additions).sum();
-            pull.lines_removed = files.iter().map(|f| f.deletions).sum();
+            // Only when the payload did not carry the totals: a full file
+            // walk is the fallback, not the source of truth.
+            if pull.lines_added == 0 {
+                pull.lines_added = files.iter().map(|f| f.additions).sum();
+            }
+            if pull.lines_removed == 0 {
+                pull.lines_removed = files.iter().map(|f| f.deletions).sum();
+            }
             pull_request_files.extend(
                 files
                     .into_iter()
@@ -1985,6 +2411,7 @@ impl GithubClient {
             pull_request_files,
             review_threads,
             pull_request_commits,
+            reviewers,
         })
     }
 }
@@ -2046,7 +2473,14 @@ impl GithubPort for GithubClient {
             releases: meta.complete.releases,
             branches: meta.complete.branches,
             tags: meta.complete.tags,
-            contributors: meta.complete.contributors,
+            // Derived, so exactly as complete as the listings it was read
+            // out of.
+            contributors: issues.complete.issues
+                && issues.complete.comments
+                && pulls.complete.pull_requests
+                && pulls.complete.review_comments
+                && commits.complete.commits
+                && commits.complete.commit_comments,
             issue_events: issues.complete.issue_events,
             commit_comments: commits.complete.commit_comments,
             deployments: actions.complete.deployments,
@@ -2065,7 +2499,12 @@ impl GithubPort for GithubClient {
             milestones: meta.milestones,
             releases: meta.releases,
             branches: meta.branches,
-            contributors: meta.contributors,
+            contributors: {
+                let mut people = issues.people;
+                people.absorb(pulls.people);
+                people.absorb(commits.people);
+                people.into_records()
+            },
             workflow_runs: actions.workflow_runs,
             pull_request_files: pulls.pull_request_files,
             tags: meta.tags,

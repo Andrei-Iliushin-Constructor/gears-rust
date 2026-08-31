@@ -62,9 +62,8 @@ type ConcreteService = Service<
     SeaOrmRepoSyncStatusRepository,
 >;
 
-// The macro requires a literal, so the name cannot reference
-// `service::GEAR_NAME` directly; `gear_name_matches_the_domain_constant`
-// below pins the two together.
+// This attribute is the one place the gear's name is written:
+// `service::GEAR_NAME` aliases the `MODULE_NAME` const it generates.
 #[toolkit::gear(
     name = "github-mirror",
     deps = [authz_resolver],
@@ -379,17 +378,9 @@ mod tests {
     }
 
     #[test]
-    fn gear_name_matches_the_domain_constant() {
-        assert_eq!(
-            GithubMirrorGear::MODULE_NAME,
-            crate::domain::service::GEAR_NAME
-        );
-    }
-
-    #[test]
     fn gear_provides_all_migrations() {
         use toolkit::contracts::DatabaseCapability;
         let gear = GithubMirrorGear::default();
-        assert_eq!(gear.migrations().len(), 38);
+        assert_eq!(gear.migrations().len(), 45);
     }
 }

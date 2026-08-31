@@ -16,6 +16,7 @@ impl From<repositories::Model> for Repo {
     fn from(m: repositories::Model) -> Self {
         Self {
             id: m.id,
+            node_id: m.node_id,
             owner: m.owner,
             name: m.name,
             full_name: m.full_name,
@@ -34,6 +35,7 @@ impl From<issues::Model> for Issue {
     fn from(m: issues::Model) -> Self {
         Self {
             id: m.id,
+            node_id: m.node_id,
             repo_id: m.repo_id,
             number: m.number,
             title: m.title,
@@ -44,6 +46,12 @@ impl From<issues::Model> for Issue {
             updated_at: m.updated_at,
             closed_at: m.closed_at,
             html_url: m.html_url,
+            author_login: m.author_login,
+            author_json: m.author_json,
+            assignees_json: m.assignees_json,
+            labels_json: m.labels_json,
+            comments_count: m.comments_count,
+            locked: m.locked,
         }
     }
 }
@@ -52,6 +60,7 @@ impl From<pull_requests::Model> for PullRequest {
     fn from(m: pull_requests::Model) -> Self {
         Self {
             id: m.id,
+            node_id: m.node_id,
             repo_id: m.repo_id,
             number: m.number,
             title: m.title,
@@ -70,6 +79,13 @@ impl From<pull_requests::Model> for PullRequest {
             html_url: m.html_url,
             head_ref: m.head_ref,
             base_ref: m.base_ref,
+            author_login: m.author_login,
+            author_json: m.author_json,
+            assignees_json: m.assignees_json,
+            labels_json: m.labels_json,
+            comments_count: m.comments_count,
+            locked: m.locked,
+            requested_reviewers_json: m.requested_reviewers_json,
         }
     }
 }
@@ -122,6 +138,14 @@ impl From<review_comments::Model> for ReviewComment {
             html_url: m.html_url,
             position: m.position,
             original_position: m.original_position,
+            line: m.line,
+            original_line: m.original_line,
+            start_line: m.start_line,
+            original_start_line: m.original_start_line,
+            side: m.side,
+            start_side: m.start_side,
+            subject_type: m.subject_type,
+            pull_request_review_id: m.pull_request_review_id,
         }
     }
 }
@@ -212,8 +236,19 @@ impl From<contributors::Model> for Contributor {
             user_id: m.user_id,
             // '' is the NOT NULL column's stand-in for "no login".
             login: (!m.login.is_empty()).then_some(m.login),
-            contributions: m.contributions,
-            user_type: m.user_type,
+            roles: m
+                .roles
+                .as_deref()
+                .map(|raw| {
+                    raw.split(',')
+                        .filter(|role| !role.is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            first_seen_at: m.first_seen_at,
+            last_seen_at: m.last_seen_at,
+            account_type: m.account_type,
             avatar_url: m.avatar_url,
             html_url: m.html_url,
         }
@@ -253,6 +288,7 @@ impl From<pull_request_files::Model> for PullRequestFile {
             deletions: m.deletions,
             changes: m.changes,
             previous_filename: m.previous_filename,
+            patch: m.patch,
             sha: m.sha,
         }
     }

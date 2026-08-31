@@ -10,6 +10,7 @@ use github_mirror_sdk::{
     PullRequest, PullRequestCommit, PullRequestFile, Release, Repo, Review, ReviewComment,
     ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
+use sea_orm::prelude::DateTimeUtc;
 use tokio::sync::{Mutex, mpsc};
 use toolkit_macros::domain_model;
 use toolkit_odata::{CursorV1, ODataQuery, Page, PageInfo, SortDir};
@@ -25,27 +26,46 @@ use super::repo::{
     CommitStatusRepository, ContributorRecord, ContributorRepository, DeploymentRecord,
     DeploymentRepository, IssueEventRecord, IssueEventRepository, IssueReactionRecord,
     IssueReactionRepository, IssueRecord, IssueRepository, IssueTimelineEventRecord,
-    IssueTimelineRepository, LabelRecord, LabelRepository, MilestoneRecord, MilestoneRepository,
-    PullRequestCommitRecord, PullRequestCommitRepository, PullRequestFileRecord,
-    PullRequestFileRepository, PullRequestRecord, PullRequestRepository, ReleaseRecord,
-    ReleaseRepository, RepoRecord, RepoRepository, RepoSyncStatusRecord, RepoSyncStatusRepository,
-    ReviewCommentRecord, ReviewCommentRepository, ReviewRecord, ReviewRepository,
-    ReviewThreadRecord, ReviewThreadRepository, SyncSessionRecord, SyncSessionRepository,
-    TagRecord, TagRepository, WorkflowJobRecord, WorkflowJobRepository, WorkflowRunRecord,
-    WorkflowRunRepository,
+    IssueTimelineRepository, LabelRecord, LabelRepository, ListingFilter, MilestoneRecord,
+    MilestoneRepository, PullRequestCommitRecord, PullRequestCommitRepository,
+    PullRequestFileRecord, PullRequestFileRepository, PullRequestRecord, PullRequestRepository,
+    ReleaseRecord, ReleaseRepository, RepoRecord, RepoRepository, RepoSyncStatusRecord,
+    RepoSyncStatusRepository, ReviewCommentRecord, ReviewCommentRepository, ReviewRecord,
+    ReviewRepository, ReviewThreadRecord, ReviewThreadRepository, SyncSessionRecord,
+    SyncSessionRepository, TagRecord, TagRepository, WorkflowJobRecord, WorkflowJobRepository,
+    WorkflowRunRecord, WorkflowRunRepository,
 };
 use super::scope::ScopeConfig;
 
-pub const GEAR_NAME: &str = "github-mirror";
+/// The gear's name, taken from the `#[toolkit::gear]` attribute so the
+/// literal exists in exactly one place.
+pub const GEAR_NAME: &str = crate::gear::GithubMirrorGear::MODULE_NAME;
 
-/// The current instant as RFC3339 text, matching how every other timestamp
-/// in the mirror is stored.
+/// How many stored contributors one merge reads back. A repository with more
+/// distinct people than this loses nothing already written — the merge simply
+/// cannot widen the rows it did not see.
+const CONTRIBUTOR_MERGE_LIMIT: u64 = 10_000;
+
+/// The current instant as RFC3339 text.
+///
+/// Session and run-status rows still store their timestamps as text (their
+/// tables predate the typed columns), so they format here; `extracted_at` and
+/// the contributor window are real timestamps and never pass through this.
 fn now_rfc3339() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default()
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// The earlier of two optional instants, ignoring a missing one.
+///
+/// `flatten()` first, because `Option`'s own ordering puts `None` below every
+/// `Some`: plain `a.min(b)` would answer `None` whenever one side is missing.
+/// The mirror image needs no helper — `Option::max` already skips `None` for
+/// the same reason, which is why only this direction is written out.
+fn earliest(a: Option<DateTimeUtc>, b: Option<DateTimeUtc>) -> Option<DateTimeUtc> {
+    [a, b].into_iter().flatten().min()
+}
+
+/// The current instant as RFC3339 text, matching how every other timestamp
 const DEFAULT_LIST_LIMIT: u64 = 50;
 
 pub(crate) type DbProvider = toolkit_db::DBProvider<toolkit_db::DbError>;
@@ -919,12 +939,61 @@ impl<
     /// # Errors
     /// `DomainError::NotFound` when the repository is not mirrored for this
     /// tenant; `Forbidden`/`Database`/`Internal` as usual.
+    /// `state`: GitHub's filter — `Some("open")`, `Some("closed")`, or `None`
+    /// for every state. GitHub's own default is `open`, applied by the handler.
+    /// How many rows the matching listing has in total, so the `Link`
+    /// header can name its last page.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
+    pub async fn count_issues(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name_arg: &str,
+        filter: ListingFilter<'_>,
+    ) -> Result<u64, DomainError> {
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &ISSUE_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await?;
+
+        let conn = self.db.conn()?;
+        let full_name = format!("{owner}/{name_arg}");
+        let repository = self
+            .repo
+            .find_by_full_name(&conn, &scope, &full_name)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+
+        self.issues
+            .count_by_repo(&conn, &scope, repository.id, filter)
+            .await
+    }
+
+    /// The repository's issues, filtered as GitHub's list endpoint filters.
+    ///
+    /// `filter`: GitHub's list-endpoint filters (state, sort, direction,
+    /// since). The handler applies GitHub's own defaults.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
     pub async fn list_issues(
         &self,
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
         query: &ODataQuery,
+        filter: ListingFilter<'_>,
     ) -> Result<Page<Issue>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -949,7 +1018,7 @@ impl<
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .issues
-            .list_by_repo(&conn, &scope, repository.id, limit)
+            .list_by_repo(&conn, &scope, repository.id, limit, filter)
             .await?;
 
         Ok(Page::new(
@@ -1009,12 +1078,62 @@ impl<
     /// # Errors
     /// `DomainError::NotFound` when the repository is not mirrored for this
     /// tenant; `Forbidden`/`Database`/`Internal` as usual.
+    /// `state`: GitHub's filter — `Some("open")`, `Some("closed")`, or `None`
+    /// for every state. GitHub's own default is `open`, applied by the handler.
+    /// How many rows the matching listing has in total, so the `Link`
+    /// header can name its last page.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
+    pub async fn count_pull_requests(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name_arg: &str,
+        filter: ListingFilter<'_>,
+    ) -> Result<u64, DomainError> {
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &PULL_REQUEST_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await?;
+
+        let conn = self.db.conn()?;
+        let full_name = format!("{owner}/{name_arg}");
+        let repository = self
+            .repo
+            .find_by_full_name(&conn, &scope, &full_name)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+
+        self.pull_requests
+            .count_by_repo(&conn, &scope, repository.id, filter)
+            .await
+    }
+
+    /// The repository's pull requests, filtered as GitHub's list endpoint
+    /// filters.
+    ///
+    /// `filter`: GitHub's list-endpoint filters (state, sort, direction,
+    /// since). The handler applies GitHub's own defaults.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
     pub async fn list_pull_requests(
         &self,
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
         query: &ODataQuery,
+        filter: ListingFilter<'_>,
     ) -> Result<Page<PullRequest>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -1039,7 +1158,7 @@ impl<
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .pull_requests
-            .list_by_repo(&conn, &scope, repository.id, limit)
+            .list_by_repo(&conn, &scope, repository.id, limit, filter)
             .await?;
 
         Ok(Page::new(
@@ -1102,6 +1221,48 @@ impl<
     /// # Errors
     /// `DomainError::NotFound` when the repository is not mirrored for this
     /// tenant; `Forbidden`/`Database`/`Internal` as usual.
+    /// How many rows the matching listing has in total, so the `Link`
+    /// header can name its last page.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
+    pub async fn count_commits(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name_arg: &str,
+    ) -> Result<u64, DomainError> {
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &COMMIT_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await?;
+
+        let conn = self.db.conn()?;
+        let full_name = format!("{owner}/{name_arg}");
+        let repository = self
+            .repo
+            .find_by_full_name(&conn, &scope, &full_name)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+
+        self.commits
+            .count_by_repo(&conn, &scope, repository.id)
+            .await
+    }
+
+    /// The repository's mirrored commits, newest first.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
     pub async fn list_commits(
         &self,
         ctx: &SecurityContext,
@@ -1914,6 +2075,119 @@ impl<
     /// # Errors
     /// `DomainError::NotFound` when the repository is not mirrored for this
     /// tenant; `Forbidden`/`Database`/`Internal` as usual.
+    /// How many workflow runs this repository has, across every page.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
+    pub async fn count_workflow_runs(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name_arg: &str,
+    ) -> Result<u64, DomainError> {
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &WORKFLOW_RUN_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await?;
+
+        let conn = self.db.conn()?;
+        let full_name = format!("{owner}/{name_arg}");
+        let repository = self
+            .repo
+            .find_by_full_name(&conn, &scope, &full_name)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+
+        self.workflow_runs
+            .count_by_repo(&conn, &scope, repository.id)
+            .await
+    }
+
+    /// How many jobs this workflow run has, across every page.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
+    pub async fn count_workflow_jobs(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name_arg: &str,
+        run_id: i64,
+    ) -> Result<u64, DomainError> {
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &WORKFLOW_JOB_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await?;
+
+        let conn = self.db.conn()?;
+        let full_name = format!("{owner}/{name_arg}");
+        let repository = self
+            .repo
+            .find_by_full_name(&conn, &scope, &full_name)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+
+        self.workflow_jobs
+            .count_by_run(&conn, &scope, repository.id, run_id)
+            .await
+    }
+
+    /// How many check runs this commit has, across every page.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
+    pub async fn count_check_runs(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name_arg: &str,
+        head_sha: &str,
+    ) -> Result<u64, DomainError> {
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &CHECK_RUN_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await?;
+
+        let conn = self.db.conn()?;
+        let full_name = format!("{owner}/{name_arg}");
+        let repository = self
+            .repo
+            .find_by_full_name(&conn, &scope, &full_name)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+
+        self.check_runs
+            .count_by_commit(&conn, &scope, repository.id, head_sha)
+            .await
+    }
+
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
     pub async fn list_workflow_runs(
         &self,
         ctx: &SecurityContext,
@@ -3764,6 +4038,49 @@ impl<
         self.db.conn().is_ok()
     }
 
+    /// Fold this sync's derived contributors into the rows already stored.
+    ///
+    /// A derived contributor is only ever evidence of what the sync saw: a
+    /// run narrowed to issues cannot know that someone also reviewed pull
+    /// requests last month. So roles union and the seen-at window widens — a
+    /// person is never demoted by a narrower run.
+    async fn merge_known_contributors<DBR: toolkit_db::secure::DBRunner>(
+        &self,
+        conn: &DBR,
+        scope: &AccessScope,
+        repo_id: i64,
+        derived: Vec<ContributorRecord>,
+    ) -> Result<Vec<ContributorRecord>, DomainError> {
+        if derived.is_empty() {
+            return Ok(derived);
+        }
+
+        let known = self
+            .contributors
+            .list_by_repo(conn, scope, repo_id, CONTRIBUTOR_MERGE_LIMIT)
+            .await?;
+        let known: std::collections::HashMap<i64, Contributor> =
+            known.into_iter().map(|c| (c.user_id, c)).collect();
+
+        Ok(derived
+            .into_iter()
+            .map(|mut record| {
+                let Some(stored) = known.get(&record.user_id) else {
+                    return record;
+                };
+                for role in &stored.roles {
+                    if !record.roles.iter().any(|held| held == role) {
+                        record.roles.push(role.clone());
+                    }
+                }
+                record.roles.sort();
+                record.first_seen_at = earliest(record.first_seen_at, stored.first_seen_at);
+                record.last_seen_at = record.last_seen_at.max(stored.last_seen_at);
+                record
+            })
+            .collect())
+    }
+
     /// Hard-delete rows this sync did not see, family by family, but only
     /// where the listing was walked to its final page: absence from a
     /// truncated listing proves nothing (PRD 5.2's "complete and verifiable
@@ -3778,7 +4095,7 @@ impl<
         scope: &AccessScope,
         complete: ListingCompleteness,
         repo_id: i64,
-        watermark: &str,
+        watermark: DateTimeUtc,
     ) -> Result<u64, DomainError> {
         let mut deleted = 0;
         if complete.issues {
@@ -3901,7 +4218,7 @@ impl<
         // Captured before any row is written: every upsert in this sync stamps
         // `extracted_at` with a later instant, so "extracted_at < watermark"
         // identifies exactly the rows this sync did not touch.
-        let watermark = now_rfc3339();
+        let watermark = chrono::Utc::now();
         let fetched = self.github.fetch_repository(owner, name, options).await?;
         let complete = fetched.complete;
         progress.fetched();
@@ -3967,14 +4284,15 @@ impl<
                     let branches_synced =
                         sync_table!(service, tx, &scope, tenant_id, branches, fetched.branches);
 
-                    let contributors_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        contributors,
-                        fetched.contributors
-                    );
+                    // Contributors are derived from whatever this sync
+                    // happened to fetch, so writing them straight would
+                    // narrow the set every time the scope narrows. Merge
+                    // with what earlier syncs already learned instead.
+                    let contributors = service
+                        .merge_known_contributors(tx, &scope, repository.id, fetched.contributors)
+                        .await?;
+                    let contributors_synced =
+                        sync_table!(service, tx, &scope, tenant_id, contributors, contributors);
 
                     let workflow_runs_synced = sync_table!(
                         service,
@@ -4086,6 +4404,20 @@ impl<
                         check_runs,
                         fetched.check_runs
                     );
+                    // Rows are keyed by position, so a shorter timeline would
+                    // leave the old tail behind: clear each fetched issue
+                    // before rewriting it.
+                    let refetched: Vec<i64> = fetched
+                        .issue_timeline
+                        .iter()
+                        .map(|event| event.issue_number)
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .collect();
+                    service
+                        .issue_timeline
+                        .delete_by_issues(tx, &scope, repository.id, &refetched)
+                        .await?;
                     let issue_timeline_synced = sync_table!(
                         service,
                         tx,
@@ -4095,7 +4427,7 @@ impl<
                         fetched.issue_timeline
                     );
                     let stale_rows_deleted = service
-                        .reconcile_stale(tx, &scope, complete, repository.id, &watermark)
+                        .reconcile_stale(tx, &scope, complete, repository.id, watermark)
                         .await?;
                     if stale_rows_deleted > 0 {
                         tracing::info!(

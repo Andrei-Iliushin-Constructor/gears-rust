@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS gm_commits (
     tenant_id VARCHAR(36) NOT NULL,
     repo_id BIGINT NOT NULL,
     sha VARCHAR(64) NOT NULL,
-    message TEXT NOT NULL,
+    message MEDIUMTEXT NOT NULL,
     author_login VARCHAR(255),
     committer_login VARCHAR(255),
     authored_at VARCHAR(64),

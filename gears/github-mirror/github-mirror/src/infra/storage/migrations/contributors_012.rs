@@ -18,8 +18,7 @@ CREATE TABLE IF NOT EXISTS gm_contributors (
     repo_id BIGINT NOT NULL,
     user_id BIGINT NOT NULL,
     login VARCHAR(255) NOT NULL,
-    contributions BIGINT NOT NULL,
-    user_type VARCHAR(32) NOT NULL,
+    account_type VARCHAR(32) NOT NULL,
     avatar_url VARCHAR(1024),
     html_url VARCHAR(1024),
     PRIMARY KEY (tenant_id, repo_id, user_id)
@@ -33,8 +32,7 @@ CREATE TABLE IF NOT EXISTS gm_contributors (
     repo_id BIGINT NOT NULL,
     user_id BIGINT NOT NULL,
     login VARCHAR(255) NOT NULL,
-    contributions BIGINT NOT NULL,
-    user_type VARCHAR(32) NOT NULL,
+    account_type VARCHAR(32) NOT NULL,
     avatar_url VARCHAR(1024),
     html_url VARCHAR(1024),
     PRIMARY KEY (tenant_id, repo_id, user_id)
@@ -48,8 +46,7 @@ CREATE TABLE IF NOT EXISTS gm_contributors (
     repo_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
     login TEXT NOT NULL,
-    contributions INTEGER NOT NULL,
-    user_type TEXT NOT NULL,
+    account_type TEXT NOT NULL,
     avatar_url TEXT,
     html_url TEXT,
     PRIMARY KEY (tenant_id, repo_id, user_id)

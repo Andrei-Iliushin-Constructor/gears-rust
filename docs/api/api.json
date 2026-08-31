@@ -67,8 +67,47 @@
       "ActorDto": {
         "description": "GitHub `{ \"login\": ... }` actor object.",
         "properties": {
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "html_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "GitHub's numeric user id, when the mirror stored one — a login can be\nrenamed and later reused, the id cannot.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "login": {
             "type": "string"
+          },
+          "node_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "site_admin": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "type": {
+            "description": "`User`, `Bot` or `Organization`, under GitHub's own field name.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -2624,9 +2663,12 @@
               "null"
             ]
           },
-          "contributions": {
-            "format": "int64",
-            "type": "integer"
+          "first_seen_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "html_url": {
             "type": [
@@ -2638,6 +2680,13 @@
             "format": "int64",
             "type": "integer"
           },
+          "last_seen_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "login": {
             "description": "Omitted for anonymous contributors, matching GitHub's shape.",
             "type": [
@@ -2645,14 +2694,20 @@
               "null"
             ]
           },
+          "roles": {
+            "description": "Beyond GitHub's shape: the capacities this person was seen in, and\nthe window they were seen across.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "type": {
             "type": "string"
           }
         },
         "required": [
           "id",
-          "type",
-          "contributions"
+          "type"
         ],
         "type": "object"
       },
@@ -6501,6 +6556,12 @@
       "IssueDto": {
         "description": "GitHub-shaped issue.",
         "properties": {
+          "assignees": {
+            "items": {
+              "$ref": "#/components/schemas/ActorDto"
+            },
+            "type": "array"
+          },
           "body": {
             "type": [
               "string",
@@ -6510,6 +6571,13 @@
           "closed_at": {
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "comments": {
+            "format": "int64",
+            "type": [
+              "integer",
               "null"
             ]
           },
@@ -6525,6 +6593,25 @@
           "id": {
             "format": "int64",
             "type": "integer"
+          },
+          "labels": {
+            "items": {
+              "$ref": "#/components/schemas/LabelRefDto"
+            },
+            "type": "array"
+          },
+          "locked": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "node_id": {
+            "description": "GitHub's GraphQL global id, as GitHub itself returns it.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "number": {
             "format": "int64",
@@ -6548,6 +6635,17 @@
           },
           "updated_at": {
             "type": "string"
+          },
+          "user": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ActorDto",
+                "description": "Who opened it, who it is assigned to, and the labels it carries —\nthe fields a GitHub client renders a list row from."
+              }
+            ]
           }
         },
         "required": [
@@ -6811,6 +6909,52 @@
           "name",
           "color",
           "default"
+        ],
+        "type": "object"
+      },
+      "LabelRefDto": {
+        "description": "A label as GitHub embeds it in an issue or pull request.",
+        "properties": {
+          "color": {
+            "description": "The chip colour a client paints the label with.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "default": {
+            "description": "Whether GitHub created the label with the repository.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "GitHub's label id; absent on rows mirrored before it was stored.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "node_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
         ],
         "type": "object"
       },
@@ -11994,6 +12138,12 @@
             "format": "int64",
             "type": "integer"
           },
+          "assignees": {
+            "items": {
+              "$ref": "#/components/schemas/ActorDto"
+            },
+            "type": "array"
+          },
           "base": {
             "$ref": "#/components/schemas/PullRefDto"
           },
@@ -12006,6 +12156,13 @@
           "closed_at": {
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "comments": {
+            "format": "int64",
+            "type": [
+              "integer",
               "null"
             ]
           },
@@ -12032,6 +12189,18 @@
             "format": "int64",
             "type": "integer"
           },
+          "labels": {
+            "items": {
+              "$ref": "#/components/schemas/LabelRefDto"
+            },
+            "type": "array"
+          },
+          "locked": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "merged": {
             "type": "boolean"
           },
@@ -12041,9 +12210,22 @@
               "null"
             ]
           },
+          "node_id": {
+            "description": "GitHub's GraphQL global id, as GitHub itself returns it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "number": {
             "format": "int64",
             "type": "integer"
+          },
+          "requested_reviewers": {
+            "items": {
+              "$ref": "#/components/schemas/ActorDto"
+            },
+            "type": "array"
           },
           "state": {
             "type": "string"
@@ -12053,6 +12235,17 @@
           },
           "updated_at": {
             "type": "string"
+          },
+          "user": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ActorDto",
+                "description": "Who opened it, who it is assigned to, who was asked to review, and\nthe labels it carries."
+              }
+            ]
           }
         },
         "required": [
@@ -12088,6 +12281,13 @@
           },
           "filename": {
             "type": "string"
+          },
+          "patch": {
+            "description": "The file's unified diff, as GitHub returns it on this endpoint.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "previous_filename": {
             "type": [
@@ -13582,6 +13782,13 @@
           "name": {
             "type": "string"
           },
+          "node_id": {
+            "description": "GitHub's GraphQL global id, as GitHub itself returns it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "owner": {
             "$ref": "#/components/schemas/ActorDto"
           },
@@ -14553,8 +14760,30 @@
               "null"
             ]
           },
+          "line": {
+            "description": "GitHub's current diff anchors, which its own UI positions inline\ncomments by; `position` above is the deprecated form.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "original_line": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "original_position": {
             "description": "Line position at comment-creation time — the stable anchor across\nlater force-pushes.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "original_start_line": {
             "format": "int64",
             "type": [
               "integer",
@@ -14572,6 +14801,39 @@
             "format": "int64",
             "type": [
               "integer",
+              "null"
+            ]
+          },
+          "pull_request_review_id": {
+            "description": "The review this inline comment belongs to, as GitHub reports it.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "side": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start_line": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "start_side": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject_type": {
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -45806,6 +46068,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Filter by state: `open` (GitHub's default when omitted), `closed`, or `all`",
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -46770,6 +47041,15 @@
             "description": "The number of results per page (max 100)",
             "in": "query",
             "name": "per_page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by state: `open` (GitHub's default when omitted), `closed`, or `all`",
+            "in": "query",
+            "name": "state",
             "required": false,
             "schema": {
               "type": "string"

@@ -25,6 +25,8 @@ pub struct MirrorStatus {
 pub struct Repo {
     /// GitHub's numeric repository id.
     pub id: i64,
+    /// GitHub's GraphQL global id for this entity (DESIGN's `node_id`).
+    pub node_id: Option<String>,
     pub owner: String,
     pub name: String,
     pub full_name: String,
@@ -60,6 +62,8 @@ impl Repo {
 pub struct Issue {
     /// GitHub's numeric issue id.
     pub id: i64,
+    /// GitHub's GraphQL global id for this entity (DESIGN's `node_id`).
+    pub node_id: Option<String>,
     /// Owning repository's GitHub id.
     pub repo_id: i64,
     pub number: i64,
@@ -71,6 +75,17 @@ pub struct Issue {
     pub updated_at: String,
     pub closed_at: Option<String>,
     pub html_url: Option<String>,
+    /// Who opened it; GitHub's `user`.
+    pub author_login: Option<String>,
+    /// The author as GitHub's own `user` object, JSON; `author_login` above
+    /// is the same person as an indexable identity.
+    pub author_json: Option<String>,
+    /// Assignee logins as a JSON array, and the labels it carries.
+    pub assignees_json: Option<String>,
+    pub labels_json: Option<String>,
+    /// How many comments GitHub reports on it.
+    pub comments_count: Option<i64>,
+    pub locked: Option<bool>,
 }
 
 /// A mirrored GitHub pull request (read-slice shape).
@@ -79,6 +94,8 @@ pub struct Issue {
 pub struct PullRequest {
     /// GitHub's numeric pull-request id.
     pub id: i64,
+    /// GitHub's GraphQL global id for this entity (DESIGN's `node_id`).
+    pub node_id: Option<String>,
     /// Owning repository's GitHub id.
     pub repo_id: i64,
     pub number: i64,
@@ -99,6 +116,19 @@ pub struct PullRequest {
     /// Branch names of the pull request's head and base.
     pub head_ref: Option<String>,
     pub base_ref: Option<String>,
+    /// Who opened it; GitHub's `user`.
+    pub author_login: Option<String>,
+    /// The author as GitHub's own `user` object, JSON; `author_login` above
+    /// is the same person as an indexable identity.
+    pub author_json: Option<String>,
+    /// Assignee logins as a JSON array, and the labels it carries.
+    pub assignees_json: Option<String>,
+    pub labels_json: Option<String>,
+    /// How many comments GitHub reports on it.
+    pub comments_count: Option<i64>,
+    pub locked: Option<bool>,
+    /// Reviewers requested on the pull request, as a JSON array.
+    pub requested_reviewers_json: Option<String>,
 }
 
 /// A mirrored GitHub commit (read-slice shape).
@@ -198,6 +228,17 @@ pub struct ReviewComment {
     /// Line position at comment-creation time — GitHub's own stable anchor
     /// for resolving where a comment pointed before later force-pushes.
     pub original_position: Option<i64>,
+    /// GitHub's current diff anchors, replacing `position`: the line and
+    /// side a comment sits on, plus the start of a multi-line selection.
+    pub line: Option<i64>,
+    pub original_line: Option<i64>,
+    pub start_line: Option<i64>,
+    pub original_start_line: Option<i64>,
+    pub side: Option<String>,
+    pub start_side: Option<String>,
+    pub subject_type: Option<String>,
+    /// The review this inline comment belongs to, when it belongs to one.
+    pub pull_request_review_id: Option<i64>,
 }
 
 /// A mirrored GitHub pull-request review (the verdict object).
@@ -306,11 +347,15 @@ pub struct Contributor {
     pub user_id: i64,
     /// `None` for anonymous contributors.
     pub login: Option<String>,
-    pub contributions: i64,
     /// User, Bot, or Organization.
-    pub user_type: String,
+    pub account_type: String,
     pub avatar_url: Option<String>,
     pub html_url: Option<String>,
+    /// PRD 5.2's association roles for this person in this repository.
+    pub roles: Vec<String>,
+    /// When this person was first and last seen in mirrored data.
+    pub first_seen_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// A mirrored GitHub Actions workflow run (read-slice shape).
@@ -360,6 +405,9 @@ pub struct PullRequestFile {
     pub previous_filename: Option<String>,
     /// Blob SHA of the file version in this pull request.
     pub sha: Option<String>,
+    /// The file's unified diff as GitHub returned it; `None` when GitHub
+    /// omitted it, which it does for very large diffs.
+    pub patch: Option<String>,
 }
 
 /// A mirrored GitHub tag (read-slice shape).

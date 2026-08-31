@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS gm_workflow_jobs (
     started_at VARCHAR(64),
     completed_at VARCHAR(64),
     html_url VARCHAR(1024),
-    steps_json TEXT,
+    steps_json MEDIUMTEXT,
     PRIMARY KEY (tenant_id, id),
     KEY idx_gm_workflow_jobs_tenant_repo_run (tenant_id, repo_id, run_id)
 );

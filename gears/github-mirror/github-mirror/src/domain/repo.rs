@@ -5,6 +5,7 @@ use github_mirror_sdk::{
     PullRequest, PullRequestCommit, PullRequestFile, Release, Repo, Review, ReviewComment,
     ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
+use sea_orm::prelude::DateTimeUtc;
 use toolkit_db::secure::DBRunner;
 use toolkit_macros::domain_model;
 use toolkit_security::AccessScope;
@@ -17,6 +18,8 @@ use super::error::DomainError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoRecord {
     pub id: i64,
+    /// GitHub's GraphQL global id for this entity (DESIGN's `node_id`).
+    pub node_id: Option<String>,
     pub owner: String,
     pub name: String,
     pub full_name: String,
@@ -61,6 +64,8 @@ pub trait RepoRepository: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueRecord {
     pub id: i64,
+    /// GitHub's GraphQL global id for this entity (DESIGN's `node_id`).
+    pub node_id: Option<String>,
     pub repo_id: i64,
     pub number: i64,
     pub title: String,
@@ -71,10 +76,85 @@ pub struct IssueRecord {
     pub updated_at: String,
     pub closed_at: Option<String>,
     pub html_url: Option<String>,
+    /// Who opened it; GitHub's `user`.
+    pub author_login: Option<String>,
+    /// The author as GitHub's own `user` object, JSON; `author_login` above
+    /// is the same person as an indexable identity.
+    pub author_json: Option<String>,
+    /// Assignee logins as a JSON array, and the labels it carries.
+    pub assignees_json: Option<String>,
+    pub labels_json: Option<String>,
+    /// How many comments GitHub reports on it.
+    pub comments_count: Option<i64>,
+    pub locked: Option<bool>,
+}
+
+/// GitHub's list-endpoint filters for issues and pull requests.
+///
+/// `sort`/`direction` are honored; the filters GitHub also accepts but the
+/// mirror does not yet apply (`labels`, `assignee`, `creator`, `mentioned`,
+/// `milestone`) are recorded as unsupported in PRD 4.3 rather than silently
+/// ignored here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListingFilter<'a> {
+    /// `open`/`closed`, or `None` for every state.
+    pub state: Option<&'a str>,
+    /// `created` (GitHub's default) or `updated`.
+    pub sort: ListingSort,
+    /// Ascending or descending; GitHub defaults to descending.
+    pub direction: ListingDirection,
+    /// Only rows updated at or after this RFC3339 instant.
+    pub since: Option<&'a str>,
+}
+
+/// The sort keys GitHub offers that the mirror stores a column for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ListingSort {
+    #[default]
+    Created,
+    Updated,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ListingDirection {
+    #[default]
+    Desc,
+    Asc,
+}
+
+impl ListingSort {
+    /// GitHub's `sort` value; anything else falls back to its default.
+    #[must_use]
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw {
+            Some("updated") => Self::Updated,
+            _ => Self::Created,
+        }
+    }
+}
+
+impl ListingDirection {
+    /// GitHub's `direction` value; anything else falls back to its default.
+    #[must_use]
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw {
+            Some("asc") => Self::Asc,
+            _ => Self::Desc,
+        }
+    }
 }
 
 #[async_trait]
 pub trait IssueRepository: Send + Sync {
+    /// How many issues match `filter` in total, for the `Link` header's
+    /// `rel="last"` — it spans every page, so it cannot be read off one.
+    async fn count_by_repo<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        filter: ListingFilter<'_>,
+    ) -> Result<u64, DomainError>;
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,
@@ -83,12 +163,14 @@ pub trait IssueRepository: Send + Sync {
         record: IssueRecord,
     ) -> Result<Issue, DomainError>;
 
+    /// `state`: GitHub's `open`/`closed` filter, or `None` for every state.
     async fn list_by_repo<C: DBRunner>(
         &self,
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
+        filter: ListingFilter<'_>,
     ) -> Result<Vec<Issue>, DomainError>;
 
     async fn find_by_number<C: DBRunner>(
@@ -107,7 +189,7 @@ pub trait IssueRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -116,6 +198,8 @@ pub trait IssueRepository: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequestRecord {
     pub id: i64,
+    /// GitHub's GraphQL global id for this entity (DESIGN's `node_id`).
+    pub node_id: Option<String>,
     pub repo_id: i64,
     pub number: i64,
     pub title: String,
@@ -135,10 +219,31 @@ pub struct PullRequestRecord {
     /// Branch names of the pull request's head and base.
     pub head_ref: Option<String>,
     pub base_ref: Option<String>,
+    /// Who opened it; GitHub's `user`.
+    pub author_login: Option<String>,
+    /// The author as GitHub's own `user` object, JSON; `author_login` above
+    /// is the same person as an indexable identity.
+    pub author_json: Option<String>,
+    /// Assignee logins as a JSON array, and the labels it carries.
+    pub assignees_json: Option<String>,
+    pub labels_json: Option<String>,
+    /// How many comments GitHub reports on it.
+    pub comments_count: Option<i64>,
+    pub locked: Option<bool>,
+    /// Reviewers requested on the pull request, as a JSON array.
+    pub requested_reviewers_json: Option<String>,
 }
 
 #[async_trait]
 pub trait PullRequestRepository: Send + Sync {
+    /// How many pull requests match `filter` in total.
+    async fn count_by_repo<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        filter: ListingFilter<'_>,
+    ) -> Result<u64, DomainError>;
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,
@@ -147,12 +252,15 @@ pub trait PullRequestRepository: Send + Sync {
         record: PullRequestRecord,
     ) -> Result<PullRequest, DomainError>;
 
+    /// `state`: GitHub's `open`/`closed` filter, or `None` for every state.
+    /// A merged pull request is `closed` upstream, so no extra case is needed.
     async fn list_by_repo<C: DBRunner>(
         &self,
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
+        filter: ListingFilter<'_>,
     ) -> Result<Vec<PullRequest>, DomainError>;
 
     async fn find_by_number<C: DBRunner>(
@@ -171,7 +279,7 @@ pub trait PullRequestRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -192,6 +300,13 @@ pub struct CommitRecord {
 
 #[async_trait]
 pub trait CommitRepository: Send + Sync {
+    /// How many commits this repository has in total.
+    async fn count_by_repo<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+    ) -> Result<u64, DomainError>;
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,
@@ -224,7 +339,7 @@ pub trait CommitRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -269,7 +384,7 @@ pub trait CommentRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -295,6 +410,17 @@ pub struct ReviewCommentRecord {
     /// Line position at comment-creation time — GitHub's own stable anchor
     /// for resolving where a comment pointed before later force-pushes.
     pub original_position: Option<i64>,
+    /// GitHub's current diff anchors, replacing `position`: the line and
+    /// side a comment sits on, plus the start of a multi-line selection.
+    pub line: Option<i64>,
+    pub original_line: Option<i64>,
+    pub start_line: Option<i64>,
+    pub original_start_line: Option<i64>,
+    pub side: Option<String>,
+    pub start_side: Option<String>,
+    pub subject_type: Option<String>,
+    /// The review this inline comment belongs to, when it belongs to one.
+    pub pull_request_review_id: Option<i64>,
 }
 
 #[async_trait]
@@ -324,7 +450,7 @@ pub trait ReviewCommentRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -401,7 +527,7 @@ pub trait LabelRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -450,7 +576,7 @@ pub trait MilestoneRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -500,7 +626,7 @@ pub trait ReleaseRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -540,7 +666,7 @@ pub trait BranchRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -552,10 +678,16 @@ pub struct ContributorRecord {
     pub user_id: i64,
     /// `None` for anonymous contributors.
     pub login: Option<String>,
-    pub contributions: i64,
-    pub user_type: String,
+    pub account_type: String,
     pub avatar_url: Option<String>,
     pub html_url: Option<String>,
+    /// PRD 5.2's association roles: `author`, `assignee`, `reviewer`,
+    /// `commenter`, `committer`. Sorted and deduplicated; unioned across
+    /// syncs, never replaced.
+    pub roles: Vec<String>,
+    /// When this person was first and last seen in mirrored data.
+    pub first_seen_at: Option<DateTimeUtc>,
+    pub last_seen_at: Option<DateTimeUtc>,
 }
 
 #[async_trait]
@@ -600,6 +732,14 @@ pub struct WorkflowRunRecord {
 
 #[async_trait]
 pub trait WorkflowRunRepository: Send + Sync {
+    /// How many runs this repository has in total, for GitHub's
+    /// `total_count`, which spans every page rather than the current one.
+    async fn count_by_repo<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+    ) -> Result<u64, DomainError>;
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,
@@ -630,6 +770,9 @@ pub struct PullRequestFileRecord {
     pub changes: i64,
     pub previous_filename: Option<String>,
     pub sha: Option<String>,
+    /// The file's unified diff as GitHub returned it; `None` when GitHub
+    /// omitted it, which it does for very large diffs.
+    pub patch: Option<String>,
 }
 
 #[async_trait]
@@ -687,7 +830,7 @@ pub trait TagRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: &str,
+        extracted_before: DateTimeUtc,
     ) -> Result<u64, DomainError>;
 }
 
@@ -959,6 +1102,14 @@ pub struct WorkflowJobRecord {
 
 #[async_trait]
 pub trait WorkflowJobRepository: Send + Sync {
+    /// How many jobs this run has in total, for GitHub's `total_count`.
+    async fn count_by_run<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        run_id: i64,
+    ) -> Result<u64, DomainError>;
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,
@@ -1033,6 +1184,15 @@ pub struct CheckRunRecord {
 
 #[async_trait]
 pub trait CheckRunRepository: Send + Sync {
+    /// How many check runs this commit has in total, for GitHub's
+    /// `total_count`.
+    async fn count_by_commit<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        head_sha: &str,
+    ) -> Result<u64, DomainError>;
     async fn upsert<C: DBRunner>(
         &self,
         conn: &C,
@@ -1082,6 +1242,20 @@ pub trait IssueTimelineRepository: Send + Sync {
         issue_number: i64,
         limit: u64,
     ) -> Result<Vec<IssueTimelineEvent>, DomainError>;
+
+    /// Drop these issues' timelines before they are rewritten.
+    ///
+    /// Rows are keyed by their index in the fetched timeline, so a timeline
+    /// that grew shorter upstream — a deleted comment removes its entry —
+    /// would leave the tail of the previous, longer run behind. Clearing the
+    /// issues first is what keeps a re-sync idempotent (PRD 5.3).
+    async fn delete_by_issues<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        repo_id: i64,
+        issue_numbers: &[i64],
+    ) -> Result<u64, DomainError>;
 }
 
 /// Per-repository run status: is this repository mid-sync, and when did a run

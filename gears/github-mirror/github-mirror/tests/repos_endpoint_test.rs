@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 fn record(id: i64, name: &str) -> RepoRecord {
     RepoRecord {
+        node_id: None,
         id,
         owner: "constructorfabric".to_owned(),
         name: name.to_owned(),

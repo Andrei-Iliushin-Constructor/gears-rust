@@ -16,6 +16,7 @@ use toolkit_security::SecurityContext;
 
 use crate::api::rest::routes::ConcreteService;
 use crate::domain::error::DomainError;
+use crate::domain::repo::{ListingDirection, ListingFilter, ListingSort};
 use crate::domain::scope::{CollectionMode, ScopeConfig, SyncScope};
 
 use super::dto::{
@@ -134,11 +135,39 @@ pub struct RunStatusQuery {
     pub status: Option<String>,
 }
 
-/// GitHub-style pagination query (`?page=2&per_page=50`).
+/// GitHub-style pagination query (`?page=2&per_page=50`), plus the `state`,
+/// `sort`, `direction` and `since` filters the issue and pull listings accept.
 #[derive(Debug, Deserialize)]
 pub struct GithubPageQuery {
     pub page: Option<u64>,
     pub per_page: Option<u64>,
+    pub state: Option<String>,
+    pub sort: Option<String>,
+    pub direction: Option<String>,
+    pub since: Option<String>,
+}
+
+impl GithubPageQuery {
+    /// The state to filter on, following GitHub: no `state` means `open`,
+    /// `all` means no filter, anything else is passed through as given.
+    fn state_filter(&self) -> Option<&str> {
+        match self.state.as_deref() {
+            None => Some("open"),
+            Some("all") => None,
+            Some(state) => Some(state),
+        }
+    }
+
+    /// The whole listing filter, with GitHub's defaults for anything the
+    /// caller left out.
+    fn listing_filter(&self) -> ListingFilter<'_> {
+        ListingFilter {
+            state: self.state_filter(),
+            sort: ListingSort::parse(self.sort.as_deref()),
+            direction: ListingDirection::parse(self.direction.as_deref()),
+            since: self.since.as_deref(),
+        }
+    }
 }
 
 struct GithubPage {
@@ -180,8 +209,22 @@ impl GithubPage {
     }
 
     fn link_header(&self, path: &str, returned: usize) -> HeaderMap {
+        self.link_header_with_total(path, returned, None)
+    }
+
+    /// The `Link` header, with `rel="last"` resolved from `total` when the
+    /// listing can count itself.
+    ///
+    /// Without a total the last page is only knowable when the current one
+    /// came back short, so on a full page `rel="last"` is omitted rather than
+    /// guessed — GitHub itself always knows the total and always sends it.
+    fn link_header_with_total(&self, path: &str, returned: usize, total: Option<u64>) -> HeaderMap {
+        let last_page = total.map(|total| total.div_ceil(self.per_page).max(1));
+        let is_last_page =
+            last_page.map_or(returned as u64 != self.per_page, |last| self.page >= last);
+
         let mut links = Vec::new();
-        if returned as u64 == self.per_page {
+        if !is_last_page {
             links.push(format!(
                 "<{path}?page={}&per_page={}>; rel=\"next\"",
                 self.page + 1,
@@ -199,6 +242,19 @@ impl GithubPage {
                 self.per_page
             ));
         }
+        // With a total the last page is known outright; without one, only a
+        // short page proves it is the end.
+        if let Some(last) = last_page {
+            links.push(format!(
+                "<{path}?page={last}&per_page={}>; rel=\"last\"",
+                self.per_page
+            ));
+        } else if is_last_page {
+            links.push(format!(
+                "<{path}?page={}&per_page={}>; rel=\"last\"",
+                self.page, self.per_page
+            ));
+        }
 
         let mut headers = HeaderMap::new();
         if !links.is_empty()
@@ -214,6 +270,18 @@ type GithubList<D> = ApiResult<(HeaderMap, JsonBody<Vec<D>>)>;
 
 fn respond<D>(page: &GithubPage, path: &str, items: Vec<D>) -> (HeaderMap, JsonBody<Vec<D>>) {
     let headers = page.link_header(path, items.len());
+    (headers, Json(items))
+}
+
+/// [`respond`] for a listing that knows how many rows it has in total, so the
+/// `Link` header can name the last page even from a full one.
+fn respond_counted<D>(
+    page: &GithubPage,
+    path: &str,
+    items: Vec<D>,
+    total: u64,
+) -> (HeaderMap, JsonBody<Vec<D>>) {
+    let headers = page.link_header_with_total(path, items.len(), Some(total));
     (headers, Json(items))
 }
 
@@ -264,11 +332,14 @@ pub async fn list_issues(
 ) -> GithubList<IssueDto> {
     let page = query.normalized();
     let items = svc
-        .list_issues(&ctx, &owner, &name, &page.odata())
+        .list_issues(&ctx, &owner, &name, &page.odata(), query.listing_filter())
         .await?
         .items;
+    let total = svc
+        .count_issues(&ctx, &owner, &name, query.listing_filter())
+        .await?;
     let path = format!("/repos/{owner}/{name}/issues");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond_counted(&page, &path, page.slice(items), total))
 }
 
 pub async fn list_comments(
@@ -294,11 +365,14 @@ pub async fn list_pull_requests(
 ) -> GithubList<PullRequestDto> {
     let page = query.normalized();
     let items = svc
-        .list_pull_requests(&ctx, &owner, &name, &page.odata())
+        .list_pull_requests(&ctx, &owner, &name, &page.odata(), query.listing_filter())
         .await?
         .items;
+    let total = svc
+        .count_pull_requests(&ctx, &owner, &name, query.listing_filter())
+        .await?;
     let path = format!("/repos/{owner}/{name}/pulls");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond_counted(&page, &path, page.slice(items), total))
 }
 
 pub async fn list_reviews(
@@ -357,8 +431,9 @@ pub async fn list_commits(
         .list_commits(&ctx, &owner, &name, &page.odata())
         .await?
         .items;
+    let total = svc.count_commits(&ctx, &owner, &name).await?;
     let path = format!("/repos/{owner}/{name}/commits");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond_counted(&page, &path, page.slice(items), total))
 }
 
 pub async fn list_branches(
@@ -465,7 +540,10 @@ pub async fn list_workflow_runs(
     let runs: Vec<WorkflowRunDto> = page.slice(items);
     let path = format!("/repos/{owner}/{name}/actions/runs");
     let headers = page.link_header(&path, runs.len());
-    let total_count = i64::try_from(runs.len()).unwrap_or(i64::MAX);
+    // GitHub's `total_count` spans every page, so it is a count, not the
+    // length of the slice being served.
+    let total_count =
+        i64::try_from(svc.count_workflow_runs(&ctx, &owner, &name).await?).unwrap_or(i64::MAX);
     Ok((
         headers,
         Json(WorkflowRunsPageDto {
@@ -666,7 +744,8 @@ pub async fn list_workflow_jobs(
     let jobs: Vec<WorkflowJobDto> = page.slice(items);
     let path = format!("/repos/{owner}/{name}/actions/runs/{run_id}/jobs");
     let headers = page.link_header(&path, jobs.len());
-    let total_count = i64::try_from(jobs.len()).unwrap_or(i64::MAX);
+    let total_count = i64::try_from(svc.count_workflow_jobs(&ctx, &owner, &name, run_id).await?)
+        .unwrap_or(i64::MAX);
     Ok((headers, Json(WorkflowJobsPageDto { total_count, jobs })))
 }
 
@@ -684,7 +763,8 @@ pub async fn list_check_runs(
     let check_runs: Vec<CheckRunDto> = page.slice(items);
     let path = format!("/repos/{owner}/{name}/commits/{sha}/check-runs");
     let headers = page.link_header(&path, check_runs.len());
-    let total_count = i64::try_from(check_runs.len()).unwrap_or(i64::MAX);
+    let total_count =
+        i64::try_from(svc.count_check_runs(&ctx, &owner, &name, &sha).await?).unwrap_or(i64::MAX);
     Ok((
         headers,
         Json(CheckRunsPageDto {

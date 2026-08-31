@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS gm_repositories (
     pushed_at VARCHAR(64),
     stars BIGINT NOT NULL DEFAULT 0,
     forks BIGINT NOT NULL DEFAULT 0,
-    description TEXT,
+    description MEDIUMTEXT,
     PRIMARY KEY (tenant_id, id),
     UNIQUE KEY idx_gm_repositories_tenant_full_name (tenant_id, full_name)
 );

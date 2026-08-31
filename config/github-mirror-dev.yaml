@@ -276,8 +276,9 @@ opentelemetry:
     # HTTP-specific options
     http:
       inject_request_id_header: "x-request-id"
-      # WARNING: "authorization" sends bearer tokens to the trace collector — dev/test only
-      record_headers: [ "user-agent", "x-forwarded-for", "authorization" ]
+      # Credential-bearing headers ("authorization", "cookie", …) must never
+      # be listed here: whatever is recorded reaches the trace collector.
+      record_headers: [ "user-agent", "x-forwarded-for" ]
 
     # Log correlation (future feature)
     logs_correlation:

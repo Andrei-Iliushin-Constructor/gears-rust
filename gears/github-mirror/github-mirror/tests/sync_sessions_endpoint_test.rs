@@ -21,6 +21,7 @@ fn fetched() -> FetchedRepository {
         complete: ListingCompleteness::all_complete(),
         repository: RepoRecord {
             id: 42,
+            node_id: None,
             owner: "acme".to_owned(),
             name: "widget".to_owned(),
             full_name: "acme/widget".to_owned(),

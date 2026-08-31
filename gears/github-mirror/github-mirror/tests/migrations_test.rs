@@ -88,6 +88,34 @@ async fn migrations_apply_and_roll_back_on_a_clean_database() {
         "gm_releases.assets_json must exist after up()"
     );
 
+    for (table, column) in [
+        ("gm_review_comments", "pull_request_review_id"),
+        ("gm_review_comments", "line"),
+        ("gm_review_comments", "side"),
+        ("gm_review_comments", "subject_type"),
+        ("gm_pull_request_files", "patch"),
+        ("gm_repositories", "node_id"),
+        ("gm_issues", "node_id"),
+        ("gm_pull_requests", "node_id"),
+        ("gm_issues", "author_login"),
+        ("gm_issues", "author_json"),
+        ("gm_pull_requests", "author_json"),
+        ("gm_issues", "labels_json"),
+        ("gm_pull_requests", "requested_reviewers_json"),
+    ] {
+        assert!(
+            manager.has_column(table, column).await.unwrap(),
+            "{table}.{column} must exist after up()"
+        );
+    }
+
+    for column in ["roles", "first_seen_at", "last_seen_at"] {
+        assert!(
+            manager.has_column("gm_contributors", column).await.unwrap(),
+            "gm_contributors.{column} must exist after up()"
+        );
+    }
+
     for migration in Migrator::migrations().iter().rev() {
         migration.down(&manager).await.expect("down must succeed");
     }
