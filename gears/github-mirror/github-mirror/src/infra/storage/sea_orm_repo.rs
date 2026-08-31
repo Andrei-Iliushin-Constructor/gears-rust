@@ -460,7 +460,8 @@ impl PullRequestRepository for SeaOrmPullRequestRepository {
         repo_id: i64,
         filter: ListingFilter<'_>,
     ) -> Result<u64, DomainError> {
-        let mut condition = sea_orm::Condition::all().add(pull_requests::Column::RepoId.eq(repo_id));
+        let mut condition =
+            sea_orm::Condition::all().add(pull_requests::Column::RepoId.eq(repo_id));
         if let Some(state) = filter.state {
             condition = condition.add(pull_requests::Column::State.eq(state));
         }

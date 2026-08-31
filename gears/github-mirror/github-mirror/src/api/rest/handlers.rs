@@ -114,8 +114,8 @@ impl GithubPage {
     /// guessed — GitHub itself always knows the total and always sends it.
     fn link_header_with_total(&self, path: &str, returned: usize, total: Option<u64>) -> HeaderMap {
         let last_page = total.map(|total| total.div_ceil(self.per_page).max(1));
-        let is_last_page = last_page
-            .map_or(returned as u64 != self.per_page, |last| self.page >= last);
+        let is_last_page =
+            last_page.map_or(returned as u64 != self.per_page, |last| self.page >= last);
 
         let mut links = Vec::new();
         if !is_last_page {
@@ -218,8 +218,11 @@ pub async fn list_issues(
         .list_issues(&ctx, &owner, &name, &page.odata(), query.listing_filter())
         .await?
         .items;
+    let total = svc
+        .count_issues(&ctx, &owner, &name, query.listing_filter())
+        .await?;
     let path = format!("/repos/{owner}/{name}/issues");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond_counted(&page, &path, page.slice(items), total))
 }
 
 pub async fn list_comments(
@@ -248,8 +251,11 @@ pub async fn list_pull_requests(
         .list_pull_requests(&ctx, &owner, &name, &page.odata(), query.listing_filter())
         .await?
         .items;
+    let total = svc
+        .count_pull_requests(&ctx, &owner, &name, query.listing_filter())
+        .await?;
     let path = format!("/repos/{owner}/{name}/pulls");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond_counted(&page, &path, page.slice(items), total))
 }
 
 pub async fn list_reviews(
@@ -308,8 +314,9 @@ pub async fn list_commits(
         .list_commits(&ctx, &owner, &name, &page.odata())
         .await?
         .items;
+    let total = svc.count_commits(&ctx, &owner, &name).await?;
     let path = format!("/repos/{owner}/{name}/commits");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond_counted(&page, &path, page.slice(items), total))
 }
 
 pub async fn list_branches(

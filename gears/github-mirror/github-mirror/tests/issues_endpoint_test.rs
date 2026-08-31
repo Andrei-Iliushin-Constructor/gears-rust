@@ -254,3 +254,61 @@ async fn issues_carry_the_fields_a_github_client_renders() {
     assert_eq!(issue["comments"], 7);
     assert_eq!(issue["locked"], false);
 }
+
+#[tokio::test]
+async fn a_full_page_names_the_last_page_from_the_total() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let service = common::service("https://api.github.com").await;
+    service
+        .upsert_repo(&ctx, repo_record())
+        .await
+        .expect("repo seed must succeed");
+    for number in 1..=5 {
+        service
+            .upsert_issue(
+                &ctx,
+                "acme",
+                "widget",
+                issue_record(number, number, "open one"),
+            )
+            .await
+            .expect("issue seed must succeed");
+    }
+
+    let router = router_for(service, ctx);
+
+    // Five issues, two per page: page 1 is full, and the count says where the
+    // listing ends — GitHub always answers with `last`, so the mirror does too.
+    let response = get(
+        router.clone(),
+        "/repos/acme/widget/issues?per_page=2&page=1",
+    )
+    .await;
+    let links = response
+        .headers()
+        .get(axum::http::header::LINK)
+        .expect("a paginated listing must link")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(links.contains(r#"rel="next""#), "{links}");
+    assert!(
+        links.contains(r#"page=3&per_page=2>; rel="last""#),
+        "five rows at two a page end on page 3: {links}"
+    );
+
+    // The last page offers no `next`, and still names itself.
+    let response = get(router, "/repos/acme/widget/issues?per_page=2&page=3").await;
+    let links = response
+        .headers()
+        .get(axum::http::header::LINK)
+        .expect("the last page still links back")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(!links.contains(r#"rel="next""#), "{links}");
+    assert!(
+        links.contains(r#"page=3&per_page=2>; rel="last""#),
+        "{links}"
+    );
+}

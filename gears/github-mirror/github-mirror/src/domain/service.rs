@@ -736,6 +736,52 @@ impl<
     /// tenant; `Forbidden`/`Database`/`Internal` as usual.
     /// `state`: GitHub's filter — `Some("open")`, `Some("closed")`, or `None`
     /// for every state. GitHub's own default is `open`, applied by the handler.
+    /// How many rows the matching listing has in total, so the `Link`
+    /// header can name its last page.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
+    pub async fn count_issues(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name_arg: &str,
+        filter: ListingFilter<'_>,
+    ) -> Result<u64, DomainError> {
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &ISSUE_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await?;
+
+        let conn = self.db.conn()?;
+        let full_name = format!("{owner}/{name_arg}");
+        let repository = self
+            .repo
+            .find_by_full_name(&conn, &scope, &full_name)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+
+        self.issues
+            .count_by_repo(&conn, &scope, repository.id, filter)
+            .await
+    }
+
+    /// The repository's issues, filtered as GitHub's list endpoint filters.
+    ///
+    /// `filter`: GitHub's list-endpoint filters (state, sort, direction,
+    /// since). The handler applies GitHub's own defaults.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
     pub async fn list_issues(
         &self,
         ctx: &SecurityContext,
@@ -829,6 +875,53 @@ impl<
     /// tenant; `Forbidden`/`Database`/`Internal` as usual.
     /// `state`: GitHub's filter — `Some("open")`, `Some("closed")`, or `None`
     /// for every state. GitHub's own default is `open`, applied by the handler.
+    /// How many rows the matching listing has in total, so the `Link`
+    /// header can name its last page.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
+    pub async fn count_pull_requests(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name_arg: &str,
+        filter: ListingFilter<'_>,
+    ) -> Result<u64, DomainError> {
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &PULL_REQUEST_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await?;
+
+        let conn = self.db.conn()?;
+        let full_name = format!("{owner}/{name_arg}");
+        let repository = self
+            .repo
+            .find_by_full_name(&conn, &scope, &full_name)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+
+        self.pull_requests
+            .count_by_repo(&conn, &scope, repository.id, filter)
+            .await
+    }
+
+    /// The repository's pull requests, filtered as GitHub's list endpoint
+    /// filters.
+    ///
+    /// `filter`: GitHub's list-endpoint filters (state, sort, direction,
+    /// since). The handler applies GitHub's own defaults.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
     pub async fn list_pull_requests(
         &self,
         ctx: &SecurityContext,
@@ -923,6 +1016,48 @@ impl<
     /// # Errors
     /// `DomainError::NotFound` when the repository is not mirrored for this
     /// tenant; `Forbidden`/`Database`/`Internal` as usual.
+    /// How many rows the matching listing has in total, so the `Link`
+    /// header can name its last page.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
+    pub async fn count_commits(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name_arg: &str,
+    ) -> Result<u64, DomainError> {
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &COMMIT_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await?;
+
+        let conn = self.db.conn()?;
+        let full_name = format!("{owner}/{name_arg}");
+        let repository = self
+            .repo
+            .find_by_full_name(&conn, &scope, &full_name)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+
+        self.commits
+            .count_by_repo(&conn, &scope, repository.id)
+            .await
+    }
+
+    /// The repository's mirrored commits, newest first.
+    ///
+    /// # Errors
+    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
+    /// as usual.
     pub async fn list_commits(
         &self,
         ctx: &SecurityContext,
