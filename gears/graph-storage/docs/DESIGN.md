@@ -402,35 +402,53 @@ no fields of its own beyond what the family genuinely requires.
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "id":         { "type": "string", "minLength": 1, "maxLength": 512 },
+    "node_key":   { "type": "string", "minLength": 1, "maxLength": 512 },
     "type":       { "type": "string", "format": "gts-type-id", "x-gts-ref": "gts.cf.core.graph.node.v1~" },
     "name":       { "type": "string", "maxLength": 1024 },
     "payload":    { "type": "object", "additionalProperties": true },
     "content":    { "type": "string" }
   },
-  "required": ["id", "type"]
+  "required": ["node_key", "type"]
 }
 ```
 
 `content` is the long-form text that chunking consumes, bounded by
 `content_max_bytes`.
 
-**`id` stays in the type because a producer authors it.** It is the stable key
-the rest of this document calls `node_key` and the `node.node_key` column stores.
-The gear cannot generate it: a producer addresses the same node on a re-sync a
-month later by that key, and an edge names an endpoint by that key before the
-endpoint's node exists at all (§ Phantom Materialization Contract). Request
-idempotency is a different problem, solved by the `Idempotency-Key` header, and
-the header cannot substitute — it makes one call safe to retry, while the key
+**`node_key` is producer-authored, and that is why it is in the type.** An
+earlier draft of this base called it `id`, which invited the reading that it is
+an identifier the gear mints. It is not: it is a domain key, the same value the
+`node.node_key` column stores, and neither a GTS instance identifier
+(`guidelines/GTS.md` §2.4 — those are `gts.`-prefixed and built from the type)
+nor the gear's internal row id, which never leaves the database.
+
+The gear cannot generate it, for two independent reasons:
+
+- **Re-sync needs a name the producer already has.** A mirror re-ingesting a
+  repository names the same commit a month later by the same key and the gear
+  upserts one row. Were the key gear-minted, every producer would have to keep a
+  `natural key → our id` table for its whole corpus, which is the mapping the
+  natural key already is.
+- **An edge names an endpoint that may not exist yet.** An analyzer asserts
+  `finding → introduced_by → commit:…` before the mirror has ingested that
+  commit; the gear materializes a phantom under the key and the real ingest
+  replaces it in place (§ Phantom Materialization Contract). A gear-minted id
+  cannot name a node that has never been written, so this would become a
+  two-phase protocol and `cpt-cf-graph-storage-fr-bulk-ingest` would lose batch
+  atomicity.
+
+Request idempotency is a different problem and is solved separately by the
+`Idempotency-Key` header: the header makes one call safe to retry, while the key
 makes two unrelated calls converge on one node.
 
-That a producer supplies the key does not mean a producer may write any key. The
-concern it raises — one producer overwriting another's node — is an
-authorization question, and the § Authorization Model answers it under source
-namespaces: ownership is recorded immutably on first creation and re-checked on
-every upsert. Generating the key gear-side would not answer that question either,
-since convergence of two producers on one upstream object is the behaviour
-reference nodes exist for.
+That a producer supplies the key does not mean a producer may write any key —
+but the lever for that is authorization, not identifier provenance. Keys appear
+in every read response, so a gear-minted key would be equally guessable and
+equally writable; what refuses the write is the § Authorization Model's source
+namespace, where ownership is recorded immutably on first creation and re-checked
+on every upsert. Nor would minting keys be neutral: two producers referring to
+one upstream object converge on one node precisely because they derive the same
+key, which is the behaviour reference nodes exist for.
 
 | Node trait | Default | Meaning |
 |---|---|---|
@@ -480,12 +498,13 @@ is frequently the wrong field to embed.
 }
 ```
 
-**The edge base declares no `id`, and the node base does.** The asymmetry is the
-rule applied, not an inconsistency: `edge_key` is a hash of type, endpoints and
-discriminator, so the gear derives it from fields already in the submission and a
-producer has nothing to author. It appears on the API envelope like any other
-gear-assigned field. `node_key`, by contrast, is the producer's own identity for
-the thing.
+**The edge base declares no key, and the node base declares `node_key`.** The
+asymmetry is the rule applied, not an inconsistency: `edge_key` is a hash of
+type, endpoints and discriminator, so the gear derives it from fields already in
+the submission and a producer has nothing to author. It appears on the API
+envelope like any other gear-assigned field. `node_key`, by contrast, is the
+producer's own name for the thing, and the next section says why the gear cannot
+mint it.
 
 **Endpoint constraints are traits, not JSON Schema.** `src_types` and `dst_types`
 hold GTS patterns, and JSON Schema cannot express "this string must name a type
@@ -735,8 +754,8 @@ reproduced against the reference implementation.
    `additionalProperties: false` at the top level applies to the whole instance,
    so a base that closes itself and omits a field rejects every instance carrying
    it. That is the mechanical reason the split between this type and the API
-   schema has to be decided once, at the base: the node base declares `id` and
-   `type`, the edge base declares `type`, and a validated submission carries
+   schema has to be decided once, at the base: the node base declares `node_key`
+   and `type`, the edge base declares `type`, and a validated submission carries
    nothing else at the top level. An element as the *API* returns it is that
    document plus the gear-assigned envelope, and it is validated against the
    OpenAPI schema rather than against this type.

@@ -61,11 +61,11 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "id": {
+    "node_key": {
       "type": "string",
       "minLength": 1,
       "maxLength": 512,
-      "description": "Producer-supplied stable key, unique per tenant -- the field the ingest DTO spells node_key and the node.node_key column stores. Producer-authored and not gear-generated: it is how a producer addresses the same node on a later re-sync and how an edge names an endpoint that does not exist yet. Whether a second producer may write an existing key is an authorization question, answered by the source-namespace ownership contract, not by hiding the key."
+      "description": "Producer-supplied stable key, unique per tenant -- the same value the node_key column stores and the ingest DTO carries. Producer-authored: it is how a producer addresses the same node on a later re-sync and how an edge names an endpoint whose node has not been ingested yet. It is a domain key, not a GTS instance identifier and not a gear-generated id; the gear's own row id and the API envelope are elsewhere."
     },
     "type": {
       "type": "string",
@@ -89,7 +89,7 @@
     }
   },
   "required": [
-    "id",
+    "node_key",
     "type"
   ]
 }
