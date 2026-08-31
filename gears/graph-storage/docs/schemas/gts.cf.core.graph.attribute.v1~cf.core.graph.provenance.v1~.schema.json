@@ -1,7 +1,7 @@
 {
   "$id": "gts://gts.cf.core.graph.attribute.v1~cf.core.graph.provenance.v1~",
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "description": "Who asserted a derived fact, with what, and how confidently. Retained across scope replacement together with the edge that carries it.",
+  "description": "Who asserted a derived fact, with what, and how confidently. The asserting subject is carried here rather than inherited from the element, because the subject that wrote the node or edge is frequently not the one that produced the assertion inside it. Retained across scope replacement together with the edge that carries it.",
   "type": "object",
   "allOf": [
     {
@@ -11,9 +11,24 @@
       "type": "object",
       "properties": {
         "produced_by": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Analyzer identity."
+          "description": "Subject that produced the assertion, in the platform's subject vocabulary (SecurityContext subject_id / subject_type), so an automation, an API integration and a user are all expressible without a second convention.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "subject_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Identifier of the acting subject."
+            },
+            "subject_type": {
+              "type": "string",
+              "format": "gts-type-id",
+              "description": "GTS type of the acting subject, e.g. gts.cf.core.security.subject_user.v1~. Optional, matching SecurityContext."
+            }
+          },
+          "required": [
+            "subject_id"
+          ]
         },
         "method": {
           "type": "string",

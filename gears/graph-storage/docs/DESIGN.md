@@ -88,6 +88,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-fr-source-ownership` | Source namespaces bound to producer principals in a tenant-scoped registry; `node.source_namespace` / `node.owner_principal` written once and compared on every upsert; transfer is an audited administrative flow (§ Authorization Model) |
 | `p2` | `cpt-cf-graph-storage-fr-tenant-offboarding` | Deletion generation from the control-plane ledger; fence, cancel, delete tenant-keyed state, acknowledge; unreconciled tenants quarantined and readiness withheld (§ Tenant Offboarding and Deletion Monotonicity) |
 | `p1` | `cpt-cf-graph-storage-fr-snapshot-identity` | `(source_epoch, graph_revision)` is the snapshot identity in continuation tokens, cache keys, job identity and plugin cursors; epoch rotated before readiness after restore (§ Read Consistency Contract) |
+| `p1` | `cpt-cf-graph-storage-fr-audit-envelope` | Gear-assigned envelope (tenant, key, timestamps, tombstone, acting subject per verb) on every element read, read-only on write and described by the OpenAPI schema rather than by the registered GTS type (§ API element envelope) |
 | `p1` | `cpt-cf-graph-storage-fr-rest-api` | Versioned REST under `/api/graph-storage/v1` with OpenAPI schemas, RFC-9457 problems, documented limits |
 | `p1` | `cpt-cf-graph-storage-fr-sdk-client` | SDK crate with `GraphStorageClientV1` trait registered in ClientHub; local client delegates to domain services |
 | `p2` | `cpt-cf-graph-storage-fr-observability` | Structural tracing spans (batch sizes, arm timings, frontier sizes, cache hits) and OTel metrics, including per-limit saturation counters from the Capacity and Admission Contract; payload content never logged |
@@ -286,7 +287,7 @@ classDiagram
         payload: JsonObject
         search_text: String
         embedding: Vector?
-        created_by: ActorId
+        created_by: Subject
         created_at / updated_at
     }
     class Edge {
@@ -306,7 +307,7 @@ classDiagram
         embedding: Vector?
     }
     class Provenance {
-        produced_by: ActorId
+        produced_by: Subject
         produced_at: Timestamp
         method: String?
         model: String?
@@ -354,14 +355,24 @@ it. The "derive from a family, never from a base" rule and the required-`family`
 rule below are therefore node and edge rules. An implementation that applies
 them to attributes rejects the gear's own provenance type.
 
-**What the schema describes.** The validated instance is the node or edge as the
-gear materializes it, not the wire DTO: the GTS instance envelope (`id`, `type`)
-plus the producer-authored fields. Base fields map to columns and `payload` maps
-to the JSONB column, which is the platform's hybrid storage pattern
-(`guidelines/GTS.md` §5). Tenant, timestamps, creating actor and graph revision
-are gear-assigned and are deliberately **not** in the type: a producer cannot
-supply them, and a type that declared `tenant_id` would invite a producer to
-assert one.
+**What the schema describes — and what it deliberately does not.** A GTS type
+here describes the **producer-authored** part of an element: what a producer may
+send, what a derived type may extend, and what the gear validates a submission
+against. It is not the API schema of the element. The gear-assigned envelope —
+tenant, timestamps, acting subjects, soft-delete tombstone, graph revision — is
+described by the OpenAPI schema instead, and § API element envelope states it in
+one place.
+
+The separation is not stylistic. A GTS type can also be instantiated *statically*
+in the types-registry, as a well-known instance that is configuration rather than
+runtime state; `created_at` and `updated_by` have no value to carry there, and a
+type that declares them forces every such instance to answer a question that does
+not apply to it. And the two contracts evolve on different clocks: the envelope
+changes when the platform's audit conventions change, the type changes when a
+domain does. Binding them into one document couples them.
+
+What remains in the type maps to columns, with `payload` mapping to the JSONB
+column — the platform's hybrid storage pattern (`guidelines/GTS.md` §5).
 
 **Chain shape.** `base → family → producer type` is two derivations, which is the
 maximum `guidelines/GTS.md` §9 recommends. A vendor extending another vendor's
@@ -393,10 +404,6 @@ no fields of its own beyond what the family genuinely requires.
   "properties": {
     "id":         { "type": "string", "minLength": 1, "maxLength": 512 },
     "type":       { "type": "string", "format": "gts-type-id", "x-gts-ref": "gts.cf.core.graph.node.v1~" },
-    "tenant_id":  { "type": "string", "format": "uuid", "readOnly": true },
-    "created_at": { "type": "string", "format": "date-time", "readOnly": true },
-    "updated_at": { "type": "string", "format": "date-time", "readOnly": true },
-    "deleted_at": { "type": ["string", "null"], "format": "date-time", "readOnly": true },
     "name":       { "type": "string", "maxLength": 1024 },
     "payload":    { "type": "object", "additionalProperties": true },
     "content":    { "type": "string" }
@@ -405,20 +412,25 @@ no fields of its own beyond what the family genuinely requires.
 }
 ```
 
-`id` is the producer-supplied stable key — what the rest of this document calls
-`node_key` and what the `node.node_key` column stores. `content` is the
-long-form text that chunking consumes, bounded by `content_max_bytes`.
+`content` is the long-form text that chunking consumes, bounded by
+`content_max_bytes`.
 
-The four `readOnly` fields are the **element envelope**, carried by the node and
-edge bases alike. They are server-assigned — `tenant_id` from the security
-context, the timestamps by the write path — and a producer that sends them has
-them ignored, not honoured. They are in the *schema* rather than only in the
-table because an instance leaves the request that produced it: an export, an
-event payload, a cross-tenant administrative read or a debugging dump has to say
-which tenant a node belongs to and when it was written, and a schema that omits
-them makes those instances ambiguous. This follows the platform's own envelope
-convention — `gts.cf.core.events.event.v1~` carries `tenant_id`, and
-`gts.cf.core.events.topic.v1~` carries `created_at` as `readOnly`.
+**`id` stays in the type because a producer authors it.** It is the stable key
+the rest of this document calls `node_key` and the `node.node_key` column stores.
+The gear cannot generate it: a producer addresses the same node on a re-sync a
+month later by that key, and an edge names an endpoint by that key before the
+endpoint's node exists at all (§ Phantom Materialization Contract). Request
+idempotency is a different problem, solved by the `Idempotency-Key` header, and
+the header cannot substitute — it makes one call safe to retry, while the key
+makes two unrelated calls converge on one node.
+
+That a producer supplies the key does not mean a producer may write any key. The
+concern it raises — one producer overwriting another's node — is an
+authorization question, and the § Authorization Model answers it under source
+namespaces: ownership is recorded immutably on first creation and re-checked on
+every upsert. Generating the key gear-side would not answer that question either,
+since convergence of two producers on one upstream object is the behaviour
+reference nodes exist for.
 
 | Node trait | Default | Meaning |
 |---|---|---|
@@ -458,16 +470,22 @@ is frequently the wrong field to embed.
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "id":            { "type": "string", "minLength": 1 },
     "type":          { "type": "string", "format": "gts-type-id", "x-gts-ref": "gts.cf.core.graph.edge.v1~" },
     "src_node_key":  { "type": "string", "minLength": 1, "maxLength": 512 },
     "dst_node_key":  { "type": "string", "minLength": 1, "maxLength": 512 },
     "discriminator": { "type": "string", "maxLength": 256 },
     "payload":       { "type": "object", "additionalProperties": true }
   },
-  "required": ["id", "type", "src_node_key", "dst_node_key"]
+  "required": ["type", "src_node_key", "dst_node_key"]
 }
 ```
+
+**The edge base declares no `id`, and the node base does.** The asymmetry is the
+rule applied, not an inconsistency: `edge_key` is a hash of type, endpoints and
+discriminator, so the gear derives it from fields already in the submission and a
+producer has nothing to author. It appears on the API envelope like any other
+gear-assigned field. `node_key`, by contrast, is the producer's own identity for
+the thing.
 
 **Endpoint constraints are traits, not JSON Schema.** `src_types` and `dst_types`
 hold GTS patterns, and JSON Schema cannot express "this string must name a type
@@ -490,7 +508,7 @@ wildcard token.
   "additionalProperties": true,
   "properties": {
     "type": { "type": "string", "format": "gts-type-id",
-              "x-gts-ref": "gts.cf.core.graph.attribute.v1~", "readOnly": true }
+              "x-gts-ref": "gts.cf.core.graph.attribute.v1~" }
   }
 }
 ```
@@ -515,8 +533,11 @@ introduced it:
   "dst_node_key": "commit:github:acme/infra:a1b2c3",
   "payload": {
     "provenance": {                                          // ← an ATTRIBUTE: a fragment.
-      "produced_by": "acme-blame-analyzer",                  //   no row, no key; lives and
-      "method": "git-blame",                                 //   dies with the edge above
+      "produced_by": {                                       //   no row, no key; lives and
+        "subject_id": "svc:acme-blame-analyzer",             //   dies with the edge above --
+        "subject_type": "gts.cf.core.security.subject_service.v1~"
+      },
+      "method": "git-blame",
       "produced_at": "2026-08-24T09:14:02Z",
       "confidence": 0.82
     }
@@ -537,21 +558,28 @@ edge without provenance would be indistinguishable from static content and would
 be deleted on the next re-sync — which is why `analysis_edge` requires it in the
 schema rather than by convention.
 
-**What the fragment carries, and what it does not.** No `tenant_id` and no row
-timestamps: a fragment is created, updated and deleted with the element embedding
-it and is only ever read through that element, so those values would be a second
-copy that can disagree with the first. Provenance's own `produced_at` is a
-different thing and stays — it records when the analyzer made the assertion, not
-when the row was written.
+**What the fragment carries, and what it does not.** No envelope: a fragment is
+created, updated and deleted with the element embedding it and is only ever read
+through that element, so its tenant, its row timestamps and the subject that
+wrote it are the element's, reported once on the element's API envelope
+(§ API element envelope). Copying them into the fragment would create a second
+place they could disagree.
+
+Provenance's `produced_at` and `produced_by` are a different thing and stay.
+They record when the *assertion* was made and by whom, which is not when the row
+was written or by whom — a person creates a node and an analyzer adds a finding
+inside it, and the envelope's `updated_by` names the writer while
+`produced_by` names the analyzer. That is domain data a producer authors, so it
+belongs in the type; the envelope is gear-assigned, so it does not.
 
 It does carry its own `type`. Today `analysis_edge` pins `payload.provenance` by
 `$ref`, so the fragment's type is derivable from the embedding schema — but that
 holds only while one attribute type exists. The base exists to be *reusable*,
 and reuse means several types embedding fragments at pointers of their own
 choosing, at which point a raw payload cannot be interpreted without resolving
-the embedding type's schema first. The field is `readOnly` and server-stamped
-during ingest validation, which resolves that schema anyway: a producer neither
-sends it nor can forge it, and a reader always has it.
+the embedding type's schema first. It is producer-authored, like `type` on a node
+or an edge, and optional: the pointer the embedding type declares is what selects
+the schema to validate against, and it stays authoritative if the two disagree.
 
 It declares **no** traits schema: `index`, `full_text_search` and `vector_search`
 are JSON pointers rooted at the instance, so only the embedding node or edge type
@@ -618,7 +646,11 @@ knows where the fragment sits and can therefore declare paths into it.
   "allOf": [
     { "$ref": "gts://gts.cf.core.graph.attribute.v1~" },
     { "type": "object", "required": ["produced_by", "produced_at"], "properties": {
-        "produced_by": { "type": "string", "minLength": 1 },
+        "produced_by": { "type": "object", "additionalProperties": false,
+                         "required": ["subject_id"],
+                         "properties": {
+                           "subject_id":   { "type": "string", "minLength": 1 },
+                           "subject_type": { "type": "string", "format": "gts-type-id" } } },
         "method":      { "type": "string" },
         "model":       { "type": "string" },
         "produced_at": { "type": "string", "format": "date-time" },
@@ -699,11 +731,15 @@ nothing from the abstract base, which declares the trait schema but no values.
 These are constraints of the type system rather than gear policy; each one was
 reproduced against the reference implementation.
 
-1. **The envelope must be declared by the base.** `additionalProperties: false`
-   at the top level applies to the whole instance, so a base that closes itself
-   and omits any envelope field rejects every instance carrying it. The envelope
-   is six fields — `id`, `type`, `tenant_id`, `created_at`, `updated_at`,
-   `deleted_at` — of which the last four are `readOnly` and server-assigned.
+1. **Whatever the type is closed around, the base must declare.**
+   `additionalProperties: false` at the top level applies to the whole instance,
+   so a base that closes itself and omits a field rejects every instance carrying
+   it. That is the mechanical reason the split between this type and the API
+   schema has to be decided once, at the base: the node base declares `id` and
+   `type`, the edge base declares `type`, and a validated submission carries
+   nothing else at the top level. An element as the *API* returns it is that
+   document plus the gear-assigned envelope, and it is validated against the
+   OpenAPI schema rather than against this type.
 2. **Derived types extend `payload`, nothing else.** The top level is closed by
    the base, so a family or producer type that needs a new field puts it under
    `payload`. This is why reference identity is `payload.source` and not a
@@ -1125,6 +1161,49 @@ one platform release as the deprecation window.
 
 **Error contract**: RFC-9457 problem details; validation failures carry per-item error lists (item index, GTS type, JSON pointer, message).
 
+#### API element envelope
+
+An element on the API is two documents joined: a **gear-assigned envelope**,
+identical for every node and every edge and described by the OpenAPI schema, and
+the **producer-authored body**, described by the element's GTS type (§ Base
+Ontology GTS Schemas). The envelope is read-only on every write surface — a
+producer that sends an envelope field has it ignored, not honoured, and never
+rejected, so that a document read from the API can be sent back unchanged.
+
+| Envelope field | Node | Edge | Assigned from |
+|---|---|---|---|
+| `tenant_id` | yes | yes | security context |
+| `key` | echoes the producer's `id` | derived hash of type, endpoints, discriminator | ingest |
+| `created_at` / `created_by` | yes | yes | first write |
+| `updated_at` / `updated_by` | yes | yes | most recent write |
+| `deleted_at` / `deleted_by` | yes | yes | soft delete; absent on live elements |
+| `graph_revision` | yes | yes | the revision the read observed |
+
+`created_by`, `updated_by` and `deleted_by` are **subjects**, not users:
+`{ subject_id, subject_type }` in the platform's own vocabulary
+(`SecurityContext.subject_id` / `subject_type`, the latter a GTS type identifier
+such as `gts.cf.core.security.subject_user.v1~`). Most writes into this gear come
+from an automation or a service integration rather than from a person, so a
+`user_id` field would be null on the majority of rows and would need a second
+convention beside it for the rest.
+
+**An attribute has no envelope of its own.** It is a fragment inside an element's
+payload, so its tenant, its timestamps and the subject that wrote it are the
+embedding element's, reported once on that element. What is *not* inherited is
+who asserted the fragment's content: the subject that wrote a node is regularly
+not the subject that produced an analysis attribute inside it — a person creates
+the node, an analyzer adds the finding. That actor is domain data, carried by the
+`provenance` attribute's `produced_by`, and it is in the GTS type because a
+producer authors it.
+
+**Current state here, history in the audit trail.** An element carries the *last*
+writer of each verb, not a chain of them. Change history is not stored per row:
+mutations emit events through the transactional outbox (`emit_events`, per type)
+and are recorded in `ingest_audit`, and reconstructing a timeline is a query over
+those rather than a column here. Designing per-element versioning into this gear
+would duplicate a platform concern and is out of scope for v1 (PRD § 4.2,
+bitemporal versioning).
+
 #### Plugin trait surfaces
 
 The three plugin contracts live in `graph-storage-sdk/src/plugin_api.rs` and are
@@ -1480,7 +1559,7 @@ Content-Type: application/json
       "dst_node_key": "commit:github:acme/infra:a1b2c3",
       "payload": {
         "provenance": {
-          "produced_by": "acme-blame-analyzer",
+          "produced_by": { "subject_id": "svc:acme-blame-analyzer" },
           "method": "git-blame",
           "produced_at": "2026-08-24T09:14:02Z",
           "confidence": 0.82
@@ -1729,9 +1808,11 @@ PostgreSQL row alignment the two are the same size in these tables anyway.
 | embedding_epoch / embedding_input_hash | BIGINT / TEXT | Embedding-space epoch the vector belongs to and the canonical hash of its input (staleness detection) |
 | source_namespace | TEXT | Source namespace for reference nodes; `NULL` for owned nodes |
 | owner_principal | TEXT | Producer principal that created the row; immutable after insert (§ Authorization Model) |
-| created_by | TEXT | Creating actor |
 | created_at / updated_at | TIMESTAMPTZ | Timestamps |
+| created_by_subject_id / created_by_subject_type | TEXT | Subject that first wrote the row (§ API element envelope) |
+| updated_by_subject_id / updated_by_subject_type | TEXT | Subject of the most recent write |
 | deleted_at | TIMESTAMPTZ | Soft-delete tombstone; `NULL` for live rows (Soft Delete Contract) |
+| deleted_by_subject_id / deleted_by_subject_type | TEXT | Subject that tombstoned the row; `NULL` while live |
 
 `source_namespace` and `owner_principal` are written once, on insert, and never
 by an upsert; the ingest path compares them instead. A companion
@@ -1750,8 +1831,16 @@ per tenant and is the authority the comparison consults.
 | gts_edge_type_id | INTEGER | **FK (tenant_id, gts_edge_type_id) -> gts_type (tenant_id, id)** |
 | src_node_id / dst_node_id | BIGINT | Endpoints; **FK (tenant_id, src/dst_node_id) -> node (tenant_id, id) ON DELETE RESTRICT** — deletion never cascades into edges, so an analysis edge can never be destroyed as a side effect of removing a static node |
 | payload | JSONB | GTS-validated attributes incl. provenance |
-| created_at | TIMESTAMPTZ | Timestamp |
+| created_at / updated_at | TIMESTAMPTZ | Timestamps |
+| created_by_subject_id / created_by_subject_type | TEXT | Subject that first wrote the row (§ API element envelope) |
+| updated_by_subject_id / updated_by_subject_type | TEXT | Subject of the most recent write |
 | deleted_at | TIMESTAMPTZ | Soft-delete tombstone; `NULL` for live rows (Soft Delete Contract) |
+| deleted_by_subject_id / deleted_by_subject_type | TEXT | Subject that tombstoned the row; `NULL` while live |
+
+An edge carries the same audit columns as a node. A re-synced static edge is
+rewritten rather than versioned, so `updated_by` records the last producer to
+assert it — which is the question asked when two producers claim the same
+relationship.
 
 #### Table: chunk
 

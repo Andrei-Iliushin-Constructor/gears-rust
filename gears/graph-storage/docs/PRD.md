@@ -593,6 +593,15 @@ The system **MUST** expose all capabilities over a versioned REST API following 
 - **Rationale**: The REST surface is how UIs and non-Rust consumers integrate.
 - **Actors**: `cpt-cf-graph-storage-actor-consumer-gear`, `cpt-cf-graph-storage-actor-graph-explorer`, `cpt-cf-graph-storage-actor-data-analyst`
 
+#### Element Audit Envelope
+
+- [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-audit-envelope`
+
+Every node and edge returned by any read surface **MUST** carry a gear-assigned envelope: tenant, key, creation and last-update timestamps, the soft-delete tombstone, and the subject behind each of those three verbs. The acting party **MUST** be expressed as a platform subject (`subject_id` plus optional `subject_type`) rather than as a user identifier, so an automation, a service integration and a person are all representable. The envelope **MUST** be read-only on every write surface and **MUST NOT** be declared by the GTS types producers register or derive from, which describe only producer-authored fields. Per-element change history is out of scope: the current state is stored, and history is reconstructed from emitted change events and `ingest_audit`.
+
+- **Rationale**: Who wrote an element and when is the first question asked of any stored record, and the answer has to exist before it is needed rather than be added after. Keeping it out of the GTS type keeps a type usable as a static registry instance, where runtime timestamps have no value to carry.
+- **Actors**: `cpt-cf-graph-storage-actor-platform-admin`, `cpt-cf-graph-storage-actor-consumer-gear`, `cpt-cf-graph-storage-actor-data-analyst`
+
 #### Typed SDK Client
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-fr-sdk-client`

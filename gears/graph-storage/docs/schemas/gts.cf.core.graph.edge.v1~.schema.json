@@ -1,7 +1,7 @@
 {
   "$id": "gts://gts.cf.core.graph.edge.v1~",
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "description": "Base graph edge. id is derived by the gear from type, endpoints and discriminator, so a producer supplies the endpoints and the gear completes the envelope.",
+  "description": "Base graph edge: the producer-authored part of an edge -- its type, its two endpoints and an optional discriminator for parallel edges. The edge key is derived by the gear from those, and the envelope (tenant, timestamps, acting subjects, tombstone) is gear-assigned; neither is in this type, both are in the API schema.",
   "x-gts-abstract": true,
   "x-gts-traits-schema": {
     "type": "object",
@@ -53,42 +53,10 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "id": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Deterministic edge key derived from type, endpoints and discriminator. Gear-derived, not producer-authored."
-    },
     "type": {
       "type": "string",
       "format": "gts-type-id",
       "x-gts-ref": "gts.cf.core.graph.edge.v1~"
-    },
-    "tenant_id": {
-      "description": "Tenant that owns the element. Server-assigned from the security context on write; present on read and on export so an instance is self-describing outside its request.",
-      "type": "string",
-      "format": "uuid",
-      "readOnly": true
-    },
-    "created_at": {
-      "description": "First write. Server-assigned.",
-      "type": "string",
-      "format": "date-time",
-      "readOnly": true
-    },
-    "updated_at": {
-      "description": "Most recent write. Server-assigned.",
-      "type": "string",
-      "format": "date-time",
-      "readOnly": true
-    },
-    "deleted_at": {
-      "description": "Soft-delete tombstone; absent or null on live elements. Server-assigned (Soft Delete Contract).",
-      "type": [
-        "string",
-        "null"
-      ],
-      "format": "date-time",
-      "readOnly": true
     },
     "src_node_key": {
       "type": "string",
@@ -113,7 +81,6 @@
     }
   },
   "required": [
-    "id",
     "type",
     "src_node_key",
     "dst_node_key"

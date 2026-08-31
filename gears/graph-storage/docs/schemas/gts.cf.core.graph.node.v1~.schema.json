@@ -1,7 +1,7 @@
 {
   "$id": "gts://gts.cf.core.graph.node.v1~",
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "description": "Base graph node. Carries the GTS instance envelope (id, type) plus the producer-authored fields; tenant, timestamps, actor and revision are gear-assigned and are deliberately not part of the type.",
+  "description": "Base graph node: the producer-authored part of a node, and the only part a producer may extend. The gear-assigned envelope -- tenant, timestamps, acting subjects, soft-delete tombstone and graph revision -- is not in this type: it is described by the API schema, because it has no meaning for an instance registered statically in the types-registry and because a producer can neither supply nor extend it.",
   "x-gts-abstract": true,
   "x-gts-traits-schema": {
     "type": "object",
@@ -65,40 +65,13 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 512,
-      "description": "Producer-supplied stable key, unique per tenant. The ingest DTO spells it node_key; it is the GTS instance id."
+      "description": "Producer-supplied stable key, unique per tenant -- the field the ingest DTO spells node_key and the node.node_key column stores. Producer-authored and not gear-generated: it is how a producer addresses the same node on a later re-sync and how an edge names an endpoint that does not exist yet. Whether a second producer may write an existing key is an authorization question, answered by the source-namespace ownership contract, not by hiding the key."
     },
     "type": {
       "type": "string",
       "format": "gts-type-id",
       "x-gts-ref": "gts.cf.core.graph.node.v1~",
       "description": "The node's registered GTS type."
-    },
-    "tenant_id": {
-      "description": "Tenant that owns the element. Server-assigned from the security context on write; present on read and on export so an instance is self-describing outside its request.",
-      "type": "string",
-      "format": "uuid",
-      "readOnly": true
-    },
-    "created_at": {
-      "description": "First write. Server-assigned.",
-      "type": "string",
-      "format": "date-time",
-      "readOnly": true
-    },
-    "updated_at": {
-      "description": "Most recent write. Server-assigned.",
-      "type": "string",
-      "format": "date-time",
-      "readOnly": true
-    },
-    "deleted_at": {
-      "description": "Soft-delete tombstone; absent or null on live elements. Server-assigned (Soft Delete Contract).",
-      "type": [
-        "string",
-        "null"
-      ],
-      "format": "date-time",
-      "readOnly": true
     },
     "name": {
       "type": "string",
