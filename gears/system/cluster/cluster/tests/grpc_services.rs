@@ -26,13 +26,39 @@ use toolkit_transport_grpc::InternalAuthInterceptor;
 mod common;
 use common::served_gear::{ServedGear, served_gear};
 
-/// The per-unary-call deadline this test stands in for.
+/// The per-call deadline the watch tests carry on their stream.
 ///
 /// The deployed value is `GrpcClientConfig::rpc_timeout` (30 s by default), which
 /// is far too long to hold a test against. What the number has to be is *some*
 /// real RPC timeout, so that a stream held past it demonstrates the property; the
 /// magnitude is not what is being asserted.
-const RPC_TIMEOUT: Duration = Duration::from_millis(250);
+///
+/// It is deliberately **not** as short as it could be. A watch/`await_change`
+/// subscribe is a streaming call whose *response future* — the header flush that
+/// makes `.watch()` return — is governed by this deadline, so a value in the
+/// hundreds of milliseconds would race that handshake under LLVM-coverage load and
+/// flake exactly the way the unary tests did (#4695). A couple of seconds is far
+/// above any header-flush overhead, and — because the idle hold below is additive,
+/// not a multiple of this value — enlarging it costs the suite almost nothing.
+const RPC_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How far *past* [`RPC_TIMEOUT`] a subscription is held idle before it must still
+/// deliver. Additive rather than a multiple of the deadline, so [`RPC_TIMEOUT`]
+/// can be sized for a safe handshake without inflating the real sleep. Any margin
+/// proves the property — that the stream outlives its own deadline — since the
+/// deadline's magnitude is explicitly not what is asserted.
+const HELD_PAST_DEADLINE: Duration = Duration::from_millis(750);
+
+/// The deadline a *semantic* unary assertion carries: the deployed
+/// `GrpcClientConfig::rpc_timeout` default.
+///
+/// It is not the subject of any assertion — it is a fail-fast backstop, so a test
+/// that hits a genuinely hung server fails *at the call* rather than blocking
+/// until the harness kills the whole job. Kept far above any LLVM-coverage or
+/// CI-scheduling overhead a correct call could ever incur, so — unlike
+/// [`RPC_TIMEOUT`] — it can never turn a slow-but-correct call into a spurious
+/// `Cancelled` (#4695).
+const SEMANTIC_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A running cluster gear, serving all four services on a real port.
 struct Server_ {
@@ -46,11 +72,33 @@ impl Server_ {
         }
     }
 
-    /// A channel with the per-call deadline unary calls carry.
+    /// A channel carrying a short per-call deadline.
+    ///
+    /// Used **only** by the tests that assert a *stream outlives that deadline*
+    /// (§6.10), where the timeout is the subject of the assertion. A semantic
+    /// unary assertion must never open its channel here: the round trip would be
+    /// racing `RPC_TIMEOUT`, and under LLVM-coverage instrumentation or ordinary
+    /// CI scheduling delay a slow-but-correct call maps to `Status::cancelled`
+    /// instead of the code under test — the spurious failure #4695 reported. Those
+    /// tests use [`Server_::channel_bounded`] instead.
     async fn channel_with_rpc_timeout(&self) -> Channel {
         Channel::from_shared(self.gear.endpoint.clone())
             .expect("a valid endpoint")
             .timeout(RPC_TIMEOUT)
+            .connect()
+            .await
+            .expect("connects")
+    }
+
+    /// A channel for semantic unary assertions: a generous fail-fast deadline
+    /// ([`SEMANTIC_RPC_TIMEOUT`]) that bounds a hung server without racing a
+    /// correct call. This is the channel semantic tests use — never
+    /// [`Server_::channel_with_rpc_timeout`], whose short deadline is only for the
+    /// tests that assert a stream outlives it.
+    async fn channel_bounded(&self) -> Channel {
+        Channel::from_shared(self.gear.endpoint.clone())
+            .expect("a valid endpoint")
+            .timeout(SEMANTIC_RPC_TIMEOUT)
             .connect()
             .await
             .expect("connects")
@@ -84,7 +132,7 @@ async fn all_four_services_serve() {
     let server = Server_::start().await;
 
     let mut cache = stubs::cache::cluster_cache_api_client::ClusterCacheApiClient::with_interceptor(
-        server.channel_with_rpc_timeout().await,
+        server.channel_bounded().await,
         credential(),
     );
     cache
@@ -111,7 +159,7 @@ async fn all_four_services_serve() {
 
     let mut lock =
         stubs::lock::distributed_lock_api_client::DistributedLockApiClient::with_interceptor(
-            server.channel_with_rpc_timeout().await,
+            server.channel_bounded().await,
             credential(),
         );
     let token = lock
@@ -137,7 +185,7 @@ async fn all_four_services_serve() {
 
     let mut leader =
         stubs::leader::leader_election_api_client::LeaderElectionApiClient::with_interceptor(
-            server.channel_with_rpc_timeout().await,
+            server.channel_bounded().await,
             credential(),
         );
     let joined = leader
@@ -158,7 +206,7 @@ async fn all_four_services_serve() {
 
     let mut profiles =
         stubs::profile::cluster_profile_api_client::ClusterProfileApiClient::with_interceptor(
-            server.channel_with_rpc_timeout().await,
+            server.channel_bounded().await,
             credential(),
         );
     let described = profiles
@@ -183,7 +231,7 @@ async fn an_unknown_profile_returns_the_not_found_mapped_profile_not_bound() {
 
     let server = Server_::start().await;
     let mut cache = stubs::cache::cluster_cache_api_client::ClusterCacheApiClient::with_interceptor(
-        server.channel_with_rpc_timeout().await,
+        server.channel_bounded().await,
         credential(),
     );
 
@@ -225,7 +273,7 @@ async fn a_watch_stream_outlives_an_rpc_timeout() {
         )
     };
 
-    // 1. A channel carrying the same `rpc_timeout` the unary calls use.
+    // 1. A channel carrying an `rpc_timeout` on the stream.
     let mut on_timed_channel =
         stubs::cache::cluster_cache_api_client::ClusterCacheApiClient::with_interceptor(
             server.channel_with_rpc_timeout().await,
@@ -256,9 +304,9 @@ async fn a_watch_stream_outlives_an_rpc_timeout() {
         .expect("the watch subscribes")
         .into_inner();
 
-    // Held idle far past the deadline. Real sleeps, not virtual: this is a
-    // property of a socket and a server, and a paused clock would move neither.
-    tokio::time::sleep(RPC_TIMEOUT * 4).await;
+    // Held idle past the deadline. Real sleeps, not virtual: this is a property of
+    // a socket and a server, and a paused clock would move neither.
+    tokio::time::sleep(RPC_TIMEOUT + HELD_PAST_DEADLINE).await;
 
     let mut writer = untimed().await;
     writer
@@ -285,7 +333,7 @@ async fn a_watch_stream_outlives_an_rpc_timeout() {
         assert_eq!(
             event.kind,
             i32::from(stubs::cache::CacheWatchEventKind::Changed),
-            "{shape}: a stream held far past rpc_timeout still delivers - the server \
+            "{shape}: a stream held past rpc_timeout still delivers - the server \
              sets no deadline of its own"
         );
     }
@@ -411,9 +459,11 @@ async fn an_election_subscription_also_carries_no_rpc_timeout() {
     // then severed would be one behaving exactly as designed.
     let server = Server_::start().await;
 
+    // `join` is semantic setup, so it carries the fail-fast backstop — not the
+    // short deadline under test, which no unary call here should race.
     let mut leader =
         stubs::leader::leader_election_api_client::LeaderElectionApiClient::with_interceptor(
-            server.channel_with_rpc_timeout().await,
+            server.channel_bounded().await,
             credential(),
         );
     let joined = leader
@@ -428,7 +478,14 @@ async fn an_election_subscription_also_carries_no_rpc_timeout() {
         .expect("join succeeds")
         .into_inner();
 
-    let mut stream = leader
+    // Only `await_change` — the subscription whose survival past the deadline is
+    // the subject of this test — is opened on the short-deadline channel.
+    let mut subscriber =
+        stubs::leader::leader_election_api_client::LeaderElectionApiClient::with_interceptor(
+            server.channel_with_rpc_timeout().await,
+            credential(),
+        );
+    let mut stream = subscriber
         .await_change(stubs::leader::AwaitChangeRequest {
             profile: "orders".to_owned(),
             election_id: joined.election_id,
@@ -437,7 +494,7 @@ async fn an_election_subscription_also_carries_no_rpc_timeout() {
         .expect("the subscription opens")
         .into_inner();
 
-    tokio::time::sleep(RPC_TIMEOUT * 4).await;
+    tokio::time::sleep(RPC_TIMEOUT + HELD_PAST_DEADLINE).await;
 
     // The gear drains. Item `S5` owns the ordering; what matters here is that the
     // subscription was still there to receive it after all that idle time.
@@ -456,7 +513,7 @@ async fn an_election_subscription_also_carries_no_rpc_timeout() {
     assert_eq!(
         event.kind,
         i32::from(stubs::leader::LeaderWatchEventKind::Closed),
-        "a subscription held far past rpc_timeout still receives its terminal event"
+        "a subscription held past rpc_timeout still receives its terminal event"
     );
 
     server.stop().await;
