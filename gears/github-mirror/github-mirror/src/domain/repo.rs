@@ -1,11 +1,11 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use github_mirror_sdk::{
     Branch, CheckRun, Comment, Commit, CommitComment, CommitFile, CommitStatus, Contributor,
     Deployment, Issue, IssueEvent, IssueReaction, IssueTimelineEvent, Label, Milestone,
     PullRequest, PullRequestCommit, PullRequestFile, Release, Repo, Review, ReviewComment,
     ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
-use sea_orm::prelude::DateTimeUtc;
 use toolkit_db::secure::DBRunner;
 use toolkit_macros::domain_model;
 use toolkit_security::AccessScope;
@@ -189,7 +189,7 @@ pub trait IssueRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: DateTimeUtc,
+        extracted_before: DateTime<Utc>,
     ) -> Result<u64, DomainError>;
 }
 
@@ -279,7 +279,7 @@ pub trait PullRequestRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: DateTimeUtc,
+        extracted_before: DateTime<Utc>,
     ) -> Result<u64, DomainError>;
 }
 
@@ -339,7 +339,7 @@ pub trait CommitRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: DateTimeUtc,
+        extracted_before: DateTime<Utc>,
     ) -> Result<u64, DomainError>;
 }
 
@@ -384,7 +384,7 @@ pub trait CommentRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: DateTimeUtc,
+        extracted_before: DateTime<Utc>,
     ) -> Result<u64, DomainError>;
 }
 
@@ -450,7 +450,7 @@ pub trait ReviewCommentRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: DateTimeUtc,
+        extracted_before: DateTime<Utc>,
     ) -> Result<u64, DomainError>;
 }
 
@@ -527,7 +527,7 @@ pub trait LabelRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: DateTimeUtc,
+        extracted_before: DateTime<Utc>,
     ) -> Result<u64, DomainError>;
 }
 
@@ -576,7 +576,7 @@ pub trait MilestoneRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: DateTimeUtc,
+        extracted_before: DateTime<Utc>,
     ) -> Result<u64, DomainError>;
 }
 
@@ -626,7 +626,7 @@ pub trait ReleaseRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: DateTimeUtc,
+        extracted_before: DateTime<Utc>,
     ) -> Result<u64, DomainError>;
 }
 
@@ -666,7 +666,7 @@ pub trait BranchRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: DateTimeUtc,
+        extracted_before: DateTime<Utc>,
     ) -> Result<u64, DomainError>;
 }
 
@@ -686,8 +686,8 @@ pub struct ContributorRecord {
     /// syncs, never replaced.
     pub roles: Vec<String>,
     /// When this person was first and last seen in mirrored data.
-    pub first_seen_at: Option<DateTimeUtc>,
-    pub last_seen_at: Option<DateTimeUtc>,
+    pub first_seen_at: Option<DateTime<Utc>>,
+    pub last_seen_at: Option<DateTime<Utc>>,
 }
 
 #[async_trait]
@@ -830,7 +830,7 @@ pub trait TagRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        extracted_before: DateTimeUtc,
+        extracted_before: DateTime<Utc>,
     ) -> Result<u64, DomainError>;
 }
 
