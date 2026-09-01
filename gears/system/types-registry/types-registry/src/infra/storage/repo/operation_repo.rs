@@ -335,12 +335,10 @@ impl OperationRepo {
     /// Record a committed registration that changed **nothing**.
     ///
     /// No `result_revision_no`, and that is the whole difference from
-    /// [`Self::mark_item_succeeded`]: an `unchanged` candidate allocates no
-    /// revision number (ADR-0005), and `ck_tr_operation_item_state` enforces
-    /// exactly that pairing — `result_revision_no IS NULL` beside a
-    /// `result_resource_version` that names the version which did not move. The
-    /// same CHECK requires `expected_resource_version >= 1`, so a creation cannot
-    /// reach this state even if a caller tried.
+    /// [`Self::mark_item_succeeded`]: an `unchanged` candidate allocates no revision
+    /// number (ADR-0005), and `ck_tr_operation_item_state` enforces that pairing.
+    /// The same CHECK requires `expected_resource_version >= 1`, so a creation
+    /// cannot reach this state.
     ///
     /// # Errors
     /// Propagates the update's failure.

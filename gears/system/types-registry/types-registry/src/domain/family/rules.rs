@@ -2,12 +2,11 @@
 //!
 //! All three are asked of a **new member** only. A content revision adds nobody to
 //! the family, so it is not gated here — which is also why closing a region cannot
-//! freeze the entities already in it (T11, SPEC §8.1 step 3).
+//! freeze the entities already in it (SPEC §8.1 step 3).
 //!
 //! # Each rule is one exact lookup, never a scan
 //!
-//! `database.sql` fixes which single identifier decides each question, and that is
-//! what makes the rules keyed rather than family-wide:
+//! `database.sql` fixes which single identifier decides each question:
 //!
 //! ```text
 //! shape, minor-bearing candidate vM.n~   -> refuse while vM~ exists
@@ -15,27 +14,21 @@
 //! contiguity, candidate vM.n~ with n > 0 -> refuse unless vM.(n-1)~ exists
 //! ```
 //!
-//! Both are scoped to one **major**, as the compatibility chain is, so a family may
-//! hold a major-only `v1~` beside a minor-bearing `v2.0~`. The kind rule is the one
-//! that is family-wide, because a family key deliberately maps a type and an
+//! Shape and contiguity are scoped to one **major**, as the compatibility chain is,
+//! so a family may hold a major-only `v1~` beside a minor-bearing `v2.0~`. The kind
+//! rule is the family-wide one, because a family key deliberately maps a type and an
 //! Instance spelling onto one row and one of them has to lose.
 //!
-//! # Tombstones count, and one primitive is why
+//! # Tombstones count
 //!
-//! A `DELETED` predecessor still satisfies contiguity: its definition remains the
-//! compatibility baseline until purge, so skipping it would let an ordinary deletion
-//! move the baseline. A `DELETED` member likewise still decides shape. Both fall out
-//! of `EntityStore::find_by_gts_id` returning tombstones — one primitive, both rules,
-//! and no way for the two to disagree about what a tombstone means.
+//! A `DELETED` member still decides shape and still satisfies contiguity: its
+//! definition remains the compatibility baseline until purge, so skipping it would
+//! let an ordinary deletion move the baseline. Both fall out of one primitive,
+//! `EntityStore::find_by_gts_id` returning tombstones.
 //!
-//! # What is *not* here
-//!
-//! The predecessor is **not** a dependency edge (T13) and **not** part of the
-//! revision vector (T15). Such an edge would forbid deleting `v1.0~` while `v1.1~`
-//! exists, which ADR-0008 permits and ADR-0004 relies on. With no edge between two
-//! minors, the family row is an admission's and a purge's only serialization point
-//! for these rules — see `version_family_repo`'s note on what that row can and
-//! cannot lock today.
+//! The predecessor is deliberately **not** a dependency edge and not part of the
+//! revision vector: such an edge would forbid deleting `v1.0~` while `v1.1~` exists,
+//! which ADR-0008 permits and ADR-0004 relies on.
 
 use gts::GtsId;
 use toolkit_db::DbTx;
@@ -50,8 +43,7 @@ use crate::domain::ports::{Stores, VersionFamilyRow};
 ///
 /// A value rather than an error, like [`PolicyRefusal`](crate::domain::policy::PolicyRefusal):
 /// the commit path turns it into the item's outcome, and nothing here is a fault.
-/// One variant per rule, so a caller can count refusals by rule without parsing
-/// prose.
+/// One variant per rule, so a caller can count refusals without parsing prose.
 #[domain_model]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FamilyRefusal {
@@ -69,6 +61,13 @@ pub enum FamilyRefusal {
     MinorShape { gts_id: String, conflicting: String },
     /// Minor contiguity: the minors of a major are contiguous and open at `M.0`.
     MissingPredecessor { gts_id: String, predecessor: String },
+    /// The candidate's last segment carries no readable major, so neither the shape
+    /// nor the contiguity rule has an identifier to look up.
+    ///
+    /// Acceptance refuses such an identifier first (SPEC §8.1 step 4), so this is
+    /// unreachable from the write path. It exists so the *absence* of a version
+    /// refuses the member rather than admitting it with two rules silently skipped.
+    UnreadableVersion { gts_id: String },
 }
 
 impl FamilyRefusal {
@@ -79,6 +78,7 @@ impl FamilyRefusal {
             Self::KindConflict { .. } => "family_kind_conflict",
             Self::MinorShape { .. } => "family_shape_conflict",
             Self::MissingPredecessor { .. } => "missing_predecessor",
+            Self::UnreadableVersion { .. } => "unreadable_version",
         }
     }
 }
@@ -112,6 +112,11 @@ impl std::fmt::Display for FamilyRefusal {
                 "'{gts_id}' requires its predecessor '{predecessor}'; the minors of a major are \
                  contiguous and open at M.0"
             ),
+            Self::UnreadableVersion { gts_id } => write!(
+                f,
+                "'{gts_id}' names no readable version in its last segment, so the family's shape \
+                 and contiguity rules have nothing to compare it against"
+            ),
         }
     }
 }
@@ -119,9 +124,9 @@ impl std::fmt::Display for FamilyRefusal {
 /// The exact lookups the shape and contiguity rules need, chosen by the
 /// candidate's **own** version.
 ///
-/// Three variants because there are exactly three shapes a last segment can have,
-/// and each asks a different pair of questions. Two `Option<String>` fields beside
-/// a discriminant would have made "a first minor with a predecessor" representable.
+/// One variant per shape a last segment can have, each asking a different pair of
+/// questions. `Option<String>` fields beside a discriminant would have made "a first
+/// minor with a predecessor" representable.
 #[domain_model]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VersionProbe {
@@ -169,13 +174,10 @@ pub fn version_probe(id: &GtsId) -> Option<VersionProbe> {
 /// created: every question is about committed state, and the answer must not be
 /// older than the transaction that acts on it.
 ///
-/// The family row is passed whole rather than as `(key, id)`: the kind rule needs
-/// the id and its refusal names the key, and two parameters that must come from one
-/// row are two chances to pass a mismatched pair.
-///
-/// `family_is_new` skips the kind rule for a family this admission is founding —
-/// there is no existing member to conflict with, and asking would be one read that
-/// can only answer `None`.
+/// The family row is passed whole rather than as `(key, id)`, which would be two
+/// chances to pass a mismatched pair. `family_is_new` skips the kind rule for a
+/// family this admission is founding: there is no existing member to conflict with,
+/// so the read could only answer `None`.
 ///
 /// # Errors
 /// Propagates the scoped reads. A refusal is `Ok(Some(..))`: it is an outcome, not
@@ -201,10 +203,12 @@ pub async fn admits_new_member(
         }));
     }
 
-    // A candidate whose version this function cannot read is one acceptance should
-    // have refused; there is nothing to check and nothing to invent.
+    // Refused rather than admitted: `Ok(None)` would let it through with both
+    // remaining rules unevaluated.
     let Some(probe) = version_probe(id) else {
-        return Ok(None);
+        return Ok(Some(FamilyRefusal::UnreadableVersion {
+            gts_id: id.id().to_owned(),
+        }));
     };
 
     let (blocker, predecessor) = match &probe {

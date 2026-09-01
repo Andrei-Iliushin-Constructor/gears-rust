@@ -19,8 +19,8 @@
 //! Only the calls the domain makes are here. `list_page`, `mark_deleted`,
 //! `replace_outgoing` and the batch reads stay as inherent methods until a domain
 //! rule needs them: a port method with no domain caller is an abstraction with
-//! nothing to abstract. `compare_and_swap_version` left that list at T11, when the
-//! revision commit became its first domain caller.
+//! nothing to abstract. `compare_and_swap_version` left that list when the revision
+//! commit became its first domain caller.
 
 use async_trait::async_trait;
 use time::OffsetDateTime;

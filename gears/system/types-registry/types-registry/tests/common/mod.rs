@@ -126,10 +126,9 @@ pub fn allow_all() -> AccessScope {
 // ---------------------------------------------------------------------------
 //
 // `type_schema` and `type_schema_revision` have no repository writer: those writes
-// belong to the admission worker (T8), their first caller. Until then the tests that
-// need admitted rows — the transient store (T5) and the backend suites — write them
-// through their `ActiveModel`s and share the operation → item → revision →
-// current-pointer boilerplate here.
+// belong to the admission worker, their first caller. Tests that need admitted rows
+// write them through their `ActiveModel`s and share the operation → item → revision
+// → current-pointer boilerplate here.
 
 use sea_orm::ActiveValue::Set;
 use time::OffsetDateTime;
@@ -316,4 +315,391 @@ pub async fn seed_current_type_schema(
     )
     .await
     .expect("insert current type schema");
+}
+
+// ---------------------------------------------------------------------------
+// A commit paused mid-transaction (shared by the concurrency suites)
+// ---------------------------------------------------------------------------
+
+use async_trait::async_trait;
+use toolkit_db::DbTx;
+use toolkit_db::secure::ScopeError;
+use types_registry::domain::admission::fingerprint::ScopeHash;
+use types_registry::domain::enums::{EntityKind, OwnershipScope};
+use types_registry::domain::family::FamilyKey;
+use types_registry::domain::ports::{
+    CurrentDocument, CurrentInstanceRow, CurrentInstanceValue, CurrentTypeSchemaRow,
+    DependencyClosure, DependencyStore, EntityRow, EntityStore, InstanceStore, NewCurrentInstance,
+    NewCurrentTypeSchema, NewEntity, NewInstanceRevision, NewOperation, NewOperationItem,
+    NewRevision, OperationItemRow, OperationRow, OperationStore, TypeSchemaStore, VersionFamilyRow,
+    VersionFamilyStore,
+};
+
+// ---------------------------------------------------------------------------
+// A commit paused mid-transaction
+// ---------------------------------------------------------------------------
+
+/// Which statement of the commit transaction [`PausingStores`] holds the pass at.
+///
+/// Named points rather than a closure, because each one is a *place in the commit
+/// protocol* a test is making a claim about, and the name is that claim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PausePoint {
+    /// Between `commit_revision`'s entity read and both of its concurrency
+    /// branches: the window the `unchanged` re-read and the compare-and-swap exist
+    /// to close.
+    CurrentDocuments,
+    /// Inside `commit_creation`, with the family row taken and the three family
+    /// rules not yet asked — the window the family advisory lock exists to close.
+    CreateOrGet,
+}
+
+/// Every port forwarded to the real adapter, with one call held on a channel.
+///
+/// A decorator rather than a hand-written fake: everything the commit path reads
+/// and writes must be the real thing, or a test would be pinning the fake's
+/// behaviour instead of the transaction's. Only the *timing* is the test's.
+pub struct PausingStores {
+    inner: Arc<dyn types_registry::domain::ports::Stores>,
+    at: PausePoint,
+    /// Sent once, when the pass reaches the pause point.
+    reached: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Awaited once, before that call returns.
+    resume: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+impl PausingStores {
+    /// The decorated ports, a receiver that fires when the pass reaches `at`, and
+    /// the sender that lets it go.
+    #[must_use]
+    pub fn new(
+        at: PausePoint,
+    ) -> (
+        Arc<Self>,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let decorated = Arc::new(Self {
+            inner: stores(),
+            at,
+            reached: tokio::sync::Mutex::new(Some(reached_tx)),
+            resume: tokio::sync::Mutex::new(Some(resume_rx)),
+        });
+        (decorated, reached_rx, resume_tx)
+    }
+
+    /// Signal the caller and wait to be let go. A no-op on any call after the
+    /// first, so a commit path that grew a second call at the same point would not
+    /// deadlock the suite.
+    async fn pause(&self, at: PausePoint) {
+        if at != self.at {
+            return;
+        }
+        let reached = self.reached.lock().await.take();
+        let resume = self.resume.lock().await.take();
+        if let Some(reached) = reached {
+            // The receiver is dropped only if the test already gave up; that is the
+            // test's own failure to report, not this helper's.
+            reached.send(()).ok();
+        }
+        if let Some(resume) = resume {
+            resume.await.expect("the test must always resume the pass");
+        }
+    }
+}
+
+#[async_trait]
+impl VersionFamilyStore for PausingStores {
+    async fn create_or_get(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        family_key: &FamilyKey,
+        ownership_scope: OwnershipScope,
+        owner_tenant_id: Option<Uuid>,
+        now: OffsetDateTime,
+    ) -> Result<(VersionFamilyRow, bool), ScopeError> {
+        let out = self
+            .inner
+            .create_or_get(tx, scope, family_key, ownership_scope, owner_tenant_id, now)
+            .await?;
+        self.pause(PausePoint::CreateOrGet).await;
+        Ok(out)
+    }
+}
+
+#[async_trait]
+impl EntityStore for PausingStores {
+    async fn find_by_gts_id(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        gts_id: &str,
+    ) -> Result<Option<EntityRow>, ScopeError> {
+        self.inner.find_by_gts_id(tx, scope, gts_id).await
+    }
+
+    async fn find_by_gts_uuid(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        gts_uuid: Uuid,
+    ) -> Result<Option<EntityRow>, ScopeError> {
+        self.inner.find_by_gts_uuid(tx, scope, gts_uuid).await
+    }
+
+    async fn kind_in_family(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        family_id: i64,
+    ) -> Result<Option<EntityKind>, ScopeError> {
+        self.inner.kind_in_family(tx, scope, family_id).await
+    }
+
+    async fn insert_entity(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        new: NewEntity,
+    ) -> Result<Option<EntityRow>, ScopeError> {
+        self.inner.insert_entity(tx, scope, new).await
+    }
+
+    async fn compare_and_swap_version(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_id: i64,
+        expected_resource_version: i64,
+        now: OffsetDateTime,
+    ) -> Result<bool, ScopeError> {
+        self.inner
+            .compare_and_swap_version(tx, scope, entity_id, expected_resource_version, now)
+            .await
+    }
+}
+
+#[async_trait]
+impl TypeSchemaStore for PausingStores {
+    async fn current_documents(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_ids: &[i64],
+    ) -> Result<Vec<CurrentDocument>, ScopeError> {
+        let out = self.inner.current_documents(tx, scope, entity_ids).await?;
+        self.pause(PausePoint::CurrentDocuments).await;
+        Ok(out)
+    }
+
+    async fn find_current_schema(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_id: i64,
+    ) -> Result<Option<CurrentTypeSchemaRow>, ScopeError> {
+        self.inner.find_current_schema(tx, scope, entity_id).await
+    }
+
+    async fn insert_schema_revision(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        new: NewRevision,
+    ) -> Result<(), ScopeError> {
+        self.inner.insert_schema_revision(tx, scope, new).await
+    }
+
+    async fn insert_current_schema(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        new: NewCurrentTypeSchema,
+    ) -> Result<(), ScopeError> {
+        self.inner.insert_current_schema(tx, scope, new).await
+    }
+
+    async fn update_current_schema(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        new: NewCurrentTypeSchema,
+    ) -> Result<bool, ScopeError> {
+        self.inner.update_current_schema(tx, scope, new).await
+    }
+}
+
+#[async_trait]
+impl InstanceStore for PausingStores {
+    async fn current_values(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_ids: &[i64],
+    ) -> Result<Vec<CurrentInstanceValue>, ScopeError> {
+        self.inner.current_values(tx, scope, entity_ids).await
+    }
+
+    async fn find_current_instance(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_id: i64,
+    ) -> Result<Option<CurrentInstanceRow>, ScopeError> {
+        self.inner.find_current_instance(tx, scope, entity_id).await
+    }
+
+    async fn insert_instance_revision(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        new: NewInstanceRevision,
+    ) -> Result<(), ScopeError> {
+        self.inner.insert_instance_revision(tx, scope, new).await
+    }
+
+    async fn insert_current_instance(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        new: NewCurrentInstance,
+    ) -> Result<(), ScopeError> {
+        self.inner.insert_current_instance(tx, scope, new).await
+    }
+
+    async fn update_current_instance(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        new: NewCurrentInstance,
+    ) -> Result<bool, ScopeError> {
+        self.inner.update_current_instance(tx, scope, new).await
+    }
+}
+
+#[async_trait]
+impl OperationStore for PausingStores {
+    async fn find_by_idempotency(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        idempotency_scope_hash: &ScopeHash,
+        idempotency_key: &str,
+    ) -> Result<Option<OperationRow>, ScopeError> {
+        self.inner
+            .find_by_idempotency(tx, scope, idempotency_scope_hash, idempotency_key)
+            .await
+    }
+
+    async fn find_by_id(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<OperationRow>, ScopeError> {
+        self.inner.find_by_id(tx, scope, id).await
+    }
+
+    async fn insert_operation(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        new: NewOperation,
+    ) -> Result<OperationRow, ScopeError> {
+        self.inner.insert_operation(tx, scope, new).await
+    }
+
+    async fn insert_items(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        parent: &OperationRow,
+        items: &[NewOperationItem],
+    ) -> Result<(), ScopeError> {
+        self.inner.insert_items(tx, scope, parent, items).await
+    }
+
+    async fn find_items(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        operation_id: Uuid,
+    ) -> Result<Vec<OperationItemRow>, ScopeError> {
+        self.inner.find_items(tx, scope, operation_id).await
+    }
+
+    async fn mark_running(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        id: Uuid,
+        now: OffsetDateTime,
+    ) -> Result<bool, ScopeError> {
+        self.inner.mark_running(tx, scope, id, now).await
+    }
+
+    async fn mark_completed(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        id: Uuid,
+        now: OffsetDateTime,
+    ) -> Result<bool, ScopeError> {
+        self.inner.mark_completed(tx, scope, id, now).await
+    }
+
+    async fn mark_item_succeeded(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        item_id: i64,
+        revision_no: i32,
+        resource_version: i64,
+        now: OffsetDateTime,
+    ) -> Result<bool, ScopeError> {
+        self.inner
+            .mark_item_succeeded(tx, scope, item_id, revision_no, resource_version, now)
+            .await
+    }
+
+    async fn mark_item_unchanged(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        item_id: i64,
+        resource_version: i64,
+        now: OffsetDateTime,
+    ) -> Result<bool, ScopeError> {
+        self.inner
+            .mark_item_unchanged(tx, scope, item_id, resource_version, now)
+            .await
+    }
+
+    async fn mark_item_failed(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        item_id: i64,
+        error_payload: String,
+        now: OffsetDateTime,
+    ) -> Result<bool, ScopeError> {
+        self.inner
+            .mark_item_failed(tx, scope, item_id, error_payload, now)
+            .await
+    }
+}
+
+#[async_trait]
+impl DependencyStore for PausingStores {
+    async fn closure(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        roots: &[String],
+    ) -> Result<DependencyClosure, ScopeError> {
+        self.inner.closure(tx, scope, roots).await
+    }
 }

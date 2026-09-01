@@ -276,11 +276,10 @@ pub struct CurrentDocument {
     /// caller's job: this port moves bytes, and the layer that knows what a
     /// malformed document means is the one that names the entity in the error.
     pub raw_schema: String,
-    /// The digest of [`Self::raw_schema`], carried so the `unchanged` decision can
-    /// reject an inequality without comparing whole documents. A **prefilter
-    /// only** (ADR-0012): equality here proposes redundancy and the bytes confirm
-    /// it, which is why the text travels beside the digest rather than instead of
-    /// it.
+    /// The digest of [`Self::raw_schema`], so the `unchanged` decision can reject an
+    /// inequality without comparing whole documents. A **prefilter only**
+    /// (ADR-0012): equality proposes redundancy, the bytes confirm it — which is why
+    /// the text travels beside the digest rather than instead of it.
     pub content_hash: Vec<u8>,
 }
 
@@ -515,12 +514,14 @@ pub trait EntityStore: Send + Sync {
         new: NewEntity,
     ) -> Result<Option<EntityRow>, ScopeError>;
 
-    /// Advance `resource_version` if and only if it still equals `expected`.
+    /// Advance `resource_version` if and only if the entity is **active** and
+    /// still at `expected`.
     ///
-    /// The caller's precondition, enforced where it means something: the check is
-    /// in the statement's `WHERE`, so there is no window between reading the
-    /// version and moving it. `false` is a lost race — an ordinary concurrent
-    /// outcome the caller turns into `precondition_failed`, never a fault.
+    /// The check is in the statement's `WHERE`, so there is no window between reading
+    /// the version and moving it. The lifecycle is there for the same reason: a
+    /// deletion can commit between the caller's read and this call, and a revision
+    /// must not resurrect a tombstone. `false` is a lost race, which the caller turns
+    /// into `precondition_failed` — never a fault.
     async fn compare_and_swap_version(
         &self,
         tx: &DbTx<'_>,
@@ -568,9 +569,8 @@ pub trait TypeSchemaStore: Send + Sync {
     /// re-materializing D3's artifacts with it.
     ///
     /// Separate from [`Self::insert_current_schema`] rather than one upsert: an
-    /// insert that finds a row is a missing existence recheck, and an update that
-    /// finds none is a missing first admission. Collapsing them would make both
-    /// bugs silent. `false` means no row matched.
+    /// insert that finds a row and an update that finds none are different bugs, and
+    /// collapsing them would silence both. `false` means no row matched.
     async fn update_current_schema(
         &self,
         tx: &DbTx<'_>,

@@ -1,4 +1,4 @@
-//! Content revisions and compare-and-swap (T11).
+//! Content revisions and compare-and-swap.
 //!
 //! Every test calls the worker directly, as `admission_worker_test.rs` does: no
 //! `sleep`, no timer, no polling (SPEC §13).
@@ -342,6 +342,66 @@ async fn a_precondition_on_an_absent_entity_is_refused_rather_than_created() {
             .is_none(),
         "a refused revision must not create the entity it named",
     );
+}
+
+/// A tombstoned entity refuses a revision, and says so rather than reporting a
+/// version.
+///
+/// `commit_revision` is the only write path that reaches a `DELETED` row. Without
+/// the lifecycle check the caller's content would become the current state of a
+/// withdrawn entity, with `resource_version` advancing behind it.
+#[tokio::test]
+async fn a_revision_is_refused_on_a_tombstoned_entity() {
+    let db = test_db().await;
+    admit(&db, "k1", CF_TYPE, schema(CF_TYPE, "first"), None).await;
+
+    let provider = worker(&db);
+    let conn = provider.conn().expect("conn");
+    let entity = EntityRepo::find_by_gts_id(&conn, &allow_all(), CF_TYPE)
+        .await
+        .expect("read")
+        .expect("admitted");
+    assert!(
+        EntityRepo::mark_deleted(
+            &conn,
+            &allow_all(),
+            entity.id,
+            entity.resource_version,
+            LATER
+        )
+        .await
+        .expect("tombstone the entity"),
+        "the fixture must really produce a tombstone",
+    );
+    let after_delete = resource_version_of(&db, CF_TYPE).await;
+
+    // The precondition names the version the deletion left behind, so nothing but
+    // the lifecycle can refuse this.
+    let outcome = admit(
+        &db,
+        "k2",
+        CF_TYPE,
+        schema(CF_TYPE, "second"),
+        Some(after_delete),
+    )
+    .await;
+
+    let item = &outcome.items[0];
+    assert_eq!(item.status, domain_enums::OperationItemStatus::Failed);
+    assert_eq!(
+        item.failure.as_ref().expect("a recorded failure").reason,
+        "entity_deleted",
+        "a withdrawn entity is not a stale version, and must not be reported as one",
+    );
+    assert_eq!(item.revision_no, None);
+
+    let entity_id = entity_id_of(&db, CF_TYPE).await;
+    assert_eq!(
+        schema_revisions(&db, entity_id).await.len(),
+        1,
+        "the refused revision wrote nothing",
+    );
+    assert_eq!(resource_version_of(&db, CF_TYPE).await, after_delete);
 }
 
 // ---------------------------------------------------------------------------

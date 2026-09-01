@@ -736,12 +736,11 @@ async fn a_zero_precondition_is_refused() {
 /// The review's probe, as a standing test: naming `expected_resource_version` must
 /// not get a candidate into a **closed** region.
 ///
-/// The refusal moved with T11 and the claim did not. A revision now bypasses SPEC
-/// §8.1's policy gate at acceptance — otherwise closing a region would freeze the
-/// entities already in it — so this is accepted and then refused *terminally by the
-/// worker*, which requires the identifier to exist at the named version. What must
-/// never happen, and is what this test pins, is the candidate being committed as an
-/// ordinary creation inside the closed region.
+/// A revision bypasses SPEC §8.1's policy gate at acceptance — otherwise closing a
+/// region would freeze the entities already in it — so this is accepted and then
+/// refused *terminally by the worker*, which requires the identifier to exist at the
+/// named version. What this pins is that it is never committed as an ordinary
+/// creation inside the closed region.
 #[tokio::test]
 async fn naming_a_version_does_not_get_a_candidate_past_a_closed_region() {
     let router = router_with_db().await;
@@ -774,8 +773,8 @@ async fn naming_a_version_does_not_get_a_candidate_past_a_closed_region() {
     assert_eq!(entity.status, StatusCode::NOT_FOUND);
 }
 
-/// The standing read criterion for a task that extends the write path: whatever
-/// T11 makes storable is readable through the public route.
+/// The standing read criterion for anything that extends the write path: whatever
+/// becomes storable is readable through the public route.
 #[tokio::test]
 async fn a_revision_is_readable_through_the_entity_route() {
     let router = router_with_db().await;

@@ -1,14 +1,18 @@
-//! The three non-stored family rules, end to end through the admission worker
-//! (T12; the kind rule landed with T10 and moved into `family::rules` here).
+//! The three non-stored family rules, end to end through the admission worker.
 //!
 //! Every test calls the worker directly: no `sleep`, no timer, no polling
 //! (SPEC §13).
 //!
-//! The rules are **scoped to one major**, as the compatibility chain is, so a
-//! family may hold a major-only `v1~` beside a minor-bearing `v2.0~`. That is the
-//! property the table below is arranged to make visible: every case names the
-//! existing member and the candidate, and the two `v2` rows are what stop the
-//! rules from being read as family-wide.
+//! # Concurrency: the lock is here, the unique-key race is not
+//!
+//! Covered here: a creation *holds* the family's advisory lock across its commit
+//! transaction — probed rather than raced, so it needs no second writer.
+//!
+//! Not covered here: two simultaneous first registrations, decided by
+//! `uq_tr_version_family_key`. `SQLite` cannot demonstrate that — a second
+//! concurrent writer fails the whole transaction with `database is locked` rather
+//! than losing a unique-key race — so `repo_backends_test.rs::family_race_*` covers
+//! it on the real backends.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -270,7 +274,7 @@ async fn a_deleted_predecessor_still_satisfies_contiguity() {
 }
 
 /// The mirror: a `DELETED` major-only member still blocks a minor-bearing
-/// candidate. One primitive answers both, which is why they are one exact read.
+/// candidate.
 #[tokio::test]
 async fn a_deleted_member_still_decides_minor_shape() {
     let db = test_db().await;
@@ -283,9 +287,23 @@ async fn a_deleted_member_still_decides_minor_shape() {
         .await
         .expect("read")
         .expect("admitted");
-    EntityRepo::mark_deleted(&conn, &scope, existing.id, existing.resource_version, NOW)
+    assert!(
+        EntityRepo::mark_deleted(&conn, &scope, existing.id, existing.resource_version, NOW)
+            .await
+            .expect("tombstone the blocker"),
+        "the fixture must really produce a tombstone",
+    );
+    // Re-read rather than trust the `bool`: without this the shape refusal below
+    // would fire whether or not the tombstone was written, and the test's claim
+    // would never be exercised.
+    let tombstoned = EntityRepo::find_by_gts_id(&conn, &scope, V1)
         .await
-        .expect("tombstone");
+        .expect("read")
+        .expect("the tombstone stays reverse-resolvable");
+    assert_eq!(
+        tombstoned.lifecycle_status,
+        domain_enums::LifecycleStatus::Deleted,
+    );
 
     let (status, reason) = verdict(&admit(&db, "k2", V1_1).await);
     assert_eq!(status, domain_enums::OperationItemStatus::Failed);
@@ -340,8 +358,7 @@ async fn one_family_row_holds_every_version_and_owns_its_members() {
 
 /// A predecessor is **not** a dependency edge: such an edge would forbid deleting
 /// `v1.0~` while `v1.1~` exists, which ADR-0008 permits and ADR-0004 relies on
-/// (`database.sql`). The family row is their only serialization point, and this
-/// pins that T13 must not add the edge when it starts writing the table.
+/// (`database.sql`). This pins that the dependency table must not grow one.
 #[tokio::test]
 async fn a_predecessor_is_not_a_dependency_edge() {
     let db = test_db().await;
@@ -362,12 +379,95 @@ async fn a_predecessor_is_not_a_dependency_edge() {
     );
 }
 
-/// **The concurrent case lives in `repo_backends_test.rs`, not here.** Two
-/// simultaneous first registrations are decided by `uq_tr_version_family_key`, and
-/// `SQLite` cannot demonstrate it: a second concurrent writer fails the whole
-/// transaction with `database is locked` rather than losing a unique-key race. The
-/// two backend tests that do cover it are `family_race_yields_one_row` — eight
-/// callers, one `created` — and `family_race_inside_a_transaction_yields_one_row`,
-/// which additionally proves the loser can keep reading in the same transaction.
-#[test]
-fn the_family_race_is_covered_on_the_container_backends() {}
+// ---------------------------------------------------------------------------
+// The family lock
+// ---------------------------------------------------------------------------
+
+/// A creation holds the family's advisory lock **across** its commit transaction.
+///
+/// That is what makes the three rules above safe: they are check-then-act reads at
+/// `READ COMMITTED`, and the lock is the serialization the family row cannot provide
+/// (`version_family_repo`).
+///
+/// Asserted by probing rather than by racing: a second admission is paused inside
+/// its commit transaction, with the family row taken and the rules not yet asked,
+/// and the lock is then probed with a **non-waiting** config. `None` means held. A
+/// race would prove nothing — the correct answer also comes out of a lucky ordering
+/// — and waiting for one would need the `sleep` SPEC §13 forbids.
+///
+/// Mutation-checked: removing the `lock_families` call from `worker::process_item`
+/// makes the probe succeed.
+#[tokio::test]
+async fn a_creation_holds_the_family_lock_across_its_commit() {
+    let db = test_db().await;
+    let op = submit(&db, "k1", V1).await;
+
+    let (paused_stores, reached, resume) =
+        common::PausingStores::new(common::PausePoint::CreateOrGet);
+    let stores_handle: Arc<dyn types_registry::domain::ports::Stores> = paused_stores;
+    let provider = worker(&db);
+    let admission = tokio::spawn(async move {
+        run_operation(&stores_handle, &provider, &allow_all(), op, LATER)
+            .await
+            .expect("the worker itself must not fail")
+    });
+
+    reached
+        .await
+        .expect("the admission reaches the family row inside its commit");
+
+    // One attempt, no retries: this must report the lock as held, not wait for it.
+    let probe = toolkit_db::LockConfig {
+        max_wait: Some(std::time::Duration::from_millis(1)),
+        max_retries: Some(0),
+        ..toolkit_db::LockConfig::default()
+    };
+    let key = types_registry::domain::admission::worker::family_lock_key(
+        &types_registry::domain::family::family_key(
+            &gts::GtsId::try_new(V1).expect("fixture identifier"),
+        ),
+    );
+    let held = db
+        .db()
+        .try_lock(
+            types_registry::domain::admission::worker::LOCK_GEAR,
+            &key,
+            probe.clone(),
+        )
+        .await
+        .expect("probing a held lock is not an error");
+    assert!(
+        held.is_none(),
+        "the family lock must be held while the commit transaction is open",
+    );
+
+    resume
+        .send(())
+        .expect("the paused admission is still waiting");
+    let outcome = admission.await.expect("task");
+    assert_eq!(
+        verdict(&outcome).0,
+        domain_enums::OperationItemStatus::Succeeded,
+    );
+
+    // And released afterwards, or the next admission of a sibling would block for
+    // the whole wait budget.
+    let after = db
+        .db()
+        .try_lock(
+            types_registry::domain::admission::worker::LOCK_GEAR,
+            &key,
+            probe,
+        )
+        .await
+        .expect("probe");
+    assert!(
+        after.is_some(),
+        "the lock must be released when the commit transaction closes",
+    );
+    after
+        .expect("just asserted")
+        .release()
+        .await
+        .expect("release the probe's own guard");
+}

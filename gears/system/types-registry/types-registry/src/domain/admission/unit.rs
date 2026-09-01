@@ -1,27 +1,18 @@
 //! One admission unit: evaluate a candidate against its transient store, then
 //! commit it (SPEC §8.1, worker steps 3 and 4).
 //!
-//! The split between the two halves is the point of this module. Evaluation is
-//! everything expensive and everything fallible for content reasons — building the
-//! store, resolving references, composing effective traits, meta-compiling the
-//! schema — and runs with **no transaction open**. The transaction that follows
-//! holds only the commit-time rechecks and the writes, so a slow validation never
-//! holds a row lock and a failed one never opened it.
+//! Evaluation — building the store, resolving references, composing effective
+//! traits, meta-compiling the schema — runs with **no transaction open**, so a slow
+//! validation never holds a row lock and a failed one never opened one. The
+//! transaction that follows holds only the commit-time rechecks and the writes.
 //!
-//! P0 scope here is T8's: one acyclic, reference-free candidate per unit. In-batch
-//! resolution and SCC ordering are T19, compatibility T17, dependency edges T13,
-//! the revision-vector guard T15 — each adds a step to `evaluate` or `commit`
-//! without moving the boundary between them.
+//! P0 scope is one acyclic, reference-free candidate per unit; later phases add
+//! steps to `evaluate` or `commit` without moving that boundary.
 //!
-//! # Two commits, not one commit with a flag
-//!
-//! [`commit_creation`] requires the identifier **absent**; [`commit_revision`]
+//! [`commit_creation`] requires the identifier **absent**, [`commit_revision`]
 //! requires it present at a named `resource_version`. They share evaluation and
-//! nothing else: the creation takes or makes a family and inserts current-state
-//! rows, the revision moves them, and only the revision can end `unchanged`. A
-//! single function branching on an `Option<i64>` would make each half's writes
-//! reachable under the other's precondition, which is the shape T11 was asked to
-//! remove rather than to parameterize.
+//! nothing else — one function branching on an `Option<i64>` would make each half's
+//! writes reachable under the other's precondition.
 
 use std::sync::Arc;
 
@@ -36,7 +27,7 @@ use uuid::Uuid;
 use super::errors::{ItemFailure, WorkerError};
 use super::fingerprint::canonical_text;
 use crate::domain::artifacts::{MaterializedArtifacts, content_hash, materialize};
-use crate::domain::enums::{EntityKind, OwnershipScope};
+use crate::domain::enums::{EntityKind, LifecycleStatus, OwnershipScope};
 use crate::domain::family::{FamilyKey, admits_new_member, family_key};
 use crate::domain::gts_store::{UnitDocument, UnitStore, load_unit_store};
 use crate::domain::ports::{
@@ -46,18 +37,14 @@ use crate::domain::ports::{
 
 /// The owning gear recorded on a P0 admission.
 ///
-/// ponytail: caller-declared attribution that MUST NOT authorize (`database.sql`).
-/// P0 has one writer — types-registry itself, seeding — so the constant is honest
-/// here. T24 replaces it with T22's `owning_gear` from the inventory record, which
-/// is what strikes ceiling C3.
+/// ponytail: ceiling C3 — caller-declared attribution that MUST NOT authorize
+/// (`database.sql`). Honest while P0 has one writer, the registry seeding itself.
+/// Upgrade: the inventory record's own `owning_gear`.
 pub const P0_OWNING_GEAR: &str = "types-registry";
 
-/// The kind-specific half of an evaluation, and why `EvaluatedUnit` has no
-/// `entity_kind` field.
-///
-/// Variants rather than two `Option`s beside a `kind` discriminant: with `Option`s a
-/// commit path reading the wrong one sees `None` at runtime, and a `kind` that
-/// disagrees with its payload is representable. Here the kind *is* the variant.
+/// The kind-specific half of an evaluation. The kind *is* the variant, so
+/// `EvaluatedUnit` needs no `entity_kind` field and no payload can disagree with
+/// one.
 #[domain_model]
 #[derive(Clone, Debug)]
 pub enum EvaluatedOutcome {
@@ -74,9 +61,8 @@ pub enum EvaluatedOutcome {
 }
 
 impl EvaluatedOutcome {
-    /// Derived, never passed: the identifier's `~` chose the branch, the branch chose
-    /// this variant. Supplying it independently is how an entity row and its revision
-    /// table come to disagree.
+    /// Derived, never passed: the identifier's `~` chose the variant. Supplying the
+    /// kind alongside it is how an entity row and its revision table come to disagree.
     #[must_use]
     pub const fn entity_kind(&self) -> EntityKind {
         match self {
@@ -87,8 +73,7 @@ impl EvaluatedOutcome {
 }
 
 /// What evaluation produced, and what the commit needs. Owned, because it crosses
-/// into a transaction closure that may not borrow anything shorter-lived than
-/// `'static`.
+/// into a transaction closure that borrows nothing shorter-lived than `'static`.
 #[domain_model]
 #[derive(Clone, Debug)]
 pub struct EvaluatedUnit {
@@ -110,12 +95,9 @@ pub struct CommittedUnit {
     pub resource_version: i64,
 }
 
-/// What committing a *revision* produced.
-///
-/// Two variants rather than a `CommittedUnit` with an optional `revision_no`: an
-/// `unchanged` candidate allocates no revision number (ADR-0005), and an `Option`
-/// there would also be inhabited by [`commit_creation`]'s result, where the
-/// outcome is impossible. Here the outcome *is* the variant.
+/// What committing a *revision* produced. The outcome is the variant: an
+/// `unchanged` candidate allocates no revision number (ADR-0005), and
+/// [`commit_creation`] cannot reach that outcome at all.
 #[domain_model]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RevisionCommit {
@@ -133,16 +115,14 @@ pub enum RevisionCommit {
 /// Evaluate one candidate. **No transaction is open here.**
 ///
 /// Builds the unit's transient store from the database (D2), asks `gts-rust` to
-/// validate the candidate, and materializes D3's artifacts. The store is created
-/// inside this call and dropped when it returns: nothing is retained on a worker,
-/// a service or the gear, and there is no post-commit rebuild step — the next
-/// invocation reads the database again.
+/// validate the candidate, and materializes D3's artifacts. The store is dropped
+/// when this returns: nothing is retained anywhere, and the next invocation reads
+/// the database again.
 ///
 /// # Errors
 /// [`WorkerError`] for an infrastructure failure, which the outbox handler must
-/// retry. A content failure is an [`ItemFailure`] in the `Ok(Err(..))` position:
-/// it is an *outcome* of this operation, not a fault of the worker, and retrying
-/// it would produce the same answer forever.
+/// retry. A content failure is an [`ItemFailure`] in the `Ok(Err(..))` position: an
+/// *outcome*, not a fault, and retrying it would answer the same forever.
 pub async fn evaluate(
     stores: &Arc<dyn Stores>,
     db: &DBProvider<WorkerError>,
@@ -173,9 +153,7 @@ pub async fn evaluate(
     };
 
     // The store's reads are one snapshot, and the transaction ends with the load:
-    // everything after this line — reference resolution, trait composition, the
-    // meta-schema compile — runs with **no transaction open**, which is the split
-    // this module's header is about.
+    // everything after it runs with no transaction open (see the module header).
     let candidates = vec![UnitDocument {
         gts_id: id.id().to_owned(),
         content,
@@ -323,14 +301,10 @@ pub async fn commit_creation(
     // Created here if absent: ownership must be fixed before the first member, and
     // the family and that member commit together.
     //
-    // `database.sql` calls this row the serialization point for the rules below, and
-    // for a *first* member it is — `uq_tr_version_family_key` decides that race. It
-    // is **not** a lock for the rules themselves: `create_or_get` documents why it
-    // cannot take one, so two concurrent admissions of two different new members can
-    // both pass the shape check below. T10's kind rule has the same window. The
-    // mechanism is `Db::try_lock` beside `VersionFamilyRepo::lock_order`; wiring it
-    // is a service-layer decision recorded at Checkpoint 2, not something this
-    // function can do from inside the transaction.
+    // `uq_tr_version_family_key` decides which of two concurrent admissions founds
+    // the family, and nothing more — the rules below are check-then-act reads. What
+    // serializes *those* is the advisory lock `admission::worker` holds on the
+    // family key across the whole of this transaction.
     let (family, created) = stores
         .create_or_get(
             tx,
@@ -343,20 +317,20 @@ pub async fn commit_creation(
         .await?;
 
     // The three family rules — kind, minor shape, minor contiguity — in one call,
-    // asked of a **new member** only. A revision adds nobody to the family and is
-    // not gated (T11). See `domain::family::rules` for why each is an exact lookup
-    // and why a tombstone still counts.
+    // asked of a **new member** only: a revision adds nobody to the family and is
+    // not gated. See `domain::family::rules`.
     //
-    // The identifier is re-parsed rather than carried on `EvaluatedUnit`: a value
-    // holding both the string and its parse has two spellings of one fact that can
-    // drift, and `gts_id` is the one the rest of the commit writes. The parse
-    // already succeeded during evaluation, so the failure arm below is unreachable
-    // for a candidate that got this far — it exists because the type says it can.
-    let Ok(id) = GtsId::try_new(&unit.gts_id) else {
-        return Ok(Err(ItemFailure::new(
-            "invalid_identifier",
-            format!("stored identifier '{}' does not parse", unit.gts_id),
-        )));
+    // Re-parsed rather than carried on `EvaluatedUnit`, which would hold two
+    // spellings of one fact; the parse already succeeded in `evaluate`, so the
+    // failure arm exists only because the type says it can.
+    let id = match GtsId::try_new(&unit.gts_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return Ok(Err(ItemFailure::new(
+                "invalid_identifier",
+                format!("stored identifier '{}' does not parse: {e}", unit.gts_id),
+            )));
+        }
     };
     if let Some(refusal) = admits_new_member(
         stores,
@@ -382,11 +356,9 @@ pub async fn commit_creation(
                 entity_kind: unit.outcome.entity_kind(),
                 family_id: family.id,
                 // A **projection** of the family row, never a second reading of the
-                // request: `database.sql` makes the entity's owner columns a copy
-                // kept for SecureORM scoping and join-free visibility checks, and a
-                // copy taken from the same place it is verified against cannot
-                // disagree with it. Family ownership is write-once — `create_or_get`
-                // has no update path — so this is the only writer of either column.
+                // request: the entity's owner columns are a copy kept for SecureORM
+                // scoping and join-free visibility checks. Family ownership is
+                // write-once, so this is the only writer of either column.
                 ownership_scope: family.ownership_scope,
                 owner_tenant_id: family.owner_tenant_id,
                 owning_gear: Some(P0_OWNING_GEAR.to_owned()),
@@ -394,11 +366,9 @@ pub async fn commit_creation(
             },
         )
         .await?;
-    // The existence check above and this one are the same question asked at two
-    // moments: a creation that lost the race by microseconds sees no row and then
-    // loses the unique key. Both answers are `already_exists`, and neither aborts
-    // the transaction — which is what returning `None` instead of raising the
-    // violation buys (`repo::conflict_do_nothing`).
+    // The same question as the check above, asked at the moment the unique key
+    // answers it. `None` rather than a raised violation, so the loser's transaction
+    // stays usable (`repo::conflict_do_nothing`).
     let Some(entity) = inserted else {
         return Ok(Err(ItemFailure::new(
             "already_exists",
@@ -516,32 +486,94 @@ pub async fn commit_creation(
     }))
 }
 
+/// The current revision's number, authored content and digest, whichever kind the
+/// candidate is.
+///
+/// The **authored** content, never the effective artifacts: those move when a
+/// dependency moves while the authored document stands still, so including them
+/// would report a revision for a document nobody edited.
+///
+/// TODO(toolkit): a genuine edit fails the `content_hash` prefilter and never
+/// compares the bytes, so the body travels for nothing. Fetching it only on a hash
+/// match needs a column projection `SecureSelect` does not expose — no
+/// `select_only` / `into_tuple`.
+///
+/// # Errors
+/// [`WorkerError::CurrentStateMissing`] when the entity row has no current-state
+/// row of its kind — corruption, since one transaction writes both (D3).
+async fn read_current_content(
+    stores: &dyn Stores,
+    tx: &DbTx<'_>,
+    scope: &AccessScope,
+    unit: &EvaluatedUnit,
+    entity_id: i64,
+) -> Result<(i32, String, Vec<u8>), WorkerError> {
+    let missing = || WorkerError::CurrentStateMissing {
+        gts_id: unit.gts_id.clone(),
+        entity_id,
+    };
+    Ok(match &unit.outcome {
+        EvaluatedOutcome::TypeSchema { .. } => {
+            let current = stores
+                .current_documents(tx, scope, &[entity_id])
+                .await?
+                .pop()
+                .ok_or_else(missing)?;
+            (
+                current.revision_no,
+                current.raw_schema,
+                current.content_hash,
+            )
+        }
+        EvaluatedOutcome::Instance { .. } => {
+            let current = stores
+                .current_values(tx, scope, &[entity_id])
+                .await?
+                .pop()
+                .ok_or_else(missing)?;
+            (
+                current.revision_no,
+                current.canonical_value,
+                current.content_hash,
+            )
+        }
+    })
+}
+
 /// Commit one evaluated unit as a **revision** of an entity that already exists:
 /// the `expected_resource_version` precondition, the immutable revision insert,
 /// the current-state pointer move, and the item outcome.
 ///
-/// # The order of the four statements is the concurrency design
+/// # The order of the three statements is the concurrency design
 ///
-/// 1. read the entity and compare `resource_version` to `expected`, so a stale
-///    caller gets a message naming both versions rather than a bare CAS failure;
+/// 1. read the entity, refuse a tombstone, and compare `resource_version` to
+///    `expected`, so a stale caller gets a message naming both versions rather
+///    than a bare CAS failure;
 /// 2. read the current revision's authored content, to decide `unchanged`;
 /// 3. **re-ask the precondition** — as a compare-and-swap for a real revision, and
 ///    as a plain re-read for an `unchanged` one.
 ///
 /// Step 3 is not redundant with step 1. The commit transaction runs at
 /// `READ COMMITTED` ([`commit_write`](crate::domain::ports::commit_write)), so a
-/// concurrent admission can commit between steps 1 and 2, and this pass would
+/// concurrent admission can commit between steps 1 and 2 and this pass would
 /// otherwise answer `unchanged` against content that is no longer current. The
-/// compare-and-swap closes that window for a revision by construction — its
-/// precondition is in the `WHERE` — and the re-read closes it for `unchanged`,
-/// which writes nothing and so has no `WHERE` to put it in. What is left is
-/// serializable either way: a re-read that still sees `expected` means the other
+/// compare-and-swap closes that window by construction — its precondition is in the
+/// `WHERE` — and the re-read closes it for `unchanged`, which writes nothing and so
+/// has no `WHERE` to put it in. A re-read that still sees `expected` means the other
 /// admission had not committed yet, so this pass genuinely came first.
+///
+/// ponytail: ceiling C6 (SPEC §9) — nothing authorizes this path. The registration
+/// policy is asked of creations only, and P0 has no principal to check in its place,
+/// so any caller that reaches the submit route can revise the authored content of
+/// any entity the registry holds. Bounded by transport rather than by policy: the
+/// mutation routes are internal-only (ceiling C8). Upgrade: the
+/// identity-to-permission binding, then an owner check before this call.
 ///
 /// # Errors
 /// [`WorkerError`] for an infrastructure failure, including a corrupt row with no
-/// current state. A lost or stale precondition is an [`ItemFailure`] in the
-/// `Ok(Err(..))` position — terminal, and never rebased onto the current version.
+/// current state. A lost or stale precondition, and a revision aimed at a
+/// tombstone, are [`ItemFailure`]s in the `Ok(Err(..))` position — terminal, and
+/// never rebased onto the current version.
 pub async fn commit_revision(
     stores: &dyn Stores,
     tx: &DbTx<'_>,
@@ -554,11 +586,27 @@ pub async fn commit_revision(
         return Ok(Err(ItemFailure::new(
             "precondition_failed",
             format!(
-                "'{}' does not exist; expected_resource_version {expected_resource_version}                  requires it to exist at that version",
+                "'{}' does not exist; expected_resource_version {expected_resource_version} \
+                 requires it to exist at that version",
                 unit.gts_id
             ),
         )));
     };
+    // Before the version, because a tombstone is not a stale version: reporting
+    // `precondition_failed` would send the caller to retry against a row that will
+    // never accept a revision. This is the only write path that reaches a `DELETED`
+    // row — `find_by_gts_id` returns tombstones because the family rules need them.
+    // The compare-and-swap below carries the same clause for the race this read
+    // cannot see.
+    if entity.lifecycle_status == LifecycleStatus::Deleted {
+        return Ok(Err(ItemFailure::new(
+            "entity_deleted",
+            format!(
+                "'{}' is deleted; a revision cannot be admitted onto a withdrawn entity",
+                unit.gts_id
+            ),
+        )));
+    }
     if entity.resource_version != expected_resource_version {
         return Ok(Err(stale_precondition(
             &unit.gts_id,
@@ -567,51 +615,21 @@ pub async fn commit_revision(
         )));
     }
 
-    // The current revision's authored content, never its effective artifacts:
-    // those move when a dependency moves while the authored document stands still,
-    // so including them would report a revision for a document nobody edited.
-    let (current_revision_no, current_body, current_hash) = match &unit.outcome {
-        EvaluatedOutcome::TypeSchema { .. } => {
-            let current = stores
-                .current_documents(tx, scope, &[entity.id])
-                .await?
-                .pop()
-                .ok_or_else(|| WorkerError::CurrentStateMissing {
-                    gts_id: unit.gts_id.clone(),
-                    entity_id: entity.id,
-                })?;
-            (
-                current.revision_no,
-                current.raw_schema,
-                current.content_hash,
-            )
-        }
-        EvaluatedOutcome::Instance { .. } => {
-            let current = stores
-                .current_values(tx, scope, &[entity.id])
-                .await?
-                .pop()
-                .ok_or_else(|| WorkerError::CurrentStateMissing {
-                    gts_id: unit.gts_id.clone(),
-                    entity_id: entity.id,
-                })?;
-            (
-                current.revision_no,
-                current.canonical_value,
-                current.content_hash,
-            )
-        }
-    };
+    let (current_revision_no, current_body, current_hash) =
+        read_current_content(stores, tx, scope, unit, entity.id).await?;
 
     // The hash is a prefilter and the bytes are the decision (ADR-0012): a digest
     // collision would otherwise silently swallow a real edit. Equality against an
     // *older* revision is deliberately not asked — that is an ordinary update which
     // allocates a new number rather than moving the pointer backwards (ADR-0005).
     if current_hash == unit.content_hash && current_body == unit.canonical_body {
+        // `EntityVanished`, not `CurrentStateMissing`: the row that disappeared is
+        // the *entity*, read twice in one transaction. Naming the current-state
+        // tables would point an operator at the wrong half of the corruption.
         let still = stores
             .find_by_gts_id(tx, scope, &unit.gts_id)
             .await?
-            .ok_or_else(|| WorkerError::CurrentStateMissing {
+            .ok_or_else(|| WorkerError::EntityVanished {
                 gts_id: unit.gts_id.clone(),
                 entity_id: entity.id,
             })?;
@@ -643,7 +661,9 @@ pub async fn commit_revision(
     }
 
     // One statement carrying the precondition, so there is no window between
-    // checking the version and moving it. `false` is the lost race.
+    // checking the version and moving it. `false` is the lost race — the version
+    // moved, or the entity was deleted, both of which the statement's `WHERE`
+    // covers and neither of which it can tell apart.
     if !stores
         .compare_and_swap_version(tx, scope, entity.id, expected_resource_version, now)
         .await?
@@ -651,7 +671,8 @@ pub async fn commit_revision(
         return Ok(Err(ItemFailure::new(
             "precondition_failed",
             format!(
-                "'{}' moved past resource_version {expected_resource_version} while this                  revision was being admitted",
+                "'{}' moved past resource_version {expected_resource_version}, or was deleted, \
+                 while this revision was being admitted",
                 unit.gts_id
             ),
         )));
@@ -770,22 +791,22 @@ pub async fn commit_revision(
 }
 
 /// The refusal for a precondition that was already wrong when read — the entry
-/// check and the `unchanged` re-read. Shared so the two spell one fact one way; the
-/// lost compare-and-swap says something different on purpose, because it knows only
-/// that the version *moved*, not what it moved to. Both carry the same `reason`, so
-/// a client branching on `precondition_failed` sees one outcome.
+/// check and the `unchanged` re-read. The lost compare-and-swap words it
+/// differently on purpose, knowing only that the version *moved*, not what to; both
+/// carry the same `reason`, so a client branching on it sees one outcome.
 fn stale_precondition(gts_id: &str, expected: i64, found: i64) -> ItemFailure {
     ItemFailure::new(
         "precondition_failed",
         format!(
-            "'{gts_id}' is at resource_version {found}, not the expected {expected}; a revision              is never rebased onto the current version"
+            "'{gts_id}' is at resource_version {found}, not the expected {expected}; a revision \
+             is never rebased onto the current version"
         ),
     )
 }
 
 /// Canonicalize a document the way acceptance did, for a caller that has a `Value`
-/// rather than the stored text. Exposed so the seeding path (T24) and tests share
-/// one canonical form with the acceptance path.
+/// rather than the stored text. Exposed so the seeding path and tests share one
+/// canonical form with the acceptance path.
 #[must_use]
 pub fn canonical_body(content: &Value) -> String {
     canonical_text(content)

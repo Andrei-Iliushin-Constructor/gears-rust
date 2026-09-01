@@ -178,6 +178,19 @@ impl From<WorkerError> for CanonicalError {
                 &format!("entity '{gts_id}' (id {entity_id}) has no current-state row of its kind"),
                 "admission",
             ),
+            // Its own arm, not folded into the one above: the entity row is gone,
+            // which points at a different table and a different cause.
+            WorkerError::EntityVanished { gts_id, entity_id } => opaque_internal(
+                &format!("entity '{gts_id}' (id {entity_id}) vanished mid-transaction"),
+                "admission",
+            ),
+            // Contention, not corruption, and retryable like `ConformingTypeAbsent`:
+            // opaque for the same reason — a `409` would invite the caller to change
+            // a request that is correct.
+            WorkerError::FamilyLockUnavailable { family_key } => opaque_internal(
+                &format!("could not acquire the version-family lock for '{family_key}' in time"),
+                "admission",
+            ),
             WorkerError::Storage(inner) => opaque_internal(&inner, "storage write"),
             WorkerError::Db(inner) => opaque_internal(&inner, "database write"),
         }

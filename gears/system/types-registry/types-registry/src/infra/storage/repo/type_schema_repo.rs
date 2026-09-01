@@ -147,10 +147,9 @@ impl TypeSchemaRepo {
     /// Insert the current-state row for a first admission.
     ///
     /// Insert, not upsert: moving an existing pointer is a *revision*, and that is
-    /// [`Self::update_current`], which enforces its own precondition. A caller that
-    /// reached here for an entity that already has a current row would get a
-    /// primary-key violation, which is the honest outcome — the recheck that should
-    /// have prevented it is missing, and a silent overwrite would hide that.
+    /// [`Self::update_current`]. Reaching here for an entity that already has a
+    /// current row raises a primary-key violation, which is the honest outcome — a
+    /// silent overwrite would hide the missing recheck.
     ///
     /// # Errors
     /// Propagates the insert's failure.
@@ -175,17 +174,14 @@ impl TypeSchemaRepo {
 
     /// Move the current-state row onto a newly admitted revision.
     ///
-    /// Every artifact column moves with the pointer in one statement: D3's
-    /// artifacts are outputs of resolving *that* revision, so a row carrying
-    /// revision `N + 1` beside revision `N`'s `resolved_schema` is a state no
-    /// reader should ever see, and two statements would create it.
+    /// Every artifact column moves with the pointer in one statement: D3's artifacts
+    /// are outputs of resolving *that* revision, so a row carrying revision `N + 1`
+    /// beside revision `N`'s `resolved_schema` is a state no reader should see, and
+    /// two statements would create it. `created_at` is deliberately not touched.
     ///
-    /// `created_at` is deliberately not touched — the row was created at the first
-    /// admission and only `updated_at` tracks the pointer.
-    ///
-    /// `Ok(false)` means the entity has no current row. The caller checked, so this
-    /// is a lost race rather than an ordinary answer; it is returned rather than
-    /// raised because the caller's transaction has to decide what to do with it.
+    /// `Ok(false)` means the entity has no current row — a lost race, since the
+    /// caller checked. Returned rather than raised, because the caller's transaction
+    /// has to decide what to do with it.
     ///
     /// # Errors
     /// Propagates the update's failure.

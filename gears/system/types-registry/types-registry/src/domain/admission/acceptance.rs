@@ -234,10 +234,9 @@ pub fn validate(
                     version: v,
                 });
             }
-            // A positive precondition claims the candidate is a revision of an
-            // entity already at that version. The claim is not taken on trust: the
-            // worker commits it through `commit_revision`, which refuses an absent
-            // identifier, so naming a version cannot register a new entity.
+            // The claim is not taken on trust: the worker commits it through
+            // `commit_revision`, which refuses an absent identifier, so naming a
+            // version cannot register a new entity.
             Some(v) => Precondition::Version(v),
         };
 
@@ -247,12 +246,15 @@ pub fn validate(
         // a region freeze the entities already inside it, which is a different — and
         // unasked-for — power.
         //
-        // Safe only because the declared kind is enforced downstream. A revision
-        // that named a version for an identifier the registry does not hold is
-        // refused by `commit_revision`, terminally, having created nothing; without
-        // that, this bypass would be a way past the deployment allowlist. The two
-        // halves landed in one change for exactly that reason. T20 adds deletion,
-        // which bypasses the gate on the same terms.
+        // Safe only because the declared kind is enforced downstream: a revision
+        // naming a version for an identifier the registry does not hold is refused
+        // terminally by `commit_revision`, having created nothing. Without that, the
+        // bypass would be a way past the deployment allowlist.
+        //
+        // ponytail: ceiling C6 — the bypass leaves **no** authorization on the
+        // revision path. The right control is an owner or principal check, which P0
+        // has nothing to check against. The residual exposure is recorded on
+        // `unit::commit_revision`.
         if expected == Precondition::MustNotExist {
             ctx.policy
                 .admits(&id, OwnershipScope::Global)

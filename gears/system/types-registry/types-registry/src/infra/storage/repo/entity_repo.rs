@@ -266,12 +266,19 @@ impl EntityRepo {
         }
     }
 
-    /// Advance `resource_version` if and only if it still equals `expected`.
+    /// Advance `resource_version` if and only if the row is **active** and still
+    /// at `expected`.
     ///
     /// One statement: the precondition is in the `WHERE`, so there is no window
     /// between the check and the write, and the affected-row count is the success
     /// signal. A stale precondition is `Ok(false)` rather than an error — it is an
     /// ordinary concurrent-writer outcome the caller turns into `412`, not a fault.
+    ///
+    /// `lifecycle_status = ACTIVE` is in the same `WHERE` for the reason the version
+    /// is: [`Self::mark_deleted`] can commit between the caller's read and this
+    /// statement, and a revision that moved a tombstone's current state would
+    /// resurrect a withdrawn entity. The caller refuses a tombstone it can see, so a
+    /// deliberate attempt gets a message; this clause closes the race it cannot.
     ///
     /// # Errors
     /// Propagates scope validation and database update failures.
@@ -292,7 +299,8 @@ impl EntityRepo {
             .filter(
                 Condition::all()
                     .add(entity::Column::Id.eq(entity_id))
-                    .add(entity::Column::ResourceVersion.eq(expected_resource_version)),
+                    .add(entity::Column::ResourceVersion.eq(expected_resource_version))
+                    .add(entity::Column::LifecycleStatus.eq(LifecycleStatus::Active)),
             )
             .scope_with(scope)
             .exec(runner)

@@ -385,16 +385,13 @@ async fn current_documents_reads_the_current_revision_only(
     assert_eq!(single_doc.raw_schema, only);
 }
 
-/// The two writes T11 added, on a real backend.
+/// The two revision writes, on a real backend — neither demonstrable on `SQLite`.
 ///
-/// Neither is demonstrable on `SQLite`. `update_current` rebinds
-/// `resolution_fingerprint` — a binary column that is `BYTEA` / `BINARY(16)` here
-/// and typeless `BLOB` there, the exact class of defect the uuid binding was — in an
-/// `UPDATE` rather than the `INSERT` T3 already covers. And `mark_item_unchanged`
-/// writes the one `operation_item` state whose CHECK arm nothing else reaches:
-/// `status = 4` requires `result_revision_no IS NULL` beside a non-null
-/// `result_resource_version` and `expected_resource_version >= 1`, and `SQLite`
-/// enforces CHECKs but has never had a row in that state to enforce them against.
+/// `update_current` rebinds `resolution_fingerprint` in an `UPDATE`: a binary column
+/// that is `BYTEA` / `BINARY(16)` here and typeless `BLOB` there, the exact class of
+/// defect the uuid binding was. And `mark_item_unchanged` writes the one
+/// `operation_item` state whose CHECK arm nothing else reaches, which `SQLite` has
+/// never had a row to enforce against.
 async fn a_revision_moves_the_pointer_and_can_report_unchanged(
     db: &Provider,
     family_id: i64,

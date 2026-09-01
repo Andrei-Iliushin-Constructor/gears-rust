@@ -23,22 +23,40 @@
 //!
 //! One acyclic, reference-free candidate per unit, each item its own unit,
 //! processed in `item_no` order. Creations and content revisions both land here —
-//! the item's stored precondition chooses which commit runs. Dependency-aware
-//! ordering and partial admission are T19; compatibility is T17; deletion is T20.
+//! the item's stored precondition chooses which commit runs.
 
 use std::sync::Arc;
 
 use time::OffsetDateTime;
-use toolkit_db::DBProvider;
-use toolkit_db::secure::AccessScope;
+use toolkit_db::secure::{AccessScope, ScopeError};
+use toolkit_db::{DBProvider, DbError, DbLockGuard, LockConfig};
 use toolkit_macros::domain_model;
 use uuid::Uuid;
 
 pub use super::errors::{ItemFailure, WorkerError};
-use super::unit::{CommittedUnit, RevisionCommit, commit_creation, commit_revision, evaluate};
+use super::unit::{
+    CommittedUnit, EvaluatedUnit, RevisionCommit, commit_creation, commit_revision, evaluate,
+};
 use crate::domain::admission::Precondition;
 use crate::domain::enums::{OperationItemStatus, OperationStatus};
+use crate::domain::family::{FamilyKey, lock_order};
 use crate::domain::ports::{OperationItemRow, OperationRow, Stores, commit_write, snapshot_read};
+
+/// The advisory-lock namespace every types-registry lock is taken under.
+pub const LOCK_GEAR: &str = "types_registry";
+
+/// Prefix on the family lock key, so a future lock on some other thing in this
+/// gear cannot collide with a family key that happens to spell the same bytes.
+const FAMILY_LOCK_PREFIX: &str = "family:";
+
+/// The advisory-lock key one version family is serialized under.
+///
+/// Public so that a test can probe the key the worker actually takes. A test that
+/// spelled the key itself would keep passing after this function changed it.
+#[must_use]
+pub fn family_lock_key(family_key: &FamilyKey) -> String {
+    format!("{FAMILY_LOCK_PREFIX}{family_key}")
+}
 
 /// What one pass over an operation produced.
 #[domain_model]
@@ -118,6 +136,155 @@ pub async fn run_operation(
     })
 }
 
+/// The `DbErr` inside a [`WorkerError`], for the transaction retry helper.
+///
+/// Only the two arms that actually wrap one. Everything else — a store that would
+/// not build, an item another pass terminalized — is `None`, which short-circuits
+/// the retry loop: those answers do not change on a second attempt.
+///
+/// The `sea_orm` type in the signature is `Db::transaction_with_retry`'s contract,
+/// not a persistence choice this layer is making: the helper classifies contention
+/// per backend and needs the driver error to do it.
+#[allow(unknown_lints)]
+#[allow(de0301_no_infra_in_domain)]
+const fn retryable_db_err(e: &WorkerError) -> Option<&sea_orm::DbErr> {
+    match e {
+        WorkerError::Storage(ScopeError::Db(inner)) | WorkerError::Db(DbError::Sea(inner)) => {
+            Some(inner)
+        }
+        _ => None,
+    }
+}
+
+/// Take the advisory lock on each named family, in [`lock_order`]'s order.
+///
+/// The guards are returned rather than held here because they must outlive the
+/// commit transaction: the window they close spans `create_or_get`, the three family
+/// rules and the entity insert.
+///
+/// # Errors
+/// [`WorkerError::FamilyLockUnavailable`] when the wait budget expires — contention,
+/// not a statement about the candidate, so a redelivery re-drives it. Any guard
+/// already taken is dropped on the way out, which releases it best-effort.
+async fn lock_families(
+    db: &DBProvider<WorkerError>,
+    family_keys: &[FamilyKey],
+) -> Result<Vec<DbLockGuard>, WorkerError> {
+    let handle = db.db();
+    let mut guards = Vec::with_capacity(family_keys.len());
+    for key in lock_order(family_keys) {
+        let lock_key = family_lock_key(&key);
+        match handle
+            .try_lock(LOCK_GEAR, &lock_key, LockConfig::default())
+            .await?
+        {
+            Some(guard) => guards.push(guard),
+            None => {
+                return Err(WorkerError::FamilyLockUnavailable {
+                    family_key: key.as_str().to_owned(),
+                });
+            }
+        }
+    }
+    Ok(guards)
+}
+
+/// Steps 4a and 4b: take the family lock a creation needs, run the commit
+/// transaction, and release the lock however the commit ended.
+///
+/// Its own function so the lock's lifetime is a single lexical scope: the guard is
+/// taken before the transaction and released after it on every path.
+async fn commit_evaluated(
+    db: &DBProvider<WorkerError>,
+    stores: &Arc<dyn Stores>,
+    scope: &AccessScope,
+    evaluated: &Arc<EvaluatedUnit>,
+    item: &OperationItemRow,
+    operation_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<Result<RevisionCommit, ItemFailure>, WorkerError> {
+    // Step 4a: serialize the family rules, for a **creation** only.
+    //
+    // `create_or_get`'s unique key decides which of two concurrent admissions founds
+    // a family, and nothing more: the kind, minor-shape and minor-contiguity rules
+    // are check-then-act reads inside a READ COMMITTED transaction, so two admissions
+    // of two *different* new members of one family — `…v1~` and `…v1.0~`, or a Type
+    // Schema beside an Instance — can each pass and both commit an invariant
+    // violation nothing later repairs. The lock is taken here rather than in the
+    // repository because it lives on the `Db` handle and must be held **across** the
+    // transaction, which a repository inside one cannot do.
+    //
+    // A revision takes nothing: it adds no member, so it asks none of the rules.
+    let precondition = item.precondition;
+    let family_lock = match precondition {
+        Precondition::MustNotExist => {
+            lock_families(db, std::slice::from_ref(&evaluated.family_key)).await?
+        }
+        Precondition::Version(_) => Vec::new(),
+    };
+
+    // Step 4b: a short READ COMMITTED transaction containing only rechecks and
+    // writes. The `Arc` keeps transaction retries from cloning the artifacts.
+    //
+    // Retried on lock contention: every statement in both commit paths re-reads
+    // inside the transaction, so an attempt that rolled back leaves nothing to undo.
+    // Without the retry, a deadlock on the entity compare-and-swap propagates out of
+    // `process_item` before `mark_completed`, stranding the operation row in
+    // `running` with its items `pending` and nothing to re-drive it.
+    //
+    // The item's stored precondition — never the candidate's shape and never a
+    // caller-declared kind — chooses the commit. Acceptance skips the policy gate
+    // for a revision (SPEC §8.1 step 3), so the claim "this is a revision" has to be
+    // *enforced* here, by a commit that refuses an absent identifier.
+    let tx_scope = scope.clone();
+    let tx_stores = Arc::clone(stores);
+    let committed = db
+        .db()
+        .transaction_with_retry(commit_write(&db.db()), retryable_db_err, |tx| {
+            let unit = Arc::clone(evaluated);
+            let tx_scope = tx_scope.clone();
+            let tx_stores = Arc::clone(&tx_stores);
+            Box::pin(async move {
+                match precondition {
+                    Precondition::MustNotExist => {
+                        commit_creation(tx_stores.as_ref(), tx, &tx_scope, unit.as_ref(), now)
+                            .await
+                            .map(|r| r.map(RevisionCommit::Admitted))
+                    }
+                    Precondition::Version(expected) => {
+                        commit_revision(
+                            tx_stores.as_ref(),
+                            tx,
+                            &tx_scope,
+                            unit.as_ref(),
+                            expected,
+                            now,
+                        )
+                        .await
+                    }
+                }
+            })
+        })
+        .await;
+
+    // Released deterministically rather than on `Drop`, which the toolkit documents
+    // as best-effort: a sibling admission is waiting on this key. A failed release is
+    // logged, not propagated — the commit above is already decided.
+    for guard in family_lock {
+        if let Err(error) = guard.release().await {
+            tracing::warn!(
+                %operation_id,
+                operation_item_id = item.id,
+                %error,
+                "types_registry could not release a version-family lock; it expires with the \
+                 session"
+            );
+        }
+    }
+
+    committed
+}
+
 /// Evaluate and commit one non-terminal operation item, or report the durable
 /// outcome an overlapping pass already established.
 async fn process_item(
@@ -145,44 +312,7 @@ async fn process_item(
         }
     };
 
-    // Step 4: a short READ COMMITTED transaction containing only rechecks and
-    // writes. The `Arc` keeps transaction retries from cloning the artifacts.
-    //
-    // The item's stored precondition — never the candidate's shape and never a
-    // caller-declared kind — chooses the commit. That is the half of SPEC §8.1
-    // step 3 the acceptance-time policy bypass depends on: acceptance skips the
-    // policy gate for a revision, so the claim "this is a revision" has to be
-    // *enforced* here, by a commit that refuses an absent identifier.
-    let tx_scope = scope.clone();
-    let tx_stores = Arc::clone(stores);
-    let precondition = item.precondition;
-    let committed = db
-        .transaction_with_config(commit_write(&db.db()), |tx| {
-            let unit = Arc::clone(&evaluated);
-            let tx_scope = tx_scope.clone();
-            let tx_stores = Arc::clone(&tx_stores);
-            Box::pin(async move {
-                match precondition {
-                    Precondition::MustNotExist => {
-                        commit_creation(tx_stores.as_ref(), tx, &tx_scope, unit.as_ref(), now)
-                            .await
-                            .map(|r| r.map(RevisionCommit::Admitted))
-                    }
-                    Precondition::Version(expected) => {
-                        commit_revision(
-                            tx_stores.as_ref(),
-                            tx,
-                            &tx_scope,
-                            unit.as_ref(),
-                            expected,
-                            now,
-                        )
-                        .await
-                    }
-                }
-            })
-        })
-        .await;
+    let committed = commit_evaluated(db, stores, scope, &evaluated, item, operation_id, now).await;
 
     let committed = match committed {
         Ok(committed) => committed,

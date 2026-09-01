@@ -274,10 +274,9 @@ fn a_closed_region_refuses_a_declared_creation() {
 /// SPEC §8.1 step 3: the gate is for **creations**. A revision names a version,
 /// so closing a region must not freeze the entities already inside it.
 ///
-/// This is only safe because the declared kind is enforced downstream:
+/// Safe only because the declared kind is enforced downstream:
 /// `unit::commit_revision` refuses an identifier the registry does not hold, so
-/// naming a version cannot register anything new here. The pair is why the bypass
-/// and the precondition landed in one change.
+/// naming a version cannot register anything new here.
 #[test]
 fn a_revision_bypasses_the_policy_gate_in_a_closed_region() {
     let pair = closed();
@@ -291,20 +290,20 @@ fn a_revision_bypasses_the_policy_gate_in_a_closed_region() {
     );
 }
 
-/// The bypass is keyed on the precondition alone, not on the region: a creation in
-/// a region the policy *admits* passes, and a creation in one it does not is
-/// refused, whatever the revision beside it does.
+/// The other side of the bypass: it is keyed on the precondition, not on the
+/// region, so a creation in a region the policy *admits* still goes through the gate
+/// and still passes it. The refusal half is
+/// `a_closed_region_refuses_a_declared_creation` above.
 #[test]
-fn the_gate_still_refuses_a_creation_in_the_same_closed_region() {
-    let pair = closed();
-    let creation = request(vec![candidate(ACME_TYPE)]);
-    assert!(matches!(
-        run(&pair, &creation),
-        Err(AcceptanceError::PolicyRefused(_))
-    ));
-
+fn the_gate_admits_a_creation_in_an_opened_region() {
     let open = open_for_acme();
-    assert!(run(&open, &creation).is_ok());
+    let creation = request(vec![candidate(ACME_TYPE)]);
+    let validated = run(&open, &creation).expect("an opened region admits its vendor");
+    assert_eq!(
+        validated.items[0].precondition,
+        Precondition::MustNotExist,
+        "and it is a creation that passed the gate, not a revision that skipped it",
+    );
 }
 
 /// The ordering invariant, made observable: a candidate that fails **both** the

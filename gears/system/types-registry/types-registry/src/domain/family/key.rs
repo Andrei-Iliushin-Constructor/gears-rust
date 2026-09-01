@@ -6,13 +6,10 @@
 //! its own version. `family_key` is **not** a GTS Identifier and MUST NOT be parsed
 //! as one (`database.sql`) — it is a byte key, hence the column's binary collation.
 //!
-//! # Why the key and the sibling derivation are one file
-//!
-//! [`sibling_id`] is [`family_key`] run backwards: the key is everything before the
-//! last segment's version, so appending `.vM[.n]` and the kind marker reconstructs a
-//! member identifier exactly. Splitting them would leave two places that both know
-//! how a version is spelled, and a rule looking up an identifier the registry spells
-//! differently is a rule that silently never fires.
+//! [`sibling_id`] is [`family_key`] run backwards, and lives here for that reason:
+//! split apart, they would be two places that both know how a version is spelled,
+//! and a rule looking up an identifier the registry spells differently is a rule
+//! that silently never fires.
 
 use gts::{GtsId, GtsIdSegment};
 use toolkit_macros::domain_model;
@@ -58,11 +55,10 @@ pub fn family_key(id: &GtsId) -> FamilyKey {
     let Some(last) = id.segments().last() else {
         return FamilyKey(String::new());
     };
-    // Everything up to the last segment is kept **verbatim** — including the
-    // `gts.` prefix, which is not part of any segment and is configurable, and
-    // including a preceding segment's own minor. Only the last segment is
-    // rewritten. Taking the head by subtracting the last segment's raw length
-    // means this never has to reconstruct a prefix it does not own.
+    // Everything up to the last segment is kept **verbatim** — the configurable
+    // `gts.` prefix included, and a preceding segment's own minor. Taking the head
+    // by subtracting the last segment's raw length means this never reconstructs a
+    // prefix it does not own.
     let raw = last.raw();
     let head = id.id().len().saturating_sub(raw.len());
     let mut key = String::with_capacity(id.id().len());
@@ -88,7 +84,7 @@ pub fn family_key(id: &GtsId) -> FamilyKey {
 /// The identifier of the member of this candidate's family at the named version.
 ///
 /// The kind marker is the **candidate's own**: a family holds one kind
-/// ([`super::rules`]), so a rule asking about a sibling is always asking about a
+/// (`super::rules`), so a rule asking about a sibling is always asking about a
 /// sibling of the same kind, and a Type Schema's `~` must survive into the lookup or
 /// it would probe an Instance identifier that can never exist.
 ///
@@ -107,6 +103,22 @@ pub fn sibling_id(id: &GtsId, major: u32, minor: Option<u32>) -> String {
         out.push('~');
     }
     out
+}
+
+/// Canonical order for acquiring family locks: sorted and deduplicated.
+///
+/// A batch admission touches several families, and two batches taking the same two
+/// in opposite orders would deadlock. Sorting is enough to make that impossible, and
+/// `FamilyKey`'s byte order is the one the `family_key` column already uses.
+///
+/// P0 admits one candidate per transaction, so today this is the identity. It is on
+/// the path anyway, so the rule lives at the call site rather than in a comment.
+#[must_use]
+pub fn lock_order(family_keys: &[FamilyKey]) -> Vec<FamilyKey> {
+    let mut ordered = family_keys.to_vec();
+    ordered.sort();
+    ordered.dedup();
+    ordered
 }
 
 #[cfg(test)]
