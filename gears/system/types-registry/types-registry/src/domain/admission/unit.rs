@@ -37,7 +37,7 @@ use super::errors::{ItemFailure, WorkerError};
 use super::fingerprint::canonical_text;
 use crate::domain::artifacts::{MaterializedArtifacts, content_hash, materialize};
 use crate::domain::enums::{EntityKind, OwnershipScope};
-use crate::domain::family::{FamilyKey, family_key};
+use crate::domain::family::{FamilyKey, admits_new_member, family_key};
 use crate::domain::gts_store::{UnitDocument, UnitStore, load_unit_store};
 use crate::domain::ports::{
     NewCurrentInstance, NewCurrentTypeSchema, NewEntity, NewInstanceRevision, NewRevision, Stores,
@@ -320,9 +320,17 @@ pub async fn commit_creation(
         )));
     }
 
-    // The family row is the serialization point for the shape and contiguity rules
-    // (T12). Created here if absent: ownership must be fixed before the first
-    // member, and the family and that member commit together.
+    // Created here if absent: ownership must be fixed before the first member, and
+    // the family and that member commit together.
+    //
+    // `database.sql` calls this row the serialization point for the rules below, and
+    // for a *first* member it is — `uq_tr_version_family_key` decides that race. It
+    // is **not** a lock for the rules themselves: `create_or_get` documents why it
+    // cannot take one, so two concurrent admissions of two different new members can
+    // both pass the shape check below. T10's kind rule has the same window. The
+    // mechanism is `Db::try_lock` beside `VersionFamilyRepo::lock_order`; wiring it
+    // is a service-layer decision recorded at Checkpoint 2, not something this
+    // function can do from inside the transaction.
     let (family, created) = stores
         .create_or_get(
             tx,
@@ -334,27 +342,34 @@ pub async fn commit_creation(
         )
         .await?;
 
-    // One kind per family (T12's kind rule). `family_key` normalizes the trailing `~`
-    // away, so `…thing.v1~` and `…thing.v1` share a key; T12's shape and contiguity
-    // rules assume a family holds versions of one logical entity.
+    // The three family rules — kind, minor shape, minor contiguity — in one call,
+    // asked of a **new member** only. A revision adds nobody to the family and is
+    // not gated (T11). See `domain::family::rules` for why each is an exact lookup
+    // and why a tombstone still counts.
     //
-    // Only for a family that already existed — a fresh one has this candidate as its
-    // founding member. Under the family lock, so a concurrent first member of the
-    // other kind cannot slip in. Not `already_exists`: the identifier is free.
-    if !created {
-        let candidate_kind = unit.outcome.entity_kind();
-        if let Some(existing) = stores.kind_in_family(tx, scope, family.id).await?
-            && existing != candidate_kind
-        {
-            return Ok(Err(ItemFailure::new(
-                "family_kind_conflict",
-                format!(
-                    "'{}' is a {candidate_kind:?}, but version family '{}' already holds \
-                     {existing:?} members; a family holds one kind",
-                    unit.gts_id, unit.family_key
-                ),
-            )));
-        }
+    // The identifier is re-parsed rather than carried on `EvaluatedUnit`: a value
+    // holding both the string and its parse has two spellings of one fact that can
+    // drift, and `gts_id` is the one the rest of the commit writes. The parse
+    // already succeeded during evaluation, so the failure arm below is unreachable
+    // for a candidate that got this far — it exists because the type says it can.
+    let Ok(id) = GtsId::try_new(&unit.gts_id) else {
+        return Ok(Err(ItemFailure::new(
+            "invalid_identifier",
+            format!("stored identifier '{}' does not parse", unit.gts_id),
+        )));
+    };
+    if let Some(refusal) = admits_new_member(
+        stores,
+        tx,
+        scope,
+        &id,
+        &family,
+        unit.outcome.entity_kind(),
+        created,
+    )
+    .await?
+    {
+        return Ok(Err(ItemFailure::new(refusal.reason(), refusal.to_string())));
     }
 
     let inserted = stores
@@ -366,8 +381,14 @@ pub async fn commit_creation(
                 gts_id: unit.gts_id.clone(),
                 entity_kind: unit.outcome.entity_kind(),
                 family_id: family.id,
-                ownership_scope: OwnershipScope::Global,
-                owner_tenant_id: None,
+                // A **projection** of the family row, never a second reading of the
+                // request: `database.sql` makes the entity's owner columns a copy
+                // kept for SecureORM scoping and join-free visibility checks, and a
+                // copy taken from the same place it is verified against cannot
+                // disagree with it. Family ownership is write-once — `create_or_get`
+                // has no update path — so this is the only writer of either column.
+                ownership_scope: family.ownership_scope,
+                owner_tenant_id: family.owner_tenant_id,
                 owning_gear: Some(P0_OWNING_GEAR.to_owned()),
                 now,
             },

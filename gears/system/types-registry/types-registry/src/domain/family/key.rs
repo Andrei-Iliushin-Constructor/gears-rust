@@ -1,8 +1,4 @@
-//! Version-family key derivation.
-//!
-//! A family groups every version of one logical entity — `v1~`, `v1.4~` and `v2~`
-//! of the same type — because `database.sql`'s shape and contiguity rules are asked
-//! of the family row, their only serialization point.
+//! Version-family key derivation, and the sibling identifiers the rules look up.
 //!
 //! The key is the identifier with **the last segment's version removed** and the
 //! trailing `~` normalized away. A minor in a *preceding* segment survives verbatim:
@@ -10,9 +6,13 @@
 //! its own version. `family_key` is **not** a GTS Identifier and MUST NOT be parsed
 //! as one (`database.sql`) — it is a byte key, hence the column's binary collation.
 //!
-//! The three non-stored family rules — kind, minor shape, contiguity — are T12's.
-//! What lives here is the derivation the first admission needs to find or create the
-//! row at all.
+//! # Why the key and the sibling derivation are one file
+//!
+//! [`sibling_id`] is [`family_key`] run backwards: the key is everything before the
+//! last segment's version, so appending `.vM[.n]` and the kind marker reconstructs a
+//! member identifier exactly. Splitting them would leave two places that both know
+//! how a version is spelled, and a rule looking up an identifier the registry spells
+//! differently is a rule that silently never fires.
 
 use gts::{GtsId, GtsIdSegment};
 use toolkit_macros::domain_model;
@@ -85,6 +85,30 @@ pub fn family_key(id: &GtsId) -> FamilyKey {
     FamilyKey(key)
 }
 
+/// The identifier of the member of this candidate's family at the named version.
+///
+/// The kind marker is the **candidate's own**: a family holds one kind
+/// ([`super::rules`]), so a rule asking about a sibling is always asking about a
+/// sibling of the same kind, and a Type Schema's `~` must survive into the lookup or
+/// it would probe an Instance identifier that can never exist.
+///
+/// Returns the exact bytes `entity.gts_id` holds, so the caller's lookup goes
+/// through `uq_tr_entity_gts_id` rather than scanning the family.
+#[must_use]
+pub fn sibling_id(id: &GtsId, major: u32, minor: Option<u32>) -> String {
+    let mut out = family_key(id).0;
+    out.push_str(".v");
+    out.push_str(&major.to_string());
+    if let Some(minor) = minor {
+        out.push('.');
+        out.push_str(&minor.to_string());
+    }
+    if id.is_type() {
+        out.push('~');
+    }
+    out
+}
+
 #[cfg(test)]
-#[path = "family_tests.rs"]
-mod family_tests;
+#[path = "key_tests.rs"]
+mod key_tests;

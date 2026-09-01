@@ -777,31 +777,62 @@ admission had not committed yet.
 
 ---
 
-### - [ ] T12: Version-family shape and contiguity rules
+### - [x] T12: Version-family shape and contiguity rules
 
 **Description:** The remaining non-stored rules enforced under the family lock: minor shape must
 be uniform within a major, and minors must be contiguous from `M.0`. Both are keyed lookups, not
 scans.
 
-**The kind rule landed with T10** (P13): a Type Schema `…ns.thing.v1~` and an Instance
-`…ns.thing.v1` derive the same `family_key`, so the first Instance could not be admitted without
-it. This task takes over the file it opened — `rules.rs` — rather than creating it.
+**The kind rule landed with T10** (P13) — but *inline in the commit path*, not in a `rules.rs`.
+This task's plan said it would "take over the file it opened"; there was no such file, so T12
+created `family/rules.rs` and **moved** the kind rule into it. Worth recording because the
+correction is the point: all three rules now read as one list, rather than one rule buried in
+`commit_creation` and two beside it.
+
+**No migration, and no new port.** Both rules are exact lookups through
+`uq_tr_entity_gts_id` on an identifier the key module derives, so `EntityStore::find_by_gts_id`
+— which already returns tombstones — is the only primitive either needs.
 
 **Acceptance criteria:**
-- [ ] `vM.n~` refused while `vM~` exists; `vM~` refused while `vM.0~` exists
-- [ ] `vM.n~` with `n > 0` refused unless `vM.(n-1)~` exists
-- [ ] A `DELETED` predecessor still counts; the predecessor test is re-asked inside the commit transaction
-- [ ] Family ownership is write-once; the entity's owner columns are a projection maintained under the lock
-- [ ] The predecessor is excluded from `dependency` and from the revision vector
+- [x] `vM.n~` refused while `vM~` exists; `vM~` refused while `vM.0~` exists — `family_shape_conflict`
+- [x] `vM.n~` with `n > 0` refused unless `vM.(n-1)~` exists — `missing_predecessor`
+- [x] A `DELETED` predecessor still counts; the predecessor test is re-asked inside the commit transaction. Both fall out of one primitive: `find_by_gts_id` returns tombstones and every rule runs inside `commit_creation`'s transaction, so there is no way for the two rules to disagree about what a tombstone means
+- [x] Family ownership is write-once; the entity's owner columns are a projection maintained under the lock. `NewEntity` now takes `family.ownership_scope` / `family.owner_tenant_id` instead of re-reading the request — a copy taken from the row it is verified against **cannot** disagree with it, which is stronger than verifying two independent readings. Write-once is structural: `create_or_get` has no update path, so this is the only writer of either column
+- [x] The predecessor is excluded from `dependency` and from the revision vector — a **negative** criterion, and the only discharge available now: T13 does not write edges yet and T15's vector does not exist. `a_predecessor_is_not_a_dependency_edge` asserts the table stays empty after `v1.0~` then `v1.1~`, so T13 inherits a failing test if it adds the edge
+
+**Both rules are scoped to one MAJOR**, as the compatibility chain is, so a family may hold a
+major-only `v1~` beside a minor-bearing `v2.0~` (`database.sql`). Three of the twelve table rows
+exist only to pin that, because "uniform within a family" is the plausible misreading.
+
+**The pure/impure split is where the risk is.** `version_probe` returns *which identifiers decide*
+this candidate — three variants for the three shapes a last segment can have, so "a first minor
+with a predecessor" is not representable. `sibling_id` lives beside `family_key` because it is that
+function run backwards, and a rule that spells a sibling differently from the way the registry
+stores it is a rule that **silently never fires** rather than one that fails loudly. That is what
+`rules_tests.rs` is for: six pure tests, including that every probe stays inside the candidate's
+own family and that an Instance probes Instance spellings.
 
 **Verification:**
-- [ ] Gear tests, all three backends (see [Commands](#commands))
-- [ ] Table-driven test over shape and contiguity combinations
-- [ ] Test: concurrent first registration under two owners yields one winner
-- [ ] Test: family key derivation maps `v1~`, `v1.4~`, `v2~` to one row, and a preceding-segment minor survives verbatim
+- [x] Gear tests, all three backends (see [Commands](#commands)) — 501 on `SQLite`; `make test-types-registry-db` green on `PostgreSQL` and `MySQL`. No new backend cases: the rules add no new SQL shape, only more `find_by_gts_id` calls, which the suite already covers
+- [x] Table-driven test over shape and contiguity combinations — twelve rows, each its own database, `shape_and_contiguity_over_the_combinations`. Genuine RED→GREEN
+- [x] Test: family key derivation maps `v1~`, `v1.4~`, `v2~` to one row, and a preceding-segment minor survives verbatim — the pure half in `key_tests.rs` (unchanged from T8), the *one row* half in `one_family_row_holds_every_version_and_owns_its_members`, which also pins the owner projection
+- [x] ~~Test: concurrent first registration under two owners yields one winner~~ — **already covered, and deliberately not duplicated on `SQLite`.** `repo_backends_test.rs::family_race_yields_one_row` (eight concurrent callers, exactly one `created`) and `family_race_inside_a_transaction_yields_one_row` (the loser keeps reading in the same transaction) are T4's, on both container backends. A `SQLite` version cannot exist: a second concurrent writer fails the whole transaction with `database is locked` rather than losing a unique-key race — measured, not assumed. `family_test.rs` carries a named placeholder test pointing at the two that do cover it. *"Two owners"* is P1 language; P0 fixes every row to `ownership_scope = 1` (ceiling C6)
+
+**Gap raised rather than closed: there is no family lock.** `database.sql` and SPEC §8.1 step 4.2
+both describe locking the family row, and `version_family_repo::create_or_get` already documents
+that it **is not** one — the secure query builder exposes no lock clause. So two concurrent
+admissions of two *different new* members of one family can both pass their shape check and both
+commit, leaving a family that violates minor-shape uniformity. This is **not new to T12**: T10's
+kind rule has the identical hole, and the unique key on `gts_id` closes only the same-identifier
+race. The mechanism exists — `Db::try_lock`, an advisory lock working on all three backends — and
+`VersionFamilyRepo::lock_order` is already its ordering half, so the fix is service-layer wiring
+rather than new infrastructure. It is not free: the `SQLite` lock scope is keyed on the DSN, and
+every test using `sqlite::memory:` shares one scope through markers in a **cross-process** cache
+directory, so contending test binaries would serialize against each other. Decide at Checkpoint 2
+whether that wiring belongs to T15 (which already owns bounded retry) or to its own task.
 
 **Dependencies:** T10, T11
-**Files likely touched:** `TR/src/domain/family.rs` — **this is where it becomes `TR/src/domain/family/`**: `key.rs` for today's `family_key`, `rules.rs` extended with the two rules below beside T10's kind rule, per the trigger table above. Also `TR/src/domain/admission/unit.rs`, `TR/src/infra/storage/repo/`, `TR/src/domain/ports.rs`, `TR/src/infra/storage/store.rs`, `TR/tests/family_test.rs`
+**Files touched:** `TR/src/domain/family.rs` → `TR/src/domain/family/{mod,key,key_tests,rules,rules_tests}.rs`, `TR/src/domain/{mod,enums}.rs`, `TR/src/domain/admission/unit.rs`, `TR/tests/family_test.rs`
 **Scope:** M
 
 ---
