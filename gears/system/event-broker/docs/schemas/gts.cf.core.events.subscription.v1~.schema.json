@@ -15,7 +15,8 @@
     "consumer_group": {
       "description": "Full GTS consumer-group identifier. Either named (vendor-namespaced) or anonymous (~{uuid}).",
       "type": "string",
-      "pattern": "^[\\x20-\\x7E]+$"
+      "pattern": "^[\\x20-\\x7E]+$",
+      "x-gts-instance": "gts.cf.core.events.consumer_group.v1~"
     },
     "client_agent": {
       "description": "RFC 9110 User-Agent grammar; ASCII; 1-256 bytes. Informational diagnostic hint surfaced in operational logs (NEVER as a metric label). Required at create per ADR-0004.",
@@ -45,7 +46,10 @@
         "required": ["topic", "partition"],
         "additionalProperties": false,
         "properties": {
-          "topic": { "type": "string" },
+          "topic": {
+            "type": "string",
+            "x-gts-instance": "gts.cf.core.events.topic.v1~"
+          },
           "partition": { "type": "integer", "minimum": 0 }
         }
       }
@@ -73,7 +77,8 @@
         "topic": {
           "description": "Full GTS topic identifier. Partition / rebalance / authz unit (Kafka-style). Required.",
           "type": "string",
-          "pattern": "^[\\x20-\\x7E]+$"
+          "pattern": "^[\\x20-\\x7E]+$",
+          "x-gts-instance": "gts.cf.core.events.topic.v1~"
         },
         "tenant_id": {
           "description": "Tenant scope. Authz-validated by the platform tenant resolver against the calling principal. Different interests MAY declare different tenant_ids (system services consuming across multiple tenants).",
@@ -93,14 +98,15 @@
           "default": "respect"
         },
         "types": {
-          "description": "GTS event-type-instance patterns. >=1 entry; <=32 entries (compile-time const MAX_TYPES_PER_INTEREST). Wildcards per GTS spec §10 (single trailing `*` at a segment boundary). Patterns scoped to the declared `topic` — types belonging to other topics are never matched. Per-name-latest + minor-version-omitted matching applied at JOIN.",
+          "description": "GTS event-type patterns. >=1 entry; <=32 entries (compile-time const MAX_TYPES_PER_INTEREST). Wildcards per GTS spec §10 (single trailing `*` at a segment boundary). Patterns scoped to the declared `topic` — types belonging to other topics are never matched. Per-name-latest + minor-version-omitted matching applied at JOIN.",
           "type": "array",
           "minItems": 1,
           "maxItems": 32,
           "items": {
             "type": "string",
             "pattern": "^[\\x20-\\x7E]+$",
-            "maxLength": 1024
+            "maxLength": 1024,
+            "x-gts-type": "gts.cf.core.events.event.v1~"
           }
         },
         "filter": {
@@ -112,7 +118,8 @@
             "engine": {
               "description": "Full GTS identifier of the filter engine (e.g. gts.cf.core.events.filter.v1~cf.core.expression.cel.v1).",
               "type": "string",
-              "pattern": "^[\\x20-\\x7E]+$"
+              "pattern": "^[\\x20-\\x7E]+$",
+              "x-gts-instance": "gts.cf.core.events.filter.v1~"
             },
             "expression": {
               "description": "Engine-specific source string. 1–4096 bytes. For CEL, a CEL-syntax string.",
