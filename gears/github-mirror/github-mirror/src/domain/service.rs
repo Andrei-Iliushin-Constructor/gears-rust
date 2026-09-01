@@ -4,13 +4,13 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use authz_resolver_sdk::PolicyEnforcer;
 use authz_resolver_sdk::pep::{AccessRequest, ResourceType};
+use chrono::{DateTime, Utc};
 use github_mirror_sdk::{
     Branch, CheckRun, Comment, Commit, CommitComment, CommitFile, CommitStatus, Contributor,
     Deployment, Issue, IssueEvent, IssueReaction, IssueTimelineEvent, Label, Milestone,
     PullRequest, PullRequestCommit, PullRequestFile, Release, Repo, Review, ReviewComment,
     ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
-use sea_orm::prelude::DateTimeUtc;
 use tokio::sync::{Mutex, mpsc};
 use toolkit_macros::domain_model;
 use toolkit_odata::{CursorV1, ODataQuery, Page, PageInfo, SortDir};
@@ -52,7 +52,7 @@ const CONTRIBUTOR_MERGE_LIMIT: u64 = 10_000;
 /// tables predate the typed columns), so they format here; `extracted_at` and
 /// the contributor window are real timestamps and never pass through this.
 fn now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 /// The earlier of two optional instants, ignoring a missing one.
@@ -61,7 +61,7 @@ fn now_rfc3339() -> String {
 /// `Some`: plain `a.min(b)` would answer `None` whenever one side is missing.
 /// The mirror image needs no helper — `Option::max` already skips `None` for
 /// the same reason, which is why only this direction is written out.
-fn earliest(a: Option<DateTimeUtc>, b: Option<DateTimeUtc>) -> Option<DateTimeUtc> {
+fn earliest(a: Option<DateTime<Utc>>, b: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
     [a, b].into_iter().flatten().min()
 }
 
@@ -4095,7 +4095,7 @@ impl<
         scope: &AccessScope,
         complete: ListingCompleteness,
         repo_id: i64,
-        watermark: DateTimeUtc,
+        watermark: DateTime<Utc>,
     ) -> Result<u64, DomainError> {
         let mut deleted = 0;
         if complete.issues {
@@ -4218,7 +4218,7 @@ impl<
         // Captured before any row is written: every upsert in this sync stamps
         // `extracted_at` with a later instant, so "extracted_at < watermark"
         // identifies exactly the rows this sync did not touch.
-        let watermark = chrono::Utc::now();
+        let watermark = Utc::now();
         let fetched = self.github.fetch_repository(owner, name, options).await?;
         let complete = fetched.complete;
         progress.fetched();
