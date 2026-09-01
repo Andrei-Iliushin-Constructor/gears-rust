@@ -80,6 +80,7 @@ pub async fn send_message_in_session(
         file_ids: body.file_ids.unwrap_or_default(),
         parent_message_id: body.parent_message_id,
         capabilities: capabilities_into_sdk(body.capabilities),
+        metadata: body.metadata,
     };
     let cancel = CancellationToken::new();
     let stream = svc.send_message(req, &ctx, cancel).await?;

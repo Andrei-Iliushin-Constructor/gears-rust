@@ -456,6 +456,17 @@
               "null"
             ]
           },
+          "metadata": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Value",
+                "description": "Opaque per-turn client context (device, locale, active error state, …)\npersisted on the user message row and echoed back on reads as the\nmessage's `metadata`. Engine-reserved keys (`model_used`, `finish_reason`,\n`temperature_used`, `usage`, `summarized_message_ids`) and payloads larger\nthan 8 KiB serialized are rejected with `400`."
+              }
+            ]
+          },
           "parent_message_id": {
             "format": "uuid",
             "type": [
