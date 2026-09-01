@@ -276,6 +276,12 @@ pub struct CurrentDocument {
     /// caller's job: this port moves bytes, and the layer that knows what a
     /// malformed document means is the one that names the entity in the error.
     pub raw_schema: String,
+    /// The digest of [`Self::raw_schema`], carried so the `unchanged` decision can
+    /// reject an inequality without comparing whole documents. A **prefilter
+    /// only** (ADR-0012): equality here proposes redundancy and the bytes confirm
+    /// it, which is why the text travels beside the digest rather than instead of
+    /// it.
+    pub content_hash: Vec<u8>,
 }
 
 /// The result of a dependency-closure read.
@@ -370,6 +376,9 @@ pub struct CurrentInstanceValue {
     /// The authored value as submitted, canonical UTF-8 text. Parsing it is the
     /// caller's job, as on [`CurrentDocument`].
     pub canonical_value: String,
+    /// The digest of [`Self::canonical_value`] — a prefilter, as on
+    /// [`CurrentDocument::content_hash`].
+    pub content_hash: Vec<u8>,
     pub type_schema_entity_id: i64,
     pub type_schema_revision_no: i32,
 }
@@ -505,6 +514,21 @@ pub trait EntityStore: Send + Sync {
         scope: &AccessScope,
         new: NewEntity,
     ) -> Result<Option<EntityRow>, ScopeError>;
+
+    /// Advance `resource_version` if and only if it still equals `expected`.
+    ///
+    /// The caller's precondition, enforced where it means something: the check is
+    /// in the statement's `WHERE`, so there is no window between reading the
+    /// version and moving it. `false` is a lost race — an ordinary concurrent
+    /// outcome the caller turns into `precondition_failed`, never a fault.
+    async fn compare_and_swap_version(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_id: i64,
+        expected_resource_version: i64,
+        now: OffsetDateTime,
+    ) -> Result<bool, ScopeError>;
 }
 
 /// Authored revisions and the current-state row.
@@ -539,6 +563,20 @@ pub trait TypeSchemaStore: Send + Sync {
         scope: &AccessScope,
         new: NewCurrentTypeSchema,
     ) -> Result<(), ScopeError>;
+
+    /// Move an existing current-state row onto a newly admitted revision,
+    /// re-materializing D3's artifacts with it.
+    ///
+    /// Separate from [`Self::insert_current_schema`] rather than one upsert: an
+    /// insert that finds a row is a missing existence recheck, and an update that
+    /// finds none is a missing first admission. Collapsing them would make both
+    /// bugs silent. `false` means no row matched.
+    async fn update_current_schema(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        new: NewCurrentTypeSchema,
+    ) -> Result<bool, ScopeError>;
 }
 
 /// Registered Instances: immutable revisions and the current-revision pointer.
@@ -577,6 +615,15 @@ pub trait InstanceStore: Send + Sync {
         scope: &AccessScope,
         new: NewCurrentInstance,
     ) -> Result<(), ScopeError>;
+
+    /// Move an existing current-revision pointer, for the reasons
+    /// [`TypeSchemaStore::update_current_schema`] states.
+    async fn update_current_instance(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        new: NewCurrentInstance,
+    ) -> Result<bool, ScopeError>;
 }
 
 /// Operations and their per-candidate items.
@@ -644,6 +691,18 @@ pub trait OperationStore: Send + Sync {
         scope: &AccessScope,
         item_id: i64,
         revision_no: i32,
+        resource_version: i64,
+        now: OffsetDateTime,
+    ) -> Result<bool, ScopeError>;
+
+    /// Record a candidate whose authored content already equalled the current
+    /// revision. No `revision_no`, because an `unchanged` candidate allocates none
+    /// (ADR-0005); the resource version is the one that did **not** move.
+    async fn mark_item_unchanged(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        item_id: i64,
         resource_version: i64,
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError>;

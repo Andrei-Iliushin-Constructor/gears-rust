@@ -38,6 +38,12 @@ pub enum WorkerError {
     /// other `WorkerError`.
     #[error("instance '{gts_id}' conforms to '{type_id}', which has no current revision")]
     ConformingTypeAbsent { gts_id: String, type_id: String },
+    /// An entity row exists with no matching current-state row, or with one of the
+    /// other kind. Structurally impossible — entity, revision and current row are
+    /// written by one transaction (D3) — so this is a corrupt row rather than a
+    /// race, and it is infrastructure rather than a statement about the candidate.
+    #[error("entity '{gts_id}' (id {entity_id}) has no current-state row of its kind")]
+    CurrentStateMissing { gts_id: String, entity_id: i64 },
     #[error("storage failure during admission: {0}")]
     Storage(#[from] ScopeError),
     #[error("database failure during admission: {0}")]

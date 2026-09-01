@@ -48,13 +48,13 @@ use uuid::Uuid;
 
 use common::{
     allow_all, provider_for, seed_current_type_schema, seed_operation_item,
-    seed_type_schema_revision,
+    seed_pending_revision_item, seed_type_schema_revision,
 };
 use types_registry::domain::enums::{DependencyKind, EntityKind, OwnershipScope};
-use types_registry::domain::ports::{NewEntity, commit_write, snapshot_read};
+use types_registry::domain::ports::{NewCurrentTypeSchema, NewEntity, commit_write, snapshot_read};
 use types_registry::infra::storage::entity::type_schema;
 use types_registry::infra::storage::repo::{
-    DependencyRepo, EntityRepo, PageRequest, TypeSchemaRepo, VersionFamilyRepo,
+    DependencyRepo, EntityRepo, OperationRepo, PageRequest, TypeSchemaRepo, VersionFamilyRepo,
 };
 
 const NOW: OffsetDateTime = datetime!(2026-08-18 09:15:30 UTC);
@@ -385,6 +385,123 @@ async fn current_documents_reads_the_current_revision_only(
     assert_eq!(single_doc.raw_schema, only);
 }
 
+/// The two writes T11 added, on a real backend.
+///
+/// Neither is demonstrable on `SQLite`. `update_current` rebinds
+/// `resolution_fingerprint` — a binary column that is `BYTEA` / `BINARY(16)` here
+/// and typeless `BLOB` there, the exact class of defect the uuid binding was — in an
+/// `UPDATE` rather than the `INSERT` T3 already covers. And `mark_item_unchanged`
+/// writes the one `operation_item` state whose CHECK arm nothing else reaches:
+/// `status = 4` requires `result_revision_no IS NULL` beside a non-null
+/// `result_resource_version` and `expected_resource_version >= 1`, and `SQLite`
+/// enforces CHECKs but has never had a row in that state to enforce them against.
+async fn a_revision_moves_the_pointer_and_can_report_unchanged(
+    db: &Provider,
+    family_id: i64,
+    backend: &str,
+) {
+    let conn = db.conn().expect("conn");
+    let scope = allow_all();
+
+    let gts_id = gts_id!("acme.crm.moved.type.v1~");
+    let entity = EntityRepo::insert(&conn, &scope, new_entity(gts_id, family_id))
+        .await
+        .expect("insert")
+        .expect("the identifier is free");
+
+    let first = r#"{"$schema":"http://json-schema.org/draft-07/schema#","title":"first"}"#;
+    let second = r#"{"$schema":"http://json-schema.org/draft-07/schema#","title":"second"}"#;
+    let item1 = seed_operation_item(&conn, gts_id, 1, NOW).await;
+    seed_type_schema_revision(&conn, entity.id, 1, item1, first, NOW).await;
+    seed_current_type_schema(&conn, entity.id, 1, first, NOW).await;
+    let item2 = seed_operation_item(&conn, gts_id, 2, NOW).await;
+    seed_type_schema_revision(&conn, entity.id, 2, item2, second, NOW).await;
+
+    // A fingerprint that is not the seed's, so a pointer move that failed to
+    // rebind the binary column would read back as the old value rather than as
+    // an absent one.
+    let fingerprint = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF];
+    assert!(
+        TypeSchemaRepo::update_current(
+            &conn,
+            &scope,
+            NewCurrentTypeSchema {
+                entity_id: entity.id,
+                revision_no: 2,
+                resolved_schema: second.to_owned(),
+                effective_traits: r#"{"moved":true}"#.to_owned(),
+                effective_traits_schema: "{}".to_owned(),
+                resolution_fingerprint: fingerprint.clone(),
+                now: NOW,
+            },
+        )
+        .await
+        .expect("move the pointer"),
+        "the update must match exactly one row on {backend}"
+    );
+
+    let current = TypeSchemaRepo::find_current(&conn, &scope, entity.id)
+        .await
+        .expect("read")
+        .expect("a current row exists");
+    assert_eq!(current.revision_no, 2, "the pointer moved on {backend}");
+    assert_eq!(
+        current.resolution_fingerprint, fingerprint,
+        "the binary artifact must round-trip through an UPDATE on {backend}"
+    );
+    assert_eq!(current.resolved_schema, second);
+
+    // An entity with no current row: the caller's existence recheck is missing,
+    // and the repository says so rather than inventing a row.
+    let orphan_id = gts_id!("acme.crm.orphan.type.v1~");
+    let orphan = EntityRepo::insert(&conn, &scope, new_entity(orphan_id, family_id))
+        .await
+        .expect("insert")
+        .expect("the identifier is free");
+    assert!(
+        !TypeSchemaRepo::update_current(
+            &conn,
+            &scope,
+            NewCurrentTypeSchema {
+                entity_id: orphan.id,
+                revision_no: 1,
+                resolved_schema: first.to_owned(),
+                effective_traits: "{}".to_owned(),
+                effective_traits_schema: "{}".to_owned(),
+                resolution_fingerprint: vec![0x01],
+                now: NOW,
+            },
+        )
+        .await
+        .expect("the miss is reported, not raised"),
+        "no current row means no rows affected on {backend}"
+    );
+
+    unchanged_is_written_once(db, gts_id, backend).await;
+}
+
+/// The `unchanged` terminal state, which is the one `ck_tr_operation_item_state`
+/// arm nothing else in the suite reaches: `status = 4` with a null
+/// `result_revision_no`, a non-null `result_resource_version` and
+/// `expected_resource_version >= 1`.
+async fn unchanged_is_written_once(db: &Provider, gts_id: &str, backend: &str) {
+    let conn = db.conn().expect("conn");
+    let scope = allow_all();
+    let pending = seed_pending_revision_item(&conn, gts_id, 1, NOW).await;
+    assert!(
+        OperationRepo::mark_item_unchanged(&conn, &scope, pending, 1, NOW)
+            .await
+            .expect("the unchanged state must satisfy ck_tr_operation_item_state"),
+        "the CAS must match the pending item on {backend}"
+    );
+    assert!(
+        !OperationRepo::mark_item_unchanged(&conn, &scope, pending, 1, NOW)
+            .await
+            .expect("a second write reports failure rather than erroring"),
+        "a terminal item may not be terminalized twice on {backend}"
+    );
+}
+
 /// Everything the two backend tests assert, in one body so neither backend can
 /// drift into covering less than the other.
 /// A read under [`snapshot_read`] does not observe a commit that lands mid-read,
@@ -633,6 +750,7 @@ async fn assert_repo_primitives_behave(db: &Provider, backend: &str) {
     cas_reports_by_affected_rows(db, family.id, backend).await;
     closure_walks_a_chain(db, family.id, backend).await;
     current_documents_reads_the_current_revision_only(db, family.id, backend).await;
+    a_revision_moves_the_pointer_and_can_report_unchanged(db, family.id, backend).await;
     snapshot_read_does_not_see_a_mid_read_commit(db, family.id, backend).await;
 
     // Last, because both write rows the enumerating tests above would have to

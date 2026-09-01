@@ -657,7 +657,7 @@ Outcome and evidence: the criteria below.
   - ~~**`Idempotency-Key` cannot be declared in OpenAPI.**~~ **Retracted — the claim was false and is now fixed.** `ParamLocation::Header` exists and `openapi_registry.rs:200` already maps it onto utoipa's `ParameterIn::Header`; the generic `OperationBuilder::param(ParamSpec)` declares it. What misled us is that there is no `header_param` convenience beside `path_param` / `query_param`, so the capability is discoverable only by reading the enum. `POST /v2/entities` now declares the header as a required parameter, pinned by `the_idempotency_key_header_is_declared_as_a_required_parameter` and mutation-checked. The remaining toolkit gap is the missing convenience method — filed upstream as constructorfabric/gears-rust#4614
   - **T2's three lowering decisions were flagged *worth review* and never signed off:** MySQL `DATETIME(6)` rather than `TIMESTAMP(6)`; three extra boolean-domain CHECKs on SQLite and MySQL; MySQL's four indexes declared inline as `KEY`
   - **The migration changed after T2 was marked done** (the uuid binding). Nothing to migrate forward — no deployment had run it — but the "done" marker moved
-  - **T10's marker moved too, and the reason generalizes.** The public read returned `content: null` for an admitted Instance; fixed, with the correction written into T10. What is worth deciding rather than just noting: T10's criteria covered admission exhaustively and never named the read, and the same asymmetry stands wherever a task extends the write path — T11, T13 and T20 each add state that `RegistryService::entity()` must then be able to return. Consider a standing criterion for those three: *whatever this task makes storable is readable through the public surface, with a test on the route*
+  - **T10's marker moved too, and the reason generalizes.** The public read returned `content: null` for an admitted Instance; fixed, with the correction written into T10. What is worth deciding rather than just noting: T10's criteria covered admission exhaustively and never named the read, and the same asymmetry stands wherever a task extends the write path — T11, T13 and T20 each add state that `RegistryService::entity()` must then be able to return. Consider a standing criterion for those three: *whatever this task makes storable is readable through the public surface, with a test on the route*. **T11 adopted it** — the criterion is written into T11's verification and discharged by `a_revision_is_readable_through_the_entity_route`; T13 and T20 still need the same, and the decision to make it standing rather than per-task is still yours
   - **Five gear groups have their GTS declarations proven at compile time only**, never admitted into a live registry: `bss-rate-provider` and its plugins, `usage-collector` and its TimescaleDB plugin, `tr-authz`, the OoP calculator example, and `chat-engine` (which `make gts-docs` excludes by policy). They are outside `config/e2e-features.txt`, so the runtime dump covered 34 of the repository's ~40 Type Schema declaration sites. Cheap follow-up once the configs they need exist: repeat the dump with those features enabled
 
 ---
@@ -722,27 +722,57 @@ which is a technical property, not a concept. A directory whose name promises a 
 it does not have is worse than a flat list, because the next module that is merely *pure* gets
 filed there too.
 
-### - [ ] T11: Content revisions and compare-and-swap
+### - [x] T11: Content revisions and compare-and-swap
 
 **Description:** Second and later revisions of a logical entity: `expected_resource_version`
 preconditions, immutable revision insert, current-state pointer move, and the `unchanged`
 outcome for authored content equal to current.
 
+**No migration.** T2's `ck_tr_operation_item_state` already carries the `unchanged` arm —
+`status = 4` requires `result_revision_no IS NULL` beside a non-null `result_resource_version`
+and `expected_resource_version >= 1` — and `OperationItemStatus::Unchanged` already existed in
+all three vocabularies (domain, storage, DTO). So the CHECK that makes `unchanged` impossible
+for a creation was written before there was any code that could reach it; this task is where
+the first row lands in that state.
+
 **Acceptance criteria:**
-- [ ] Acceptance stops refusing a positive `expected_resource_version` (`AcceptanceError::RevisionNotAccepted`, added at Checkpoint 1) **and** the SPEC §8.1 step 3 bypass is restored in the same change: the policy gate becomes conditional on `expected == 0` again only once the commit transaction enforces the precondition. Gating on the caller's *declared* kind while nothing verifies it is the bypass the refusal replaced — found at the Checkpoint 1 review
-- [ ] Update requires `entity.resource_version == expected_resource_version`; mismatch is terminal `precondition_failed` with no silent rebase. It goes through the existing `EntityRepo::compare_and_swap_version` — written and unit-tested at T4 with no caller until now, so this task is where its behaviour is validated against a real precondition
-- [ ] Equal authored content yields `unchanged`, creating no revision and not advancing `resource_version`
-- [ ] `unchanged` is impossible for a create or a delete, enforced in code as well as by the CHECK
-- [ ] Content hash is a prefilter only; effective artifacts are excluded from equality
+- [x] Acceptance stops refusing a positive `expected_resource_version` — `AcceptanceError::RevisionNotAccepted` is deleted, along with its REST mapping — **and** the SPEC §8.1 step 3 bypass is restored in the same change: the gate is now `if expected == Precondition::MustNotExist`. What makes that safe is the other half of the same commit: `worker::process_item` dispatches on the item's **stored** precondition, and `commit_revision` refuses an identifier the registry does not hold. The caller's declared kind is therefore *enforced*, not trusted — which is exactly what Checkpoint 1's refusal stood in for
+- [x] Update requires `entity.resource_version == expected_resource_version`; mismatch is terminal `precondition_failed` with no silent rebase. It goes through `EntityRepo::compare_and_swap_version` — written and unit-tested at T4 with no caller until now — which became a port method here (its first domain caller, per `store.rs`'s own rule)
+- [x] Equal authored content yields `unchanged`, creating no revision and not advancing `resource_version`. Both kinds: the rule is shared, the tables are not
+- [x] `unchanged` is impossible for a create or a delete, enforced in code as well as by the CHECK. In code it is **structural**: `commit_creation` returns `CommittedUnit` and only `commit_revision` returns `RevisionCommit`, whose `Unchanged` variant is the sole way to reach `mark_item_unchanged`. A creation of existing content is `already_exists`, whatever the content
+- [x] Content hash is a prefilter only; effective artifacts are excluded from equality. `CurrentDocument` and `CurrentInstanceValue` gained `content_hash` so the digest and the bytes travel together, and the decision is `hash == hash && bytes == bytes` — the digest alone would let a collision swallow a real edit
+
+**The concurrency shape, because it is not the obvious one.** The commit transaction runs at
+`READ COMMITTED` (`ports::commit_write`), so a concurrent admission can commit between reading
+the entity and reading the current document. For a real revision the compare-and-swap closes
+that by construction — the precondition is in the `WHERE`. For `unchanged` there is no write to
+put a `WHERE` on, so the precondition is **re-asked** immediately before the item write. Without
+it, a pass that read revision N's content while another admission committed N+1 would answer
+`unchanged` against content that is no longer current, and never notice: it runs no CAS. With
+it, both interleavings are serializable — a re-read that still sees `expected` means the other
+admission had not committed yet.
 
 **Verification:**
-- [ ] Gear tests, all three backends (see [Commands](#commands))
-- [ ] Tests: stale version, equal content, content equal to an *older* non-current revision (must create a new revision, ADR-0005)
-- [ ] Test: revision numbers are contiguous per entity
-- [ ] Test: a revision in a region the policy has since **closed** is admitted (the restored bypass), while a creation there is still refused — the pair that Checkpoint 1's refusal stands in for
+- [x] Gear tests, all three backends (see [Commands](#commands)) — 488 on `SQLite`, and `make test-types-registry-db` green on `PostgreSQL` and `MySQL`
+- [x] Tests: stale version, equal content, content equal to an *older* non-current revision (must create a new revision, ADR-0005) — `TR/tests/revision_test.rs`, ten tests, genuine RED→GREEN (nine of the ten failed before the implementation)
+- [x] Test: revision numbers are contiguous per entity — three admissions yield `1, 2, 3` with `resource_version` at 3
+- [x] Test: a revision in a region the policy has since **closed** is admitted (the restored bypass), while a creation there is still refused — `a_revision_survives_a_region_the_policy_has_since_closed` drives both halves against two compiled policies, and the acceptance unit tests pin the pure half
+- [x] **The standing read criterion, applied.** Checkpoint 1's open item asked that whatever a write-path task makes storable be readable through the public route. `api_rest_test.rs::a_revision_is_readable_through_the_entity_route` reads `resource_version = 2`, the new `content` **and** the re-materialized `resolved_schema` over the real router; `unchanged_content_reports_unchanged_on_the_operation` pins the other outcome on the wire
+- [x] **New repository primitives covered on the container backends**, not only on `SQLite`. `TypeSchemaRepo::update_current` rebinds `resolution_fingerprint` — a binary column, the exact class of defect the uuid binding was at Checkpoint 1 — in an `UPDATE` rather than the `INSERT` T3 covered; and `mark_item_unchanged` writes the one `ck_tr_operation_item_state` arm no other test reaches. Both added to `repo_backends_test.rs`
+
+**Two design choices worth naming.**
+
+- **`update_current` is separate from `insert_current`, not one upsert.** An insert that finds a
+  row means a missing existence recheck; an update that finds none means a missing first
+  admission. One upsert makes both bugs silent, so each returns its own miss and the revision
+  commit turns an unexpected one into `WorkerError::CurrentStateMissing` — infrastructure, not a
+  statement about the candidate.
+- **The Type Schema pointer and its artifacts move in one statement.** D3's artifacts are outputs
+  of resolving *that* revision, so a row carrying revision N+1 beside revision N's
+  `resolved_schema` is a state no reader should see — and two statements would create it.
 
 **Dependencies:** Checkpoint 1
-**Files likely touched:** `TR/src/domain/admission/unit.rs`, `TR/src/infra/storage/repo/`, `TR/src/domain/ports.rs`, `TR/src/infra/storage/store.rs`, `TR/tests/revision_test.rs`
+**Files touched:** `TR/src/domain/admission/{acceptance,acceptance_tests,errors,unit,worker}.rs`, `TR/src/domain/ports.rs`, `TR/src/infra/storage/repo/{type_schema_repo,instance_repo,operation_repo}.rs`, `TR/src/infra/storage/store.rs`, `TR/src/api/rest/{error,dto}.rs`, `TR/tests/{revision_test,api_rest_test,repo_backends_test,common/mod}.rs`
 **Scope:** M
 
 ---

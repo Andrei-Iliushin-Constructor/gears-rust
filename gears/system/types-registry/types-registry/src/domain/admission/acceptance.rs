@@ -13,7 +13,7 @@
 //! |---|---|
 //! | 1 envelope and batch size | here |
 //! | 2 candidate identifiers | here |
-//! | 3 registration policy | here (via [`RegistrationPolicy`]) |
+//! | 3 registration policy | here (via [`RegistrationPolicy`]), for creations only |
 //! | 4 managed identifier profile | here |
 //! | 5 declared dialect | here |
 //! | 6 `force` | here |
@@ -108,11 +108,6 @@ pub enum AcceptanceError {
     ZeroPrecondition { gts_id: String },
     #[error("expected_resource_version {version} on '{gts_id}' is negative")]
     NegativePrecondition { gts_id: String, version: i64 },
-    #[error(
-        "expected_resource_version {version} on '{gts_id}' is refused: \
-         content revisions arrive with T11"
-    )]
-    RevisionNotAccepted { gts_id: String, version: i64 },
     #[error("operation kind is not accepted yet: deletion arrives with T20")]
     UnsupportedOperationKind,
     #[error("dry_run is not accepted yet: rollback-only evaluation arrives with T20")]
@@ -239,33 +234,30 @@ pub fn validate(
                     version: v,
                 });
             }
-            // A positive precondition claims the candidate is a revision, and
-            // nothing in P0 can check the claim: `commit_creation` ignores the field,
-            // so it would commit as an ordinary creation at `resource_version = 1` —
-            // with step 3 skipped, because step 3 is skipped for revisions. Naming a
-            // version would then be enough to register inside a region the deployment
-            // closes. Refused loudly until T11, as deletion is until T20.
-            Some(v) => {
-                return Err(AcceptanceError::RevisionNotAccepted {
-                    gts_id: id.id().to_owned(),
-                    version: v,
-                });
-            }
+            // A positive precondition claims the candidate is a revision of an
+            // entity already at that version. The claim is not taken on trust: the
+            // worker commits it through `commit_revision`, which refuses an absent
+            // identifier, so naming a version cannot register a new entity.
+            Some(v) => Precondition::Version(v),
         };
 
         // --- step 3: registration policy ---------------------------------
-        // Unconditional, because every candidate reaching this line is a declared
-        // creation: a positive `expected_resource_version` was refused above and
-        // deletion was refused with the envelope.
+        // **Creations only** (SPEC §8.1 step 3, DESIGN §3.2). The policy governs
+        // what may *appear* in a region; applying it to a revision would let closing
+        // a region freeze the entities already inside it, which is a different — and
+        // unasked-for — power.
         //
-        // TODO(T11): a revision — and at T20 a deletion — must bypass this gate
-        // again, so that closing a region cannot freeze the entities already in it
-        // (SPEC §8.1 step 3, DESIGN §3.2). Restore the condition *together with*
-        // the precondition check in the commit transaction: gating on the
-        // caller's declared kind alone is the bypass this refusal replaces.
-        ctx.policy
-            .admits(&id, OwnershipScope::Global)
-            .map_err(|refusal| AcceptanceError::PolicyRefused(PolicyRefusalError(refusal)))?;
+        // Safe only because the declared kind is enforced downstream. A revision
+        // that named a version for an identifier the registry does not hold is
+        // refused by `commit_revision`, terminally, having created nothing; without
+        // that, this bypass would be a way past the deployment allowlist. The two
+        // halves landed in one change for exactly that reason. T20 adds deletion,
+        // which bypasses the gate on the same terms.
+        if expected == Precondition::MustNotExist {
+            ctx.policy
+                .admits(&id, OwnershipScope::Global)
+                .map_err(|refusal| AcceptanceError::PolicyRefused(PolicyRefusalError(refusal)))?;
+        }
 
         // --- step 4: managed identifier profile --------------------------
         if id

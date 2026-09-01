@@ -21,9 +21,10 @@
 //!
 //! # P0 scope
 //!
-//! One acyclic, reference-free Type Schema candidate per unit, each item its own
-//! unit, processed in `item_no` order. Dependency-aware ordering and partial
-//! admission are T19; compatibility is T17; deletion is T20; Instances are T10.
+//! One acyclic, reference-free candidate per unit, each item its own unit,
+//! processed in `item_no` order. Creations and content revisions both land here —
+//! the item's stored precondition chooses which commit runs. Dependency-aware
+//! ordering and partial admission are T19; compatibility is T17; deletion is T20.
 
 use std::sync::Arc;
 
@@ -34,7 +35,8 @@ use toolkit_macros::domain_model;
 use uuid::Uuid;
 
 pub use super::errors::{ItemFailure, WorkerError};
-use super::unit::{commit_creation, evaluate};
+use super::unit::{CommittedUnit, RevisionCommit, commit_creation, commit_revision, evaluate};
+use crate::domain::admission::Precondition;
 use crate::domain::enums::{OperationItemStatus, OperationStatus};
 use crate::domain::ports::{OperationItemRow, OperationRow, Stores, commit_write, snapshot_read};
 
@@ -130,19 +132,6 @@ async fn process_item(
         return Ok(stored_outcome(item));
     }
 
-    // Re-check the closed vocabulary admitted by P0. T11 replaces this refusal
-    // with the real precondition enforced inside the commit transaction.
-    if let Some(expected_resource_version) = item.precondition.expected_resource_version() {
-        let failure = ItemFailure::new(
-            "precondition_failed",
-            format!(
-                "'{}' names expected_resource_version {}; content revisions are not admitted yet",
-                item.gts_id, expected_resource_version,
-            ),
-        );
-        return record_failure(stores, db, scope, operation_id, item, failure, now).await;
-    }
-
     let payload = item
         .request_payload
         .as_deref()
@@ -158,15 +147,39 @@ async fn process_item(
 
     // Step 4: a short READ COMMITTED transaction containing only rechecks and
     // writes. The `Arc` keeps transaction retries from cloning the artifacts.
+    //
+    // The item's stored precondition — never the candidate's shape and never a
+    // caller-declared kind — chooses the commit. That is the half of SPEC §8.1
+    // step 3 the acceptance-time policy bypass depends on: acceptance skips the
+    // policy gate for a revision, so the claim "this is a revision" has to be
+    // *enforced* here, by a commit that refuses an absent identifier.
     let tx_scope = scope.clone();
     let tx_stores = Arc::clone(stores);
+    let precondition = item.precondition;
     let committed = db
         .transaction_with_config(commit_write(&db.db()), |tx| {
             let unit = Arc::clone(&evaluated);
             let tx_scope = tx_scope.clone();
             let tx_stores = Arc::clone(&tx_stores);
             Box::pin(async move {
-                commit_creation(tx_stores.as_ref(), tx, &tx_scope, unit.as_ref(), now).await
+                match precondition {
+                    Precondition::MustNotExist => {
+                        commit_creation(tx_stores.as_ref(), tx, &tx_scope, unit.as_ref(), now)
+                            .await
+                            .map(|r| r.map(RevisionCommit::Admitted))
+                    }
+                    Precondition::Version(expected) => {
+                        commit_revision(
+                            tx_stores.as_ref(),
+                            tx,
+                            &tx_scope,
+                            unit.as_ref(),
+                            expected,
+                            now,
+                        )
+                        .await
+                    }
+                }
             })
         })
         .await;
@@ -182,21 +195,48 @@ async fn process_item(
     };
 
     match committed {
-        Ok(committed) => {
+        Ok(RevisionCommit::Admitted(CommittedUnit {
+            gts_uuid,
+            revision_no,
+            resource_version,
+        })) => {
             tracing::info!(
                 %operation_id,
                 operation_item_id = item.id,
                 gts_id = %item.gts_id,
-                revision_no = committed.revision_no,
-                resource_version = committed.resource_version,
+                revision_no,
+                resource_version,
                 "types_registry candidate admitted"
             );
             Ok(ItemOutcome {
                 gts_id: item.gts_id.clone(),
                 status: OperationItemStatus::Succeeded,
-                gts_uuid: Some(committed.gts_uuid),
-                resource_version: Some(committed.resource_version),
-                revision_no: Some(committed.revision_no),
+                gts_uuid: Some(gts_uuid),
+                resource_version: Some(resource_version),
+                revision_no: Some(revision_no),
+                failure: None,
+            })
+        }
+        // Terminal and successful, and deliberately not `Succeeded`: no revision
+        // number was allocated, so reporting one would name a revision that does
+        // not exist (ADR-0005).
+        Ok(RevisionCommit::Unchanged {
+            gts_uuid,
+            resource_version,
+        }) => {
+            tracing::info!(
+                %operation_id,
+                operation_item_id = item.id,
+                gts_id = %item.gts_id,
+                resource_version,
+                "types_registry candidate content already current"
+            );
+            Ok(ItemOutcome {
+                gts_id: item.gts_id.clone(),
+                status: OperationItemStatus::Unchanged,
+                gts_uuid: Some(gts_uuid),
+                resource_version: Some(resource_version),
+                revision_no: None,
                 failure: None,
             })
         }

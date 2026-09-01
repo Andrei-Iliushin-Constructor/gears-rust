@@ -12,6 +12,16 @@
 //! resolution and SCC ordering are T19, compatibility T17, dependency edges T13,
 //! the revision-vector guard T15 — each adds a step to `evaluate` or `commit`
 //! without moving the boundary between them.
+//!
+//! # Two commits, not one commit with a flag
+//!
+//! [`commit_creation`] requires the identifier **absent**; [`commit_revision`]
+//! requires it present at a named `resource_version`. They share evaluation and
+//! nothing else: the creation takes or makes a family and inserts current-state
+//! rows, the revision moves them, and only the revision can end `unchanged`. A
+//! single function branching on an `Option<i64>` would make each half's writes
+//! reachable under the other's precondition, which is the shape T11 was asked to
+//! remove rather than to parameterize.
 
 use std::sync::Arc;
 
@@ -91,13 +101,33 @@ pub struct EvaluatedUnit {
     pub operation_item_id: i64,
 }
 
-/// The commit's result for one item.
+/// The commit's result for one item that wrote a revision.
 #[domain_model]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommittedUnit {
     pub gts_uuid: Uuid,
     pub revision_no: i32,
     pub resource_version: i64,
+}
+
+/// What committing a *revision* produced.
+///
+/// Two variants rather than a `CommittedUnit` with an optional `revision_no`: an
+/// `unchanged` candidate allocates no revision number (ADR-0005), and an `Option`
+/// there would also be inhabited by [`commit_creation`]'s result, where the
+/// outcome is impossible. Here the outcome *is* the variant.
+#[domain_model]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RevisionCommit {
+    /// A new immutable revision, the current pointer moved onto it, and
+    /// `resource_version` advanced.
+    Admitted(CommittedUnit),
+    /// The authored content already equalled the current revision: no revision, no
+    /// version move. `resource_version` is the one that did not move.
+    Unchanged {
+        gts_uuid: Uuid,
+        resource_version: i64,
+    },
 }
 
 /// Evaluate one candidate. **No transaction is open here.**
@@ -463,6 +493,273 @@ pub async fn commit_creation(
         revision_no,
         resource_version: entity.resource_version,
     }))
+}
+
+/// Commit one evaluated unit as a **revision** of an entity that already exists:
+/// the `expected_resource_version` precondition, the immutable revision insert,
+/// the current-state pointer move, and the item outcome.
+///
+/// # The order of the four statements is the concurrency design
+///
+/// 1. read the entity and compare `resource_version` to `expected`, so a stale
+///    caller gets a message naming both versions rather than a bare CAS failure;
+/// 2. read the current revision's authored content, to decide `unchanged`;
+/// 3. **re-ask the precondition** — as a compare-and-swap for a real revision, and
+///    as a plain re-read for an `unchanged` one.
+///
+/// Step 3 is not redundant with step 1. The commit transaction runs at
+/// `READ COMMITTED` ([`commit_write`](crate::domain::ports::commit_write)), so a
+/// concurrent admission can commit between steps 1 and 2, and this pass would
+/// otherwise answer `unchanged` against content that is no longer current. The
+/// compare-and-swap closes that window for a revision by construction — its
+/// precondition is in the `WHERE` — and the re-read closes it for `unchanged`,
+/// which writes nothing and so has no `WHERE` to put it in. What is left is
+/// serializable either way: a re-read that still sees `expected` means the other
+/// admission had not committed yet, so this pass genuinely came first.
+///
+/// # Errors
+/// [`WorkerError`] for an infrastructure failure, including a corrupt row with no
+/// current state. A lost or stale precondition is an [`ItemFailure`] in the
+/// `Ok(Err(..))` position — terminal, and never rebased onto the current version.
+pub async fn commit_revision(
+    stores: &dyn Stores,
+    tx: &DbTx<'_>,
+    scope: &AccessScope,
+    unit: &EvaluatedUnit,
+    expected_resource_version: i64,
+    now: OffsetDateTime,
+) -> Result<Result<RevisionCommit, ItemFailure>, WorkerError> {
+    let Some(entity) = stores.find_by_gts_id(tx, scope, &unit.gts_id).await? else {
+        return Ok(Err(ItemFailure::new(
+            "precondition_failed",
+            format!(
+                "'{}' does not exist; expected_resource_version {expected_resource_version}                  requires it to exist at that version",
+                unit.gts_id
+            ),
+        )));
+    };
+    if entity.resource_version != expected_resource_version {
+        return Ok(Err(stale_precondition(
+            &unit.gts_id,
+            expected_resource_version,
+            entity.resource_version,
+        )));
+    }
+
+    // The current revision's authored content, never its effective artifacts:
+    // those move when a dependency moves while the authored document stands still,
+    // so including them would report a revision for a document nobody edited.
+    let (current_revision_no, current_body, current_hash) = match &unit.outcome {
+        EvaluatedOutcome::TypeSchema { .. } => {
+            let current = stores
+                .current_documents(tx, scope, &[entity.id])
+                .await?
+                .pop()
+                .ok_or_else(|| WorkerError::CurrentStateMissing {
+                    gts_id: unit.gts_id.clone(),
+                    entity_id: entity.id,
+                })?;
+            (
+                current.revision_no,
+                current.raw_schema,
+                current.content_hash,
+            )
+        }
+        EvaluatedOutcome::Instance { .. } => {
+            let current = stores
+                .current_values(tx, scope, &[entity.id])
+                .await?
+                .pop()
+                .ok_or_else(|| WorkerError::CurrentStateMissing {
+                    gts_id: unit.gts_id.clone(),
+                    entity_id: entity.id,
+                })?;
+            (
+                current.revision_no,
+                current.canonical_value,
+                current.content_hash,
+            )
+        }
+    };
+
+    // The hash is a prefilter and the bytes are the decision (ADR-0012): a digest
+    // collision would otherwise silently swallow a real edit. Equality against an
+    // *older* revision is deliberately not asked — that is an ordinary update which
+    // allocates a new number rather than moving the pointer backwards (ADR-0005).
+    if current_hash == unit.content_hash && current_body == unit.canonical_body {
+        let still = stores
+            .find_by_gts_id(tx, scope, &unit.gts_id)
+            .await?
+            .ok_or_else(|| WorkerError::CurrentStateMissing {
+                gts_id: unit.gts_id.clone(),
+                entity_id: entity.id,
+            })?;
+        if still.resource_version != expected_resource_version {
+            return Ok(Err(stale_precondition(
+                &unit.gts_id,
+                expected_resource_version,
+                still.resource_version,
+            )));
+        }
+        if !stores
+            .mark_item_unchanged(
+                tx,
+                scope,
+                unit.operation_item_id,
+                still.resource_version,
+                now,
+            )
+            .await?
+        {
+            return Err(WorkerError::ItemAlreadyTerminal {
+                item_id: unit.operation_item_id,
+            });
+        }
+        return Ok(Ok(RevisionCommit::Unchanged {
+            gts_uuid: unit.gts_uuid,
+            resource_version: still.resource_version,
+        }));
+    }
+
+    // One statement carrying the precondition, so there is no window between
+    // checking the version and moving it. `false` is the lost race.
+    if !stores
+        .compare_and_swap_version(tx, scope, entity.id, expected_resource_version, now)
+        .await?
+    {
+        return Ok(Err(ItemFailure::new(
+            "precondition_failed",
+            format!(
+                "'{}' moved past resource_version {expected_resource_version} while this                  revision was being admitted",
+                unit.gts_id
+            ),
+        )));
+    }
+    let resource_version = expected_resource_version.saturating_add(1);
+    let revision_no = current_revision_no.saturating_add(1);
+
+    match &unit.outcome {
+        EvaluatedOutcome::TypeSchema { artifacts } => {
+            stores
+                .insert_schema_revision(
+                    tx,
+                    scope,
+                    NewRevision {
+                        entity_id: entity.id,
+                        revision_no,
+                        raw_schema: unit.canonical_body.clone(),
+                        content_hash: unit.content_hash.clone(),
+                        gts_spec_version: GTS_SPECIFICATION_VERSION.to_owned(),
+                        gts_impl_version: GTS_IMPLEMENTATION_VERSION.to_owned(),
+                        compat_forced: false,
+                        operation_item_id: unit.operation_item_id,
+                        now,
+                    },
+                )
+                .await?;
+            if !stores
+                .update_current_schema(
+                    tx,
+                    scope,
+                    NewCurrentTypeSchema {
+                        entity_id: entity.id,
+                        revision_no,
+                        resolved_schema: artifacts.resolved_schema.clone(),
+                        effective_traits: artifacts.effective_traits.clone(),
+                        effective_traits_schema: artifacts.effective_traits_schema.clone(),
+                        resolution_fingerprint: artifacts.resolution_fingerprint.clone(),
+                        now,
+                    },
+                )
+                .await?
+            {
+                return Err(WorkerError::CurrentStateMissing {
+                    gts_id: unit.gts_id.clone(),
+                    entity_id: entity.id,
+                });
+            }
+        }
+        EvaluatedOutcome::Instance {
+            type_schema_entity_id,
+            type_schema_revision_no,
+        } => {
+            stores
+                .insert_instance_revision(
+                    tx,
+                    scope,
+                    NewInstanceRevision {
+                        entity_id: entity.id,
+                        revision_no,
+                        canonical_value: unit.canonical_body.clone(),
+                        content_hash: unit.content_hash.clone(),
+                        // Re-recorded per revision, not inherited: this value was
+                        // validated against whatever the schema's current revision
+                        // was at *this* evaluation.
+                        type_schema_entity_id: *type_schema_entity_id,
+                        type_schema_revision_no: *type_schema_revision_no,
+                        gts_spec_version: GTS_SPECIFICATION_VERSION.to_owned(),
+                        gts_impl_version: GTS_IMPLEMENTATION_VERSION.to_owned(),
+                        operation_item_id: unit.operation_item_id,
+                        now,
+                    },
+                )
+                .await?;
+            if !stores
+                .update_current_instance(
+                    tx,
+                    scope,
+                    NewCurrentInstance {
+                        entity_id: entity.id,
+                        revision_no,
+                        now,
+                    },
+                )
+                .await?
+            {
+                return Err(WorkerError::CurrentStateMissing {
+                    gts_id: unit.gts_id.clone(),
+                    entity_id: entity.id,
+                });
+            }
+        }
+    }
+
+    // Last, and its `false` rolls everything above back — see `commit_creation`.
+    if !stores
+        .mark_item_succeeded(
+            tx,
+            scope,
+            unit.operation_item_id,
+            revision_no,
+            resource_version,
+            now,
+        )
+        .await?
+    {
+        return Err(WorkerError::ItemAlreadyTerminal {
+            item_id: unit.operation_item_id,
+        });
+    }
+
+    Ok(Ok(RevisionCommit::Admitted(CommittedUnit {
+        gts_uuid: unit.gts_uuid,
+        revision_no,
+        resource_version,
+    })))
+}
+
+/// The refusal for a precondition that was already wrong when read — the entry
+/// check and the `unchanged` re-read. Shared so the two spell one fact one way; the
+/// lost compare-and-swap says something different on purpose, because it knows only
+/// that the version *moved*, not what it moved to. Both carry the same `reason`, so
+/// a client branching on `precondition_failed` sees one outcome.
+fn stale_precondition(gts_id: &str, expected: i64, found: i64) -> ItemFailure {
+    ItemFailure::new(
+        "precondition_failed",
+        format!(
+            "'{gts_id}' is at resource_version {found}, not the expected {expected}; a revision              is never rebased onto the current version"
+        ),
+    )
 }
 
 /// Canonicalize a document the way acceptance did, for a caller that has a `Value`

@@ -172,6 +172,12 @@ impl From<WorkerError> for CanonicalError {
                 ),
                 "admission",
             ),
+            // Corruption, not input: an entity row without the current-state row its
+            // own admission transaction wrote. Nothing the caller can act on.
+            WorkerError::CurrentStateMissing { gts_id, entity_id } => opaque_internal(
+                &format!("entity '{gts_id}' (id {entity_id}) has no current-state row of its kind"),
+                "admission",
+            ),
             WorkerError::Storage(inner) => opaque_internal(&inner, "storage write"),
             WorkerError::Db(inner) => opaque_internal(&inner, "database write"),
         }
@@ -354,19 +360,6 @@ impl From<AcceptanceError> for CanonicalError {
                 gts_id,
                 vf::EXPECTED_RESOURCE_VERSION,
                 format!("expected_resource_version {version} on '{gts_id}' is negative"),
-                field::VALIDATION_FAILED,
-            ),
-            // `400`, not `501`, and for the same reason as the deletion refusal
-            // above: what the caller sent is not accepted by this API version, and
-            // answering well-formed client input with a `5xx` would page an
-            // operator over a client's request.
-            AcceptanceError::RevisionNotAccepted { gts_id, version } => invalid_candidate(
-                gts_id,
-                vf::EXPECTED_RESOURCE_VERSION,
-                format!(
-                    "expected_resource_version {version} on '{gts_id}' is refused: content \
-                     revisions are not accepted yet"
-                ),
                 field::VALIDATION_FAILED,
             ),
 
@@ -566,16 +559,8 @@ mod tests {
             ),
             (
                 AcceptanceError::NegativePrecondition {
-                    gts_id: id.clone(),
-                    version: -1,
-                },
-                violation_field::EXPECTED_RESOURCE_VERSION,
-                field::VALIDATION_FAILED,
-            ),
-            (
-                AcceptanceError::RevisionNotAccepted {
                     gts_id: id,
-                    version: 1,
+                    version: -1,
                 },
                 violation_field::EXPECTED_RESOURCE_VERSION,
                 field::VALIDATION_FAILED,

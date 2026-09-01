@@ -201,6 +201,66 @@ pub async fn seed_operation_item(
     item.id
 }
 
+/// A **pending** item naming a positive `expected_resource_version`: the input a
+/// revision commit terminalizes, and the only shape `mark_item_unchanged` accepts
+/// (`ck_tr_operation_item_state` requires `expected_resource_version >= 1` for
+/// `unchanged`). Returns the item id.
+pub async fn seed_pending_revision_item(
+    runner: &impl DBRunner,
+    gts_id: &str,
+    expected_resource_version: i64,
+    now: OffsetDateTime,
+) -> i64 {
+    let scope = allow_all();
+    let op_id = Uuid::new_v4();
+    secure_insert::<operation::Entity>(
+        operation::ActiveModel {
+            id: Set(op_id),
+            kind: Set(OperationKind::Registration),
+            dry_run: Set(false),
+            plane: Set(Plane::Platform),
+            tenant_id: Set(None),
+            principal_id: Set(Uuid::from_u128(0xB1)),
+            idempotency_key: Set(format!("idem-{op_id}")),
+            idempotency_scope_hash: Set(vec![0x01]),
+            request_fingerprint: Set(vec![0x02]),
+            status: Set(OperationStatus::Running),
+            created_at: Set(now),
+            started_at: Set(Some(now)),
+            completed_at: Set(None),
+        },
+        &scope,
+        runner,
+    )
+    .await
+    .expect("insert operation");
+
+    let item = secure_insert::<operation_item::Entity>(
+        operation_item::ActiveModel {
+            operation_id: Set(op_id),
+            item_no: Set(0),
+            gts_id: Set(gts_id.to_owned()),
+            dry_run: Set(false),
+            kind: Set(OperationKind::Registration),
+            expected_resource_version: Set(expected_resource_version),
+            status: Set(OperationItemStatus::Pending),
+            request_payload: Set(Some("{}".to_owned())),
+            result_revision_no: Set(None),
+            result_resource_version: Set(None),
+            error_payload: Set(None),
+            created_at: Set(now),
+            started_at: Set(None),
+            completed_at: Set(None),
+            ..Default::default()
+        },
+        &scope,
+        runner,
+    )
+    .await
+    .expect("insert pending operation item");
+    item.id
+}
+
 /// One immutable authored revision.
 pub async fn seed_type_schema_revision(
     runner: &impl DBRunner,

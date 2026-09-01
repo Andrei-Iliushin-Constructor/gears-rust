@@ -271,45 +271,40 @@ fn a_closed_region_refuses_a_declared_creation() {
     }
 }
 
-/// A revision is not accepted yet, and *that* is what keeps the policy gate from
-/// being optional. SPEC §8.1 step 3 lets a revision bypass the gate — otherwise
-/// closing a region would freeze the entities already in it — but P0 has nothing
-/// that checks the candidate is a revision, so accepting one would make "name a
-/// version" a way past the deployment allowlist. T11 replaces this refusal with
-/// the precondition itself, and restores the bypass with it.
+/// SPEC §8.1 step 3: the gate is for **creations**. A revision names a version,
+/// so closing a region must not freeze the entities already inside it.
+///
+/// This is only safe because the declared kind is enforced downstream:
+/// `unit::commit_revision` refuses an identifier the registry does not hold, so
+/// naming a version cannot register anything new here. The pair is why the bypass
+/// and the precondition landed in one change.
 #[test]
-fn a_revision_is_refused_until_revisions_are_admitted() {
+fn a_revision_bypasses_the_policy_gate_in_a_closed_region() {
     let pair = closed();
     let mut req = request(vec![candidate(ACME_TYPE)]);
     req.candidates[0].expected_resource_version = Some(4);
-    match run(&pair, &req) {
-        Err(AcceptanceError::RevisionNotAccepted { gts_id, version }) => {
-            assert_eq!(gts_id, ACME_TYPE);
-            assert_eq!(version, 4);
-        }
-        other => panic!("expected RevisionNotAccepted, got {other:?}"),
-    }
+    let validated = run(&pair, &req).expect("a revision is not gated by the policy");
+    assert_eq!(
+        validated.items[0].precondition,
+        Precondition::Version(4),
+        "the precondition travels to the worker, which is what enforces the claim",
+    );
 }
 
-/// The refusal is about the unimplemented feature and not about the region: an
-/// identifier the policy *admits* is refused identically, so the answer cannot be
-/// read as a policy verdict either way.
+/// The bypass is keyed on the precondition alone, not on the region: a creation in
+/// a region the policy *admits* passes, and a creation in one it does not is
+/// refused, whatever the revision beside it does.
 #[test]
-fn a_revision_is_refused_in_an_admitted_region_too() {
-    let pair = open_for_acme();
-    let mut req = request(vec![candidate(ACME_TYPE)]);
-    req.candidates[0].expected_resource_version = Some(4);
+fn the_gate_still_refuses_a_creation_in_the_same_closed_region() {
+    let pair = closed();
+    let creation = request(vec![candidate(ACME_TYPE)]);
     assert!(matches!(
-        run(&pair, &req),
-        Err(AcceptanceError::RevisionNotAccepted { version: 4, .. })
+        run(&pair, &creation),
+        Err(AcceptanceError::PolicyRefused(_))
     ));
 
-    let mut cf = request(vec![candidate(CF_TYPE)]);
-    cf.candidates[0].expected_resource_version = Some(1);
-    assert!(matches!(
-        run(&closed(), &cf),
-        Err(AcceptanceError::RevisionNotAccepted { version: 1, .. })
-    ));
+    let open = open_for_acme();
+    assert!(run(&open, &creation).is_ok());
 }
 
 /// The ordering invariant, made observable: a candidate that fails **both** the
