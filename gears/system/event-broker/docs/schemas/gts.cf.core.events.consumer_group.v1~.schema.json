@@ -9,7 +9,8 @@
     "id": {
       "description": "Full GTS consumer-group identifier. Broker-minted for anonymous groups; registered via types_registry for named groups. Always server-set — clients MUST NOT supply this field on creation.",
       "type": "string",
-      "readOnly": true
+      "readOnly": true,
+      "x-gts-instance": "gts.cf.core.events.consumer_group.v1~"
     },
     "tenant_id": {
       "description": "Owner tenant (from SecurityContext at create time). Non-overridable.",
