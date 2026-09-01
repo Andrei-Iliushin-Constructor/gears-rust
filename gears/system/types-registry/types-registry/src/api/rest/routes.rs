@@ -7,6 +7,7 @@ use toolkit::api::OpenApiRegistry;
 use toolkit::api::canonical_prelude::StatusCode;
 use toolkit::api::operation_builder::{
     CORE_GLOBAL_BASE_LICENSE_FEATURE, LicenseFeature, OperationBuilder, ParamLocation, ParamSpec,
+    ResponseHeaderSpec, ResponseHeaderType,
 };
 
 use super::dto::{
@@ -187,11 +188,36 @@ pub fn register_routes(
             StatusCode::ACCEPTED,
             "Accepted; poll the operation at the returned Location",
         )
+        .response_header(ResponseHeaderSpec::new(
+            "Location",
+            "URI of the admission operation",
+            ResponseHeaderType::String,
+        ))
+        .response_header(ResponseHeaderSpec::new(
+            "Retry-After",
+            "Suggested delay in seconds before polling the operation",
+            ResponseHeaderType::Integer,
+        ))
+        .response_header(ResponseHeaderSpec::new(
+            "Idempotency-Replayed",
+            "Whether this submission replayed an existing operation",
+            ResponseHeaderType::Boolean,
+        ))
         .json_response_with_schema::<OperationAcceptedDto>(
             openapi,
             StatusCode::OK,
             "Replay of an operation that is already terminal",
         )
+        .response_header(ResponseHeaderSpec::new(
+            "Location",
+            "URI of the admission operation",
+            ResponseHeaderType::String,
+        ))
+        .response_header(ResponseHeaderSpec::new(
+            "Idempotency-Replayed",
+            "Whether this submission replayed an existing operation",
+            ResponseHeaderType::Boolean,
+        ))
         .problem_response(
             openapi,
             StatusCode::CONFLICT,

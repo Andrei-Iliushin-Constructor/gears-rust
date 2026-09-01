@@ -19,7 +19,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
-use toolkit::api::OpenApiRegistry;
+use toolkit::api::{OpenApiRegistry, ResponseHeaderType};
 use toolkit_gts::{gts_id, gts_uri};
 use tower::ServiceExt;
 
@@ -46,6 +46,8 @@ const HTTP_REQUEST_RESOURCE_TYPE: &str = gts_id!("cf.core.http.request.v1~");
 type DeclaredParam = (String, String, bool);
 /// One response as the generated document will carry it: status and content type.
 type DeclaredResponse = (u16, String);
+/// One response header: status, name, and JSON Schema scalar type.
+type DeclaredResponseHeader = (u16, String, ResponseHeaderType);
 
 /// Records what `register_routes` declares, so the generated document is
 /// assertable instead of eyeballed in `/cf/docs`.
@@ -57,6 +59,8 @@ struct TestOpenApi {
     params: std::sync::Mutex<Vec<(String, Vec<DeclaredParam>)>>,
     /// `operation_id -> [(status, content type)]`.
     responses: std::sync::Mutex<Vec<(String, Vec<DeclaredResponse>)>>,
+    /// `operation_id -> [(status, header name, scalar type)]`.
+    response_headers: std::sync::Mutex<Vec<(String, Vec<DeclaredResponseHeader>)>>,
     /// `operation_id -> gateway visibility`.
     exposure: std::sync::Mutex<Vec<(String, bool)>>,
 }
@@ -82,6 +86,20 @@ impl OpenApiRegistry for TestOpenApi {
                 .map(|r| (r.status, r.content_type.to_owned()))
                 .collect(),
         ));
+        self.response_headers
+            .lock()
+            .expect("response headers lock")
+            .push((
+                spec.operation_id.clone().unwrap_or_default(),
+                spec.responses
+                    .iter()
+                    .flat_map(|response| {
+                        response.headers.iter().map(move |header| {
+                            (response.status, header.name.clone(), header.header_type)
+                        })
+                    })
+                    .collect(),
+            ));
         self.exposure
             .lock()
             .expect("exposure lock")
@@ -1071,6 +1089,49 @@ fn the_idempotency_key_header_is_declared_as_a_required_parameter() {
     assert!(
         submit.contains(&("Idempotency-Key".to_owned(), "Header".to_owned(), true)),
         "submit must declare a required Idempotency-Key header, got: {submit:?}",
+    );
+}
+
+#[test]
+fn submission_response_headers_are_declared() {
+    let openapi = TestOpenApi::default();
+    let config = TypesRegistryConfig::default();
+    let legacy = Arc::new(TypesRegistryService::new(
+        Arc::new(InMemoryGtsRepository::new(config.to_gts_config())),
+        config,
+    ));
+    let _router =
+        types_registry::api::rest::routes::register_routes(Router::new(), &openapi, legacy, None);
+
+    let headers = openapi
+        .response_headers
+        .lock()
+        .expect("response headers lock");
+    let submit = headers
+        .iter()
+        .find(|(id, _)| id == "types_registry.submit_entities")
+        .map(|(_, headers)| headers)
+        .expect("the submit operation is registered");
+
+    for expected in [
+        (202, "Location", ResponseHeaderType::String),
+        (202, "Retry-After", ResponseHeaderType::Integer),
+        (202, "Idempotency-Replayed", ResponseHeaderType::Boolean),
+        (200, "Location", ResponseHeaderType::String),
+        (200, "Idempotency-Replayed", ResponseHeaderType::Boolean),
+    ] {
+        assert!(
+            submit.iter().any(|actual| {
+                actual.0 == expected.0 && actual.1 == expected.1 && actual.2 == expected.2
+            }),
+            "missing response header {expected:?}: {submit:?}",
+        );
+    }
+    assert!(
+        !submit
+            .iter()
+            .any(|(status, name, _)| *status == 200 && name == "Retry-After"),
+        "terminal replay must not advertise Retry-After: {submit:?}",
     );
 }
 

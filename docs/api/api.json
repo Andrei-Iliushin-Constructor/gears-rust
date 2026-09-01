@@ -43740,7 +43740,21 @@
                 }
               }
             },
-            "description": "Replay of an operation that is already terminal"
+            "description": "Replay of an operation that is already terminal",
+            "headers": {
+              "Idempotency-Replayed": {
+                "description": "Whether this submission replayed an existing operation",
+                "schema": {
+                  "type": "boolean"
+                }
+              },
+              "Location": {
+                "description": "URI of the admission operation",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "202": {
             "content": {
@@ -43750,7 +43764,27 @@
                 }
               }
             },
-            "description": "Accepted; poll the operation at the returned Location"
+            "description": "Accepted; poll the operation at the returned Location",
+            "headers": {
+              "Idempotency-Replayed": {
+                "description": "Whether this submission replayed an existing operation",
+                "schema": {
+                  "type": "boolean"
+                }
+              },
+              "Location": {
+                "description": "URI of the admission operation",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Suggested delay in seconds before polling the operation",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
           },
           "400": {
             "content": {
