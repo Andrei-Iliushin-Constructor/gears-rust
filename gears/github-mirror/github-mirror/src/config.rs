@@ -31,6 +31,33 @@ pub struct GithubMirrorConfig {
     /// default is on.
     #[serde(default = "default_compression")]
     pub cache_compression: String,
+    /// How many repositories the gear syncs at the same time
+    /// (PRD §6.1 "parallel synchronization of multiple repositories").
+    ///
+    /// Zero is read as one: a queue with no worker would accept syncs and
+    /// never run them.
+    #[serde(default = "default_max_concurrent_syncs")]
+    pub max_concurrent_syncs: usize,
+    /// Ceiling on GitHub requests in flight across every running sync.
+    ///
+    /// GitHub's secondary rate limit triggers on concurrency rather than
+    /// volume, and the PRD's threshold is "zero bans with parallelism <= 8"
+    /// (PRD §6.1), so the default sits at that bound. Without this ceiling
+    /// each extra concurrent repository would multiply the request rate.
+    #[serde(default = "default_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
+}
+
+/// Repositories synced at once when the config says nothing: enough to keep
+/// the queue moving, low enough that one tenant's backlog is not the whole
+/// gear's work.
+fn default_max_concurrent_syncs() -> usize {
+    4
+}
+
+/// GitHub requests in flight at once when the config says nothing.
+fn default_max_concurrent_requests() -> usize {
+    8
 }
 
 fn default_compression() -> String {
@@ -106,6 +133,8 @@ impl Default for GithubMirrorConfig {
             github_token: None,
             scope: default_scope(),
             cache_compression: default_compression(),
+            max_concurrent_syncs: default_max_concurrent_syncs(),
+            max_concurrent_requests: default_max_concurrent_requests(),
         }
     }
 }

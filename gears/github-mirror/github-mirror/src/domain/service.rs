@@ -359,6 +359,8 @@ pub struct ServiceConfig {
     pub api_base_url: String,
     /// What a sync collects when the request does not say.
     pub scope: ScopeConfig,
+    /// How many repositories may sync at the same time.
+    pub max_concurrent_syncs: usize,
 }
 
 #[domain_model]
@@ -3513,6 +3515,13 @@ impl<
     #[must_use]
     pub fn default_scope(&self) -> ScopeConfig {
         self.config.scope
+    }
+
+    /// How many repositories the sync worker pool runs at once. Zero reads as
+    /// one: a pool with no workers would accept syncs and never run them.
+    #[must_use]
+    pub fn max_concurrent_syncs(&self) -> usize {
+        self.config.max_concurrent_syncs.max(1)
     }
 
     /// Scope for writing this tenant's session rows.

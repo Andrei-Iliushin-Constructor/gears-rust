@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 use sea_orm::prelude::DateTimeUtc;
 
@@ -53,6 +54,9 @@ const USER_AGENT: &str = concat!("cf-gears-github-mirror/", env!("CARGO_PKG_VERS
 const GITHUB_API_VERSION: &str = "2022-11-28";
 /// Attempts after the first request when GitHub answers with a rate limit.
 const RATE_LIMIT_RETRIES: u32 = 3;
+/// Requests in flight a client allows before the gear config says otherwise.
+/// Matches the PRD's "parallelism <= 8" rate-limit threshold.
+const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 8;
 /// Longest single back-off sleep, whatever `Retry-After` asks for.
 const MAX_RETRY_SLEEP: std::time::Duration = std::time::Duration::from_mins(1);
 
@@ -113,6 +117,10 @@ pub struct GithubClient {
     api_base_url: String,
     token: Option<String>,
     cache: Arc<dyn HttpCache>,
+    /// Ceiling on requests in flight, shared by every sync using this client.
+    /// GitHub's secondary rate limit reacts to concurrency, so the ceiling is
+    /// global rather than per sync.
+    permits: Semaphore,
 }
 
 impl GithubClient {
@@ -144,7 +152,25 @@ impl GithubClient {
             api_base_url,
             token,
             cache,
+            permits: Semaphore::new(DEFAULT_MAX_CONCURRENT_REQUESTS),
         })
+    }
+
+    /// Cap the requests this client keeps in flight at `max` (zero reads as
+    /// one, so the client always makes progress).
+    #[must_use]
+    pub fn with_max_concurrent_requests(mut self, max: usize) -> Self {
+        self.permits = Semaphore::new(max.max(1));
+        self
+    }
+
+    /// A permit for one outbound request, held until the response body has
+    /// been read.
+    async fn request_permit(&self) -> Result<SemaphorePermit<'_>, DomainError> {
+        self.permits
+            .acquire()
+            .await
+            .map_err(|e| DomainError::internal(format!("request semaphore closed: {e}")))
     }
 
     /// The stored entry for this request, unless `force` says to ignore it.
@@ -210,7 +236,11 @@ impl GithubClient {
         let cached = self.cached_entry(options, url, &key).await;
 
         let mut attempt: u32 = 0;
-        let (response, rate_limited) = loop {
+        // `_permit` lives until this function returns, so a request counts
+        // against the ceiling until its body has been read. A retry gives its
+        // permit up first: a request asleep on a backoff is not in flight.
+        let (response, rate_limited, _permit) = loop {
+            let permit = self.request_permit().await?;
             let response = self
                 .conditional_request(url, cached.as_ref())
                 .send()
@@ -230,11 +260,12 @@ impl GithubClient {
                     delay_secs = delay.as_secs(),
                     "GitHub rate limit hit; backing off before retrying"
                 );
+                drop(permit);
                 tokio::time::sleep(delay).await;
                 attempt += 1;
                 continue;
             }
-            break (response, rate_limited);
+            break (response, rate_limited, permit);
         };
 
         let status = response.status();
@@ -384,7 +415,9 @@ impl GithubClient {
         let url = format!("{}/graphql", self.api_base_url.trim_end_matches('/'));
 
         let mut attempt: u32 = 0;
-        let response = loop {
+        // GraphQL shares the REST ceiling: both spend the same token's budget.
+        let (response, _permit) = loop {
+            let permit = self.request_permit().await?;
             let mut request = self
                 .http
                 .post(&url)
@@ -408,11 +441,12 @@ impl GithubClient {
                     delay_secs = delay.as_secs(),
                     "GitHub GraphQL rate limit hit; backing off before retrying"
                 );
+                drop(permit);
                 tokio::time::sleep(delay).await;
                 attempt += 1;
                 continue;
             }
-            break response;
+            break (response, permit);
         };
 
         let status = response.status();

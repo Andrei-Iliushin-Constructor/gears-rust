@@ -220,6 +220,7 @@ pub fn service_with_enforcer(
         ServiceConfig {
             api_base_url: api_base_url.to_owned(),
             scope: github_mirror::domain::scope::ScopeConfig::default(),
+            max_concurrent_syncs: 1,
         },
     ))
 }
