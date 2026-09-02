@@ -17,7 +17,7 @@ use std::sync::{Arc, OnceLock};
 use parking_lot::Mutex;
 
 use async_trait::async_trait;
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer, models::Capability};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer, models::Capability};
 use tokio_util::sync::CancellationToken;
 use toolkit::api::OpenApiRegistry;
 use toolkit::contracts::DatabaseCapability;
@@ -749,12 +749,12 @@ impl Gear for AccountManagementGear {
         let resource_checker: Arc<dyn ResourceOwnershipChecker> =
             Arc::new(RgResourceOwnershipChecker::new(Arc::clone(&rg_client)));
 
-        // PEP boundary (DESIGN §4.2). Hard-fail when no `AuthZResolverClient`
+        // PEP boundary (DESIGN §4.2). Hard-fail when no `AuthZResolverApi`
         // is registered: DESIGN §4.3 mandates fail-closed for protected
         // operations and explicitly forbids a local authorization fallback.
         let authz = ctx
             .client_hub()
-            .get::<dyn AuthZResolverClient>()
+            .get::<dyn AuthZResolverApi>()
             .map_err(|e| anyhow::anyhow!("failed to get AuthZ resolver: {e}"))?;
         // Advertise `TenantHierarchy` to the PDP so it returns the
         // native `InTenantSubtree` predicate (gears-rust#1813)

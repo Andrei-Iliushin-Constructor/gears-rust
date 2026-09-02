@@ -64,6 +64,19 @@
         ],
         "type": "object"
       },
+      "Action": {
+        "description": "The action being performed.",
+        "properties": {
+          "name": {
+            "description": "Action name (e.g., \"list\", \"get\", \"create\", \"update\", \"delete\").",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "ActorDto": {
         "description": "GitHub `{ \"login\": ... }` actor object.",
         "properties": {
@@ -1200,6 +1213,14 @@
         ],
         "type": "object"
       },
+      "AuthzBarrierMode": {
+        "description": "Controls how barriers (self-managed tenants) are handled during `AuthZ` evaluation.\n\nConsistent with `tenant_resolver_sdk::BarrierMode`.",
+        "enum": [
+          "respect",
+          "ignore"
+        ],
+        "type": "string"
+      },
       "BalanceDto": {
         "description": "A read-back account-balance row in the `GET /balances` response. Carries both\nthe transaction-currency `balance_minor` and the Slice-5 functional valuation:\n`functional_balance_minor` is `null` on a single-currency grain (the\n`?valuation=functional` read falls back to `balance_minor` by identity, P1\ndecision 8).",
         "properties": {
@@ -1545,6 +1566,15 @@
           "range_native"
         ],
         "type": "object"
+      },
+      "Capability": {
+        "description": "PEP-level capability declarations.\n\nTells the PDP which advanced features the PEP can handle so the PDP\ncan tailor its response accordingly.\n\n**Note:** `GroupMembership` and `GroupHierarchy` require access to the\nResource Group tables (`resource_group`, `resource_group_membership`, `resource_group_closure`).\nServices that can join against these tables may declare the capabilities;\nthe PDP will then return `InGroup`/`InGroupSubtree` predicates directly.\nServices without access should omit these capabilities — the PDP will\ndegrade group predicates to explicit `In` with pre-resolved resource IDs.",
+        "enum": [
+          "tenant_hierarchy",
+          "group_membership",
+          "group_hierarchy"
+        ],
+        "type": "string"
       },
       "CatalogSkuView": {
         "description": "One SKU as this gear passes it on.",
@@ -2631,6 +2661,22 @@
         "required": [
           "plan_revision",
           "components"
+        ],
+        "type": "object"
+      },
+      "Constraint": {
+        "description": "A constraint on a specific resource property.\n\nMultiple constraints within a response are `ORed`:\na resource matches if it satisfies ANY constraint.",
+        "properties": {
+          "predicates": {
+            "description": "The predicates within this constraint. All predicates are `ANDed`:\na resource matches this constraint only if ALL predicates are satisfied.",
+            "items": {
+              "$ref": "#/components/schemas/Predicate"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "predicates"
         ],
         "type": "object"
       },
@@ -4251,6 +4297,26 @@
         ],
         "type": "object"
       },
+      "DenyReason": {
+        "description": "Reason for an explicit deny from the PDP.",
+        "properties": {
+          "details": {
+            "description": "Human-readable details (optional).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error_code": {
+            "description": "Machine-readable error code.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error_code"
+        ],
+        "type": "object"
+      },
       "DeploymentDto": {
         "description": "GitHub-shaped deployment.",
         "properties": {
@@ -5066,6 +5132,23 @@
         ],
         "type": "object"
       },
+      "EqPredicate": {
+        "description": "Equality predicate: `property = value`.",
+        "properties": {
+          "property": {
+            "description": "Resource property name (e.g., `pep_properties::OWNER_TENANT_ID`, `pep_properties::RESOURCE_ID`).",
+            "type": "string"
+          },
+          "value": {
+            "description": "The value to match (UUID string, plain string, number, bool, etc.)."
+          }
+        },
+        "required": [
+          "property",
+          "value"
+        ],
+        "type": "object"
+      },
       "ErasureRequestDto": {
         "description": "`POST …/audit/erasure` request body: the payer to erase. The free-text\ninvestigation reason is the **`X-Investigation-Reason` header** (§5 — the\nsingle source for the reason recorded on the `erasure` record), not a body\nfield. `target_scope` opens a DIFFERENT tenant's PII map (the cross-tenant\nDPO path, §5) — absent or the caller's own ⇒ routine same-tenant erasure; a\ndifferent tenant is forensic-gated (authorized for `(entry, erase)` on the\ntarget + a required reason, else `CROSS_TENANT_ACCESS_DENIED` /\n`MISSING_INVESTIGATION_REASON`).",
         "properties": {
@@ -5101,6 +5184,117 @@
           "code",
           "message"
         ],
+        "type": "object"
+      },
+      "EvaluationRequest": {
+        "description": "Authorization evaluation request.\n\nFollows the `AuthZEN` 1.0 model: Subject + Action + Resource + Context.",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/Action",
+            "description": "The action being performed."
+          },
+          "context": {
+            "$ref": "#/components/schemas/EvaluationRequestContext",
+            "description": "Additional context for the evaluation."
+          },
+          "resource": {
+            "$ref": "#/components/schemas/Resource",
+            "description": "The resource being accessed."
+          },
+          "subject": {
+            "$ref": "#/components/schemas/Subject",
+            "description": "The subject (who is making the request)."
+          }
+        },
+        "required": [
+          "subject",
+          "action",
+          "resource",
+          "context"
+        ],
+        "type": "object"
+      },
+      "EvaluationRequestContext": {
+        "description": "Additional evaluation request context.",
+        "properties": {
+          "capabilities": {
+            "description": "PEP capabilities (tells PDP what the PEP can handle).",
+            "items": {
+              "$ref": "#/components/schemas/Capability"
+            },
+            "type": "array"
+          },
+          "require_constraints": {
+            "description": "Whether the PDP should return row-level constraints.\n- `true` for LIST/GET/UPDATE/DELETE (need scope filtering)\n- `false` for CREATE (just need decision)",
+            "type": "boolean"
+          },
+          "supported_properties": {
+            "description": "Supported constraint properties (tells PDP which properties the PEP understands).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tenant_context": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TenantContext",
+                "description": "Tenant context for multi-tenant scoping."
+              }
+            ]
+          },
+          "token_scopes": {
+            "description": "Token scopes from the `AuthN` result.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "EvaluationResponse": {
+        "description": "Authorization evaluation response.\n\nThe PDP returns a decision (allow/deny) and optionally a context\ncontaining constraints or deny reason.",
+        "properties": {
+          "context": {
+            "$ref": "#/components/schemas/EvaluationResponseContext",
+            "description": "Response context with constraints or deny reason."
+          },
+          "decision": {
+            "description": "Whether access is granted.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "type": "object"
+      },
+      "EvaluationResponseContext": {
+        "description": "Authorization evaluation response context.\n\nContains constraints (when `decision` is `true`) or deny reason\n(when `decision` is `false`).",
+        "properties": {
+          "constraints": {
+            "description": "Row-level constraints to apply when `decision` is `true`.\nEmpty when `require_constraints` was `false` or when access is unrestricted.\nMultiple constraints are `ORed` (any one matching is sufficient).",
+            "items": {
+              "$ref": "#/components/schemas/Constraint"
+            },
+            "type": "array"
+          },
+          "deny_reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DenyReason",
+                "description": "Reason for denial (present when `decision` is `false`)."
+              }
+            ]
+          }
+        },
         "type": "object"
       },
       "EventLabelDto": {
@@ -6275,6 +6469,91 @@
           "width",
           "height",
           "data_base64"
+        ],
+        "type": "object"
+      },
+      "InGroupPredicate": {
+        "description": "Group membership predicate: resource is visible if it belongs to any of the listed groups.\n\nCompiles to: `property IN (SELECT resource_id FROM resource_group_membership WHERE group_id IN (group_ids))`",
+        "properties": {
+          "group_ids": {
+            "description": "Group UUIDs - the resource must be a member of at least one.",
+            "items": {},
+            "type": "array"
+          },
+          "property": {
+            "description": "Resource property to filter (e.g., `pep_properties::RESOURCE_ID`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "property",
+          "group_ids"
+        ],
+        "type": "object"
+      },
+      "InGroupSubtreePredicate": {
+        "description": "Group subtree predicate: resource is visible if it belongs to any group\nthat is a descendant of the listed ancestor groups.\n\nCompiles to: `property IN (SELECT resource_id FROM resource_group_membership\n  WHERE group_id IN (SELECT descendant_id FROM resource_group_closure WHERE ancestor_id IN (ancestor_ids)))`",
+        "properties": {
+          "ancestor_ids": {
+            "description": "Ancestor group UUIDs - the resource must be a member of any descendant.",
+            "items": {},
+            "type": "array"
+          },
+          "property": {
+            "description": "Resource property to filter (e.g., `pep_properties::RESOURCE_ID`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "property",
+          "ancestor_ids"
+        ],
+        "type": "object"
+      },
+      "InPredicate": {
+        "description": "Set membership predicate: `property IN (values)`.",
+        "properties": {
+          "property": {
+            "description": "Resource property name (e.g., `pep_properties::OWNER_TENANT_ID`, `pep_properties::RESOURCE_ID`).",
+            "type": "string"
+          },
+          "values": {
+            "description": "The set of values to match against.",
+            "items": {},
+            "type": "array"
+          }
+        },
+        "required": [
+          "property",
+          "values"
+        ],
+        "type": "object"
+      },
+      "InTenantSubtreePredicate": {
+        "description": "Tenant subtree predicate: resource is visible if its tenant property is a\ndescendant of a single root tenant per the AM-owned `tenant_closure` table.\n\nCompiles to (with `barrier_mode = Respect`, the default):\n`property IN (SELECT descendant_id FROM tenant_closure\n  WHERE ancestor_id = root_tenant_id AND barrier = 0)`\n\nWith `barrier_mode = Ignore`:\n`property IN (SELECT descendant_id FROM tenant_closure\n  WHERE ancestor_id = root_tenant_id)`\n\nThe `barrier = 0` clamp matches the AM closure-table contract:\n`barrier` is set when any tenant on the strict path\n`(ancestor, descendant]` is `self_managed`. Respecting the barrier\ntherefore yields the canonical \"subtree minus self-managed branches\"\nsemantics; ignoring it is reserved for cross-barrier operations such\nas billing or tenant metadata reads.\n\nMultiple-root semantics are expressed at the constraint envelope: emit\none `Constraint` per root and rely on the OR-of-constraints semantics.\n\n**`descendant_status`:** When non-empty, the predicate compiles to\n`AND descendant_status IN (...)` on the closure subquery, restricting\nthe subtree to tenants in the listed statuses. The name mirrors the\n`tenant_closure.descendant_status` column so the binding is unambiguous\n— the filter applies to the descendants reached via the closure, not\nto the ancestor root.",
+        "properties": {
+          "barrier_mode": {
+            "$ref": "#/components/schemas/AuthzBarrierMode",
+            "description": "Barrier enforcement mode. Defaults to [`BarrierMode::Respect`]\nwhich clamps the closure subquery with `AND barrier = 0`."
+          },
+          "descendant_status": {
+            "description": "Status filter applied to the descendants reached via the closure.\n\nEmpty list means \"no status filter\"; a non-empty list compiles to\n`AND descendant_status IN (...)` on the closure subquery. The PEP\nmaps each [`TenantStatus`] to the SMALLINT encoding canonically\ndefined by [`TenantStatus::as_smallint`] (`Active = 1`,\n`Suspended = 2`, `Deleted = 3`).",
+            "items": {
+              "$ref": "#/components/schemas/TenantStatus"
+            },
+            "type": "array"
+          },
+          "property": {
+            "description": "Resource property to filter (e.g., `pep_properties::OWNER_TENANT_ID`,\nor `pep_properties::RESOURCE_ID` on the `tenants` entity itself).",
+            "type": "string"
+          },
+          "root_tenant_id": {
+            "description": "Root tenant UUID — the resource's tenant must be a descendant of this tenant."
+          }
+        },
+        "required": [
+          "property",
+          "root_tenant_id"
         ],
         "type": "object"
       },
@@ -11505,6 +11784,126 @@
         ],
         "type": "object"
       },
+      "Predicate": {
+        "description": "A predicate comparing a resource property to a value or subquery.",
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EqPredicate",
+                "description": "Equality: `resource_property = value`"
+              },
+              {
+                "properties": {
+                  "op": {
+                    "enum": [
+                      "eq"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op"
+                ],
+                "type": "object"
+              }
+            ],
+            "description": "Equality: `resource_property = value`"
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InPredicate",
+                "description": "Set membership: `resource_property IN (values)`"
+              },
+              {
+                "properties": {
+                  "op": {
+                    "enum": [
+                      "in"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op"
+                ],
+                "type": "object"
+              }
+            ],
+            "description": "Set membership: `resource_property IN (values)`"
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InGroupPredicate",
+                "description": "Group membership: `resource_property IN (SELECT resource_id FROM membership WHERE group_id IN (group_ids))`"
+              },
+              {
+                "properties": {
+                  "op": {
+                    "enum": [
+                      "in_group"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op"
+                ],
+                "type": "object"
+              }
+            ],
+            "description": "Group membership: `resource_property IN (SELECT resource_id FROM membership WHERE group_id IN (group_ids))`"
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InGroupSubtreePredicate",
+                "description": "Group subtree: `resource_property IN (SELECT resource_id FROM membership WHERE group_id IN (SELECT descendant_id FROM closure WHERE ancestor_id IN (ancestor_ids)))`"
+              },
+              {
+                "properties": {
+                  "op": {
+                    "enum": [
+                      "in_group_subtree"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op"
+                ],
+                "type": "object"
+              }
+            ],
+            "description": "Group subtree: `resource_property IN (SELECT resource_id FROM membership WHERE group_id IN (SELECT descendant_id FROM closure WHERE ancestor_id IN (ancestor_ids)))`"
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InTenantSubtreePredicate",
+                "description": "Tenant subtree: `resource_property IN (SELECT descendant_id FROM tenant_closure WHERE ancestor_id = root_tenant_id)`"
+              },
+              {
+                "properties": {
+                  "op": {
+                    "enum": [
+                      "in_tenant_subtree"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op"
+                ],
+                "type": "object"
+              }
+            ],
+            "description": "Tenant subtree: `resource_property IN (SELECT descendant_id FROM tenant_closure WHERE ancestor_id = root_tenant_id)`"
+          }
+        ]
+      },
       "PredicateAnswerView": {
         "description": "One predicate's answer, as the wire renders it.\n\n**`answer` is a token and there is no boolean anywhere in this document**, which\nis D-99 reaching the wire: what a consumer is given is intervals, states, a\nderived coverage end and per-predicate tokens, so no field of it is an answer to\na question about the reader's clock.\n\n`detail` and `owed_to` are both nullable and never both set: the first belongs to\n`failed` and the second to `not_evaluable`. Two fields rather than one, because\nthe whole of D-167 clause (3) is that a consumer can tell *\"this predicate is\nfalse\"* from *\"this version cannot evaluate this predicate\"* — and one merged\nmessage field would have made the difference a matter of reading English.",
         "properties": {
@@ -14357,6 +14756,35 @@
         ],
         "type": "object"
       },
+      "Resource": {
+        "description": "The resource being accessed.",
+        "properties": {
+          "id": {
+            "description": "Specific resource ID (for GET/UPDATE/DELETE on a single resource).",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "properties": {
+            "additionalProperties": {},
+            "description": "Additional resource properties for policy evaluation.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "type": {
+            "description": "Resource type identifier (e.g., \"`gts.cf.core.users.user.v1~`\").",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
       "ResourceRefDto": {
         "description": "Wire-projection of [`usage_collector_sdk::ResourceRef`]. Mirrors the SDK\nshape verbatim; the SDK struct stays `utoipa`-free.",
         "properties": {
@@ -16062,6 +16490,35 @@
         ],
         "type": "object"
       },
+      "Subject": {
+        "description": "The authenticated subject making the request.",
+        "properties": {
+          "id": {
+            "description": "Subject identifier (user ID, service ID).",
+            "format": "uuid",
+            "type": "string"
+          },
+          "properties": {
+            "additionalProperties": {},
+            "description": "Additional subject properties for policy evaluation.\nThe subject's home tenant ID goes here as `\"tenant_id\"`.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "type": {
+            "description": "Subject type (e.g., \"user\", \"service\").\nSerialized as `\"type\"` to match the `AuthZEN` spec.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
       "SubjectRefDto": {
         "description": "Wire-projection of [`usage_collector_sdk::SubjectRef`].",
         "properties": {
@@ -16792,6 +17249,38 @@
         ],
         "type": "object"
       },
+      "TenantContext": {
+        "description": "Tenant context for the evaluation.",
+        "properties": {
+          "barrier_mode": {
+            "$ref": "#/components/schemas/AuthzBarrierMode",
+            "description": "Barrier enforcement mode (default: `Respect`)."
+          },
+          "mode": {
+            "$ref": "#/components/schemas/TenantMode",
+            "description": "Tenant hierarchy mode (default: `Subtree`)."
+          },
+          "root_id": {
+            "description": "The context tenant ID (tenant being operated on).",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant_status": {
+            "description": "Required tenant status filter (e.g., `[\"active\"]`).",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "TenantCreateRequestDto": {
         "additionalProperties": false,
         "description": "Request body for `POST /tenants`.\n\nMirrors `TenantCreateRequest` in the `OpenAPI` spec. `name`,\n`parent_id`, and `tenant_type` (chained GTS identifier) are\nrequired; `self_managed` defaults to `false` and\n`provisioning_metadata` is an opaque payload forwarded to the\n`IdP` plugin. The new child's UUID is **not** part of the request\n— AM allocates it server-side so two parallel clients cannot\ncollide on the same id.",
@@ -16920,6 +17409,23 @@
           "updated_at"
         ],
         "type": "object"
+      },
+      "TenantMode": {
+        "description": "Tenant hierarchy mode.",
+        "enum": [
+          "root_only",
+          "subtree"
+        ],
+        "type": "string"
+      },
+      "TenantStatus": {
+        "description": "Tenant lifecycle status.\n\nMirrors the SMALLINT encoding stored in `tenants.status` and\n`tenant_closure.descendant_status` (the canonical mapping is\n`Active = 1`, `Suspended = 2`, `Deleted = 3`). Use [`as_smallint`] /\n[`from_smallint`] to cross the DB boundary so the mapping stays in\none place — duplicating it elsewhere risks future drift.\n\n[`as_smallint`]: TenantStatus::as_smallint\n[`from_smallint`]: TenantStatus::from_smallint",
+        "enum": [
+          "active",
+          "suspended",
+          "deleted"
+        ],
+        "type": "string"
       },
       "TenantStatusDto": {
         "description": "Wire-shape enum for `Tenant.status` on the REST surface.\n\nMirrors the SDK-visible variants of\n[`account_management_sdk::TenantStatus`] one-to-one (the\nAM-internal `provisioning` variant is never surfaced). Defined\nlocally rather than reusing the SDK enum because the upstream\ntype lives in `tenant-resolver-sdk` without a `utoipa::ToSchema`\nderive — surfacing the SDK enum verbatim through\n`#[schema(value_type = String)]` would erase the enum constraint\nfrom the served `OpenAPI`, leaving codegen clients with `String`\ninstead of `active | suspended | deleted`.",
@@ -25021,6 +25527,104 @@
         "tags": [
           "File Storage"
         ]
+      }
+    },
+    "/authz-resolver/v1/evaluate": {
+      "post": {
+        "operationId": "auth_z_resolver_api_rest_evaluate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvaluationRequest"
+              }
+            }
+          },
+          "description": "",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        }
       }
     },
     "/bss-ledger/v1/accounts": {
