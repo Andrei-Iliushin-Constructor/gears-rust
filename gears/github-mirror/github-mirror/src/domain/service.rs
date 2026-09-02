@@ -677,17 +677,24 @@ impl<
         let mut items = self.repo.list(&conn, &scope, limit + 1, after).await?;
         let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
             items.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
-            items.last().and_then(|last| {
-                CursorV1 {
-                    k: vec![last.full_name.clone()],
-                    o: SortDir::Asc,
-                    s: "full_name".to_owned(),
-                    f: None,
-                    d: "fwd".to_owned(),
-                }
-                .encode()
-                .ok()
-            })
+            // A dropped encode error would hand back `next_cursor: None`, and
+            // the caller would read a truncated listing as the last page.
+            items
+                .last()
+                .map(|last| {
+                    CursorV1 {
+                        k: vec![last.full_name.clone()],
+                        o: SortDir::Asc,
+                        s: "full_name".to_owned(),
+                        f: None,
+                        d: "fwd".to_owned(),
+                    }
+                    .encode()
+                })
+                .transpose()
+                .map_err(|e| {
+                    DomainError::internal(format!("failed to encode the next cursor: {e}"))
+                })?
         } else {
             None
         };
@@ -3475,7 +3482,19 @@ impl<
         // `extracted_at` with a later instant, so "extracted_at < watermark"
         // identifies exactly the rows this sync did not touch.
         let watermark = Utc::now();
-        let fetched = self.github.fetch_repository(owner, name).await?;
+        // A failed fetch must release the advisory lock on its way out:
+        // `DbLockGuard::drop` only queues a best-effort release, so an early
+        // `?` here would leave the key claimed until the maintenance task
+        // gets to it, and retries would 409 in the meantime.
+        let fetched = match self.github.fetch_repository(owner, name).await {
+            Ok(fetched) => fetched,
+            Err(fetch_error) => {
+                if let Err(e) = sync_lock.release().await {
+                    tracing::warn!(lock_key, error = %e, "sync advisory lock release failed");
+                }
+                return Err(fetch_error);
+            }
+        };
         let complete = fetched.complete;
 
         // All ~26 tables are written as one transaction: a failure partway

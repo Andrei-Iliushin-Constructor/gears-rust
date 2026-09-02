@@ -15,12 +15,15 @@ use github_mirror_sdk::{
 
 use crate::domain::service::{MirrorStatus, SyncSummary};
 
+/// Deliberately without `api_base_url`: `/health` is registered
+/// `.anonymous()`, and the configured upstream host is infrastructure detail
+/// an unauthenticated caller has no business learning. It stays on
+/// [`MirrorStatus`], which only authenticated callers reach.
 #[derive(Debug)]
 #[toolkit_macros::api_dto(response)]
 pub struct GithubMirrorHealthDto {
     pub gear: String,
     pub version: String,
-    pub api_base_url: String,
 }
 
 impl From<MirrorStatus> for GithubMirrorHealthDto {
@@ -28,7 +31,6 @@ impl From<MirrorStatus> for GithubMirrorHealthDto {
         Self {
             gear: status.gear,
             version: status.version,
-            api_base_url: status.api_base_url,
         }
     }
 }
@@ -89,10 +91,28 @@ struct StoredLabel {
     description: Option<String>,
 }
 
+/// Decode one stored JSON column, reporting a corrupt value instead of
+/// silently serving an empty one: a row that fails here is a mirroring bug,
+/// and the log line carries what is needed to find the row.
+fn decode_stored<T: serde::de::DeserializeOwned>(field: &str, raw: &str) -> Option<T> {
+    match serde_json::from_str::<T>(raw) {
+        Ok(value) => Some(value),
+        Err(e) => {
+            tracing::warn!(
+                field,
+                error = %e,
+                bytes = raw.len(),
+                "stored JSON could not be decoded; serving the empty value"
+            );
+            None
+        }
+    }
+}
+
 /// People stored as a JSON array, back as GitHub's actor objects.
 fn actors(stored_json: Option<&str>) -> Vec<ActorDto> {
     stored_json
-        .and_then(|raw| serde_json::from_str::<Vec<StoredActor>>(raw).ok())
+        .and_then(|raw| decode_stored::<Vec<StoredActor>>("actors_json", raw))
         .unwrap_or_default()
         .into_iter()
         .map(|a| ActorDto {
@@ -110,7 +130,7 @@ fn actors(stored_json: Option<&str>) -> Vec<ActorDto> {
 /// Labels stored as a JSON array, back as GitHub's label objects.
 fn labels(stored_json: Option<&str>) -> Vec<LabelRefDto> {
     stored_json
-        .and_then(|raw| serde_json::from_str::<Vec<StoredLabel>>(raw).ok())
+        .and_then(|raw| decode_stored::<Vec<StoredLabel>>("labels_json", raw))
         .unwrap_or_default()
         .into_iter()
         .map(|l| LabelRefDto {
@@ -160,7 +180,7 @@ fn actor(login: Option<String>) -> Option<ActorDto> {
 /// the sync stored one, and the bare login for rows mirrored before it did.
 fn author(author_json: Option<&str>, author_login: Option<String>) -> Option<ActorDto> {
     author_json
-        .and_then(|raw| serde_json::from_str::<StoredActor>(raw).ok())
+        .and_then(|raw| decode_stored::<StoredActor>("author_json", raw))
         .map(|a| ActorDto {
             login: a.login,
             id: a.id,
@@ -676,7 +696,7 @@ impl From<Release> for ReleaseDto {
         let assets = r
             .assets_json
             .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|raw| decode_stored::<serde_json::Value>("assets_json", raw))
             .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
         Self {
             id: r.id,
@@ -1176,7 +1196,7 @@ impl From<WorkflowJob> for WorkflowJobDto {
         let steps = j
             .steps_json
             .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|raw| decode_stored::<serde_json::Value>("steps_json", raw))
             .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
 
         Self {
@@ -1298,8 +1318,8 @@ pub struct IssueTimelineEventDto {
 
 impl From<IssueTimelineEvent> for IssueTimelineEventDto {
     fn from(e: IssueTimelineEvent) -> Self {
-        let entry = serde_json::from_str::<serde_json::Value>(&e.payload_json)
-            .unwrap_or_else(|_| serde_json::json!({ "event": e.event }));
+        let entry = decode_stored::<serde_json::Value>("payload_json", &e.payload_json)
+            .unwrap_or_else(|| serde_json::json!({ "event": e.event }));
 
         Self { entry }
     }
