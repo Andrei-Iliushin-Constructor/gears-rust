@@ -121,6 +121,29 @@ pub fn allow_all() -> AccessScope {
     AccessScope::allow_all()
 }
 
+/// Test entry point with the documented worker defaults. Production has no
+/// default-configured worker path: it must pass the deployment settings.
+pub async fn run_operation(
+    stores: &Arc<dyn types_registry::domain::ports::Stores>,
+    db: &DBProvider<types_registry::domain::admission::worker::WorkerError>,
+    scope: &AccessScope,
+    operation_id: uuid::Uuid,
+    now: time::OffsetDateTime,
+) -> Result<
+    types_registry::domain::admission::worker::OperationOutcome,
+    types_registry::domain::admission::worker::WorkerError,
+> {
+    types_registry::domain::admission::worker::run_operation(
+        stores,
+        db,
+        scope,
+        operation_id,
+        now,
+        types_registry::config::WorkerSettings::default(),
+    )
+    .await
+}
+
 // ---------------------------------------------------------------------------
 // Managed-state fixtures
 // ---------------------------------------------------------------------------
@@ -475,7 +498,7 @@ impl EntityStore for PausingStores {
         entity_id: i64,
         expected_resource_version: i64,
         now: OffsetDateTime,
-    ) -> Result<bool, ScopeError> {
+    ) -> Result<Option<i64>, ScopeError> {
         self.inner
             .compare_and_swap_version(tx, scope, entity_id, expected_resource_version, now)
             .await

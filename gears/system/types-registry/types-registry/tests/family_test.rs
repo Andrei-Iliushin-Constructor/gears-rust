@@ -17,19 +17,23 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use sea_orm::EntityTrait;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::macros::datetime;
 use toolkit_db::secure::SecureEntityExt;
-use toolkit_db::{DBProvider, DbError, DbTx};
+use toolkit_db::{DBProvider, DbError, DbTx, LockConfig};
 use toolkit_gts::gts_id;
 use uuid::Uuid;
 
-use types_registry::config::TypesRegistryConfig;
+use types_registry::config::{TypesRegistryConfig, WorkerSettings};
 use types_registry::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
-use types_registry::domain::admission::worker::{OperationOutcome, WorkerError, run_operation};
+use types_registry::domain::admission::worker::{
+    LOCK_GEAR, OperationOutcome, WorkerError, family_lock_key,
+    run_operation as run_operation_configured,
+};
 use types_registry::domain::admission::{Candidate, OperationDispatch, SubmitRequest};
 use types_registry::domain::enums as domain_enums;
 use types_registry::domain::policy::RegistrationPolicy;
@@ -37,7 +41,7 @@ use types_registry::infra::storage::entity::{dependency, entity, version_family}
 use types_registry::infra::storage::repo::EntityRepo;
 
 mod common;
-use common::{allow_all, stores, test_db};
+use common::{TestDir, allow_all, run_operation, stores, test_db, test_db_file};
 
 const NOW: OffsetDateTime = datetime!(2026-08-18 09:15:30 UTC);
 const LATER: OffsetDateTime = datetime!(2026-08-18 10:20:40 UTC);
@@ -252,7 +256,7 @@ async fn a_deleted_predecessor_still_satisfies_contiguity() {
         .await
         .expect("read")
         .expect("the predecessor was admitted");
-    assert!(
+    assert_eq!(
         EntityRepo::mark_deleted(
             &conn,
             &scope,
@@ -262,7 +266,8 @@ async fn a_deleted_predecessor_still_satisfies_contiguity() {
         )
         .await
         .expect("tombstone the predecessor"),
-        "the fixture must really produce a tombstone",
+        Some(predecessor.resource_version + 1),
+        "the fixture must really produce a tombstone"
     );
 
     let (status, reason) = verdict(&admit(&db, "k2", V1_1).await);
@@ -287,11 +292,12 @@ async fn a_deleted_member_still_decides_minor_shape() {
         .await
         .expect("read")
         .expect("admitted");
-    assert!(
+    assert_eq!(
         EntityRepo::mark_deleted(&conn, &scope, existing.id, existing.resource_version, NOW)
             .await
             .expect("tombstone the blocker"),
-        "the fixture must really produce a tombstone",
+        Some(existing.resource_version + 1),
+        "the fixture must really produce a tombstone"
     );
     // Re-read rather than trust the `bool`: without this the shape refusal below
     // would fire whether or not the tombstone was written, and the test's claim
@@ -399,7 +405,8 @@ async fn a_predecessor_is_not_a_dependency_edge() {
 /// makes the probe succeed.
 #[tokio::test]
 async fn a_creation_holds_the_family_lock_across_its_commit() {
-    let db = test_db().await;
+    let dir = TestDir::new("types-registry-family-lock-held");
+    let db = test_db_file(&dir.path().join("registry.sqlite")).await;
     let op = submit(&db, "k1", V1).await;
 
     let (paused_stores, reached, resume) =
@@ -470,4 +477,66 @@ async fn a_creation_holds_the_family_lock_across_its_commit() {
         .release()
         .await
         .expect("release the probe's own guard");
+}
+
+#[tokio::test]
+async fn family_lock_contention_honours_the_configured_wait_budget() {
+    let dir = TestDir::new("types-registry-family-lock-timeout");
+    let db = test_db_file(&dir.path().join("registry.sqlite")).await;
+    let family_key = types_registry::domain::family::family_key(
+        &gts::GtsId::try_new(V1).expect("fixture identifier"),
+    );
+    let lock_key = family_lock_key(&family_key);
+    let blocker = db
+        .db()
+        .try_lock(
+            LOCK_GEAR,
+            &lock_key,
+            LockConfig {
+                max_wait: Some(Duration::from_millis(1)),
+                max_retries: Some(0),
+                ..LockConfig::default()
+            },
+        )
+        .await
+        .expect("take blocker lock")
+        .expect("family starts unlocked");
+
+    let operation_id = submit(&db, "lock-timeout", V1).await;
+    let settings = WorkerSettings {
+        family_lock_timeout: Duration::from_millis(1),
+        ..WorkerSettings::default()
+    };
+    let error = run_operation_configured(
+        &stores(),
+        &worker(&db),
+        &allow_all(),
+        operation_id,
+        LATER,
+        settings,
+    )
+    .await
+    .expect_err("the held family lock must exhaust the configured budget");
+    assert!(matches!(
+        error,
+        WorkerError::FamilyLockUnavailable { family_key: found, retry_after_seconds: 1 }
+            if found == family_key.as_str()
+    ));
+
+    blocker.release().await.expect("release blocker lock");
+
+    let outcome = run_operation_configured(
+        &stores(),
+        &worker(&db),
+        &allow_all(),
+        operation_id,
+        LATER,
+        WorkerSettings::default(),
+    )
+    .await
+    .expect("the same operation is recoverable after contention clears");
+    assert_eq!(
+        verdict(&outcome).0,
+        domain_enums::OperationItemStatus::Succeeded
+    );
 }

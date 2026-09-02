@@ -660,14 +660,20 @@ pub async fn commit_revision(
         }));
     }
 
+    if expected_resource_version == i64::MAX {
+        return Err(WorkerError::ResourceVersionExhausted {
+            gts_id: unit.gts_id.clone(),
+        });
+    }
+
     // One statement carrying the precondition, so there is no window between
-    // checking the version and moving it. `false` is the lost race — the version
+    // checking the version and moving it. `None` is the lost race — the version
     // moved, or the entity was deleted, both of which the statement's `WHERE`
     // covers and neither of which it can tell apart.
-    if !stores
+    let Some(resource_version) = stores
         .compare_and_swap_version(tx, scope, entity.id, expected_resource_version, now)
         .await?
-    {
+    else {
         return Ok(Err(ItemFailure::new(
             "precondition_failed",
             format!(
@@ -676,9 +682,13 @@ pub async fn commit_revision(
                 unit.gts_id
             ),
         )));
-    }
-    let resource_version = expected_resource_version.saturating_add(1);
-    let revision_no = current_revision_no.saturating_add(1);
+    };
+    let revision_no =
+        current_revision_no
+            .checked_add(1)
+            .ok_or_else(|| WorkerError::RevisionNumberExhausted {
+                gts_id: unit.gts_id.clone(),
+            })?;
 
     match &unit.outcome {
         EvaluatedOutcome::TypeSchema { artifacts } => {

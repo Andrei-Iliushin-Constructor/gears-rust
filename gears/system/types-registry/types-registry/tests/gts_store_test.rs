@@ -351,10 +351,11 @@ async fn a_tombstoned_base_still_loads() {
     add_edge(&db, derived_id, base_id).await;
 
     let conn = db.conn().expect("conn");
-    assert!(
+    assert_eq!(
         EntityRepo::mark_deleted(&conn, &allow_all(), base_id, 1, NOW)
             .await
             .expect("tombstone the base"),
+        Some(2)
     );
 
     let mut unit = load_in_snapshot(&db, vec![doc(DERIVED, derived_content)])

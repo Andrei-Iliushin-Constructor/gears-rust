@@ -16632,7 +16632,7 @@
             ]
           },
           "force": {
-            "description": "ADR-0004 `force`: waive one cross-minor compatibility check. Refused where\nthe deployment disallows it, or where the candidate has no such check.",
+            "description": "ADR-0004 `force`: waive one cross-minor compatibility check. Refused where\nthe deployment disallows it, where the candidate has no such check, and\nuntil T17 can evaluate the check and persist the waiver provenance.",
             "type": [
               "boolean",
               "null"
@@ -50304,7 +50304,15 @@
                 }
               }
             },
-            "description": "Service Unavailable"
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Suggested delay in seconds before repeating the submission under the same Idempotency-Key; present where the family-lock budget expired",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "security": [

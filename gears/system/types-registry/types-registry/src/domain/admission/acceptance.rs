@@ -102,6 +102,10 @@ pub enum AcceptanceError {
     ForceNotPermitted { gts_id: String },
     #[error("force on '{gts_id}' is refused: it has no cross-minor check to waive")]
     ForceHasNothingToWaive { gts_id: String },
+    #[error("force on '{gts_id}' is not accepted until T17 implements compatibility evaluation")]
+    ForceCompatibilityUnavailable { gts_id: String },
+    #[error("minor-bearing Type Schema '{gts_id}' is content-immutable")]
+    MinorTypeSchemaRevision { gts_id: String },
     #[error(
         "expected_resource_version 0 on '{gts_id}' is refused: omit the field to require absence"
     )]
@@ -239,6 +243,16 @@ pub fn validate(
             // version cannot register a new entity.
             Some(v) => Precondition::Version(v),
         };
+        // ADR-0004: a minor-bearing Type Schema is content-immutable. During
+        // ceiling C9 this permanent refusal also bounds the implementation window.
+        if request.kind == OperationKind::Registration
+            && matches!(expected, Precondition::Version(_))
+            && is_minor_bearing_type_schema(&id)
+        {
+            return Err(AcceptanceError::MinorTypeSchemaRevision {
+                gts_id: id.id().to_owned(),
+            });
+        }
 
         // --- step 3: registration policy ---------------------------------
         // **Creations only** (SPEC §8.1 step 3, DESIGN §3.2). The policy governs
@@ -316,6 +330,14 @@ pub fn validate(
                     gts_id: id.id().to_owned(),
                 });
             }
+            // ponytail: ceiling C9 — T14/T17 close Checkpoints 3–4.
+            // T17 owns both the compatibility comparison and the durable
+            // `compat_forced` provenance bit. Accepting the flag before those two
+            // arrive would silently record `false` on a creation whose check was
+            // actually waived.
+            return Err(AcceptanceError::ForceCompatibilityUnavailable {
+                gts_id: id.id().to_owned(),
+            });
         }
 
         // TODO(T18): step 7, the ADR-0015 quarantine — refuse a stable candidate
@@ -575,6 +597,18 @@ fn has_cross_minor_check(id: &GtsId) -> bool {
         (Some(0) | None, _) | (_, None | Some(0)) => false,
         (Some(_), Some(_)) => true,
     }
+}
+
+/// ADR-0004 makes a minor-bearing Type Schema an immutable published contract.
+/// Its next minor is a new logical entity; only major-only Type Schemas and
+/// Instances have a content-revision path.
+fn is_minor_bearing_type_schema(id: &GtsId) -> bool {
+    id.is_type()
+        && id
+            .segments()
+            .last()
+            .and_then(GtsIdSegment::ver_minor)
+            .is_some()
 }
 
 /// The keyed read both replay paths make.

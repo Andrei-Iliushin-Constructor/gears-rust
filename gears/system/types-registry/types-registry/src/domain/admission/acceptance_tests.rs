@@ -563,7 +563,8 @@ fn force_is_refused_while_the_deployment_disallows_it() {
 }
 
 /// With `force` permitted, the candidate must still *have* a cross-minor check to
-/// waive. All three no-op shapes are refused, and the one real case is accepted.
+/// waive. No-op shapes keep their precise refusal; a real case stays unavailable
+/// until T17 can both evaluate it and persist its provenance.
 #[test]
 fn force_needs_a_cross_minor_check_to_waive() {
     let (policy, mut config) = closed();
@@ -597,7 +598,10 @@ fn force_needs_a_cross_minor_check_to_waive() {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
     }));
-    run(&pair, &req).expect("a second minor of a stable major has a check to waive");
+    assert!(matches!(
+        run(&pair, &req),
+        Err(AcceptanceError::ForceCompatibilityUnavailable { .. })
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -629,4 +633,16 @@ fn a_negative_precondition_is_refused() {
         run(&pair, &req),
         Err(AcceptanceError::NegativePrecondition { version: -1, .. })
     ));
+}
+
+#[test]
+fn a_minor_bearing_type_schema_cannot_be_content_revised() {
+    let pair = closed();
+    let id = gts_id!("cf.core.example.type.v1.2~");
+    let mut req = request(vec![candidate(id)]);
+    req.candidates[0].expected_resource_version = Some(1);
+    match run(&pair, &req) {
+        Err(AcceptanceError::MinorTypeSchemaRevision { gts_id }) => assert_eq!(gts_id, id),
+        other => panic!("expected MinorTypeSchemaRevision, got {other:?}"),
+    }
 }

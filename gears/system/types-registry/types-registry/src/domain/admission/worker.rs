@@ -37,6 +37,7 @@ pub use super::errors::{ItemFailure, WorkerError};
 use super::unit::{
     CommittedUnit, EvaluatedUnit, RevisionCommit, commit_creation, commit_revision, evaluate,
 };
+use crate::config::WorkerSettings;
 use crate::domain::admission::Precondition;
 use crate::domain::enums::{OperationItemStatus, OperationStatus};
 use crate::domain::family::{FamilyKey, lock_order};
@@ -97,6 +98,7 @@ pub async fn run_operation(
     scope: &AccessScope,
     operation_id: Uuid,
     now: OffsetDateTime,
+    settings: WorkerSettings,
 ) -> Result<OperationOutcome, WorkerError> {
     // Step 1: the operation and its items under one snapshot. `mark_running` below
     // touches only the operation row, so reading the items before it rather than
@@ -124,7 +126,7 @@ pub async fn run_operation(
 
     let mut outcomes = Vec::with_capacity(items.len());
     for item in items {
-        outcomes.push(process_item(stores, db, scope, operation_id, &item, now).await?);
+        outcomes.push(process_item(stores, db, scope, operation_id, &item, now, settings).await?);
     }
 
     mark_completed(stores, db, scope, operation_id, now).await?;
@@ -165,28 +167,71 @@ const fn retryable_db_err(e: &WorkerError) -> Option<&sea_orm::DbErr> {
 /// # Errors
 /// [`WorkerError::FamilyLockUnavailable`] when the wait budget expires — contention,
 /// not a statement about the candidate, so a redelivery re-drives it. Any guard
-/// already taken is dropped on the way out, which releases it best-effort.
+/// already taken is explicitly released before the error is returned.
 async fn lock_families(
     db: &DBProvider<WorkerError>,
     family_keys: &[FamilyKey],
+    operation_id: Uuid,
+    operation_item_id: i64,
+    max_wait: std::time::Duration,
 ) -> Result<Vec<DbLockGuard>, WorkerError> {
     let handle = db.db();
     let mut guards = Vec::with_capacity(family_keys.len());
     for key in lock_order(family_keys) {
         let lock_key = family_lock_key(&key);
-        match handle
-            .try_lock(LOCK_GEAR, &lock_key, LockConfig::default())
-            .await?
-        {
-            Some(guard) => guards.push(guard),
-            None => {
+        let config = LockConfig {
+            max_wait: Some(max_wait),
+            ..LockConfig::default()
+        };
+        match handle.try_lock(LOCK_GEAR, &lock_key, config).await {
+            Ok(Some(guard)) => guards.push(guard),
+            Ok(None) => {
+                release_family_locks(guards, operation_id, operation_item_id).await;
                 return Err(WorkerError::FamilyLockUnavailable {
                     family_key: key.as_str().to_owned(),
+                    retry_after_seconds: max_wait.as_secs().max(1),
                 });
+            }
+            Err(error) => {
+                release_family_locks(guards, operation_id, operation_item_id).await;
+                return Err(error.into());
             }
         }
     }
     Ok(guards)
+}
+
+/// Release every acquired family lock deterministically.
+///
+/// Used on the normal commit path and on partial acquisition failures. A release
+/// error cannot change an already-decided commit or replace the acquisition error;
+/// the session still bounds the lock lifetime, so the failure is logged.
+async fn release_family_locks(
+    guards: Vec<DbLockGuard>,
+    operation_id: Uuid,
+    operation_item_id: i64,
+) {
+    for guard in guards {
+        if let Err(error) = guard.release().await {
+            tracing::warn!(
+                %operation_id,
+                operation_item_id,
+                %error,
+                "types_registry could not release a version-family lock; it expires with the \
+                 session"
+            );
+        }
+    }
+}
+
+/// Groups the per-item commit inputs so the transaction boundary stays readable
+/// without crossing Clippy's argument-count threshold.
+struct CommitRequest<'a> {
+    evaluated: &'a Arc<EvaluatedUnit>,
+    item: &'a OperationItemRow,
+    operation_id: Uuid,
+    now: OffsetDateTime,
+    family_lock_timeout: std::time::Duration,
 }
 
 /// Steps 4a and 4b: take the family lock a creation needs, run the commit
@@ -198,11 +243,15 @@ async fn commit_evaluated(
     db: &DBProvider<WorkerError>,
     stores: &Arc<dyn Stores>,
     scope: &AccessScope,
-    evaluated: &Arc<EvaluatedUnit>,
-    item: &OperationItemRow,
-    operation_id: Uuid,
-    now: OffsetDateTime,
+    request: CommitRequest<'_>,
 ) -> Result<Result<RevisionCommit, ItemFailure>, WorkerError> {
+    let CommitRequest {
+        evaluated,
+        item,
+        operation_id,
+        now,
+        family_lock_timeout,
+    } = request;
     // Step 4a: serialize the family rules, for a **creation** only.
     //
     // `create_or_get`'s unique key decides which of two concurrent admissions founds
@@ -218,7 +267,14 @@ async fn commit_evaluated(
     let precondition = item.precondition;
     let family_lock = match precondition {
         Precondition::MustNotExist => {
-            lock_families(db, std::slice::from_ref(&evaluated.family_key)).await?
+            lock_families(
+                db,
+                std::slice::from_ref(&evaluated.family_key),
+                operation_id,
+                item.id,
+                family_lock_timeout,
+            )
+            .await?
         }
         Precondition::Version(_) => Vec::new(),
     };
@@ -270,17 +326,7 @@ async fn commit_evaluated(
     // Released deterministically rather than on `Drop`, which the toolkit documents
     // as best-effort: a sibling admission is waiting on this key. A failed release is
     // logged, not propagated — the commit above is already decided.
-    for guard in family_lock {
-        if let Err(error) = guard.release().await {
-            tracing::warn!(
-                %operation_id,
-                operation_item_id = item.id,
-                %error,
-                "types_registry could not release a version-family lock; it expires with the \
-                 session"
-            );
-        }
-    }
+    release_family_locks(family_lock, operation_id, item.id).await;
 
     committed
 }
@@ -294,6 +340,7 @@ async fn process_item(
     operation_id: Uuid,
     item: &OperationItemRow,
     now: OffsetDateTime,
+    settings: WorkerSettings,
 ) -> Result<ItemOutcome, WorkerError> {
     if item.status != OperationItemStatus::Pending && item.status != OperationItemStatus::Running {
         return Ok(stored_outcome(item));
@@ -312,7 +359,19 @@ async fn process_item(
         }
     };
 
-    let committed = commit_evaluated(db, stores, scope, &evaluated, item, operation_id, now).await;
+    let committed = commit_evaluated(
+        db,
+        stores,
+        scope,
+        CommitRequest {
+            evaluated: &evaluated,
+            item,
+            operation_id,
+            now,
+            family_lock_timeout: settings.family_lock_timeout,
+        },
+    )
+    .await;
 
     let committed = match committed {
         Ok(committed) => committed,

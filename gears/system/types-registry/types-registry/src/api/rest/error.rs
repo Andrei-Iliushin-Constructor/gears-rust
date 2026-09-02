@@ -120,6 +120,19 @@ fn opaque_internal(cause: &dyn std::fmt::Display, at: &'static str) -> Canonical
     CanonicalError::internal(OPAQUE_INTERNAL).create()
 }
 
+/// Log transient contention and give the caller a bounded retry instruction.
+fn retryable_unavailable(
+    cause: &dyn std::fmt::Display,
+    at: &'static str,
+    retry_after_seconds: u64,
+) -> CanonicalError {
+    tracing::warn!(error = %cause, at, "types_registry request is temporarily unavailable");
+    CanonicalError::service_unavailable()
+        .with_detail("The registry is busy. Repeat this submission under the same Idempotency-Key.")
+        .with_retry_after_seconds(retry_after_seconds)
+        .create()
+}
+
 impl From<ServiceError> for CanonicalError {
     fn from(e: ServiceError) -> Self {
         match e {
@@ -184,11 +197,22 @@ impl From<WorkerError> for CanonicalError {
                 &format!("entity '{gts_id}' (id {entity_id}) vanished mid-transaction"),
                 "admission",
             ),
-            // Contention, not corruption, and retryable like `ConformingTypeAbsent`:
-            // opaque for the same reason — a `409` would invite the caller to change
-            // a request that is correct.
-            WorkerError::FamilyLockUnavailable { family_key } => opaque_internal(
+            // Contention, not corruption: the request is correct and can be
+            // repeated after the short hint advertised by the response.
+            WorkerError::FamilyLockUnavailable {
+                family_key,
+                retry_after_seconds,
+            } => retryable_unavailable(
                 &format!("could not acquire the version-family lock for '{family_key}' in time"),
+                "admission",
+                retry_after_seconds,
+            ),
+            WorkerError::ResourceVersionExhausted { gts_id } => opaque_internal(
+                &format!("entity '{gts_id}' cannot advance resource_version after i64::MAX"),
+                "admission",
+            ),
+            WorkerError::RevisionNumberExhausted { gts_id } => opaque_internal(
+                &format!("entity '{gts_id}' cannot allocate a revision after i32::MAX"),
                 "admission",
             ),
             WorkerError::Storage(inner) => opaque_internal(&inner, "storage write"),
@@ -360,6 +384,22 @@ impl From<AcceptanceError> for CanonicalError {
                 format!("force on '{gts_id}' has no cross-minor compatibility check to waive"),
                 field::VALIDATION_FAILED,
             ),
+            AcceptanceError::ForceCompatibilityUnavailable { gts_id } => invalid_candidate(
+                gts_id,
+                vf::FORCE,
+                format!(
+                    "force on '{gts_id}' is not available until compatibility evaluation is enabled"
+                ),
+                field::VALIDATION_FAILED,
+            ),
+            AcceptanceError::MinorTypeSchemaRevision { gts_id } => invalid_candidate(
+                gts_id,
+                vf::EXPECTED_RESOURCE_VERSION,
+                format!(
+                    "minor-bearing Type Schema '{gts_id}' is immutable; register a new minor instead"
+                ),
+                field::VALIDATION_FAILED,
+            ),
             AcceptanceError::ZeroPrecondition { gts_id } => invalid_candidate(
                 gts_id,
                 vf::EXPECTED_RESOURCE_VERSION,
@@ -423,6 +463,7 @@ mod tests {
     use crate::domain::admission::acceptance::PolicyRefusalError;
     use crate::domain::gts_store::StoreBuildError;
     use crate::domain::policy::PolicyRefusal;
+    use axum::response::IntoResponse;
     use toolkit_canonical_errors::Problem;
     use toolkit_db::DbError;
     use toolkit_db::secure::ScopeError;
@@ -566,6 +607,16 @@ mod tests {
                 field::VALIDATION_FAILED,
             ),
             (
+                AcceptanceError::ForceCompatibilityUnavailable { gts_id: id.clone() },
+                violation_field::FORCE,
+                field::VALIDATION_FAILED,
+            ),
+            (
+                AcceptanceError::MinorTypeSchemaRevision { gts_id: id.clone() },
+                violation_field::EXPECTED_RESOURCE_VERSION,
+                field::VALIDATION_FAILED,
+            ),
+            (
                 AcceptanceError::ZeroPrecondition { gts_id: id.clone() },
                 violation_field::EXPECTED_RESOURCE_VERSION,
                 field::VALIDATION_FAILED,
@@ -649,6 +700,20 @@ mod tests {
                 gts_id: "instance-secret".to_owned(),
                 type_id: "type-secret".to_owned(),
             }),
+            worker_problem(WorkerError::CurrentStateMissing {
+                gts_id: "state-secret".to_owned(),
+                entity_id: 7,
+            }),
+            worker_problem(WorkerError::EntityVanished {
+                gts_id: "entity-secret".to_owned(),
+                entity_id: 7,
+            }),
+            worker_problem(WorkerError::RevisionNumberExhausted {
+                gts_id: "revision-secret".to_owned(),
+            }),
+            worker_problem(WorkerError::ResourceVersionExhausted {
+                gts_id: "version-secret".to_owned(),
+            }),
             worker_problem(WorkerError::Storage(ScopeError::Invalid("storage-secret"))),
             worker_problem(WorkerError::Db(DbError::InvalidConfig(
                 "database-secret".to_owned(),
@@ -659,6 +724,33 @@ mod tests {
             assert_eq!(problem.detail, OPAQUE_INTERNAL);
             assert!(!problem.detail.contains("secret"));
         }
+    }
+
+    #[test]
+    fn family_lock_contention_is_retryable_service_unavailable() {
+        let error = WorkerError::FamilyLockUnavailable {
+            family_key: "family-secret".to_owned(),
+            retry_after_seconds: 5,
+        };
+        let problem = worker_problem(error);
+        assert_eq!(problem.status, Some(503));
+        assert_eq!(
+            problem.context.get("retry_after_seconds"),
+            Some(&serde_json::json!(5))
+        );
+        assert!(!problem.detail.contains("family-secret"));
+        assert!(problem.detail.contains("same Idempotency-Key"));
+
+        let response = CanonicalError::from(WorkerError::FamilyLockUnavailable {
+            family_key: "family-secret".to_owned(),
+            retry_after_seconds: 5,
+        })
+        .into_response();
+        assert_eq!(response.status(), 503);
+        assert_eq!(
+            response.headers().get(axum::http::header::RETRY_AFTER),
+            Some(&axum::http::HeaderValue::from_static("5"))
+        );
     }
 
     #[tokio::test]

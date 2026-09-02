@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 use types_registry::config::{PolicyEntry, TypesRegistryConfig};
 use types_registry::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
-use types_registry::domain::admission::worker::{OperationOutcome, WorkerError, run_operation};
+use types_registry::domain::admission::worker::{OperationOutcome, WorkerError};
 use types_registry::domain::admission::{Candidate, OperationDispatch, SubmitRequest};
 use types_registry::domain::enums as domain_enums;
 use types_registry::domain::policy::RegistrationPolicy;
@@ -40,7 +40,7 @@ use types_registry::infra::storage::entity::{
 use types_registry::infra::storage::repo::EntityRepo;
 
 mod common;
-use common::{allow_all, stores, test_db};
+use common::{allow_all, run_operation, stores, test_db};
 
 const NOW: OffsetDateTime = datetime!(2026-08-18 09:15:30 UTC);
 const LATER: OffsetDateTime = datetime!(2026-08-18 10:20:40 UTC);
@@ -361,7 +361,7 @@ async fn a_revision_is_refused_on_a_tombstoned_entity() {
         .await
         .expect("read")
         .expect("admitted");
-    assert!(
+    assert_eq!(
         EntityRepo::mark_deleted(
             &conn,
             &allow_all(),
@@ -371,7 +371,8 @@ async fn a_revision_is_refused_on_a_tombstoned_entity() {
         )
         .await
         .expect("tombstone the entity"),
-        "the fixture must really produce a tombstone",
+        Some(entity.resource_version + 1),
+        "the fixture must really produce a tombstone"
     );
     let after_delete = resource_version_of(&db, CF_TYPE).await;
 

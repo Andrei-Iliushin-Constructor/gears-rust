@@ -7,8 +7,7 @@
 use gts::{GtsId, GtsIdPattern};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, Condition, DbErr, EntityTrait, ExprTrait, Order, QueryFilter,
-    QueryOrder,
+    ActiveValue::Set, ColumnTrait, Condition, DbErr, EntityTrait, Order, QueryFilter, QueryOrder,
 };
 use time::OffsetDateTime;
 use toolkit_db::secure::{
@@ -271,8 +270,9 @@ impl EntityRepo {
     ///
     /// One statement: the precondition is in the `WHERE`, so there is no window
     /// between the check and the write, and the affected-row count is the success
-    /// signal. A stale precondition is `Ok(false)` rather than an error — it is an
+    /// signal. A stale precondition is `Ok(None)` rather than an error — it is an
     /// ordinary concurrent-writer outcome the caller turns into `412`, not a fault.
+    /// Success returns the exact value written by this statement.
     ///
     /// `lifecycle_status = ACTIVE` is in the same `WHERE` for the reason the version
     /// is: [`Self::mark_deleted`] can commit between the caller's read and this
@@ -288,12 +288,17 @@ impl EntityRepo {
         entity_id: i64,
         expected_resource_version: i64,
         now: OffsetDateTime,
-    ) -> Result<bool, ScopeError> {
+    ) -> Result<Option<i64>, ScopeError> {
+        let next_resource_version = expected_resource_version.checked_add(1).ok_or_else(|| {
+            ScopeError::Db(DbErr::Custom(
+                "resource_version cannot advance past i64::MAX".to_owned(),
+            ))
+        })?;
         let result = entity::Entity::update_many()
             .secure()
             .col_expr(
                 entity::Column::ResourceVersion,
-                Expr::col(entity::Column::ResourceVersion).add(1),
+                Expr::value(next_resource_version),
             )
             .col_expr(entity::Column::UpdatedAt, Expr::value(now))
             .filter(
@@ -305,7 +310,7 @@ impl EntityRepo {
             .scope_with(scope)
             .exec(runner)
             .await?;
-        Ok(result.rows_affected == 1)
+        Ok((result.rows_affected == 1).then_some(next_resource_version))
     }
 
     /// Turn an active entity into a tombstone under the same compare-and-swap.
@@ -313,7 +318,8 @@ impl EntityRepo {
     /// `lifecycle_status` and `deleted_at` move together because
     /// `ck_tr_entity_lifecycle` constrains the pair; the `WHERE` also requires the
     /// row to be active, so a second deletion reports failure instead of moving
-    /// `deleted_at`.
+    /// `deleted_at`. As with [`Self::compare_and_swap_version`], success returns
+    /// the exact version written and `None` reports a lost race.
     ///
     /// # Errors
     /// Propagates scope validation and database update failures.
@@ -323,12 +329,17 @@ impl EntityRepo {
         entity_id: i64,
         expected_resource_version: i64,
         now: OffsetDateTime,
-    ) -> Result<bool, ScopeError> {
+    ) -> Result<Option<i64>, ScopeError> {
+        let next_resource_version = expected_resource_version.checked_add(1).ok_or_else(|| {
+            ScopeError::Db(DbErr::Custom(
+                "resource_version cannot advance past i64::MAX".to_owned(),
+            ))
+        })?;
         let result = entity::Entity::update_many()
             .secure()
             .col_expr(
                 entity::Column::ResourceVersion,
-                Expr::col(entity::Column::ResourceVersion).add(1),
+                Expr::value(next_resource_version),
             )
             .col_expr(
                 entity::Column::LifecycleStatus,
@@ -345,7 +356,7 @@ impl EntityRepo {
             .scope_with(scope)
             .exec(runner)
             .await?;
-        Ok(result.rows_affected == 1)
+        Ok((result.rows_affected == 1).then_some(next_resource_version))
     }
 
     /// One keyset page of active entities, optionally filtered by a GTS pattern.

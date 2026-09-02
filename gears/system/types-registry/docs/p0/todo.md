@@ -282,9 +282,10 @@ Outcome and evidence: the criteria below. The per-task report was folded into th
 - [x] `tenant_ownable` is **parsed and validated but inert** (SPEC §10.3). `RegistrationPolicy::tenant_ownable` resolves it by the same rules as the vendor set and is asserted to return the configured value — which is what makes it inert rather than dropped — while `admits` refuses any candidate asking for tenant ownership whatever the entry says. §9 makes that request shape unreachable, so it is a fail-closed assertion, not a feature
 - [x] Per-parameter resolution implemented: longest literal prefix wins, an exact key beats any pattern, entries omitting a parameter are skipped, closed default otherwise. Specificity is `(is_exact, literal_prefix_len)` — the exact-beats-pattern rule is a separate tuple element rather than left to fall out of prefix lengths, because DESIGN states it separately
 - [x] Global `cf` vendor is implicitly admitted; nothing else is. Keyed on the **last** segment's vendor, so a `cf`-rooted identifier with an `acme` derivation is an `acme` candidate — tested, since reading the first segment would open the whole platform namespace to derivations
+- [x] `worker.family_lock_timeout` is positive, defaults to 5s and is enforced by the admission worker; unlike the future lease timeout it is not reported as inert
 
 **Verification:**
-- [x] `cargo test -p cf-gears-types-registry` — 186 lib + 173 integration tests, of which 16 are `policy_tests.rs` (in-source, pure) and 14 are `config_test.rs`
+- [x] `cargo test -p cf-gears-types-registry` — 255 lib + 259 integration tests on SQLite; the operator-facing configuration boundary has 21 `config_test.rs` cases
 - [x] Table-driven test over the four policy entries in SPEC §10.3 plus the resolution rules, manual `vec![]` + loop (no `rstest`)
 - [x] Test: a more specific `allowed_vendors` **replaces** a less-specific set rather than extending it — including the pair of candidates that shows it, one excluded inside the narrow region and the same vendor still admitted outside it
 - [x] Test: an entry that omits `allowed_vendors` is skipped, and a less-specific entry supplies it. Both parameters are therefore `Option`: collapsing absent onto `[]` / `false` would let a narrow entry silently close what a broad one opened
@@ -316,7 +317,7 @@ T21's shapes:
 - `TR/src/domain/policy_tests.rs` — NEW, 16 in-source tests
 - `TR/src/domain/mod.rs` — declare `policy`
 - `TR/src/gear.rs` — startup validation
-- `TR/tests/config_test.rs` — NEW, 14 tests
+- `TR/tests/config_test.rs` — NEW, 21 tests
 **Scope:** M
 
 ---
@@ -331,7 +332,7 @@ operation, its items and the outbox message. Reads no entity state.
 Outcome and evidence: the criteria below. The per-task report was folded into these and deleted.
 
 **Acceptance criteria:**
-- [x] Checks run in SPEC §8.1 order; policy precedes any existence lookup so a refusal cannot probe the namespace. Kept **structurally**, not by review: `validate` takes the request and the config and has no runner, provider or repository in its signature, so mid-validation existence checking would require changing that signature. Steps 1–6 and 8 are here; **step 7 (the ADR-0015 quarantine) is T18's** — it needs T13's reference extractor — and a `TODO(T18)` marks its position between steps 6 and 8 so it lands as an insertion rather than a reordering
+- [x] Checks run in SPEC §8.1 order; policy precedes any existence lookup so a refusal cannot probe the namespace. Kept **structurally**, not by review: `validate` takes the request and the config and has no runner, provider or repository in its signature, so mid-validation existence checking would require changing that signature. Steps 1–6 and 8 are here; **step 7 (the ADR-0015 quarantine) is T18's** — it needs T13's reference extractor — and a `TODO(T18)` marks its position between steps 6 and 8 so it lands as an insertion rather than a reordering. Step 6 fail-closes every otherwise-applicable `force` until T17 can compare and persist its provenance
 - [x] Policy gates **every accepted candidate**, because P0 accepts only declared creations: a positive `expected_resource_version` is refused (`AcceptanceError::RevisionNotAccepted`) and deletion is refused with the envelope. SPEC §8.1's revision/deletion bypass is deliberately *not* implemented yet — gating on the caller's declared kind while nothing verified the claim let a request name a version and skip the gate outright (found at the Checkpoint 1 review). The bypass returns at T11, together with the commit-side precondition that makes the claim checkable. A refusal names the region and the parameter
 - [x] Fingerprint covers canonical body, operation kind, owner, preconditions and each `force` flag — plus dry-run mode, plane, tenant and principal, as one table-driven test over all nine inputs. Every field is **length-prefixed**, so a digest cannot confuse `("ab", "c")` with `("a", "bc")`, and the digest carries a version tag so a future change to its coverage cannot read as a matching replay
 - [x] Replay with a matching fingerprint returns the stored operation (`202` non-terminal, `200` terminal); a different fingerprint under the same key returns `409`. The replay test submits a deliberately **reordered** body, because canonicalization is the thing that makes a replay a replay
@@ -738,6 +739,8 @@ the first row lands in that state.
 **Acceptance criteria:**
 - [x] Acceptance stops refusing a positive `expected_resource_version` — `AcceptanceError::RevisionNotAccepted` is deleted, along with its REST mapping — **and** the SPEC §8.1 step 3 bypass is restored in the same change: the gate is now `if expected == Precondition::MustNotExist`. What makes that safe is the other half of the same commit: `worker::process_item` dispatches on the item's **stored** precondition, and `commit_revision` refuses an identifier the registry does not hold. The caller's declared kind is therefore *enforced*, not trusted — which is exactly what Checkpoint 1's refusal stood in for
 - [x] Update requires `entity.resource_version == expected_resource_version`; mismatch is terminal `precondition_failed` with no silent rebase. It goes through `EntityRepo::compare_and_swap_version` — written and unit-tested at T4 with no caller until now — which became a port method here (its first domain caller, per `store.rs`'s own rule)
+- [x] The compare-and-swap returns `Some(next_resource_version)` from the repository and `None` on a lost race. The repository computes `next` with `checked_add` and writes that exact value; the domain never reconstructs the database result or saturates at the numeric ceiling
+- [x] A positive precondition on a minor-bearing Type Schema is refused during acceptance: ADR-0004 makes that published contract content-immutable, so a change is registered as the next minor rather than appended as a revision
 - [x] Equal authored content yields `unchanged`, creating no revision and not advancing `resource_version`. Both kinds: the rule is shared, the tables are not
 - [x] `unchanged` is impossible for a create or a delete, enforced in code as well as by the CHECK. In code it is **structural**: `commit_creation` returns `CommittedUnit` and only `commit_revision` returns `RevisionCommit`, whose `Unchanged` variant is the sole way to reach `mark_item_unchanged`. A creation of existing content is `already_exists`, whatever the content
 - [x] Content hash is a prefilter only; effective artifacts are excluded from equality. `CurrentDocument` and `CurrentInstanceValue` gained `content_hash` so the digest and the bytes travel together, and the decision is `hash == hash && bytes == bytes` — the digest alone would let a collision swallow a real edit
@@ -753,8 +756,8 @@ it, both interleavings are serializable — a re-read that still sees `expected`
 admission had not committed yet.
 
 **Verification:**
-- [x] Gear tests, all three backends (see [Commands](#commands)) — 488 on `SQLite`, and `make test-types-registry-db` green on `PostgreSQL` and `MySQL`
-- [x] Tests: stale version, equal content, content equal to an *older* non-current revision (must create a new revision, ADR-0005) — `TR/tests/revision_test.rs`, ten tests, genuine RED→GREEN (nine of the ten failed before the implementation)
+- [x] Gear tests, all three backends (see [Commands](#commands)) — 514 on `SQLite`, and `make test-types-registry-db` green on `PostgreSQL` and `MySQL`
+- [x] Tests: stale version, equal content, content equal to an *older* non-current revision (must create a new revision, ADR-0005) — `TR/tests/revision_test.rs`, eleven tests
 - [x] Test: revision numbers are contiguous per entity — three admissions yield `1, 2, 3` with `resource_version` at 3
 - [x] Test: a revision in a region the policy has since **closed** is admitted (the restored bypass), while a creation there is still refused — `a_revision_survives_a_region_the_policy_has_since_closed` drives both halves against two compiled policies, and the acceptance unit tests pin the pure half
 - [x] **The standing read criterion, applied.** Checkpoint 1's open item asked that whatever a write-path task makes storable be readable through the public route. `api_rest_test.rs::a_revision_is_readable_through_the_entity_route` reads `resource_version = 2`, the new `content` **and** the re-materialized `resolved_schema` over the real router; `unchanged_content_reports_unchanged_on_the_operation` pins the other outcome on the wire
@@ -771,8 +774,16 @@ admission had not committed yet.
   of resolving *that* revision, so a row carrying revision N+1 beside revision N's
   `resolved_schema` is a state no reader should see — and two statements would create it.
 
+**Interim implementation window (SPEC C9).** T11 makes database-backed revisions executable before T14's
+reverse-impact refresh and T17's compatibility comparison exist. No consumer or v1 cutover may
+use this path before those checkpoints (the DB path remains internal until T24). During the
+window, minor-bearing Type Schema revisions are rejected structurally, and `force` is rejected
+whenever it would have a real check to waive; T17 removes that temporary refusal only when it can
+record `compat_forced` truthfully. Major-only Type Schema revisions remain staging-only until T14
+and T17 close the dependent-refresh and compatibility gaps.
+
 **Dependencies:** Checkpoint 1
-**Files touched:** `TR/src/domain/admission/{acceptance,acceptance_tests,errors,unit,worker}.rs`, `TR/src/domain/ports.rs`, `TR/src/infra/storage/repo/{type_schema_repo,instance_repo,operation_repo}.rs`, `TR/src/infra/storage/store.rs`, `TR/src/api/rest/{error,dto}.rs`, `TR/tests/{revision_test,api_rest_test,repo_backends_test,common/mod}.rs`
+**Files touched:** `TR/src/domain/admission/{acceptance,acceptance_tests,errors,unit,worker}.rs`, `TR/src/domain/ports.rs`, `TR/src/infra/storage/repo/{entity_repo,type_schema_repo,instance_repo,operation_repo}.rs`, `TR/src/infra/storage/store.rs`, `TR/src/api/rest/{error,dto}.rs`, `TR/tests/{revision_test,api_rest_test,repo_backends_test,repo_test,common/mod}.rs`
 **Scope:** M
 
 ---
@@ -799,6 +810,7 @@ correction is the point: all three rules now read as one list, rather than one r
 - [x] A `DELETED` predecessor still counts; the predecessor test is re-asked inside the commit transaction. Both fall out of one primitive: `find_by_gts_id` returns tombstones and every rule runs inside `commit_creation`'s transaction, so there is no way for the two rules to disagree about what a tombstone means
 - [x] Family ownership is write-once; the entity's owner columns are a projection maintained under the lock. `NewEntity` now takes `family.ownership_scope` / `family.owner_tenant_id` instead of re-reading the request — a copy taken from the row it is verified against **cannot** disagree with it, which is stronger than verifying two independent readings. Write-once is structural: `create_or_get` has no update path, so this is the only writer of either column
 - [x] The predecessor is excluded from `dependency` and from the revision vector — a **negative** criterion, and the only discharge available now: T13 does not write edges yet and T15's vector does not exist. `a_predecessor_is_not_a_dependency_edge` asserts the table stays empty after `v1.0~` then `v1.1~`, so T13 inherits a failing test if it adds the edge
+- [x] Family locks use the configured 5s retry budget; timeout is a retryable `503` with `Retry-After`, and both successful commits and partial acquisition failures explicitly release every acquired guard
 
 **Both rules are scoped to one MAJOR**, as the compatibility chain is, so a family may hold a
 major-only `v1~` beside a minor-bearing `v2.0~` (`database.sql`). Three of the twelve table rows
@@ -813,26 +825,24 @@ stores it is a rule that **silently never fires** rather than one that fails lou
 own family and that an Instance probes Instance spellings.
 
 **Verification:**
-- [x] Gear tests, all three backends (see [Commands](#commands)) — 501 on `SQLite`; `make test-types-registry-db` green on `PostgreSQL` and `MySQL`. No new backend cases: the rules add no new SQL shape, only more `find_by_gts_id` calls, which the suite already covers
+- [x] Gear tests, all three backends (see [Commands](#commands)) — 514 on `SQLite`; `make test-types-registry-db` green on `PostgreSQL` and `MySQL`. No new backend cases: the rules add no new SQL shape, only more `find_by_gts_id` calls, which the suite already covers
 - [x] Table-driven test over shape and contiguity combinations — twelve rows, each its own database, `shape_and_contiguity_over_the_combinations`. Genuine RED→GREEN
 - [x] Test: family key derivation maps `v1~`, `v1.4~`, `v2~` to one row, and a preceding-segment minor survives verbatim — the pure half in `key_tests.rs` (unchanged from T8), the *one row* half in `one_family_row_holds_every_version_and_owns_its_members`, which also pins the owner projection
 - [x] ~~Test: concurrent first registration under two owners yields one winner~~ — **already covered, and deliberately not duplicated on `SQLite`.** `repo_backends_test.rs::family_race_yields_one_row` (eight concurrent callers, exactly one `created`) and `family_race_inside_a_transaction_yields_one_row` (the loser keeps reading in the same transaction) are T4's, on both container backends. A `SQLite` version cannot exist: a second concurrent writer fails the whole transaction with `database is locked` rather than losing a unique-key race — measured, not assumed. `family_test.rs` carries a named placeholder test pointing at the two that do cover it. *"Two owners"* is P1 language; P0 fixes every row to `ownership_scope = 1` (ceiling C6)
+- [x] Tests: a creation holds the family lock across its transaction; configured contention returns `FamilyLockUnavailable`, then the same operation succeeds after the blocker releases. Lock tests use unique file-backed SQLite DSNs so their toolkit lock namespaces cannot collide under parallel test execution
 
-**Gap raised rather than closed: there is no family lock.** `database.sql` and SPEC §8.1 step 4.2
-both describe locking the family row, and `version_family_repo::create_or_get` already documents
-that it **is not** one — the secure query builder exposes no lock clause. So two concurrent
-admissions of two *different new* members of one family can both pass their shape check and both
-commit, leaving a family that violates minor-shape uniformity. This is **not new to T12**: T10's
-kind rule has the identical hole, and the unique key on `gts_id` closes only the same-identifier
-race. The mechanism exists — `Db::try_lock`, an advisory lock working on all three backends — and
-`VersionFamilyRepo::lock_order` is already its ordering half, so the fix is service-layer wiring
-rather than new infrastructure. It is not free: the `SQLite` lock scope is keyed on the DSN, and
-every test using `sqlite::memory:` shares one scope through markers in a **cross-process** cache
-directory, so contending test binaries would serialize against each other. Decide at Checkpoint 2
-whether that wiring belongs to T15 (which already owns bounded retry) or to its own task.
+**Family-lock gap closed.** `worker::lock_families` takes toolkit advisory locks in canonical
+`family::lock_order` before opening the commit transaction and holds them through every family
+rule and entity insert. Acquisition uses the enforced `worker.family_lock_timeout`; contention
+returns retryable `503 Service Unavailable` with `Retry-After`, while any guards accumulated
+before either timeout or a fatal acquisition error are explicitly released through the same
+helper as the successful commit path. `SQLite` keeps its toolkit-defined DSN-keyed lock scope, so
+tests use unique database files where contention matters rather than assuming row-lock semantics
+that SQLite does not provide. A timeout leaves the operation non-terminal; recovery is a replay
+under the same `Idempotency-Key`, which `submit`'s `!terminal` branch re-drives.
 
 **Dependencies:** T10, T11
-**Files touched:** `TR/src/domain/family.rs` → `TR/src/domain/family/{mod,key,key_tests,rules,rules_tests}.rs`, `TR/src/domain/{mod,enums}.rs`, `TR/src/domain/admission/unit.rs`, `TR/tests/family_test.rs`
+**Files touched:** `TR/src/domain/family.rs` → `TR/src/domain/family/{mod,key,key_tests,rules,rules_tests}.rs`, `TR/src/domain/{mod,enums}.rs`, `TR/src/domain/admission/{unit,worker}.rs`, `TR/src/config.rs`, `TR/src/api/rest/{error,routes}.rs`, `TR/tests/{family_test,config_test,common/mod}.rs`
 **Scope:** M
 
 ---
@@ -992,7 +1002,7 @@ rejected with its own reason, never collapsed into `Incompatible`.
 - [ ] `compare_documents` is the only comparison entry point; `is_minor_compatible` is not used
 - [ ] `CompatibilityVerdict::Unknown` fails the candidate with a reason distinct from `Incompatible` (`principle-fail-closed`)
 - [ ] Every admitted revision records `gts_spec_version`, `gts_impl_version` and `compat_forced`
-- [ ] `force` waives exactly one cross-minor check, only where the deployment enabled it and the candidate has such a check to waive
+- [ ] `force` waives exactly one cross-minor check, only where the deployment enabled it and the candidate has such a check to waive; this removes `ForceCompatibilityUnavailable` and carries the accepted flag into `compat_forced`
 - [ ] Major-0 candidates get no baseline and no verdict
 
 **Verification:**

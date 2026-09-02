@@ -116,7 +116,7 @@ impl EntityStore for Repos {
         entity_id: i64,
         expected_resource_version: i64,
         now: OffsetDateTime,
-    ) -> Result<bool, ScopeError> {
+    ) -> Result<Option<i64>, ScopeError> {
         EntityRepo::compare_and_swap_version(tx, scope, entity_id, expected_resource_version, now)
             .await
     }

@@ -221,16 +221,18 @@ async fn cas_reports_by_affected_rows(db: &Provider, family_id: i64, backend: &s
         .expect("the identifier is free");
     assert_eq!(row.resource_version, 1);
 
-    assert!(
+    assert_eq!(
         EntityRepo::compare_and_swap_version(&conn, &scope, row.id, 1, NOW)
             .await
             .expect("cas"),
-        "a CAS against the current version must succeed on {backend}"
+        Some(2),
+        "a successful CAS returns the value it wrote on {backend}"
     );
-    assert!(
-        !EntityRepo::compare_and_swap_version(&conn, &scope, row.id, 1, NOW)
+    assert_eq!(
+        EntityRepo::compare_and_swap_version(&conn, &scope, row.id, 1, NOW)
             .await
             .expect("a stale CAS reports failure rather than erroring"),
+        None,
         "a stale expected version must affect zero rows on {backend}"
     );
     let reread = EntityRepo::find_by_gts_id(&conn, &scope, gts_id)
@@ -562,7 +564,11 @@ async fn snapshot_read_does_not_see_a_mid_read_commit(
                 })
                 .await
                 .expect("writer task")?;
-                assert!(moved, "the concurrent writer must win its CAS on {named}");
+                assert_eq!(
+                    moved,
+                    Some(expected + 1),
+                    "the concurrent writer must win its CAS on {named}"
+                );
 
                 let second = EntityRepo::find_by_gts_id(tx, &allow_all(), ID)
                     .await?
@@ -595,7 +601,11 @@ async fn snapshot_read_does_not_see_a_mid_read_commit(
     )
     .await
     .expect("cas");
-    assert!(moved, "control CAS must succeed on {backend}");
+    assert_eq!(
+        moved,
+        Some(before.resource_version + 1),
+        "control CAS must succeed on {backend}"
+    );
     let after = EntityRepo::find_by_gts_id(&conn, &allow_all(), ID)
         .await
         .expect("read")

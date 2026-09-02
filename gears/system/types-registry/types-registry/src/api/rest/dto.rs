@@ -463,7 +463,8 @@ pub struct SubmitEntityDto {
     #[serde(default)]
     pub expected_resource_version: Option<i64>,
     /// ADR-0004 `force`: waive one cross-minor compatibility check. Refused where
-    /// the deployment disallows it, or where the candidate has no such check.
+    /// the deployment disallows it, where the candidate has no such check, and
+    /// until T17 can evaluate the check and persist the waiver provenance.
     #[serde(default)]
     pub force: Option<bool>,
 }

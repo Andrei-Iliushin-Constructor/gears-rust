@@ -39,8 +39,8 @@ pub enum WorkerError {
     /// **Retryable, not terminal**: the value is not wrong, its type has not landed
     /// yet. A terminal failure would make the outcome depend on the order two
     /// unrelated submissions reached the worker; a redelivery re-reads and succeeds.
-    /// Until T21 there is no outbox, so it surfaces inline as a `500` like every
-    /// other `WorkerError`.
+    /// Until T21 there is no outbox, so this condition surfaces inline as an
+    /// opaque `500`; lock contention is the separate retryable `503` case.
     #[error("instance '{gts_id}' conforms to '{type_id}', which has no current revision")]
     ConformingTypeAbsent { gts_id: String, type_id: String },
     /// An entity row exists with no matching current-state row, or with one of the
@@ -61,7 +61,19 @@ pub enum WorkerError {
     /// budget. Contention, not a statement about the candidate: a redelivery takes
     /// the lock and admits.
     #[error("could not acquire the version-family lock for '{family_key}' in time")]
-    FamilyLockUnavailable { family_key: String },
+    FamilyLockUnavailable {
+        family_key: String,
+        retry_after_seconds: u64,
+    },
+    /// The entity version is a monotonic persisted identity and cannot be
+    /// advanced beyond the storage type's ceiling.
+    #[error("entity '{gts_id}' cannot advance resource_version after i64::MAX")]
+    ResourceVersionExhausted { gts_id: String },
+    /// The revision counter is part of persisted identity and must never wrap or
+    /// saturate onto the current revision number. The surrounding transaction
+    /// rolls the already-executed resource-version CAS back on this error.
+    #[error("entity '{gts_id}' cannot allocate a revision after i32::MAX")]
+    RevisionNumberExhausted { gts_id: String },
     #[error("storage failure during admission: {0}")]
     Storage(#[from] ScopeError),
     #[error("database failure during admission: {0}")]

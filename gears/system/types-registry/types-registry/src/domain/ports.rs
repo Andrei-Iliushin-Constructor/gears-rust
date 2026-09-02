@@ -520,8 +520,9 @@ pub trait EntityStore: Send + Sync {
     /// The check is in the statement's `WHERE`, so there is no window between reading
     /// the version and moving it. The lifecycle is there for the same reason: a
     /// deletion can commit between the caller's read and this call, and a revision
-    /// must not resurrect a tombstone. `false` is a lost race, which the caller turns
-    /// into `precondition_failed` — never a fault.
+    /// must not resurrect a tombstone. `None` is a lost race, which the caller turns
+    /// into `precondition_failed`; `Some(next)` is the value the database actually
+    /// committed, so the domain never reconstructs it independently.
     async fn compare_and_swap_version(
         &self,
         tx: &DbTx<'_>,
@@ -529,7 +530,7 @@ pub trait EntityStore: Send + Sync {
         entity_id: i64,
         expected_resource_version: i64,
         now: OffsetDateTime,
-    ) -> Result<bool, ScopeError>;
+    ) -> Result<Option<i64>, ScopeError>;
 }
 
 /// Authored revisions and the current-state row.
