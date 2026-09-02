@@ -42,7 +42,6 @@ pub trait RepoRepository: Send + Sync {
         record: RepoRecord,
     ) -> Result<Repo, DomainError>;
 
-    /// `after`: keyset cursor — only rows whose `full_name` sorts after it.
     /// One page of mirrored repositories, honouring the caller's `OData`
     /// `$filter`, `$orderby`, `$top` and cursor.
     async fn list(
@@ -50,6 +49,14 @@ pub trait RepoRepository: Send + Sync {
         scope: &AccessScope,
         query: &ODataQuery,
     ) -> Result<Page<Repo>, DomainError>;
+
+    /// One offset-addressed page, for the GitHub-compatible surface, which
+    /// numbers its pages instead of carrying a cursor.
+    async fn list_window(
+        &self,
+        scope: &AccessScope,
+        window: PageWindow,
+    ) -> Result<Vec<Repo>, DomainError>;
 
     async fn find_by_full_name(
         &self,
@@ -86,6 +93,28 @@ pub struct IssueRecord {
     /// How many comments GitHub reports on it.
     pub comments_count: Option<i64>,
     pub locked: Option<bool>,
+}
+
+/// The slice of a listing a caller asked for: how many rows, and how many to
+/// skip first. The skip is pushed into SQL so a request for page 50 does not
+/// read the 49 pages before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageWindow {
+    pub limit: u64,
+    pub offset: u64,
+}
+
+impl PageWindow {
+    #[must_use]
+    pub const fn new(limit: u64, offset: u64) -> Self {
+        Self { limit, offset }
+    }
+
+    /// The first `limit` rows.
+    #[must_use]
+    pub const fn first(limit: u64) -> Self {
+        Self::new(limit, 0)
+    }
 }
 
 /// GitHub's list-endpoint filters for issues and pull requests.
@@ -203,7 +232,7 @@ pub trait IssueRepository: Send + Sync {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
         filter: ListingFilter,
     ) -> Result<Vec<Issue>, DomainError>;
 
@@ -288,7 +317,7 @@ pub trait PullRequestRepository: Send + Sync {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
         filter: ListingFilter,
     ) -> Result<Vec<PullRequest>, DomainError>;
 
@@ -340,7 +369,7 @@ pub trait CommitRepository: Send + Sync {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Commit>, DomainError>;
 
     async fn find_by_sha(
@@ -389,7 +418,7 @@ pub trait CommentRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         issue_number: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Comment>, DomainError>;
     /// Hard-delete this repo's rows whose `extracted_at` predates
     /// `extracted_before` — rows the sync that set the watermark did not
@@ -452,7 +481,7 @@ pub trait ReviewCommentRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         pull_number: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<ReviewComment>, DomainError>;
     /// Hard-delete this repo's rows whose `extracted_at` predates
     /// `extracted_before` — rows the sync that set the watermark did not
@@ -495,7 +524,7 @@ pub trait ReviewRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         pull_number: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Review>, DomainError>;
 }
 
@@ -524,7 +553,7 @@ pub trait LabelRepository: Send + Sync {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Label>, DomainError>;
     /// Hard-delete this repo's rows whose `extracted_at` predates
     /// `extracted_before` — rows the sync that set the watermark did not
@@ -570,7 +599,7 @@ pub trait MilestoneRepository: Send + Sync {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Milestone>, DomainError>;
     /// Hard-delete this repo's rows whose `extracted_at` predates
     /// `extracted_before` — rows the sync that set the watermark did not
@@ -617,7 +646,7 @@ pub trait ReleaseRepository: Send + Sync {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Release>, DomainError>;
     /// Hard-delete this repo's rows whose `extracted_at` predates
     /// `extracted_before` — rows the sync that set the watermark did not
@@ -654,7 +683,7 @@ pub trait BranchRepository: Send + Sync {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Branch>, DomainError>;
     /// Hard-delete this repo's rows whose `extracted_at` predates
     /// `extracted_before` — rows the sync that set the watermark did not
@@ -701,7 +730,7 @@ pub trait ContributorRepository: Send + Sync {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Contributor>, DomainError>;
 }
 
@@ -742,7 +771,7 @@ pub trait WorkflowRunRepository: Send + Sync {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<WorkflowRun>, DomainError>;
 }
 
@@ -778,7 +807,7 @@ pub trait PullRequestFileRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         pull_number: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<PullRequestFile>, DomainError>;
 }
 
@@ -804,7 +833,7 @@ pub trait TagRepository: Send + Sync {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Tag>, DomainError>;
     /// Hard-delete this repo's rows whose `extracted_at` predates
     /// `extracted_before` — rows the sync that set the watermark did not
@@ -914,7 +943,7 @@ pub trait CommitCommentRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         commit_sha: &str,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<CommitComment>, DomainError>;
 }
 
@@ -948,7 +977,7 @@ pub trait IssueEventRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         issue_number: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<IssueEvent>, DomainError>;
 }
 
@@ -981,7 +1010,7 @@ pub trait DeploymentRepository: Send + Sync {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Deployment>, DomainError>;
 }
 
@@ -1013,7 +1042,7 @@ pub trait PullRequestCommitRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         pull_number: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<PullRequestCommit>, DomainError>;
 }
 
@@ -1047,7 +1076,7 @@ pub trait CommitStatusRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         commit_sha: &str,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<CommitStatus>, DomainError>;
 }
 
@@ -1091,7 +1120,7 @@ pub trait WorkflowJobRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         run_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<WorkflowJob>, DomainError>;
 }
 
@@ -1121,7 +1150,7 @@ pub trait IssueReactionRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         issue_number: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<IssueReaction>, DomainError>;
 }
 
@@ -1169,7 +1198,7 @@ pub trait CheckRunRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         head_sha: &str,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<CheckRun>, DomainError>;
 }
 
@@ -1200,7 +1229,7 @@ pub trait IssueTimelineRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         issue_number: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<IssueTimelineEvent>, DomainError>;
 
     /// Drop these issues' timelines before they are rewritten.

@@ -24,7 +24,7 @@ use super::repo::{
     DeploymentRepository, IssueEventRecord, IssueEventRepository, IssueReactionRecord,
     IssueReactionRepository, IssueRecord, IssueRepository, IssueTimelineEventRecord,
     IssueTimelineRepository, LabelRecord, LabelRepository, ListingFilter, MilestoneRecord,
-    MilestoneRepository, PullRequestCommitRecord, PullRequestCommitRepository,
+    MilestoneRepository, PageWindow, PullRequestCommitRecord, PullRequestCommitRepository,
     PullRequestFileRecord, PullRequestFileRepository, PullRequestRecord, PullRequestRepository,
     ReleaseRecord, ReleaseRepository, RepoRecord, RepoRepository, ReviewCommentRecord,
     ReviewCommentRepository, ReviewRecord, ReviewRepository, ReviewThreadRecord,
@@ -52,9 +52,6 @@ async fn release_sync_lock(lock: toolkit_db::DbLockGuard, lock_key: &str) {
 /// it, and it is what stops a slow upstream from holding the per-repo
 /// advisory lock indefinitely.
 const SYNC_FETCH_BUDGET: std::time::Duration = std::time::Duration::from_mins(30);
-
-/// Rows a listing returns when the caller asks for no `$top`.
-const DEFAULT_LIST_LIMIT: u64 = 50;
 
 pub(crate) type DbProvider = toolkit_db::DBProvider<toolkit_db::DbError>;
 
@@ -528,6 +525,31 @@ impl Service {
         self.repo.list(&scope, query).await
     }
 
+    /// One numbered page of mirrored repositories, for the
+    /// GitHub-compatible `GET /user/repos`.
+    ///
+    /// # Errors
+    /// `Forbidden` on PDP denial, `Database`/`Internal` on storage failures.
+    pub async fn list_repos_page(
+        &self,
+        ctx: &SecurityContext,
+        window: PageWindow,
+    ) -> Result<Vec<Repo>, DomainError> {
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &REPO_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await?;
+
+        self.repo.list_window(&scope, window).await
+    }
+
     /// Insert or update a mirrored repository row for the caller's tenant.
     ///
     /// # Errors
@@ -567,7 +589,7 @@ impl Service {
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
-        query: &ODataQuery,
+        window: PageWindow,
         filter: ListingFilter,
     ) -> Result<(Page<Issue>, u64), DomainError> {
         let scope = self
@@ -589,10 +611,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .issues
-            .list_by_repo(&scope, repository.id, limit, filter)
+            .list_by_repo(&scope, repository.id, window, filter)
             .await?;
 
         // Counted on the scope and repository already resolved above: the
@@ -609,7 +630,7 @@ impl Service {
                 PageInfo {
                     next_cursor: None,
                     prev_cursor: None,
-                    limit,
+                    limit: window.limit,
                 },
             ),
             total,
@@ -671,7 +692,7 @@ impl Service {
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
-        query: &ODataQuery,
+        window: PageWindow,
         filter: ListingFilter,
     ) -> Result<(Page<PullRequest>, u64), DomainError> {
         let scope = self
@@ -693,10 +714,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .pull_requests
-            .list_by_repo(&scope, repository.id, limit, filter)
+            .list_by_repo(&scope, repository.id, window, filter)
             .await?;
 
         // Counted on the scope and repository already resolved above: the
@@ -713,7 +733,7 @@ impl Service {
                 PageInfo {
                     next_cursor: None,
                     prev_cursor: None,
-                    limit,
+                    limit: window.limit,
                 },
             ),
             total,
@@ -771,7 +791,7 @@ impl Service {
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<(Page<Commit>, u64), DomainError> {
         let scope = self
             .policy_enforcer
@@ -792,10 +812,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .commits
-            .list_by_repo(&scope, repository.id, limit)
+            .list_by_repo(&scope, repository.id, window)
             .await?;
 
         // Counted on the scope and repository already resolved above: the
@@ -809,7 +828,7 @@ impl Service {
                 PageInfo {
                     next_cursor: None,
                     prev_cursor: None,
-                    limit,
+                    limit: window.limit,
                 },
             ),
             total,
@@ -869,7 +888,7 @@ impl Service {
         owner: &str,
         name: &str,
         issue_number: i64,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<Page<Comment>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -890,10 +909,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .comments
-            .list_by_issue(&scope, repository.id, issue_number, limit)
+            .list_by_issue(&scope, repository.id, issue_number, window)
             .await?;
 
         Ok(Page::new(
@@ -901,7 +919,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit,
+                limit: window.limit,
             },
         ))
     }
@@ -957,7 +975,7 @@ impl Service {
         owner: &str,
         name: &str,
         pull_number: i64,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<Page<ReviewComment>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -978,10 +996,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .review_comments
-            .list_by_pull(&scope, repository.id, pull_number, limit)
+            .list_by_pull(&scope, repository.id, pull_number, window)
             .await?;
 
         Ok(Page::new(
@@ -989,7 +1006,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit,
+                limit: window.limit,
             },
         ))
     }
@@ -1045,7 +1062,7 @@ impl Service {
         owner: &str,
         name: &str,
         pull_number: i64,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<Page<Review>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -1066,10 +1083,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .reviews
-            .list_by_pull(&scope, repository.id, pull_number, limit)
+            .list_by_pull(&scope, repository.id, pull_number, window)
             .await?;
 
         Ok(Page::new(
@@ -1077,7 +1093,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit,
+                limit: window.limit,
             },
         ))
     }
@@ -1132,7 +1148,7 @@ impl Service {
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<Page<Label>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -1153,10 +1169,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .labels
-            .list_by_repo(&scope, repository.id, limit)
+            .list_by_repo(&scope, repository.id, window)
             .await?;
 
         Ok(Page::new(
@@ -1164,7 +1179,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit,
+                limit: window.limit,
             },
         ))
     }
@@ -1219,7 +1234,7 @@ impl Service {
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<Page<Milestone>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -1240,10 +1255,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .milestones
-            .list_by_repo(&scope, repository.id, limit)
+            .list_by_repo(&scope, repository.id, window)
             .await?;
 
         Ok(Page::new(
@@ -1251,7 +1265,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit,
+                limit: window.limit,
             },
         ))
     }
@@ -1306,7 +1320,7 @@ impl Service {
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<Page<Release>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -1327,10 +1341,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .releases
-            .list_by_repo(&scope, repository.id, limit)
+            .list_by_repo(&scope, repository.id, window)
             .await?;
 
         Ok(Page::new(
@@ -1338,7 +1351,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit,
+                limit: window.limit,
             },
         ))
     }
@@ -1393,7 +1406,7 @@ impl Service {
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<Page<Branch>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -1414,10 +1427,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .branches
-            .list_by_repo(&scope, repository.id, limit)
+            .list_by_repo(&scope, repository.id, window)
             .await?;
 
         Ok(Page::new(
@@ -1425,7 +1437,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit,
+                limit: window.limit,
             },
         ))
     }
@@ -1480,7 +1492,7 @@ impl Service {
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<Page<Contributor>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -1501,10 +1513,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .contributors
-            .list_by_repo(&scope, repository.id, limit)
+            .list_by_repo(&scope, repository.id, window)
             .await?;
 
         Ok(Page::new(
@@ -1512,7 +1523,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit,
+                limit: window.limit,
             },
         ))
     }
@@ -1564,7 +1575,7 @@ impl Service {
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<(Page<WorkflowRun>, u64), DomainError> {
         let scope = self
             .policy_enforcer
@@ -1585,10 +1596,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .workflow_runs
-            .list_by_repo(&scope, repository.id, limit)
+            .list_by_repo(&scope, repository.id, window)
             .await?;
 
         // Counted on the scope and repository already resolved above: the
@@ -1605,7 +1615,7 @@ impl Service {
                 PageInfo {
                     next_cursor: None,
                     prev_cursor: None,
-                    limit,
+                    limit: window.limit,
                 },
             ),
             total,
@@ -1663,7 +1673,7 @@ impl Service {
         owner: &str,
         name: &str,
         pull_number: i64,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<Page<PullRequestFile>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -1684,10 +1694,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .pull_request_files
-            .list_by_pull(&scope, repository.id, pull_number, limit)
+            .list_by_pull(&scope, repository.id, pull_number, window)
             .await?;
 
         Ok(Page::new(
@@ -1695,7 +1704,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit,
+                limit: window.limit,
             },
         ))
     }
@@ -1753,7 +1762,7 @@ impl Service {
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<Page<Tag>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -1774,15 +1783,17 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
-        let items = self.tags.list_by_repo(&scope, repository.id, limit).await?;
+        let items = self
+            .tags
+            .list_by_repo(&scope, repository.id, window)
+            .await?;
 
         Ok(Page::new(
             items,
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit,
+                limit: window.limit,
             },
         ))
     }
@@ -1991,7 +2002,7 @@ impl Service {
         owner: &str,
         name: &str,
         commit_sha: &str,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<Page<CommitComment>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -2012,10 +2023,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .commit_comments
-            .list_by_commit(&scope, repository.id, commit_sha, limit)
+            .list_by_commit(&scope, repository.id, commit_sha, window)
             .await?;
 
         Ok(Page::new(
@@ -2023,7 +2033,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit,
+                limit: window.limit,
             },
         ))
     }
@@ -2079,7 +2089,7 @@ impl Service {
         owner: &str,
         name: &str,
         issue_number: i64,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<Page<IssueEvent>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -2100,10 +2110,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .issue_events
-            .list_by_issue(&scope, repository.id, issue_number, limit)
+            .list_by_issue(&scope, repository.id, issue_number, window)
             .await?;
 
         Ok(Page::new(
@@ -2111,7 +2120,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit,
+                limit: window.limit,
             },
         ))
     }
@@ -2166,7 +2175,7 @@ impl Service {
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<Page<Deployment>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -2187,10 +2196,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .deployments
-            .list_by_repo(&scope, repository.id, limit)
+            .list_by_repo(&scope, repository.id, window)
             .await?;
 
         Ok(Page::new(
@@ -2198,7 +2206,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit,
+                limit: window.limit,
             },
         ))
     }
@@ -2254,7 +2262,7 @@ impl Service {
         owner: &str,
         name: &str,
         pull_number: i64,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<Page<PullRequestCommit>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -2275,10 +2283,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .pull_request_commits
-            .list_by_pull(&scope, repository.id, pull_number, limit)
+            .list_by_pull(&scope, repository.id, pull_number, window)
             .await?;
 
         Ok(Page::new(
@@ -2286,7 +2293,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit,
+                limit: window.limit,
             },
         ))
     }
@@ -2344,7 +2351,7 @@ impl Service {
         owner: &str,
         name: &str,
         commit_sha: &str,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<Page<CommitStatus>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -2365,10 +2372,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .commit_statuses
-            .list_by_commit(&scope, repository.id, commit_sha, limit)
+            .list_by_commit(&scope, repository.id, commit_sha, window)
             .await?;
 
         Ok(Page::new(
@@ -2376,7 +2382,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit,
+                limit: window.limit,
             },
         ))
     }
@@ -2432,7 +2438,7 @@ impl Service {
         owner: &str,
         name: &str,
         run_id: i64,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<(Page<WorkflowJob>, u64), DomainError> {
         let scope = self
             .policy_enforcer
@@ -2453,10 +2459,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .workflow_jobs
-            .list_by_run(&scope, repository.id, run_id, limit)
+            .list_by_run(&scope, repository.id, run_id, window)
             .await?;
 
         // Counted on the scope and repository already resolved above: the
@@ -2473,7 +2478,7 @@ impl Service {
                 PageInfo {
                     next_cursor: None,
                     prev_cursor: None,
-                    limit,
+                    limit: window.limit,
                 },
             ),
             total,
@@ -2530,7 +2535,7 @@ impl Service {
         owner: &str,
         name: &str,
         issue_number: i64,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<Page<IssueReaction>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -2551,10 +2556,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .issue_reactions
-            .list_by_issue(&scope, repository.id, issue_number, limit)
+            .list_by_issue(&scope, repository.id, issue_number, window)
             .await?;
 
         Ok(Page::new(
@@ -2562,7 +2566,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit,
+                limit: window.limit,
             },
         ))
     }
@@ -2617,7 +2621,7 @@ impl Service {
         owner: &str,
         name: &str,
         head_sha: &str,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<(Page<CheckRun>, u64), DomainError> {
         let scope = self
             .policy_enforcer
@@ -2638,10 +2642,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .check_runs
-            .list_by_commit(&scope, repository.id, head_sha, limit)
+            .list_by_commit(&scope, repository.id, head_sha, window)
             .await?;
 
         // Counted on the scope and repository already resolved above: the
@@ -2658,7 +2661,7 @@ impl Service {
                 PageInfo {
                     next_cursor: None,
                     prev_cursor: None,
-                    limit,
+                    limit: window.limit,
                 },
             ),
             total,
@@ -2716,7 +2719,7 @@ impl Service {
         owner: &str,
         name: &str,
         issue_number: i64,
-        query: &ODataQuery,
+        window: PageWindow,
     ) -> Result<Page<IssueTimelineEvent>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -2737,10 +2740,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .issue_timeline
-            .list_by_issue(&scope, repository.id, issue_number, limit)
+            .list_by_issue(&scope, repository.id, issue_number, window)
             .await?;
 
         Ok(Page::new(
@@ -2748,7 +2750,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit,
+                limit: window.limit,
             },
         ))
     }

@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::domain::ports::github::{FetchedRepository, Listing, ListingCompleteness};
-use crate::domain::repo::SyncWriter;
+use crate::domain::repo::{PageWindow, SyncWriter};
 use crate::domain::service::DbProvider;
 use crate::infra::storage::odata_mapper::{
     CommitFileField, CommitFileODataMapper, RepoField, RepoODataMapper, ReviewThreadField,
@@ -153,6 +153,15 @@ impl RepoRepository for SeaOrmRepoRepository {
         repo_list_in(&conn, scope, query).await
     }
 
+    async fn list_window(
+        &self,
+        scope: &AccessScope,
+        window: PageWindow,
+    ) -> Result<Vec<Repo>, DomainError> {
+        let conn = self.db.conn()?;
+        repo_list_window_in(&conn, scope, window).await
+    }
+
     async fn find_by_full_name(
         &self,
         scope: &AccessScope,
@@ -235,11 +244,11 @@ impl IssueRepository for SeaOrmIssueRepository {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
         filter: ListingFilter,
     ) -> Result<Vec<Issue>, DomainError> {
         let conn = self.db.conn()?;
-        issue_list_by_repo_in(&conn, scope, repo_id, limit, filter).await
+        issue_list_by_repo_in(&conn, scope, repo_id, window, filter).await
     }
     async fn find_by_number(
         &self,
@@ -333,11 +342,11 @@ impl PullRequestRepository for SeaOrmPullRequestRepository {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
         filter: ListingFilter,
     ) -> Result<Vec<PullRequest>, DomainError> {
         let conn = self.db.conn()?;
-        pull_request_list_by_repo_in(&conn, scope, repo_id, limit, filter).await
+        pull_request_list_by_repo_in(&conn, scope, repo_id, window, filter).await
     }
     async fn find_by_number(
         &self,
@@ -408,10 +417,10 @@ impl CommitRepository for SeaOrmCommitRepository {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Commit>, DomainError> {
         let conn = self.db.conn()?;
-        commit_list_by_repo_in(&conn, scope, repo_id, limit).await
+        commit_list_by_repo_in(&conn, scope, repo_id, window).await
     }
     async fn find_by_sha(
         &self,
@@ -477,10 +486,10 @@ impl CommentRepository for SeaOrmCommentRepository {
         scope: &AccessScope,
         repo_id: i64,
         issue_number: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Comment>, DomainError> {
         let conn = self.db.conn()?;
-        comment_list_by_issue_in(&conn, scope, repo_id, issue_number, limit).await
+        comment_list_by_issue_in(&conn, scope, repo_id, issue_number, window).await
     }
 }
 
@@ -554,10 +563,10 @@ impl ReviewCommentRepository for SeaOrmReviewCommentRepository {
         scope: &AccessScope,
         repo_id: i64,
         pull_number: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<ReviewComment>, DomainError> {
         let conn = self.db.conn()?;
-        review_comment_list_by_pull_in(&conn, scope, repo_id, pull_number, limit).await
+        review_comment_list_by_pull_in(&conn, scope, repo_id, pull_number, window).await
     }
 }
 
@@ -605,10 +614,10 @@ impl ReviewRepository for SeaOrmReviewRepository {
         scope: &AccessScope,
         repo_id: i64,
         pull_number: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Review>, DomainError> {
         let conn = self.db.conn()?;
-        review_list_by_pull_in(&conn, scope, repo_id, pull_number, limit).await
+        review_list_by_pull_in(&conn, scope, repo_id, pull_number, window).await
     }
 }
 
@@ -662,10 +671,10 @@ impl LabelRepository for SeaOrmLabelRepository {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Label>, DomainError> {
         let conn = self.db.conn()?;
-        label_list_by_repo_in(&conn, scope, repo_id, limit).await
+        label_list_by_repo_in(&conn, scope, repo_id, window).await
     }
 }
 
@@ -726,10 +735,10 @@ impl MilestoneRepository for SeaOrmMilestoneRepository {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Milestone>, DomainError> {
         let conn = self.db.conn()?;
-        milestone_list_by_repo_in(&conn, scope, repo_id, limit).await
+        milestone_list_by_repo_in(&conn, scope, repo_id, window).await
     }
 }
 
@@ -789,10 +798,10 @@ impl ReleaseRepository for SeaOrmReleaseRepository {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Release>, DomainError> {
         let conn = self.db.conn()?;
-        release_list_by_repo_in(&conn, scope, repo_id, limit).await
+        release_list_by_repo_in(&conn, scope, repo_id, window).await
     }
 }
 
@@ -844,10 +853,10 @@ impl BranchRepository for SeaOrmBranchRepository {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Branch>, DomainError> {
         let conn = self.db.conn()?;
-        branch_list_by_repo_in(&conn, scope, repo_id, limit).await
+        branch_list_by_repo_in(&conn, scope, repo_id, window).await
     }
 }
 
@@ -897,10 +906,10 @@ impl ContributorRepository for SeaOrmContributorRepository {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Contributor>, DomainError> {
         let conn = self.db.conn()?;
-        contributor_list_by_repo_in(&conn, scope, repo_id, limit).await
+        contributor_list_by_repo_in(&conn, scope, repo_id, window).await
     }
 }
 
@@ -958,10 +967,10 @@ impl WorkflowRunRepository for SeaOrmWorkflowRunRepository {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<WorkflowRun>, DomainError> {
         let conn = self.db.conn()?;
-        workflow_run_list_by_repo_in(&conn, scope, repo_id, limit).await
+        workflow_run_list_by_repo_in(&conn, scope, repo_id, window).await
     }
 }
 
@@ -1013,10 +1022,10 @@ impl PullRequestFileRepository for SeaOrmPullRequestFileRepository {
         scope: &AccessScope,
         repo_id: i64,
         pull_number: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<PullRequestFile>, DomainError> {
         let conn = self.db.conn()?;
-        pull_request_file_list_by_pull_in(&conn, scope, repo_id, pull_number, limit).await
+        pull_request_file_list_by_pull_in(&conn, scope, repo_id, pull_number, window).await
     }
 }
 
@@ -1067,10 +1076,10 @@ impl TagRepository for SeaOrmTagRepository {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Tag>, DomainError> {
         let conn = self.db.conn()?;
-        tag_list_by_repo_in(&conn, scope, repo_id, limit).await
+        tag_list_by_repo_in(&conn, scope, repo_id, window).await
     }
 }
 
@@ -1227,10 +1236,10 @@ impl CommitCommentRepository for SeaOrmCommitCommentRepository {
         scope: &AccessScope,
         repo_id: i64,
         commit_sha: &str,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<CommitComment>, DomainError> {
         let conn = self.db.conn()?;
-        commit_comment_list_by_commit_in(&conn, scope, repo_id, commit_sha, limit).await
+        commit_comment_list_by_commit_in(&conn, scope, repo_id, commit_sha, window).await
     }
 }
 
@@ -1279,10 +1288,10 @@ impl IssueEventRepository for SeaOrmIssueEventRepository {
         scope: &AccessScope,
         repo_id: i64,
         issue_number: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<IssueEvent>, DomainError> {
         let conn = self.db.conn()?;
-        issue_event_list_by_issue_in(&conn, scope, repo_id, issue_number, limit).await
+        issue_event_list_by_issue_in(&conn, scope, repo_id, issue_number, window).await
     }
 }
 
@@ -1330,10 +1339,10 @@ impl DeploymentRepository for SeaOrmDeploymentRepository {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<Deployment>, DomainError> {
         let conn = self.db.conn()?;
-        deployment_list_by_repo_in(&conn, scope, repo_id, limit).await
+        deployment_list_by_repo_in(&conn, scope, repo_id, window).await
     }
 }
 
@@ -1383,10 +1392,10 @@ impl PullRequestCommitRepository for SeaOrmPullRequestCommitRepository {
         scope: &AccessScope,
         repo_id: i64,
         pull_number: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<PullRequestCommit>, DomainError> {
         let conn = self.db.conn()?;
-        pull_request_commit_list_by_pull_in(&conn, scope, repo_id, pull_number, limit).await
+        pull_request_commit_list_by_pull_in(&conn, scope, repo_id, pull_number, window).await
     }
 }
 
@@ -1438,10 +1447,10 @@ impl CommitStatusRepository for SeaOrmCommitStatusRepository {
         scope: &AccessScope,
         repo_id: i64,
         commit_sha: &str,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<CommitStatus>, DomainError> {
         let conn = self.db.conn()?;
-        commit_status_list_by_commit_in(&conn, scope, repo_id, commit_sha, limit).await
+        commit_status_list_by_commit_in(&conn, scope, repo_id, commit_sha, window).await
     }
 }
 
@@ -1503,10 +1512,10 @@ impl WorkflowJobRepository for SeaOrmWorkflowJobRepository {
         scope: &AccessScope,
         repo_id: i64,
         run_id: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<WorkflowJob>, DomainError> {
         let conn = self.db.conn()?;
-        workflow_job_list_by_run_in(&conn, scope, repo_id, run_id, limit).await
+        workflow_job_list_by_run_in(&conn, scope, repo_id, run_id, window).await
     }
 }
 
@@ -1554,10 +1563,10 @@ impl IssueReactionRepository for SeaOrmIssueReactionRepository {
         scope: &AccessScope,
         repo_id: i64,
         issue_number: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<IssueReaction>, DomainError> {
         let conn = self.db.conn()?;
-        issue_reaction_list_by_issue_in(&conn, scope, repo_id, issue_number, limit).await
+        issue_reaction_list_by_issue_in(&conn, scope, repo_id, issue_number, window).await
     }
 }
 
@@ -1622,10 +1631,10 @@ impl CheckRunRepository for SeaOrmCheckRunRepository {
         scope: &AccessScope,
         repo_id: i64,
         head_sha: &str,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<CheckRun>, DomainError> {
         let conn = self.db.conn()?;
-        check_run_list_by_commit_in(&conn, scope, repo_id, head_sha, limit).await
+        check_run_list_by_commit_in(&conn, scope, repo_id, head_sha, window).await
     }
 }
 
@@ -1684,10 +1693,10 @@ impl IssueTimelineRepository for SeaOrmIssueTimelineRepository {
         scope: &AccessScope,
         repo_id: i64,
         issue_number: i64,
-        limit: u64,
+        window: PageWindow,
     ) -> Result<Vec<IssueTimelineEvent>, DomainError> {
         let conn = self.db.conn()?;
-        issue_timeline_list_by_issue_in(&conn, scope, repo_id, issue_number, limit).await
+        issue_timeline_list_by_issue_in(&conn, scope, repo_id, issue_number, window).await
     }
 }
 
@@ -1758,6 +1767,24 @@ async fn repo_list_in<C: DBRunner>(
     )
     .await
     .map_err(map_odata_error)
+}
+
+async fn repo_list_window_in<C: DBRunner>(
+    conn: &C,
+    scope: &AccessScope,
+    window: PageWindow,
+) -> Result<Vec<Repo>, DomainError> {
+    let rows = RepoEntity::find()
+        .secure()
+        .scope_with(scope)
+        .order_by(repositories::Column::FullName, Order::Asc)
+        .limit(window.limit)
+        .offset(window.offset)
+        .all(conn)
+        .await
+        .map_err(map_scope_error)?;
+
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 async fn repo_find_by_full_name_in<C: DBRunner>(
@@ -1893,7 +1920,7 @@ async fn issue_list_by_repo_in<C: DBRunner>(
     conn: &C,
     scope: &AccessScope,
     repo_id: i64,
-    limit: u64,
+    window: PageWindow,
     filter: ListingFilter,
 ) -> Result<Vec<Issue>, DomainError> {
     let mut condition = sea_orm::Condition::all().add(issues::Column::RepoId.eq(repo_id));
@@ -1920,7 +1947,8 @@ async fn issue_list_by_repo_in<C: DBRunner>(
         .order_by(sort_column, direction)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(issues::Column::Number, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2089,7 +2117,7 @@ async fn pull_request_list_by_repo_in<C: DBRunner>(
     conn: &C,
     scope: &AccessScope,
     repo_id: i64,
-    limit: u64,
+    window: PageWindow,
     filter: ListingFilter,
 ) -> Result<Vec<PullRequest>, DomainError> {
     let mut condition = sea_orm::Condition::all().add(pull_requests::Column::RepoId.eq(repo_id));
@@ -2116,7 +2144,8 @@ async fn pull_request_list_by_repo_in<C: DBRunner>(
         .order_by(sort_column, direction)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(pull_requests::Column::Number, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2235,7 +2264,7 @@ async fn commit_list_by_repo_in<C: DBRunner>(
     conn: &C,
     scope: &AccessScope,
     repo_id: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<Commit>, DomainError> {
     let rows = CommitEntity::find()
         .secure()
@@ -2244,7 +2273,8 @@ async fn commit_list_by_repo_in<C: DBRunner>(
         .order_by(commits::Column::CommittedAt, Order::Desc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(commits::Column::Sha, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2348,7 +2378,7 @@ async fn comment_list_by_issue_in<C: DBRunner>(
     scope: &AccessScope,
     repo_id: i64,
     issue_number: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<Comment>, DomainError> {
     let rows = CommentEntity::find()
         .secure()
@@ -2361,7 +2391,8 @@ async fn comment_list_by_issue_in<C: DBRunner>(
         .order_by(comments::Column::CreatedAt, Order::Asc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(comments::Column::Id, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2472,7 +2503,7 @@ async fn review_comment_list_by_pull_in<C: DBRunner>(
     scope: &AccessScope,
     repo_id: i64,
     pull_number: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<ReviewComment>, DomainError> {
     let rows = ReviewCommentEntity::find()
         .secure()
@@ -2485,7 +2516,8 @@ async fn review_comment_list_by_pull_in<C: DBRunner>(
         .order_by(review_comments::Column::CreatedAt, Order::Asc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(review_comments::Column::Id, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2542,7 +2574,7 @@ async fn review_list_by_pull_in<C: DBRunner>(
     scope: &AccessScope,
     repo_id: i64,
     pull_number: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<Review>, DomainError> {
     let rows = ReviewEntity::find()
         .secure()
@@ -2553,7 +2585,8 @@ async fn review_list_by_pull_in<C: DBRunner>(
                 .add(reviews::Column::PullNumber.eq(pull_number)),
         )
         .order_by(reviews::Column::Id, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2629,14 +2662,15 @@ async fn label_list_by_repo_in<C: DBRunner>(
     conn: &C,
     scope: &AccessScope,
     repo_id: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<Label>, DomainError> {
     let rows = LabelEntity::find()
         .secure()
         .scope_with(scope)
         .filter(sea_orm::Condition::all().add(labels::Column::RepoId.eq(repo_id)))
         .order_by(labels::Column::Name, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2728,14 +2762,15 @@ async fn milestone_list_by_repo_in<C: DBRunner>(
     conn: &C,
     scope: &AccessScope,
     repo_id: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<Milestone>, DomainError> {
     let rows = MilestoneEntity::find()
         .secure()
         .scope_with(scope)
         .filter(sea_orm::Condition::all().add(milestones::Column::RepoId.eq(repo_id)))
         .order_by(milestones::Column::Number, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2825,7 +2860,7 @@ async fn release_list_by_repo_in<C: DBRunner>(
     conn: &C,
     scope: &AccessScope,
     repo_id: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<Release>, DomainError> {
     let rows = ReleaseEntity::find()
         .secure()
@@ -2834,7 +2869,8 @@ async fn release_list_by_repo_in<C: DBRunner>(
         .order_by(releases::Column::CreatedAt, Order::Desc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(releases::Column::Id, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2908,14 +2944,15 @@ async fn branch_list_by_repo_in<C: DBRunner>(
     conn: &C,
     scope: &AccessScope,
     repo_id: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<Branch>, DomainError> {
     let rows = BranchEntity::find()
         .secure()
         .scope_with(scope)
         .filter(sea_orm::Condition::all().add(branches::Column::RepoId.eq(repo_id)))
         .order_by(branches::Column::Name, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2973,7 +3010,7 @@ async fn contributor_list_by_repo_in<C: DBRunner>(
     conn: &C,
     scope: &AccessScope,
     repo_id: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<Contributor>, DomainError> {
     let rows = ContributorEntity::find()
         .secure()
@@ -2982,7 +3019,8 @@ async fn contributor_list_by_repo_in<C: DBRunner>(
         // Derived contributors carry no activity count to rank by, so
         // the unique key is the whole ordering.
         .order_by(contributors::Column::UserId, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3066,7 +3104,7 @@ async fn workflow_run_list_by_repo_in<C: DBRunner>(
     conn: &C,
     scope: &AccessScope,
     repo_id: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<WorkflowRun>, DomainError> {
     let rows = WorkflowRunEntity::find()
         .secure()
@@ -3075,7 +3113,8 @@ async fn workflow_run_list_by_repo_in<C: DBRunner>(
         .order_by(workflow_runs::Column::CreatedAt, Order::Desc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(workflow_runs::Column::Id, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3136,7 +3175,7 @@ async fn pull_request_file_list_by_pull_in<C: DBRunner>(
     scope: &AccessScope,
     repo_id: i64,
     pull_number: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<PullRequestFile>, DomainError> {
     let rows = PullRequestFileEntity::find()
         .secure()
@@ -3147,7 +3186,8 @@ async fn pull_request_file_list_by_pull_in<C: DBRunner>(
                 .add(pull_request_files::Column::PullNumber.eq(pull_number)),
         )
         .order_by(pull_request_files::Column::Filename, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3216,14 +3256,15 @@ async fn tag_list_by_repo_in<C: DBRunner>(
     conn: &C,
     scope: &AccessScope,
     repo_id: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<Tag>, DomainError> {
     let rows = TagEntity::find()
         .secure()
         .scope_with(scope)
         .filter(sea_orm::Condition::all().add(tags::Column::RepoId.eq(repo_id)))
         .order_by(tags::Column::Name, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3425,7 +3466,7 @@ async fn commit_comment_list_by_commit_in<C: DBRunner>(
     scope: &AccessScope,
     repo_id: i64,
     commit_sha: &str,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<CommitComment>, DomainError> {
     let rows = CommitCommentEntity::find()
         .secure()
@@ -3438,7 +3479,8 @@ async fn commit_comment_list_by_commit_in<C: DBRunner>(
         .order_by(commit_comments::Column::CreatedAt, Order::Asc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(commit_comments::Column::Id, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3499,7 +3541,7 @@ async fn issue_event_list_by_issue_in<C: DBRunner>(
     scope: &AccessScope,
     repo_id: i64,
     issue_number: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<IssueEvent>, DomainError> {
     let rows = IssueEventEntity::find()
         .secure()
@@ -3512,7 +3554,8 @@ async fn issue_event_list_by_issue_in<C: DBRunner>(
         .order_by(issue_events::Column::CreatedAt, Order::Asc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(issue_events::Column::Id, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3572,7 +3615,7 @@ async fn deployment_list_by_repo_in<C: DBRunner>(
     conn: &C,
     scope: &AccessScope,
     repo_id: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<Deployment>, DomainError> {
     let rows = DeploymentEntity::find()
         .secure()
@@ -3581,7 +3624,8 @@ async fn deployment_list_by_repo_in<C: DBRunner>(
         .order_by(deployments::Column::CreatedAt, Order::Desc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(deployments::Column::Id, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3638,7 +3682,7 @@ async fn pull_request_commit_list_by_pull_in<C: DBRunner>(
     scope: &AccessScope,
     repo_id: i64,
     pull_number: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<PullRequestCommit>, DomainError> {
     let rows = PullRequestCommitEntity::find()
         .secure()
@@ -3651,7 +3695,8 @@ async fn pull_request_commit_list_by_pull_in<C: DBRunner>(
         .order_by(pull_request_commits::Column::CommittedAt, Order::Asc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(pull_request_commits::Column::Sha, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3712,7 +3757,7 @@ async fn commit_status_list_by_commit_in<C: DBRunner>(
     scope: &AccessScope,
     repo_id: i64,
     commit_sha: &str,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<CommitStatus>, DomainError> {
     let rows = CommitStatusEntity::find()
         .secure()
@@ -3725,7 +3770,8 @@ async fn commit_status_list_by_commit_in<C: DBRunner>(
         .order_by(commit_statuses::Column::CreatedAt, Order::Desc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(commit_statuses::Column::Id, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3811,7 +3857,7 @@ async fn workflow_job_list_by_run_in<C: DBRunner>(
     scope: &AccessScope,
     repo_id: i64,
     run_id: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<WorkflowJob>, DomainError> {
     let rows = WorkflowJobEntity::find()
         .secure()
@@ -3822,7 +3868,8 @@ async fn workflow_job_list_by_run_in<C: DBRunner>(
                 .add(workflow_jobs::Column::RunId.eq(run_id)),
         )
         .order_by(workflow_jobs::Column::Id, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3875,7 +3922,7 @@ async fn issue_reaction_list_by_issue_in<C: DBRunner>(
     scope: &AccessScope,
     repo_id: i64,
     issue_number: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<IssueReaction>, DomainError> {
     let rows = IssueReactionEntity::find()
         .secure()
@@ -3886,7 +3933,8 @@ async fn issue_reaction_list_by_issue_in<C: DBRunner>(
                 .add(issue_reactions::Column::IssueNumber.eq(issue_number)),
         )
         .order_by(issue_reactions::Column::Id, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3978,7 +4026,7 @@ async fn check_run_list_by_commit_in<C: DBRunner>(
     scope: &AccessScope,
     repo_id: i64,
     head_sha: &str,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<CheckRun>, DomainError> {
     let rows = CheckRunEntity::find()
         .secure()
@@ -3989,7 +4037,8 @@ async fn check_run_list_by_commit_in<C: DBRunner>(
                 .add(check_runs::Column::HeadSha.eq(head_sha)),
         )
         .order_by(check_runs::Column::Id, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -4069,7 +4118,7 @@ async fn issue_timeline_list_by_issue_in<C: DBRunner>(
     scope: &AccessScope,
     repo_id: i64,
     issue_number: i64,
-    limit: u64,
+    window: PageWindow,
 ) -> Result<Vec<IssueTimelineEvent>, DomainError> {
     let rows = IssueTimelineEntity::find()
         .secure()
@@ -4080,7 +4129,8 @@ async fn issue_timeline_list_by_issue_in<C: DBRunner>(
                 .add(issue_timeline::Column::IssueNumber.eq(issue_number)),
         )
         .order_by(issue_timeline::Column::Position, Order::Asc)
-        .limit(limit)
+        .limit(window.limit)
+        .offset(window.offset)
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -4121,7 +4171,13 @@ async fn merge_known_contributors<C: DBRunner>(
         return Ok(derived);
     }
 
-    let known = contributor_list_by_repo_in(conn, scope, repo_id, CONTRIBUTOR_MERGE_LIMIT).await?;
+    let known = contributor_list_by_repo_in(
+        conn,
+        scope,
+        repo_id,
+        PageWindow::first(CONTRIBUTOR_MERGE_LIMIT),
+    )
+    .await?;
     let known: std::collections::HashMap<i64, Contributor> =
         known.into_iter().map(|c| (c.user_id, c)).collect();
 
