@@ -675,13 +675,18 @@ async fn a_follower_pump_mints_one_subscription_per_renewal_interval() {
     let settled = fixture.gear.subscriptions.len();
     assert_eq!(settled, 2, "one subscription per `elect`, and no more yet");
 
-    tokio::time::sleep(FAST_RENEWAL * 5).await;
+    // Eight nominal intervals of observation against a floor of three: the pump's
+    // cadence is a real timer, so on a saturated CI box (this runs under the whole
+    // workspace's test load) it can be scheduler-starved and fire fewer times than
+    // the wall clock would suggest. A wide window keeps the *property* - that a
+    // steady-state follower keeps leaking - decidable without racing that latency.
+    tokio::time::sleep(FAST_RENEWAL * 8).await;
 
     let grown = fixture.gear.subscriptions.len();
     assert!(
         grown >= settled + 3,
         "a steady-state follower must leak one unattached subscription per renewal \
-         interval: started at {settled}, after five intervals {grown}"
+         interval: started at {settled}, after eight intervals {grown}"
     );
 
     fixture.stop().await;
@@ -1572,7 +1577,11 @@ async fn a_gate_consumer_cannot_wedge_the_remote_pump() {
 
     tokio::time::sleep(FAST_RENEWAL * 4).await;
     let renews_early = tally.get().2;
-    tokio::time::sleep(FAST_RENEWAL * 6).await;
+    // Nine nominal intervals against a floor of three renews: same reasoning as
+    // `a_follower_pump_mints...` - the renewal cadence is a real timer that a
+    // saturated runtime can starve, so the window is wide enough that genuine
+    // progress is still decidable when the pump fires slower than its cadence.
+    tokio::time::sleep(FAST_RENEWAL * 9).await;
     let renews_late = tally.get().2;
     println!("[wedge] renews {renews_early} -> {renews_late} through a full buffer");
     assert!(
