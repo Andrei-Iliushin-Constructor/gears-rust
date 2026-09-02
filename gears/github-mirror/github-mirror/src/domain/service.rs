@@ -53,6 +53,7 @@ async fn release_sync_lock(lock: toolkit_db::DbLockGuard, lock_key: &str) {
 /// advisory lock indefinitely.
 const SYNC_FETCH_BUDGET: std::time::Duration = std::time::Duration::from_mins(30);
 
+/// Rows a listing returns when the caller asks for no `$top`.
 const DEFAULT_LIST_LIMIT: u64 = 50;
 
 pub(crate) type DbProvider = toolkit_db::DBProvider<toolkit_db::DbError>;

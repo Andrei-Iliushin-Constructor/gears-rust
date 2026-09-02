@@ -57,7 +57,7 @@ impl Gear for GithubMirrorGear {
         // letting every later fetch build garbage requests from it.
         cfg.resolved_api_base_url()
             .map_err(|e| anyhow::anyhow!("invalid github-mirror config: {e}"))?;
-        info!(api_base_url = %cfg.api_base_url, "Initializing github-mirror gear");
+        info!(gear = Self::MODULE_NAME, api_base_url = %cfg.api_base_url, "Initializing gear");
 
         let db = Arc::new(ctx.db_required()?);
         let repo = Arc::new(SeaOrmRepoRepository::new(Arc::clone(&db)));
@@ -160,7 +160,7 @@ impl RestApiCapability for GithubMirrorGear {
             .clone();
 
         let router = routes::register_routes(router, openapi, service);
-        info!("github-mirror REST routes registered");
+        info!(gear = Self::MODULE_NAME, "REST routes registered");
         Ok(router)
     }
 
@@ -181,7 +181,7 @@ struct GithubMirrorHealthcheck {
 #[async_trait]
 impl Healthcheck for GithubMirrorHealthcheck {
     fn name(&self) -> &'static str {
-        "github-mirror"
+        GithubMirrorGear::MODULE_NAME
     }
 
     /// A pooled-connection acquisition, no query — enough to catch the DB
