@@ -67,7 +67,10 @@ impl GithubMirrorConfig {
             return Err(crate::domain::error::DomainError::Validation {
                 field: "api_base_url".to_owned(),
                 message: format!(
-                    "`{}` uses http, which would send the GitHub token in cleartext;                      use https (or a loopback host for local testing)",
+                    concat!(
+                        "`{}` uses http, which would send the GitHub token in cleartext; ",
+                        "use https (or a loopback host for local testing)"
+                    ),
                     self.api_base_url
                 ),
             });

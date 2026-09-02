@@ -148,12 +148,17 @@ impl GithubPage {
     /// came back short, so on a full page `rel="last"` is omitted rather than
     /// guessed — GitHub itself always knows the total and always sends it.
     fn link_header_with_total(&self, path: &str, returned: usize, total: Option<u64>) -> HeaderMap {
-        let last_page = total.map(|total| total.div_ceil(self.per_page).max(1));
+        // Page-based paging stops at MAX_PAGED_ROWS, so a link past it would
+        // advertise a page this gear answers with 422.
+        let reachable_pages = MAX_PAGED_ROWS.checked_div(self.per_page).unwrap_or(0);
+        let last_page = total
+            .map(|total| total.div_ceil(self.per_page).max(1).min(reachable_pages))
+            .filter(|_| reachable_pages > 0);
         let is_last_page =
             last_page.map_or(returned as u64 != self.per_page, |last| self.page >= last);
 
         let mut links = Vec::new();
-        if !is_last_page {
+        if !is_last_page && self.page < reachable_pages {
             links.push(format!(
                 "<{path}?page={}&per_page={}>; rel=\"next\"",
                 self.page + 1,
@@ -241,6 +246,8 @@ pub async fn list_repos(
 fn validate_repo_path(owner: &str, name: &str) -> Result<(), DomainError> {
     for (field, value) in [("owner", owner), ("name", name)] {
         let well_formed = !value.is_empty()
+            && value != "."
+            && value != ".."
             && value.len() <= 100
             && value
                 .bytes()
@@ -495,7 +502,7 @@ pub async fn list_workflow_runs(
         .await?;
     let runs: Vec<WorkflowRunDto> = GithubPage::convert(items.items);
     let path = format!("/repos/{owner}/{name}/actions/runs");
-    let headers = page.link_header(&path, runs.len());
+    let headers = page.link_header_with_total(&path, runs.len(), Some(total));
     // GitHub's `total_count` spans every page, so it is a count, not the
     // length of the slice being served.
     let total_count = i64::try_from(total).unwrap_or(i64::MAX);
@@ -699,7 +706,7 @@ pub async fn list_workflow_jobs(
         .await?;
     let jobs: Vec<WorkflowJobDto> = GithubPage::convert(items.items);
     let path = format!("/repos/{owner}/{name}/actions/runs/{run_id}/jobs");
-    let headers = page.link_header(&path, jobs.len());
+    let headers = page.link_header_with_total(&path, jobs.len(), Some(total));
     let total_count = i64::try_from(total).unwrap_or(i64::MAX);
     Ok((headers, Json(WorkflowJobsPageDto { total_count, jobs })))
 }
@@ -716,7 +723,7 @@ pub async fn list_check_runs(
         .await?;
     let check_runs: Vec<CheckRunDto> = GithubPage::convert(items.items);
     let path = format!("/repos/{owner}/{name}/commits/{sha}/check-runs");
-    let headers = page.link_header(&path, check_runs.len());
+    let headers = page.link_header_with_total(&path, check_runs.len(), Some(total));
     let total_count = i64::try_from(total).unwrap_or(i64::MAX);
     Ok((
         headers,

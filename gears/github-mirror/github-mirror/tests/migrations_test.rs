@@ -175,6 +175,7 @@ async fn the_additive_migrations_drop_their_columns_on_rollback() {
         ("gm_issues", "extracted_at"),
         ("gm_contributors", "roles"),
         ("gm_contributors", "first_seen_at"),
+        ("gm_contributors", "last_seen_at"),
         ("gm_releases", "assets_json"),
         ("gm_review_comments", "pull_request_review_id"),
         ("gm_review_comments", "line"),
