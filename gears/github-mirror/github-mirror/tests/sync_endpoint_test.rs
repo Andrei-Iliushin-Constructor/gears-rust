@@ -663,12 +663,31 @@ async fn sync_is_idempotent() {
     );
     let router = router_for(service, ctx);
 
+    let listings = [
+        "/repos/rust-lang/rust/issues",
+        "/repos/rust-lang/rust/pulls",
+        "/repos/rust-lang/rust/commits",
+        "/repos/rust-lang/rust/labels",
+        "/repos/rust-lang/rust/milestones",
+        "/repos/rust-lang/rust/releases",
+        "/repos/rust-lang/rust/branches",
+        "/repos/rust-lang/rust/tags",
+        "/repos/rust-lang/rust/contributors",
+    ];
+
     let first = post(
         router.clone(),
         "/github-mirror/v1/repos/rust-lang/rust/sync",
     )
     .await;
     assert_eq!(first.status(), StatusCode::OK);
+
+    let mut after_first = Vec::new();
+    for path in listings {
+        let listed = body_json(get(router.clone(), path).await).await;
+        after_first.push(listed.as_array().map(Vec::len));
+    }
+
     let second = post(
         router.clone(),
         "/github-mirror/v1/repos/rust-lang/rust/sync",
@@ -676,8 +695,17 @@ async fn sync_is_idempotent() {
     .await;
     assert_eq!(second.status(), StatusCode::OK);
 
-    let repos = body_json(get(router, "/github-mirror/v1/repos").await).await;
+    let repos = body_json(get(router.clone(), "/github-mirror/v1/repos").await).await;
     assert_eq!(repos["items"].as_array().expect("items").len(), 1);
+
+    for (path, expected) in listings.into_iter().zip(after_first) {
+        let listed = body_json(get(router.clone(), path).await).await;
+        assert_eq!(
+            listed.as_array().map(Vec::len),
+            expected,
+            "{path} must hold the same rows after a second sync, not duplicates"
+        );
+    }
 }
 
 #[tokio::test]

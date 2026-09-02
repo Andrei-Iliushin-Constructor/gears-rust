@@ -117,9 +117,8 @@ pub struct FetchedRepository {
 
 /// Outbound port to GitHub's REST API (implemented in `infra/github`).
 ///
-/// Increment 1 of gears-rust#4630: fetches a repository and the first page of
-/// its issues, pull requests, and commits. Conditional requests, pagination,
-/// and rate-limit admission arrive as that issue completes.
+/// Fetches a repository and its mirrored families, walking each listing until
+/// GitHub reports no next page or the walk hits its page cap.
 #[async_trait]
 pub trait GithubPort: Send + Sync {
     async fn fetch_repository(
