@@ -20,17 +20,18 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use authz_resolver_sdk::{
-    AuthZResolverClient, AuthZResolverError, EvaluationRequest, EvaluationResponse,
-    EvaluationResponseContext, PolicyEnforcer,
+    AuthZResolverApi, EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
+    PolicyEnforcer,
     constraints::{Constraint, InPredicate, Predicate},
 };
 use sea_orm_migration::MigratorTrait;
 use toolkit::api::OpenApiRegistry;
+use toolkit::api::canonical_prelude::CanonicalError;
 use toolkit::api::operation_builder::OperationSpec;
 use toolkit_db::{
     ConnectOpts, DBProvider, DbError, connect_db, migration_runner::run_migrations_for_testing,
 };
-use toolkit_security::{SecurityContext, pep_properties};
+use toolkit_security::{PlatformSecurityContext, SecurityContext, pep_properties};
 
 use resource_group::domain::group_service::{GroupService, QueryProfile};
 use resource_group::domain::membership_service::MembershipService;
@@ -76,11 +77,12 @@ impl OpenApiRegistry for NoopOpenApiRegistry {
 struct AllowAllAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for AllowAllAuthZ {
+impl AuthZResolverApi for AllowAllAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         let tenant_id = request
             .subject
             .properties
@@ -132,7 +134,7 @@ fn make_ctx(tenant_id: Uuid) -> SecurityContext {
 }
 
 fn make_enforcer() -> PolicyEnforcer {
-    let authz: Arc<dyn AuthZResolverClient> = Arc::new(AllowAllAuthZ);
+    let authz: Arc<dyn AuthZResolverApi> = Arc::new(AllowAllAuthZ);
     PolicyEnforcer::new(authz)
 }
 
