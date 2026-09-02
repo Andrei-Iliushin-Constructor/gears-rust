@@ -16624,7 +16624,7 @@
             "description": "The authored document."
           },
           "expected_resource_version": {
-            "description": "Optimistic precondition. **Omit** to require that the identifier does not\nexist; a literal `0` is refused. Positive versions are reserved for T11\nrevisions and are synchronously refused until revisions are implemented.",
+            "description": "Optimistic precondition. **Omit** to require that the identifier does not\nexist; a literal `0` is refused. A positive version names a content\nrevision: the entity must exist at exactly that `resource_version`, and a\nmismatch fails the candidate terminally rather than rebasing it.",
             "format": "int64",
             "type": [
               "integer",
@@ -16632,7 +16632,7 @@
             ]
           },
           "force": {
-            "description": "ADR-0004 `force`: waive one cross-minor compatibility check. Refused where\nthe deployment disallows it, or where the candidate has no such check.",
+            "description": "ADR-0004 `force`: waive one cross-minor compatibility check. Refused where\nthe deployment disallows it, where the candidate has no such check, and\nuntil T17 can evaluate the check and persist the waiver provenance.",
             "type": [
               "boolean",
               "null"
@@ -50304,7 +50304,15 @@
                 }
               }
             },
-            "description": "Service Unavailable"
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Suggested delay in seconds before repeating the submission under the same Idempotency-Key; present where the family-lock budget expired",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "security": [

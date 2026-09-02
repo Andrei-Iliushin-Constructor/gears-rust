@@ -46,6 +46,27 @@ pub enum EntityKind {
     Instance,
 }
 
+impl EntityKind {
+    /// The public spelling, for a message a caller reads.
+    ///
+    /// `Display` rather than `{:?}` because a refusal naming `TypeSchema` is a
+    /// wire-visible string: `clippy::use_debug` is denied precisely so a derive's
+    /// output cannot become an API by accident.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TypeSchema => "Type Schema",
+            Self::Instance => "Registered Instance",
+        }
+    }
+}
+
+impl std::fmt::Display for EntityKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Whether an entity is live or a tombstone (ADR-0008).
 ///
 /// P0 has no managed `deprecated` state. `Deleted` entities remain readable so

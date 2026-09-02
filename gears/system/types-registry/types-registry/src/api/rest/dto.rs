@@ -457,12 +457,14 @@ pub struct SubmitEntityDto {
     /// The authored document.
     pub content: serde_json::Value,
     /// Optimistic precondition. **Omit** to require that the identifier does not
-    /// exist; a literal `0` is refused. Positive versions are reserved for T11
-    /// revisions and are synchronously refused until revisions are implemented.
+    /// exist; a literal `0` is refused. A positive version names a content
+    /// revision: the entity must exist at exactly that `resource_version`, and a
+    /// mismatch fails the candidate terminally rather than rebasing it.
     #[serde(default)]
     pub expected_resource_version: Option<i64>,
     /// ADR-0004 `force`: waive one cross-minor compatibility check. Refused where
-    /// the deployment disallows it, or where the candidate has no such check.
+    /// the deployment disallows it, where the candidate has no such check, and
+    /// until T17 can evaluate the check and persist the waiver provenance.
     #[serde(default)]
     pub force: Option<bool>,
 }
