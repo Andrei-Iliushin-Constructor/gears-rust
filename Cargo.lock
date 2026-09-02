@@ -1724,6 +1724,8 @@ dependencies = [
  "cf-gears-toolkit-gateway",
  "cf-gears-toolkit-gts",
  "cf-gears-toolkit-http",
+ "cf-gears-toolkit-http-middleware",
+ "cf-gears-toolkit-k8s-auth",
  "cf-gears-toolkit-macros",
  "cf-gears-toolkit-security",
  "cf-gears-toolkit-transport-grpc",
