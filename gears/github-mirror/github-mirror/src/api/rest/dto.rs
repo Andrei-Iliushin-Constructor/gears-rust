@@ -6,11 +6,13 @@
 //! endpoints under `/github-mirror/v1/` (PRD §5.9) keep the platform
 //! shapes.
 
+use crate::infra::storage::mapper::decode;
+
 use github_mirror_sdk::{
-    Branch, CheckRun, Comment, Commit, CommitComment, CommitFile, CommitStatus, Contributor,
-    Deployment, Issue, IssueEvent, IssueReaction, IssueTimelineEvent, Label, Milestone,
-    PullRequest, PullRequestCommit, PullRequestFile, Release, Repo, Review, ReviewComment,
-    ReviewThread, Tag, WorkflowJob, WorkflowRun,
+    Actor, Branch, CheckRun, Comment, Commit, CommitComment, CommitFile, CommitStatus, Contributor,
+    Deployment, Issue, IssueEvent, IssueReaction, IssueTimelineEvent, Label, LabelRef, Milestone,
+    PullRequest, PullRequestCommit, PullRequestFile, Release, ReleaseAsset, Repo, Review,
+    ReviewComment, ReviewThread, Tag, WorkflowJob, WorkflowRun, WorkflowStep,
 };
 use github_mirror_sdk::{MirrorStatus, SyncSummary};
 
@@ -57,90 +59,111 @@ pub struct ActorDto {
 }
 
 /// One person as the sync stored them inside an issue or pull row.
-#[derive(serde::Deserialize)]
-struct StoredActor {
-    #[serde(default)]
-    id: Option<i64>,
-    login: String,
-    #[serde(default)]
-    node_id: Option<String>,
-    #[serde(rename = "type", default)]
-    user_type: Option<String>,
-    #[serde(default)]
-    avatar_url: Option<String>,
-    #[serde(default)]
-    html_url: Option<String>,
-    #[serde(default)]
-    site_admin: Option<bool>,
-}
-
-/// One label as the sync stored it inside an issue or pull row.
-#[derive(serde::Deserialize)]
-struct StoredLabel {
-    #[serde(default)]
-    id: Option<i64>,
-    #[serde(default)]
-    node_id: Option<String>,
-    name: String,
-    #[serde(default)]
-    color: Option<String>,
-    #[serde(rename = "default", default)]
-    is_default: Option<bool>,
-    #[serde(default)]
-    description: Option<String>,
-}
-
-/// Decode one stored JSON column, reporting a corrupt value instead of
-/// silently serving an empty one: a row that fails here is a mirroring bug,
-/// and the log line carries what is needed to find the row.
-fn decode_stored<T: serde::de::DeserializeOwned>(field: &str, raw: &str) -> Option<T> {
-    match serde_json::from_str::<T>(raw) {
-        Ok(value) => Some(value),
-        Err(e) => {
-            tracing::warn!(
-                field,
-                error = %e,
-                bytes = raw.len(),
-                "stored JSON could not be decoded; serving the empty value"
-            );
-            None
+impl From<Actor> for ActorDto {
+    fn from(a: Actor) -> Self {
+        Self {
+            login: a.login,
+            id: a.id,
+            node_id: a.node_id,
+            user_type: a.account_type,
+            avatar_url: a.avatar_url,
+            html_url: a.html_url,
+            site_admin: a.site_admin,
         }
     }
 }
 
-/// People stored as a JSON array, back as GitHub's actor objects.
-fn actors(stored_json: Option<&str>) -> Vec<ActorDto> {
-    stored_json
-        .and_then(|raw| decode_stored::<Vec<StoredActor>>("actors_json", raw))
-        .unwrap_or_default()
-        .into_iter()
-        .map(|a| ActorDto {
-            login: a.login,
-            id: a.id,
-            node_id: a.node_id,
-            user_type: a.user_type,
-            avatar_url: a.avatar_url,
-            html_url: a.html_url,
-            site_admin: a.site_admin,
-        })
-        .collect()
-}
-
-/// Labels stored as a JSON array, back as GitHub's label objects.
-fn labels(stored_json: Option<&str>) -> Vec<LabelRefDto> {
-    stored_json
-        .and_then(|raw| decode_stored::<Vec<StoredLabel>>("labels_json", raw))
-        .unwrap_or_default()
-        .into_iter()
-        .map(|l| LabelRefDto {
+impl From<LabelRef> for LabelRefDto {
+    fn from(l: LabelRef) -> Self {
+        Self {
             id: l.id,
             node_id: l.node_id,
             name: l.name,
             color: l.color,
             is_default: l.is_default,
             description: l.description,
-        })
-        .collect()
+        }
+    }
+}
+
+fn actors(people: Vec<Actor>) -> Vec<ActorDto> {
+    people.into_iter().map(Into::into).collect()
+}
+
+fn labels(refs: Vec<LabelRef>) -> Vec<LabelRefDto> {
+    refs.into_iter().map(Into::into).collect()
+}
+
+/// A downloadable file attached to a release.
+#[derive(Debug)]
+#[toolkit_macros::api_dto(response)]
+pub struct ReleaseAssetDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_download_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
+impl From<ReleaseAsset> for ReleaseAssetDto {
+    fn from(a: ReleaseAsset) -> Self {
+        Self {
+            id: a.id,
+            node_id: a.node_id,
+            name: a.name,
+            label: a.label,
+            content_type: a.content_type,
+            size: a.size,
+            download_count: a.download_count,
+            browser_download_url: a.browser_download_url,
+            created_at: a.created_at,
+            updated_at: a.updated_at,
+        }
+    }
+}
+
+/// One step of a workflow job.
+#[derive(Debug)]
+#[toolkit_macros::api_dto(response)]
+pub struct WorkflowStepDto {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conclusion: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub number: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+}
+
+impl From<WorkflowStep> for WorkflowStepDto {
+    fn from(st: WorkflowStep) -> Self {
+        Self {
+            name: st.name,
+            status: st.status,
+            conclusion: st.conclusion,
+            number: st.number,
+            started_at: st.started_at,
+            completed_at: st.completed_at,
+        }
+    }
 }
 
 /// A label as GitHub embeds it in an issue or pull request.
@@ -177,19 +200,8 @@ fn actor(login: Option<String>) -> Option<ActorDto> {
 
 /// The author of an issue or pull request: GitHub's whole `user` object when
 /// the sync stored one, and the bare login for rows mirrored before it did.
-fn author(author_json: Option<&str>, author_login: Option<String>) -> Option<ActorDto> {
-    author_json
-        .and_then(|raw| decode_stored::<StoredActor>("author_json", raw))
-        .map(|a| ActorDto {
-            login: a.login,
-            id: a.id,
-            node_id: a.node_id,
-            user_type: a.user_type,
-            avatar_url: a.avatar_url,
-            html_url: a.html_url,
-            site_admin: a.site_admin,
-        })
-        .or_else(|| actor(author_login))
+fn author(author: Option<Actor>, author_login: Option<String>) -> Option<ActorDto> {
+    author.map(Into::into).or_else(|| actor(author_login))
 }
 
 /// GitHub `{ "sha": ... }` git reference object.
@@ -317,9 +329,9 @@ impl From<Issue> for IssueDto {
             updated_at: i.updated_at,
             closed_at: i.closed_at,
             html_url: i.html_url,
-            user: author(i.author_json.as_deref(), i.author_login),
-            assignees: actors(i.assignees_json.as_deref()),
-            labels: labels(i.labels_json.as_deref()),
+            user: author(i.author, i.author_login),
+            assignees: actors(i.assignees),
+            labels: labels(i.labels),
             comments: i.comments_count,
             locked: i.locked,
         }
@@ -416,10 +428,10 @@ impl From<PullRequest> for PullRequestDto {
             closed_at: p.closed_at,
             merged_at: p.merged_at,
             html_url: p.html_url,
-            user: author(p.author_json.as_deref(), p.author_login),
-            assignees: actors(p.assignees_json.as_deref()),
-            requested_reviewers: actors(p.requested_reviewers_json.as_deref()),
-            labels: labels(p.labels_json.as_deref()),
+            user: author(p.author, p.author_login),
+            assignees: actors(p.assignees),
+            requested_reviewers: actors(p.requested_reviewers),
+            labels: labels(p.labels),
             comments: p.comments_count,
             locked: p.locked,
         }
@@ -685,18 +697,12 @@ pub struct ReleaseDto {
     pub created_at: String,
     pub published_at: Option<String>,
     pub html_url: Option<String>,
-    /// The stored asset slice (`name`, `browser_download_url`, `size` per
-    /// asset), passed through as JSON; `[]` when the release has none.
-    pub assets: serde_json::Value,
+    /// The release's downloadable files; `[]` when it has none.
+    pub assets: Vec<ReleaseAssetDto>,
 }
 
 impl From<Release> for ReleaseDto {
     fn from(r: Release) -> Self {
-        let assets = r
-            .assets_json
-            .as_deref()
-            .and_then(|raw| decode_stored::<serde_json::Value>("assets_json", raw))
-            .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
         Self {
             id: r.id,
             tag_name: r.tag_name,
@@ -708,7 +714,7 @@ impl From<Release> for ReleaseDto {
             created_at: r.created_at,
             published_at: r.published_at,
             html_url: r.html_url,
-            assets,
+            assets: r.assets.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -1187,17 +1193,11 @@ pub struct WorkflowJobDto {
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub html_url: Option<String>,
-    pub steps: serde_json::Value,
+    pub steps: Vec<WorkflowStepDto>,
 }
 
 impl From<WorkflowJob> for WorkflowJobDto {
     fn from(j: WorkflowJob) -> Self {
-        let steps = j
-            .steps_json
-            .as_deref()
-            .and_then(|raw| decode_stored::<serde_json::Value>("steps_json", raw))
-            .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
-
         Self {
             id: j.id,
             run_id: j.run_id,
@@ -1210,7 +1210,7 @@ impl From<WorkflowJob> for WorkflowJobDto {
             started_at: j.started_at,
             completed_at: j.completed_at,
             html_url: j.html_url,
-            steps,
+            steps: j.steps.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -1317,7 +1317,7 @@ pub struct IssueTimelineEventDto {
 
 impl From<IssueTimelineEvent> for IssueTimelineEventDto {
     fn from(e: IssueTimelineEvent) -> Self {
-        let entry = decode_stored::<serde_json::Value>("payload_json", &e.payload_json)
+        let entry = decode::<serde_json::Value>("payload_json", Some(&e.payload_json))
             .unwrap_or_else(|| serde_json::json!({ "event": e.event }));
 
         Self { entry }

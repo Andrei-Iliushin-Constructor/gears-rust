@@ -31,6 +31,8 @@ use crate::domain::repo::{
     WorkflowJobRepository, WorkflowRunRecord, WorkflowRunRepository,
 };
 
+use super::mapper::{StoredActor, StoredAsset, StoredLabel, StoredStep, decode, decode_list};
+
 use super::entity::branches::{self, Entity as BranchEntity};
 use super::entity::check_runs::{self, Entity as CheckRunEntity};
 use super::entity::comments::{self, Entity as CommentEntity};
@@ -345,9 +347,13 @@ impl IssueRepository for SeaOrmIssueRepository {
             closed_at: record.closed_at,
             html_url: record.html_url,
             author_login: record.author_login,
-            author_json: record.author_json,
-            assignees_json: record.assignees_json,
-            labels_json: record.labels_json,
+            author: decode::<StoredActor>("author_json", record.author_json.as_deref())
+                .map(Into::into),
+            assignees: decode_list::<StoredActor, _>(
+                "assignees_json",
+                record.assignees_json.as_deref(),
+            ),
+            labels: decode_list::<StoredLabel, _>("labels_json", record.labels_json.as_deref()),
             comments_count: record.comments_count,
             locked: record.locked,
         })
@@ -586,12 +592,19 @@ impl PullRequestRepository for SeaOrmPullRequestRepository {
             head_ref: record.head_ref,
             base_ref: record.base_ref,
             author_login: record.author_login,
-            author_json: record.author_json,
-            assignees_json: record.assignees_json,
-            labels_json: record.labels_json,
+            author: decode::<StoredActor>("author_json", record.author_json.as_deref())
+                .map(Into::into),
+            assignees: decode_list::<StoredActor, _>(
+                "assignees_json",
+                record.assignees_json.as_deref(),
+            ),
+            labels: decode_list::<StoredLabel, _>("labels_json", record.labels_json.as_deref()),
             comments_count: record.comments_count,
             locked: record.locked,
-            requested_reviewers_json: record.requested_reviewers_json,
+            requested_reviewers: decode_list::<StoredActor, _>(
+                "requested_reviewers_json",
+                record.requested_reviewers_json.as_deref(),
+            ),
         })
     }
 
@@ -1575,7 +1588,7 @@ impl ReleaseRepository for SeaOrmReleaseRepository {
             created_at: record.created_at,
             published_at: record.published_at,
             html_url: record.html_url,
-            assets_json: record.assets_json,
+            assets: decode_list::<StoredAsset, _>("assets_json", record.assets_json.as_deref()),
         })
     }
 
@@ -2987,7 +3000,7 @@ impl WorkflowJobRepository for SeaOrmWorkflowJobRepository {
             started_at: record.started_at,
             completed_at: record.completed_at,
             html_url: record.html_url,
-            steps_json: record.steps_json,
+            steps: decode_list::<StoredStep, _>("steps_json", record.steps_json.as_deref()),
         })
     }
 
