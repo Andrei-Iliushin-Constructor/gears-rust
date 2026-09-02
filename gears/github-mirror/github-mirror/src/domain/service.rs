@@ -6,15 +6,17 @@ use chrono::{DateTime, Utc};
 use github_mirror_sdk::{
     Branch, CheckRun, Comment, Commit, CommitComment, CommitFile, CommitStatus, Contributor,
     Deployment, Issue, IssueEvent, IssueReaction, IssueTimelineEvent, Label, Milestone,
-    PullRequest, PullRequestCommit, PullRequestFile, Release, Repo, Review, ReviewComment,
-    ReviewThread, Tag, WorkflowJob, WorkflowRun,
+    MirrorStatus, PullRequest, PullRequestCommit, PullRequestFile, Release, Repo, Review,
+    ReviewComment, ReviewThread, SyncSummary, Tag, WorkflowJob, WorkflowRun,
 };
 use toolkit_macros::domain_model;
 use toolkit_odata::{CursorV1, ODataQuery, Page, PageInfo, SortDir};
 use toolkit_security::{AccessScope, SecurityContext, pep_properties};
 
 use super::error::DomainError;
-use super::ports::github::{GithubPort, ListingCompleteness};
+use strum::IntoEnumIterator;
+
+use super::ports::github::{GithubPort, Listing, ListingCompleteness};
 use super::repo::{
     BranchRecord, BranchRepository, CheckRunRecord, CheckRunRepository, CommentRecord,
     CommentRepository, CommitCommentRecord, CommitCommentRepository, CommitFileRecord,
@@ -34,6 +36,23 @@ use super::repo::{
 /// The gear's name, taken from the `#[toolkit::gear]` attribute so the
 /// literal exists in exactly one place.
 pub const GEAR_NAME: &str = crate::gear::GithubMirrorGear::MODULE_NAME;
+
+/// Release the per-repo sync lock, logging a failed release rather than
+/// turning it into the sync's outcome: the guard's `Drop` has already queued
+/// a best-effort release, and the sync succeeded or failed on its own merits.
+async fn release_sync_lock(lock: toolkit_db::DbLockGuard, lock_key: &str) {
+    if let Err(e) = lock.release().await {
+        tracing::warn!(lock_key, error = %e, "sync advisory lock release failed");
+    }
+}
+
+/// Longest a single repository's fetch may run before the sync gives up.
+///
+/// The fetch is one long sequence of GitHub calls with their own per-request
+/// timeouts and rate-limit back-offs; this is the only bound on the whole of
+/// it, and it is what stops a slow upstream from holding the per-repo
+/// advisory lock indefinitely.
+const SYNC_FETCH_BUDGET: std::time::Duration = std::time::Duration::from_mins(30);
 
 /// How many stored contributors one merge reads back. A repository with more
 /// distinct people than this loses nothing already written — the merge simply
@@ -211,52 +230,6 @@ pub(crate) mod actions {
 #[derive(Debug, Clone)]
 pub struct ServiceConfig {
     pub api_base_url: String,
-}
-
-#[domain_model]
-#[derive(Debug, Clone)]
-pub struct MirrorStatus {
-    pub gear: String,
-    /// The gear crate's own version (`CARGO_PKG_VERSION`) — the version of
-    /// this mirror implementation, not of GitHub's API or of any mirrored
-    /// repository.
-    pub version: String,
-    pub api_base_url: String,
-}
-
-/// What one sync pass wrote, returned to the caller.
-#[domain_model]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SyncSummary {
-    pub repository: String,
-    pub issues_synced: u64,
-    pub pull_requests_synced: u64,
-    pub commits_synced: u64,
-    pub comments_synced: u64,
-    pub review_comments_synced: u64,
-    pub reviews_synced: u64,
-    pub labels_synced: u64,
-    pub milestones_synced: u64,
-    pub releases_synced: u64,
-    pub branches_synced: u64,
-    pub contributors_synced: u64,
-    pub workflow_runs_synced: u64,
-    pub pull_request_files_synced: u64,
-    pub tags_synced: u64,
-    pub commit_files_synced: u64,
-    pub review_threads_synced: u64,
-    pub commit_comments_synced: u64,
-    pub issue_events_synced: u64,
-    pub deployments_synced: u64,
-    pub pull_request_commits_synced: u64,
-    pub commit_statuses_synced: u64,
-    pub workflow_jobs_synced: u64,
-    pub issue_reactions_synced: u64,
-    pub check_runs_synced: u64,
-    pub issue_timeline_synced: u64,
-    /// Rows hard-deleted because a complete listing no longer contained them
-    /// (upstream deletion reconciliation).
-    pub stale_rows_deleted: u64,
 }
 
 #[domain_model]
@@ -736,51 +709,6 @@ impl<
         self.repo.upsert(&conn, &scope, tenant_id, record).await
     }
 
-    /// List mirrored issues of one repository (`owner/name`), tenant-scoped.
-    ///
-    /// # Errors
-    /// `DomainError::NotFound` when the repository is not mirrored for this
-    /// tenant; `Forbidden`/`Database`/`Internal` as usual.
-    /// `state`: GitHub's filter — `Some("open")`, `Some("closed")`, or `None`
-    /// for every state. GitHub's own default is `open`, applied by the handler.
-    /// How many rows the matching listing has in total, so the `Link`
-    /// header can name its last page.
-    ///
-    /// # Errors
-    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
-    /// as usual.
-    pub async fn count_issues(
-        &self,
-        ctx: &SecurityContext,
-        owner: &str,
-        name_arg: &str,
-        filter: ListingFilter<'_>,
-    ) -> Result<u64, DomainError> {
-        let scope = self
-            .policy_enforcer
-            .access_scope_with(
-                ctx,
-                &ISSUE_RESOURCE,
-                actions::LIST,
-                None,
-                &AccessRequest::new()
-                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
-            )
-            .await?;
-
-        let conn = self.db.conn()?;
-        let full_name = format!("{owner}/{name_arg}");
-        let repository = self
-            .repo
-            .find_by_full_name(&conn, &scope, &full_name)
-            .await?
-            .ok_or(DomainError::NotFound)?;
-
-        self.issues
-            .count_by_repo(&conn, &scope, repository.id, filter)
-            .await
-    }
-
     /// The repository's issues, filtered as GitHub's list endpoint filters.
     ///
     /// `filter`: GitHub's list-endpoint filters (state, sort, direction,
@@ -795,8 +723,8 @@ impl<
         owner: &str,
         name: &str,
         query: &ODataQuery,
-        filter: ListingFilter<'_>,
-    ) -> Result<Page<Issue>, DomainError> {
+        filter: ListingFilter,
+    ) -> Result<(Page<Issue>, u64), DomainError> {
         let scope = self
             .policy_enforcer
             .access_scope_with(
@@ -823,13 +751,24 @@ impl<
             .list_by_repo(&conn, &scope, repository.id, limit, filter)
             .await?;
 
-        Ok(Page::new(
-            items,
-            PageInfo {
-                next_cursor: None,
-                prev_cursor: None,
-                limit,
-            },
+        // Counted on the scope and repository already resolved above: the
+        // GitHub-compatible listings report a total, and doing it here saves
+        // a second policy evaluation and repository lookup per request.
+        let total = self
+            .issues
+            .count_by_repo(&conn, &scope, repository.id, filter)
+            .await?;
+
+        Ok((
+            Page::new(
+                items,
+                PageInfo {
+                    next_cursor: None,
+                    prev_cursor: None,
+                    limit,
+                },
+            ),
+            total,
         ))
     }
 
@@ -875,51 +814,6 @@ impl<
         self.issues.upsert(&conn, &scope, tenant_id, record).await
     }
 
-    /// List mirrored pull requests of one repository (`owner/name`), tenant-scoped.
-    ///
-    /// # Errors
-    /// `DomainError::NotFound` when the repository is not mirrored for this
-    /// tenant; `Forbidden`/`Database`/`Internal` as usual.
-    /// `state`: GitHub's filter — `Some("open")`, `Some("closed")`, or `None`
-    /// for every state. GitHub's own default is `open`, applied by the handler.
-    /// How many rows the matching listing has in total, so the `Link`
-    /// header can name its last page.
-    ///
-    /// # Errors
-    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
-    /// as usual.
-    pub async fn count_pull_requests(
-        &self,
-        ctx: &SecurityContext,
-        owner: &str,
-        name_arg: &str,
-        filter: ListingFilter<'_>,
-    ) -> Result<u64, DomainError> {
-        let scope = self
-            .policy_enforcer
-            .access_scope_with(
-                ctx,
-                &PULL_REQUEST_RESOURCE,
-                actions::LIST,
-                None,
-                &AccessRequest::new()
-                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
-            )
-            .await?;
-
-        let conn = self.db.conn()?;
-        let full_name = format!("{owner}/{name_arg}");
-        let repository = self
-            .repo
-            .find_by_full_name(&conn, &scope, &full_name)
-            .await?
-            .ok_or(DomainError::NotFound)?;
-
-        self.pull_requests
-            .count_by_repo(&conn, &scope, repository.id, filter)
-            .await
-    }
-
     /// The repository's pull requests, filtered as GitHub's list endpoint
     /// filters.
     ///
@@ -935,8 +829,8 @@ impl<
         owner: &str,
         name: &str,
         query: &ODataQuery,
-        filter: ListingFilter<'_>,
-    ) -> Result<Page<PullRequest>, DomainError> {
+        filter: ListingFilter,
+    ) -> Result<(Page<PullRequest>, u64), DomainError> {
         let scope = self
             .policy_enforcer
             .access_scope_with(
@@ -963,13 +857,24 @@ impl<
             .list_by_repo(&conn, &scope, repository.id, limit, filter)
             .await?;
 
-        Ok(Page::new(
-            items,
-            PageInfo {
-                next_cursor: None,
-                prev_cursor: None,
-                limit,
-            },
+        // Counted on the scope and repository already resolved above: the
+        // GitHub-compatible listings report a total, and doing it here saves
+        // a second policy evaluation and repository lookup per request.
+        let total = self
+            .pull_requests
+            .count_by_repo(&conn, &scope, repository.id, filter)
+            .await?;
+
+        Ok((
+            Page::new(
+                items,
+                PageInfo {
+                    next_cursor: None,
+                    prev_cursor: None,
+                    limit,
+                },
+            ),
+            total,
         ))
     }
 
@@ -1017,49 +922,6 @@ impl<
             .await
     }
 
-    /// List mirrored commits of one repository (`owner/name`), tenant-scoped,
-    /// newest first.
-    ///
-    /// # Errors
-    /// `DomainError::NotFound` when the repository is not mirrored for this
-    /// tenant; `Forbidden`/`Database`/`Internal` as usual.
-    /// How many rows the matching listing has in total, so the `Link`
-    /// header can name its last page.
-    ///
-    /// # Errors
-    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
-    /// as usual.
-    pub async fn count_commits(
-        &self,
-        ctx: &SecurityContext,
-        owner: &str,
-        name_arg: &str,
-    ) -> Result<u64, DomainError> {
-        let scope = self
-            .policy_enforcer
-            .access_scope_with(
-                ctx,
-                &COMMIT_RESOURCE,
-                actions::LIST,
-                None,
-                &AccessRequest::new()
-                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
-            )
-            .await?;
-
-        let conn = self.db.conn()?;
-        let full_name = format!("{owner}/{name_arg}");
-        let repository = self
-            .repo
-            .find_by_full_name(&conn, &scope, &full_name)
-            .await?
-            .ok_or(DomainError::NotFound)?;
-
-        self.commits
-            .count_by_repo(&conn, &scope, repository.id)
-            .await
-    }
-
     /// The repository's mirrored commits, newest first.
     ///
     /// # Errors
@@ -1071,7 +933,7 @@ impl<
         owner: &str,
         name: &str,
         query: &ODataQuery,
-    ) -> Result<Page<Commit>, DomainError> {
+    ) -> Result<(Page<Commit>, u64), DomainError> {
         let scope = self
             .policy_enforcer
             .access_scope_with(
@@ -1098,13 +960,24 @@ impl<
             .list_by_repo(&conn, &scope, repository.id, limit)
             .await?;
 
-        Ok(Page::new(
-            items,
-            PageInfo {
-                next_cursor: None,
-                prev_cursor: None,
-                limit,
-            },
+        // Counted on the scope and repository already resolved above: the
+        // GitHub-compatible listings report a total, and doing it here saves
+        // a second policy evaluation and repository lookup per request.
+        let total = self
+            .commits
+            .count_by_repo(&conn, &scope, repository.id)
+            .await?;
+
+        Ok((
+            Page::new(
+                items,
+                PageInfo {
+                    next_cursor: None,
+                    prev_cursor: None,
+                    limit,
+                },
+            ),
+            total,
         ))
     }
 
@@ -1871,122 +1744,6 @@ impl<
             .await
     }
 
-    /// List mirrored workflow runs of one repository (`owner/name`),
-    /// tenant-scoped, newest first.
-    ///
-    /// # Errors
-    /// `DomainError::NotFound` when the repository is not mirrored for this
-    /// tenant; `Forbidden`/`Database`/`Internal` as usual.
-    /// How many workflow runs this repository has, across every page.
-    ///
-    /// # Errors
-    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
-    /// as usual.
-    pub async fn count_workflow_runs(
-        &self,
-        ctx: &SecurityContext,
-        owner: &str,
-        name_arg: &str,
-    ) -> Result<u64, DomainError> {
-        let scope = self
-            .policy_enforcer
-            .access_scope_with(
-                ctx,
-                &WORKFLOW_RUN_RESOURCE,
-                actions::LIST,
-                None,
-                &AccessRequest::new()
-                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
-            )
-            .await?;
-
-        let conn = self.db.conn()?;
-        let full_name = format!("{owner}/{name_arg}");
-        let repository = self
-            .repo
-            .find_by_full_name(&conn, &scope, &full_name)
-            .await?
-            .ok_or(DomainError::NotFound)?;
-
-        self.workflow_runs
-            .count_by_repo(&conn, &scope, repository.id)
-            .await
-    }
-
-    /// How many jobs this workflow run has, across every page.
-    ///
-    /// # Errors
-    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
-    /// as usual.
-    pub async fn count_workflow_jobs(
-        &self,
-        ctx: &SecurityContext,
-        owner: &str,
-        name_arg: &str,
-        run_id: i64,
-    ) -> Result<u64, DomainError> {
-        let scope = self
-            .policy_enforcer
-            .access_scope_with(
-                ctx,
-                &WORKFLOW_JOB_RESOURCE,
-                actions::LIST,
-                None,
-                &AccessRequest::new()
-                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
-            )
-            .await?;
-
-        let conn = self.db.conn()?;
-        let full_name = format!("{owner}/{name_arg}");
-        let repository = self
-            .repo
-            .find_by_full_name(&conn, &scope, &full_name)
-            .await?
-            .ok_or(DomainError::NotFound)?;
-
-        self.workflow_jobs
-            .count_by_run(&conn, &scope, repository.id, run_id)
-            .await
-    }
-
-    /// How many check runs this commit has, across every page.
-    ///
-    /// # Errors
-    /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
-    /// as usual.
-    pub async fn count_check_runs(
-        &self,
-        ctx: &SecurityContext,
-        owner: &str,
-        name_arg: &str,
-        head_sha: &str,
-    ) -> Result<u64, DomainError> {
-        let scope = self
-            .policy_enforcer
-            .access_scope_with(
-                ctx,
-                &CHECK_RUN_RESOURCE,
-                actions::LIST,
-                None,
-                &AccessRequest::new()
-                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
-            )
-            .await?;
-
-        let conn = self.db.conn()?;
-        let full_name = format!("{owner}/{name_arg}");
-        let repository = self
-            .repo
-            .find_by_full_name(&conn, &scope, &full_name)
-            .await?
-            .ok_or(DomainError::NotFound)?;
-
-        self.check_runs
-            .count_by_commit(&conn, &scope, repository.id, head_sha)
-            .await
-    }
-
     /// # Errors
     /// `NotFound` when the repository is not mirrored; `Forbidden`/`Database`
     /// as usual.
@@ -1996,7 +1753,7 @@ impl<
         owner: &str,
         name: &str,
         query: &ODataQuery,
-    ) -> Result<Page<WorkflowRun>, DomainError> {
+    ) -> Result<(Page<WorkflowRun>, u64), DomainError> {
         let scope = self
             .policy_enforcer
             .access_scope_with(
@@ -2023,13 +1780,24 @@ impl<
             .list_by_repo(&conn, &scope, repository.id, limit)
             .await?;
 
-        Ok(Page::new(
-            items,
-            PageInfo {
-                next_cursor: None,
-                prev_cursor: None,
-                limit,
-            },
+        // Counted on the scope and repository already resolved above: the
+        // GitHub-compatible listings report a total, and doing it here saves
+        // a second policy evaluation and repository lookup per request.
+        let total = self
+            .workflow_runs
+            .count_by_repo(&conn, &scope, repository.id)
+            .await?;
+
+        Ok((
+            Page::new(
+                items,
+                PageInfo {
+                    next_cursor: None,
+                    prev_cursor: None,
+                    limit,
+                },
+            ),
+            total,
         ))
     }
 
@@ -2912,7 +2680,7 @@ impl<
         name: &str,
         run_id: i64,
         query: &ODataQuery,
-    ) -> Result<Page<WorkflowJob>, DomainError> {
+    ) -> Result<(Page<WorkflowJob>, u64), DomainError> {
         let scope = self
             .policy_enforcer
             .access_scope_with(
@@ -2939,13 +2707,24 @@ impl<
             .list_by_run(&conn, &scope, repository.id, run_id, limit)
             .await?;
 
-        Ok(Page::new(
-            items,
-            PageInfo {
-                next_cursor: None,
-                prev_cursor: None,
-                limit,
-            },
+        // Counted on the scope and repository already resolved above: the
+        // GitHub-compatible listings report a total, and doing it here saves
+        // a second policy evaluation and repository lookup per request.
+        let total = self
+            .workflow_jobs
+            .count_by_run(&conn, &scope, repository.id, run_id)
+            .await?;
+
+        Ok((
+            Page::new(
+                items,
+                PageInfo {
+                    next_cursor: None,
+                    prev_cursor: None,
+                    limit,
+                },
+            ),
+            total,
         ))
     }
 
@@ -3094,7 +2873,7 @@ impl<
         name: &str,
         head_sha: &str,
         query: &ODataQuery,
-    ) -> Result<Page<CheckRun>, DomainError> {
+    ) -> Result<(Page<CheckRun>, u64), DomainError> {
         let scope = self
             .policy_enforcer
             .access_scope_with(
@@ -3121,13 +2900,24 @@ impl<
             .list_by_commit(&conn, &scope, repository.id, head_sha, limit)
             .await?;
 
-        Ok(Page::new(
-            items,
-            PageInfo {
-                next_cursor: None,
-                prev_cursor: None,
-                limit,
-            },
+        // Counted on the scope and repository already resolved above: the
+        // GitHub-compatible listings report a total, and doing it here saves
+        // a second policy evaluation and repository lookup per request.
+        let total = self
+            .check_runs
+            .count_by_commit(&conn, &scope, repository.id, head_sha)
+            .await?;
+
+        Ok((
+            Page::new(
+                items,
+                PageInfo {
+                    next_cursor: None,
+                    prev_cursor: None,
+                    limit,
+                },
+            ),
+            total,
         ))
     }
 
@@ -3322,77 +3112,74 @@ impl<
     /// truncated listing proves nothing (PRD 5.2's "complete and verifiable
     /// local replica" requires reconciling upstream deletions; the
     /// completeness gate is what makes doing so safe).
-    // Ten identical completeness-gated delete calls, one per family; the
-    // repetition is the clearest shape and splitting it would hide the gate.
-    #[allow(clippy::cognitive_complexity)]
+    ///
+    /// The match over [`Listing`] is exhaustive, so a family added to that
+    /// enum must be given a delete here before this compiles.
     async fn reconcile_stale<DBR: toolkit_db::secure::DBRunner>(
         &self,
         conn: &DBR,
         scope: &AccessScope,
-        complete: ListingCompleteness,
+        complete: &ListingCompleteness,
         repo_id: i64,
         watermark: DateTime<Utc>,
     ) -> Result<u64, DomainError> {
         let mut deleted = 0;
-        if complete.issues {
-            deleted += self
-                .issues
-                .delete_stale(conn, scope, repo_id, watermark)
-                .await?;
-        }
-        if complete.pull_requests {
-            deleted += self
-                .pull_requests
-                .delete_stale(conn, scope, repo_id, watermark)
-                .await?;
-        }
-        if complete.commits {
-            deleted += self
-                .commits
-                .delete_stale(conn, scope, repo_id, watermark)
-                .await?;
-        }
-        if complete.comments {
-            deleted += self
-                .comments
-                .delete_stale(conn, scope, repo_id, watermark)
-                .await?;
-        }
-        if complete.review_comments {
-            deleted += self
-                .review_comments
-                .delete_stale(conn, scope, repo_id, watermark)
-                .await?;
-        }
-        if complete.labels {
-            deleted += self
-                .labels
-                .delete_stale(conn, scope, repo_id, watermark)
-                .await?;
-        }
-        if complete.milestones {
-            deleted += self
-                .milestones
-                .delete_stale(conn, scope, repo_id, watermark)
-                .await?;
-        }
-        if complete.releases {
-            deleted += self
-                .releases
-                .delete_stale(conn, scope, repo_id, watermark)
-                .await?;
-        }
-        if complete.branches {
-            deleted += self
-                .branches
-                .delete_stale(conn, scope, repo_id, watermark)
-                .await?;
-        }
-        if complete.tags {
-            deleted += self
-                .tags
-                .delete_stale(conn, scope, repo_id, watermark)
-                .await?;
+        for listing in Listing::iter() {
+            if !complete.is_complete(listing) {
+                continue;
+            }
+            deleted += match listing {
+                Listing::Issues => {
+                    self.issues
+                        .delete_stale(conn, scope, repo_id, watermark)
+                        .await
+                }
+                Listing::PullRequests => {
+                    self.pull_requests
+                        .delete_stale(conn, scope, repo_id, watermark)
+                        .await
+                }
+                Listing::Commits => {
+                    self.commits
+                        .delete_stale(conn, scope, repo_id, watermark)
+                        .await
+                }
+                Listing::Comments => {
+                    self.comments
+                        .delete_stale(conn, scope, repo_id, watermark)
+                        .await
+                }
+                Listing::ReviewComments => {
+                    self.review_comments
+                        .delete_stale(conn, scope, repo_id, watermark)
+                        .await
+                }
+                Listing::Labels => {
+                    self.labels
+                        .delete_stale(conn, scope, repo_id, watermark)
+                        .await
+                }
+                Listing::Milestones => {
+                    self.milestones
+                        .delete_stale(conn, scope, repo_id, watermark)
+                        .await
+                }
+                Listing::Releases => {
+                    self.releases
+                        .delete_stale(conn, scope, repo_id, watermark)
+                        .await
+                }
+                Listing::Branches => {
+                    self.branches
+                        .delete_stale(conn, scope, repo_id, watermark)
+                        .await
+                }
+                Listing::Tags => {
+                    self.tags
+                        .delete_stale(conn, scope, repo_id, watermark)
+                        .await
+                }
+            }?;
         }
         Ok(deleted)
     }
@@ -3462,11 +3249,6 @@ impl<
             )
             .await?;
 
-        // Two uncoordinated syncs of the same repo would interleave two
-        // different GitHub snapshots across the 26 tables, so the whole run
-        // holds a per-repo advisory lock (one non-blocking attempt): the
-        // second caller gets a conflict instead of racing. The key is
-        // tenant-scoped — tenants have separate rows, so they never contend.
         let lock_key = format!("sync/{tenant_id}/{owner}/{name}");
         let sync_lock = match self.db.db().lock(GEAR_NAME, &lock_key).await {
             Ok(guard) => guard,
@@ -3478,21 +3260,24 @@ impl<
             Err(e) => return Err(DomainError::Database(e)),
         };
 
-        // Captured before any row is written: every upsert in this sync stamps
-        // `extracted_at` with a later instant, so "extracted_at < watermark"
-        // identifies exactly the rows this sync did not touch.
         let watermark = Utc::now();
-        // A failed fetch must release the advisory lock on its way out:
-        // `DbLockGuard::drop` only queues a best-effort release, so an early
-        // `?` here would leave the key claimed until the maintenance task
-        // gets to it, and retries would 409 in the meantime.
-        let fetched = match self.github.fetch_repository(owner, name).await {
-            Ok(fetched) => fetched,
-            Err(fetch_error) => {
-                if let Err(e) = sync_lock.release().await {
-                    tracing::warn!(lock_key, error = %e, "sync advisory lock release failed");
-                }
+        let fetched = match tokio::time::timeout(
+            SYNC_FETCH_BUDGET,
+            self.github.fetch_repository(owner, name),
+        )
+        .await
+        {
+            Ok(Ok(fetched)) => fetched,
+            Ok(Err(fetch_error)) => {
+                release_sync_lock(sync_lock, &lock_key).await;
                 return Err(fetch_error);
+            }
+            Err(_elapsed) => {
+                release_sync_lock(sync_lock, &lock_key).await;
+                return Err(DomainError::internal(format!(
+                    "the sync of {owner}/{name} ran past its {} second budget",
+                    SYNC_FETCH_BUDGET.as_secs()
+                )));
             }
         };
         let complete = fetched.complete;
@@ -3702,7 +3487,7 @@ impl<
                     );
 
                     let stale_rows_deleted = service
-                        .reconcile_stale(tx, &scope, complete, repository.id, watermark)
+                        .reconcile_stale(tx, &scope, &complete, repository.id, watermark)
                         .await?;
                     if stale_rows_deleted > 0 {
                         tracing::info!(
@@ -3748,9 +3533,7 @@ impl<
         // Deterministic unlock on the way out; a failed release is only
         // logged — the guard's Drop already queued a best-effort release,
         // and the sync itself succeeded or failed on its own merits.
-        if let Err(e) = sync_lock.release().await {
-            tracing::warn!(lock_key, error = %e, "sync advisory lock release failed");
-        }
+        release_sync_lock(sync_lock, &lock_key).await;
         summary
     }
 }

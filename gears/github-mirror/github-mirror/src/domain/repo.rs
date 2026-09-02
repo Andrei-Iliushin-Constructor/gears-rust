@@ -96,15 +96,53 @@ pub struct IssueRecord {
 /// `milestone`) are recorded as unsupported in PRD 4.3 rather than silently
 /// ignored here.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ListingFilter<'a> {
-    /// `open`/`closed`, or `None` for every state.
-    pub state: Option<&'a str>,
+pub struct ListingFilter {
+    /// The state to keep, or `None` for every state.
+    pub state: Option<IssueState>,
     /// `created` (GitHub's default) or `updated`.
     pub sort: ListingSort,
     /// Ascending or descending; GitHub defaults to descending.
     pub direction: ListingDirection,
-    /// Only rows updated at or after this RFC3339 instant.
-    pub since: Option<&'a str>,
+    /// Only rows updated at or after this instant.
+    pub since: Option<DateTime<Utc>>,
+}
+
+/// The state an issue or pull request can be listed by.
+///
+/// A parsed enum rather than the raw query string: an unrecognised `state`
+/// used to reach SQL and return an empty page, which reads as "no such
+/// issues" instead of "no such state".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueState {
+    Open,
+    Closed,
+}
+
+impl IssueState {
+    /// The value stored in the `state` column.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+        }
+    }
+
+    /// GitHub's `state` query value.
+    ///
+    /// # Errors
+    /// `Validation` when the value is neither `open` nor `closed`; `all` is
+    /// the caller's business, not this type's.
+    pub fn parse(raw: &str) -> Result<Self, DomainError> {
+        match raw {
+            "open" => Ok(Self::Open),
+            "closed" => Ok(Self::Closed),
+            other => Err(DomainError::Validation {
+                field: "state".to_owned(),
+                message: format!("`{other}` is not a state; use open, closed or all"),
+            }),
+        }
+    }
 }
 
 /// The sort keys GitHub offers that the mirror stores a column for.
@@ -153,7 +191,7 @@ pub trait IssueRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        filter: ListingFilter<'_>,
+        filter: ListingFilter,
     ) -> Result<u64, DomainError>;
     async fn upsert<C: DBRunner>(
         &self,
@@ -170,7 +208,7 @@ pub trait IssueRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
-        filter: ListingFilter<'_>,
+        filter: ListingFilter,
     ) -> Result<Vec<Issue>, DomainError>;
 
     async fn find_by_number<C: DBRunner>(
@@ -242,7 +280,7 @@ pub trait PullRequestRepository: Send + Sync {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        filter: ListingFilter<'_>,
+        filter: ListingFilter,
     ) -> Result<u64, DomainError>;
     async fn upsert<C: DBRunner>(
         &self,
@@ -260,7 +298,7 @@ pub trait PullRequestRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
-        filter: ListingFilter<'_>,
+        filter: ListingFilter,
     ) -> Result<Vec<PullRequest>, DomainError>;
 
     async fn find_by_number<C: DBRunner>(

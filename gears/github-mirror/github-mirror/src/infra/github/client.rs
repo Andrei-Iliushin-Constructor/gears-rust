@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::domain::error::DomainError;
-use crate::domain::ports::github::{FetchedRepository, GithubPort, ListingCompleteness};
+use crate::domain::ports::github::{FetchedRepository, GithubPort, Listing, ListingCompleteness};
 use crate::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
     CommitRecord, CommitStatusRecord, ContributorRecord, DeploymentRecord, IssueEventRecord,
@@ -1855,19 +1855,19 @@ impl GithubPort for GithubClient {
             ))
             .await?;
 
-        let (deployments, deployments_complete): (Vec<GhDeployment>, bool) = self
+        let (deployments, _deployments_complete): (Vec<GhDeployment>, bool) = self
             .get_list(&format!(
                 "/repos/{owner}/{name}/deployments?per_page={FIRST_PAGE_SIZE}"
             ))
             .await?;
 
-        let (issue_events, issue_events_complete): (Vec<GhIssueEvent>, bool) = self
+        let (issue_events, _issue_events_complete): (Vec<GhIssueEvent>, bool) = self
             .get_list(&format!(
                 "/repos/{owner}/{name}/issues/events?per_page={FIRST_PAGE_SIZE}"
             ))
             .await?;
 
-        let (commit_comments, commit_comments_complete): (Vec<GhCommitComment>, bool) = self
+        let (commit_comments, _commit_comments_complete): (Vec<GhCommitComment>, bool) = self
             .get_list(&format!(
                 "/repos/{owner}/{name}/comments?per_page={FIRST_PAGE_SIZE}"
             ))
@@ -1938,29 +1938,17 @@ impl GithubPort for GithubClient {
             .await?;
         people.absorb(reviewers);
 
-        let complete = ListingCompleteness {
-            issues: issues_complete,
-            pull_requests: pulls_complete,
-            commits: commits_complete,
-            comments: comments_complete,
-            review_comments: review_comments_complete,
-            labels: labels_complete,
-            milestones: milestones_complete,
-            releases: releases_complete,
-            branches: branches_complete,
-            tags: tags_complete,
-            // Derived, so it is exactly as complete as the listings it was
-            // read out of.
-            contributors: issues_complete
-                && pulls_complete
-                && commits_complete
-                && comments_complete
-                && review_comments_complete
-                && commit_comments_complete,
-            issue_events: issue_events_complete,
-            commit_comments: commit_comments_complete,
-            deployments: deployments_complete,
-        };
+        let mut complete = ListingCompleteness::none();
+        complete.set(Listing::Issues, issues_complete);
+        complete.set(Listing::PullRequests, pulls_complete);
+        complete.set(Listing::Commits, commits_complete);
+        complete.set(Listing::Comments, comments_complete);
+        complete.set(Listing::ReviewComments, review_comments_complete);
+        complete.set(Listing::Labels, labels_complete);
+        complete.set(Listing::Milestones, milestones_complete);
+        complete.set(Listing::Releases, releases_complete);
+        complete.set(Listing::Branches, branches_complete);
+        complete.set(Listing::Tags, tags_complete);
 
         Ok(FetchedRepository {
             repository: repository_record(repo),
