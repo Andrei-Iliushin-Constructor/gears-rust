@@ -10,7 +10,7 @@ use github_mirror_sdk::{
     ReviewComment, ReviewThread, SyncSummary, Tag, WorkflowJob, WorkflowRun,
 };
 use toolkit_macros::domain_model;
-use toolkit_odata::{CursorV1, ODataQuery, Page, PageInfo, SortDir};
+use toolkit_odata::{ODataQuery, Page, PageInfo};
 use toolkit_security::{SecurityContext, pep_properties};
 
 use super::error::DomainError;
@@ -524,48 +524,7 @@ impl Service {
             )
             .await?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
-
-        // Keyset pagination on the unique sort key: fetch one row past the
-        // page to learn whether a next page exists at all.
-        let after = query
-            .cursor
-            .as_ref()
-            .and_then(|c| c.k.first())
-            .map(String::as_str);
-        let mut items = self.repo.list(&scope, limit + 1, after).await?;
-        let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
-            items.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
-            // A dropped encode error would hand back `next_cursor: None`, and
-            // the caller would read a truncated listing as the last page.
-            items
-                .last()
-                .map(|last| {
-                    CursorV1 {
-                        k: vec![last.full_name.clone()],
-                        o: SortDir::Asc,
-                        s: "full_name".to_owned(),
-                        f: None,
-                        d: "fwd".to_owned(),
-                    }
-                    .encode()
-                })
-                .transpose()
-                .map_err(|e| {
-                    DomainError::internal(format!("failed to encode the next cursor: {e}"))
-                })?
-        } else {
-            None
-        };
-
-        Ok(Page::new(
-            items,
-            PageInfo {
-                next_cursor,
-                prev_cursor: None,
-                limit,
-            },
-        ))
+        self.repo.list(&scope, query).await
     }
 
     /// Insert or update a mirrored repository row for the caller's tenant.
@@ -1899,20 +1858,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
-        let items = self
-            .commit_files
-            .list_by_commit(&scope, repository.id, commit_sha, limit)
-            .await?;
-
-        Ok(Page::new(
-            items,
-            PageInfo {
-                next_cursor: None,
-                prev_cursor: None,
-                limit,
-            },
-        ))
+        self.commit_files
+            .list_by_commit(&scope, repository.id, commit_sha, query)
+            .await
     }
 
     /// Insert or update a mirrored commit-file row for the caller's tenant.
@@ -1987,20 +1935,9 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
-        let items = self
-            .review_threads
-            .list_by_pull(&scope, repository.id, pull_number, limit)
-            .await?;
-
-        Ok(Page::new(
-            items,
-            PageInfo {
-                next_cursor: None,
-                prev_cursor: None,
-                limit,
-            },
-        ))
+        self.review_threads
+            .list_by_pull(&scope, repository.id, pull_number, query)
+            .await
     }
 
     /// Insert or update a mirrored review-thread row for the caller's tenant.

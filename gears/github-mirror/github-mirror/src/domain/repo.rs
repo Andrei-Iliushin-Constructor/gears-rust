@@ -7,6 +7,7 @@ use github_mirror_sdk::{
     ReviewThread, SyncSummary, Tag, WorkflowJob, WorkflowRun,
 };
 use toolkit_macros::domain_model;
+use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
@@ -42,12 +43,13 @@ pub trait RepoRepository: Send + Sync {
     ) -> Result<Repo, DomainError>;
 
     /// `after`: keyset cursor — only rows whose `full_name` sorts after it.
+    /// One page of mirrored repositories, honouring the caller's `OData`
+    /// `$filter`, `$orderby`, `$top` and cursor.
     async fn list(
         &self,
         scope: &AccessScope,
-        limit: u64,
-        after: Option<&str>,
-    ) -> Result<Vec<Repo>, DomainError>;
+        query: &ODataQuery,
+    ) -> Result<Page<Repo>, DomainError>;
 
     async fn find_by_full_name(
         &self,
@@ -845,8 +847,8 @@ pub trait CommitFileRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         commit_sha: &str,
-        limit: u64,
-    ) -> Result<Vec<CommitFile>, DomainError>;
+        query: &ODataQuery,
+    ) -> Result<Page<CommitFile>, DomainError>;
 }
 
 /// Write-side record for a mirrored review thread.
@@ -878,8 +880,8 @@ pub trait ReviewThreadRepository: Send + Sync {
         scope: &AccessScope,
         repo_id: i64,
         pull_number: i64,
-        limit: u64,
-    ) -> Result<Vec<ReviewThread>, DomainError>;
+        query: &ODataQuery,
+    ) -> Result<Page<ReviewThread>, DomainError>;
 }
 
 /// Write-side record for a mirrored commit comment.
