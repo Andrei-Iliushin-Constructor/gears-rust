@@ -5692,10 +5692,8 @@
         "type": "object"
       },
       "GithubMirrorHealthDto": {
+        "description": "Deliberately without `api_base_url`: `/health` is registered\n`.anonymous()`, and the configured upstream host is infrastructure detail\nan unauthenticated caller has no business learning. It stays on\n[`MirrorStatus`], which only authenticated callers reach.",
         "properties": {
-          "api_base_url": {
-            "type": "string"
-          },
           "gear": {
             "type": "string"
           },
@@ -5705,8 +5703,7 @@
         },
         "required": [
           "gear",
-          "version",
-          "api_base_url"
+          "version"
         ],
         "type": "object"
       },
@@ -13847,11 +13844,84 @@
         ],
         "type": "object"
       },
+      "ReleaseAssetDto": {
+        "description": "A downloadable file attached to a release.",
+        "properties": {
+          "browser_download_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "download_count": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "node_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "ReleaseDto": {
         "description": "GitHub-shaped release.",
         "properties": {
           "assets": {
-            "description": "The stored asset slice (`name`, `browser_download_url`, `size` per\nasset), passed through as JSON; `[]` when the release has none."
+            "description": "The release's downloadable files; `[]` when it has none.",
+            "items": {
+              "$ref": "#/components/schemas/ReleaseAssetDto"
+            },
+            "type": "array"
           },
           "author": {
             "oneOf": [
@@ -18419,7 +18489,12 @@
               "null"
             ]
           },
-          "steps": {}
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowStepDto"
+            },
+            "type": "array"
+          }
         },
         "required": [
           "id",
@@ -18552,6 +18627,49 @@
         "required": [
           "total_count",
           "workflow_runs"
+        ],
+        "type": "object"
+      },
+      "WorkflowStepDto": {
+        "description": "One step of a workflow job.",
+        "properties": {
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "conclusion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "number": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
         ],
         "type": "object"
       }
@@ -40531,6 +40649,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "OData v4 filter expression\n- full_name: eq|ne|contains|startswith|endswith|in\n- owner: eq|ne|contains|startswith|endswith|in\n- name: eq|ne|contains|startswith|endswith|in\n- private: eq|ne\n- stars: eq|ne|gt|ge|lt|le|in\n- forks: eq|ne|gt|ge|lt|le|in",
+            "in": "query",
+            "name": "$filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -40593,7 +40720,57 @@
         "summary": "List mirrored repositories",
         "tags": [
           "GitHub Mirror"
-        ]
+        ],
+        "x-odata-filter": {
+          "allowedFields": {
+            "forks": [
+              "eq",
+              "ne",
+              "gt",
+              "ge",
+              "lt",
+              "le",
+              "in"
+            ],
+            "full_name": [
+              "eq",
+              "ne",
+              "contains",
+              "startswith",
+              "endswith",
+              "in"
+            ],
+            "name": [
+              "eq",
+              "ne",
+              "contains",
+              "startswith",
+              "endswith",
+              "in"
+            ],
+            "owner": [
+              "eq",
+              "ne",
+              "contains",
+              "startswith",
+              "endswith",
+              "in"
+            ],
+            "private": [
+              "eq",
+              "ne"
+            ],
+            "stars": [
+              "eq",
+              "ne",
+              "gt",
+              "ge",
+              "lt",
+              "le",
+              "in"
+            ]
+          }
+        }
       }
     },
     "/github-mirror/v1/repos/{owner}/{name}/commits/{sha}/files": {
@@ -40632,6 +40809,15 @@
             "description": "Maximum number of files to return",
             "in": "query",
             "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "OData v4 filter expression\n- filename: eq|ne|contains|startswith|endswith|in\n- status: eq|ne|contains|startswith|endswith|in\n- additions: eq|ne|gt|ge|lt|le|in\n- deletions: eq|ne|gt|ge|lt|le|in\n- changes: eq|ne|gt|ge|lt|le|in",
+            "in": "query",
+            "name": "$filter",
             "required": false,
             "schema": {
               "type": "string"
@@ -40708,7 +40894,54 @@
         "summary": "List mirrored changed files of a commit",
         "tags": [
           "GitHub Mirror"
-        ]
+        ],
+        "x-odata-filter": {
+          "allowedFields": {
+            "additions": [
+              "eq",
+              "ne",
+              "gt",
+              "ge",
+              "lt",
+              "le",
+              "in"
+            ],
+            "changes": [
+              "eq",
+              "ne",
+              "gt",
+              "ge",
+              "lt",
+              "le",
+              "in"
+            ],
+            "deletions": [
+              "eq",
+              "ne",
+              "gt",
+              "ge",
+              "lt",
+              "le",
+              "in"
+            ],
+            "filename": [
+              "eq",
+              "ne",
+              "contains",
+              "startswith",
+              "endswith",
+              "in"
+            ],
+            "status": [
+              "eq",
+              "ne",
+              "contains",
+              "startswith",
+              "endswith",
+              "in"
+            ]
+          }
+        }
       }
     },
     "/github-mirror/v1/repos/{owner}/{name}/pulls/{number}/threads": {
@@ -40747,6 +40980,15 @@
             "description": "Maximum number of threads to return",
             "in": "query",
             "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "OData v4 filter expression\n- id: eq|ne|contains|startswith|endswith|in\n- is_resolved: eq|ne\n- is_outdated: eq|ne\n- path: eq|ne|contains|startswith|endswith|in\n- comments_count: eq|ne|gt|ge|lt|le|in",
+            "in": "query",
+            "name": "$filter",
             "required": false,
             "schema": {
               "type": "string"
@@ -40823,7 +41065,44 @@
         "summary": "List mirrored review threads of a pull request",
         "tags": [
           "GitHub Mirror"
-        ]
+        ],
+        "x-odata-filter": {
+          "allowedFields": {
+            "comments_count": [
+              "eq",
+              "ne",
+              "gt",
+              "ge",
+              "lt",
+              "le",
+              "in"
+            ],
+            "id": [
+              "eq",
+              "ne",
+              "contains",
+              "startswith",
+              "endswith",
+              "in"
+            ],
+            "is_outdated": [
+              "eq",
+              "ne"
+            ],
+            "is_resolved": [
+              "eq",
+              "ne"
+            ],
+            "path": [
+              "eq",
+              "ne",
+              "contains",
+              "startswith",
+              "endswith",
+              "in"
+            ]
+          }
+        }
       }
     },
     "/github-mirror/v1/repos/{owner}/{name}/sync": {
