@@ -431,12 +431,24 @@ async fn send_message_persists_client_metadata_on_the_user_row_against_sqlite() 
     let session_type_id = db::seed_session_type(&harness, plugin_id).await;
     let session_id = db::seed_active_session(&harness, TENANT_ID, USER_ID, session_type_id).await;
 
+    // The plugin completes with metadata of its own, so the assistant row is
+    // finalised with a populated map — otherwise the "client keys absent"
+    // assertion below would hold trivially against a NULL column.
     let plugin = FakePlugin::new(
         plugin_id,
-        FakePluginScript::Events(vec![StreamingEvent::Chunk(StreamingChunkEvent {
-            message_id: Uuid::nil(),
-            chunk: "ok".into(),
-        })]),
+        FakePluginScript::Events(vec![
+            StreamingEvent::Chunk(StreamingChunkEvent {
+                message_id: Uuid::nil(),
+                chunk: "ok".into(),
+            }),
+            StreamingEvent::Complete(StreamingCompleteEvent {
+                message_id: Uuid::nil(),
+                metadata: Some(serde_json::json!({ "finish_reason": "stop" })),
+                file_citations: vec![],
+                link_citations: vec![],
+                references: vec![],
+            }),
+        ]),
     );
     let plugin_dyn: Arc<dyn ChatEngineBackendPlugin> = plugin;
     let svc = build_service(&harness, plugin_id, plugin_dyn);
@@ -466,18 +478,26 @@ async fn send_message_persists_client_metadata_on_the_user_row_against_sqlite() 
         "per-turn client metadata must land verbatim on the user row",
     );
 
-    let assistant = rows
-        .iter()
-        .find(|m| matches!(m.role, message::MessageRole::Assistant))
-        .expect("assistant row persisted");
-    assert!(
-        assistant
-            .metadata
-            .as_ref()
-            .and_then(|m| m.get("device"))
-            .is_none(),
-        "client metadata must not leak onto the assistant row",
+    // Read the assistant row only after the detached driver has finalised it,
+    // so its metadata column is populated rather than still NULL.
+    let assistant = db::wait_for_finalize(&harness.db, session_id, Duration::from_secs(2)).await;
+    let assistant_meta = assistant.metadata.expect("assistant metadata present");
+    assert_eq!(
+        assistant_meta["finish_reason"], "stop",
+        "the plugin's own metadata must survive finalize",
     );
+    // Driven off the payload itself so the assertion cannot drift from what
+    // the request actually sent.
+    for key in client_metadata
+        .as_object()
+        .expect("client metadata is a JSON object")
+        .keys()
+    {
+        assert!(
+            assistant_meta.get(key).is_none(),
+            "client metadata key '{key}' must not leak onto the assistant row",
+        );
+    }
 }
 
 #[tokio::test]
