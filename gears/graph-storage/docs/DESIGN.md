@@ -1200,11 +1200,20 @@ rejected, so that a document read from the API can be sent back unchanged.
 
 `created_by`, `updated_by` and `deleted_by` are **subjects**, not users:
 `{ subject_id, subject_type }` in the platform's own vocabulary
-(`SecurityContext.subject_id` / `subject_type`, the latter a GTS type identifier
-such as `gts.cf.core.security.subject_user.v1~`). Most writes into this gear come
-from an automation or a service integration rather than from a person, so a
+(`SecurityContext.subject_id` / `subject_type` — the first a `Uuid`, the second
+an optional GTS type identifier such as `gts.cf.core.security.subject_user.v1~`,
+which is why the § 3.7 columns are `UUID` and `TEXT`). Most writes into this
+gear come from an automation or a service integration rather than a person, so a
 `user_id` field would be null on the majority of rows and would need a second
 convention beside it for the rest.
+
+**The revision is on the element, not on the response.** Every element of one
+read observes the same revision, so carrying it per element duplicates a value.
+It is where it has to be: the tabular projection answers inside the platform's
+page wrapper, which carries items and cursors and has no member for a revision,
+and the wrapper constrains the page rather than the items. Putting
+`graph_revision` in the envelope is therefore what lets that path report the
+snapshot it observed at all (PRD § `fr-tabular-projection`).
 
 **An attribute has no envelope of its own.** It is a fragment inside an element's
 payload, so its tenant, its timestamps and the subject that wrote it are the
@@ -1411,6 +1420,7 @@ pub struct ExpandResponse {
     pub reached: Vec<NodeId>,
     pub edges: Vec<EdgeRef>,
     pub truncated: Option<TruncationReason>, // never silent
+    pub served_by: HopBackend,               // Pattern | TwoQuery — which path answered
 }
 ```
 
@@ -1433,6 +1443,17 @@ When an engine cannot enforce a scope property it returns
 predicate. The port then serves the request on the two-query hop and logs the
 reason — which is the whole point of making it a typed error instead of a
 best-effort filter.
+
+**Found while building the prototype: a log line is not observable to a test.**
+The fallback returns the *right answer*, so a pattern hop that failed on every
+single request is indistinguishable, from outside, from one that ran. The
+prototype spent a while in exactly that state — its pattern-hop test walked the
+graph without the pattern, and its two-backend comparison compared the fallback
+with itself and found perfect agreement. `ExpandResponse` therefore carries
+`served_by`: which backend answered is part of the answer, not only of the log.
+The general form is worth stating once, because it is not specific to this
+seam: a fallback that returns the right answer is invisible unless the answer
+says which path produced it.
 
 ##### `EmbeddingProviderV1`
 
@@ -1828,10 +1849,10 @@ PostgreSQL row alignment the two are the same size in these tables anyway.
 | source_namespace | TEXT | Source namespace for reference nodes; `NULL` for owned nodes |
 | owner_principal | TEXT | Producer principal that created the row; immutable after insert (§ Authorization Model) |
 | created_at / updated_at | TIMESTAMPTZ | Timestamps |
-| created_by_subject_id / created_by_subject_type | TEXT | Subject that first wrote the row (§ API element envelope) |
-| updated_by_subject_id / updated_by_subject_type | TEXT | Subject of the most recent write |
+| created_by_subject_id / created_by_subject_type | UUID / TEXT | Subject that first wrote the row (§ API element envelope) |
+| updated_by_subject_id / updated_by_subject_type | UUID / TEXT | Subject of the most recent write |
 | deleted_at | TIMESTAMPTZ | Soft-delete tombstone; `NULL` for live rows (Soft Delete Contract) |
-| deleted_by_subject_id / deleted_by_subject_type | TEXT | Subject that tombstoned the row; `NULL` while live |
+| deleted_by_subject_id / deleted_by_subject_type | UUID / TEXT | Subject that tombstoned the row; `NULL` while live |
 
 `source_namespace` and `owner_principal` are written once, on insert, and never
 by an upsert; the ingest path compares them instead. A companion
@@ -1851,10 +1872,10 @@ per tenant and is the authority the comparison consults.
 | src_node_id / dst_node_id | BIGINT | Endpoints; **FK (tenant_id, src/dst_node_id) -> node (tenant_id, id) ON DELETE RESTRICT** — deletion never cascades into edges, so an analysis edge can never be destroyed as a side effect of removing a static node |
 | payload | JSONB | GTS-validated attributes incl. provenance |
 | created_at / updated_at | TIMESTAMPTZ | Timestamps |
-| created_by_subject_id / created_by_subject_type | TEXT | Subject that first wrote the row (§ API element envelope) |
-| updated_by_subject_id / updated_by_subject_type | TEXT | Subject of the most recent write |
+| created_by_subject_id / created_by_subject_type | UUID / TEXT | Subject that first wrote the row (§ API element envelope) |
+| updated_by_subject_id / updated_by_subject_type | UUID / TEXT | Subject of the most recent write |
 | deleted_at | TIMESTAMPTZ | Soft-delete tombstone; `NULL` for live rows (Soft Delete Contract) |
-| deleted_by_subject_id / deleted_by_subject_type | TEXT | Subject that tombstoned the row; `NULL` while live |
+| deleted_by_subject_id / deleted_by_subject_type | UUID / TEXT | Subject that tombstoned the row; `NULL` while live |
 
 An edge carries the same audit columns as a node. A re-synced static edge is
 rewritten rather than versioned, so `updated_by` records the last producer to
