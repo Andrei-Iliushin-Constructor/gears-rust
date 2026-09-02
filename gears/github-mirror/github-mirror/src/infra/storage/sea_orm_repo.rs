@@ -68,6 +68,12 @@ impl SeaOrmRepoRepository {
     }
 }
 
+/// An instant in the exact shape GitHub writes into the stored `updated_at`
+/// text, so the comparison against that TEXT column is a like-for-like one.
+fn github_instant(at: chrono::DateTime<chrono::Utc>) -> String {
+    at.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
 fn map_scope_error(e: ScopeError) -> DomainError {
     match e {
         ScopeError::Denied(msg) => DomainError::forbidden(msg),
@@ -127,9 +133,10 @@ impl RepoRepository for SeaOrmRepoRepository {
         ])
         .map_err(map_scope_error)?;
 
-        RepoEntity::insert(active_model(tenant_id, &record))
+        let model = active_model(tenant_id, &record);
+        RepoEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -236,14 +243,14 @@ impl IssueRepository for SeaOrmIssueRepository {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        filter: ListingFilter<'_>,
+        filter: ListingFilter,
     ) -> Result<u64, DomainError> {
         let mut condition = sea_orm::Condition::all().add(issues::Column::RepoId.eq(repo_id));
         if let Some(state) = filter.state {
-            condition = condition.add(issues::Column::State.eq(state));
+            condition = condition.add(issues::Column::State.eq(state.as_str()));
         }
         if let Some(since) = filter.since {
-            condition = condition.add(issues::Column::UpdatedAt.gte(since));
+            condition = condition.add(issues::Column::UpdatedAt.gte(github_instant(since)));
         }
         IssueEntity::find()
             .secure()
@@ -314,9 +321,10 @@ impl IssueRepository for SeaOrmIssueRepository {
         ])
         .map_err(map_scope_error)?;
 
-        IssueEntity::insert(issue_active_model(tenant_id, &record))
+        let model = issue_active_model(tenant_id, &record);
+        IssueEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &issue_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -351,14 +359,14 @@ impl IssueRepository for SeaOrmIssueRepository {
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
-        filter: ListingFilter<'_>,
+        filter: ListingFilter,
     ) -> Result<Vec<Issue>, DomainError> {
         let mut condition = sea_orm::Condition::all().add(issues::Column::RepoId.eq(repo_id));
         if let Some(state) = filter.state {
-            condition = condition.add(issues::Column::State.eq(state));
+            condition = condition.add(issues::Column::State.eq(state.as_str()));
         }
         if let Some(since) = filter.since {
-            condition = condition.add(issues::Column::UpdatedAt.gte(since));
+            condition = condition.add(issues::Column::UpdatedAt.gte(github_instant(since)));
         }
         let (sort_column, direction) = (
             match filter.sort {
@@ -458,15 +466,15 @@ impl PullRequestRepository for SeaOrmPullRequestRepository {
         conn: &C,
         scope: &AccessScope,
         repo_id: i64,
-        filter: ListingFilter<'_>,
+        filter: ListingFilter,
     ) -> Result<u64, DomainError> {
         let mut condition =
             sea_orm::Condition::all().add(pull_requests::Column::RepoId.eq(repo_id));
         if let Some(state) = filter.state {
-            condition = condition.add(pull_requests::Column::State.eq(state));
+            condition = condition.add(pull_requests::Column::State.eq(state.as_str()));
         }
         if let Some(since) = filter.since {
-            condition = condition.add(pull_requests::Column::UpdatedAt.gte(since));
+            condition = condition.add(pull_requests::Column::UpdatedAt.gte(github_instant(since)));
         }
         PullRequestEntity::find()
             .secure()
@@ -546,9 +554,10 @@ impl PullRequestRepository for SeaOrmPullRequestRepository {
         ])
         .map_err(map_scope_error)?;
 
-        PullRequestEntity::insert(pull_request_active_model(tenant_id, &record))
+        let model = pull_request_active_model(tenant_id, &record);
+        PullRequestEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &pull_request_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -592,15 +601,15 @@ impl PullRequestRepository for SeaOrmPullRequestRepository {
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
-        filter: ListingFilter<'_>,
+        filter: ListingFilter,
     ) -> Result<Vec<PullRequest>, DomainError> {
         let mut condition =
             sea_orm::Condition::all().add(pull_requests::Column::RepoId.eq(repo_id));
         if let Some(state) = filter.state {
-            condition = condition.add(pull_requests::Column::State.eq(state));
+            condition = condition.add(pull_requests::Column::State.eq(state.as_str()));
         }
         if let Some(since) = filter.since {
-            condition = condition.add(pull_requests::Column::UpdatedAt.gte(since));
+            condition = condition.add(pull_requests::Column::UpdatedAt.gte(github_instant(since)));
         }
         let (sort_column, direction) = (
             match filter.sort {
@@ -743,9 +752,10 @@ impl CommitRepository for SeaOrmCommitRepository {
         ])
         .map_err(map_scope_error)?;
 
-        CommitEntity::insert(commit_active_model(tenant_id, &record))
+        let model = commit_active_model(tenant_id, &record);
+        CommitEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &commit_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -886,9 +896,10 @@ impl CommentRepository for SeaOrmCommentRepository {
         ])
         .map_err(map_scope_error)?;
 
-        CommentEntity::insert(comment_active_model(tenant_id, &record))
+        let model = comment_active_model(tenant_id, &record);
+        CommentEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &comment_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -1043,9 +1054,10 @@ impl ReviewCommentRepository for SeaOrmReviewCommentRepository {
         ])
         .map_err(map_scope_error)?;
 
-        ReviewCommentEntity::insert(review_comment_active_model(tenant_id, &record))
+        let model = review_comment_active_model(tenant_id, &record);
+        ReviewCommentEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &review_comment_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -1158,9 +1170,10 @@ impl ReviewRepository for SeaOrmReviewRepository {
         ])
         .map_err(map_scope_error)?;
 
-        ReviewEntity::insert(review_active_model(tenant_id, &record))
+        let model = review_active_model(tenant_id, &record);
+        ReviewEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &review_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -1279,9 +1292,10 @@ impl LabelRepository for SeaOrmLabelRepository {
         ])
         .map_err(map_scope_error)?;
 
-        LabelEntity::insert(label_active_model(tenant_id, &record))
+        let model = label_active_model(tenant_id, &record);
+        LabelEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &label_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -1406,9 +1420,10 @@ impl MilestoneRepository for SeaOrmMilestoneRepository {
         ])
         .map_err(map_scope_error)?;
 
-        MilestoneEntity::insert(milestone_active_model(tenant_id, &record))
+        let model = milestone_active_model(tenant_id, &record);
+        MilestoneEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &milestone_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -1538,9 +1553,10 @@ impl ReleaseRepository for SeaOrmReleaseRepository {
         ])
         .map_err(map_scope_error)?;
 
-        ReleaseEntity::insert(release_active_model(tenant_id, &record))
+        let model = release_active_model(tenant_id, &record);
+        ReleaseEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &release_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -1655,9 +1671,10 @@ impl BranchRepository for SeaOrmBranchRepository {
         ])
         .map_err(map_scope_error)?;
 
-        BranchEntity::insert(branch_active_model(tenant_id, &record))
+        let model = branch_active_model(tenant_id, &record);
+        BranchEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &branch_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -1748,9 +1765,10 @@ impl ContributorRepository for SeaOrmContributorRepository {
         ])
         .map_err(map_scope_error)?;
 
-        ContributorEntity::insert(contributor_active_model(tenant_id, &record))
+        let model = contributor_active_model(tenant_id, &record);
+        ContributorEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &contributor_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -1872,9 +1890,10 @@ impl WorkflowRunRepository for SeaOrmWorkflowRunRepository {
         ])
         .map_err(map_scope_error)?;
 
-        WorkflowRunEntity::insert(workflow_run_active_model(tenant_id, &record))
+        let model = workflow_run_active_model(tenant_id, &record);
+        WorkflowRunEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &workflow_run_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -1980,9 +1999,10 @@ impl PullRequestFileRepository for SeaOrmPullRequestFileRepository {
         ])
         .map_err(map_scope_error)?;
 
-        PullRequestFileEntity::insert(pull_request_file_active_model(tenant_id, &record))
+        let model = pull_request_file_active_model(tenant_id, &record);
+        PullRequestFileEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &pull_request_file_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -2093,9 +2113,10 @@ impl TagRepository for SeaOrmTagRepository {
         .update_columns([tags::Column::CommitSha, tags::Column::ExtractedAt])
         .map_err(map_scope_error)?;
 
-        TagEntity::insert(tag_active_model(tenant_id, &record))
+        let model = tag_active_model(tenant_id, &record);
+        TagEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &tag_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -2182,9 +2203,10 @@ impl CommitFileRepository for SeaOrmCommitFileRepository {
         ])
         .map_err(map_scope_error)?;
 
-        CommitFileEntity::insert(commit_file_active_model(tenant_id, &record))
+        let model = commit_file_active_model(tenant_id, &record);
+        CommitFileEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &commit_file_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -2285,9 +2307,10 @@ impl ReviewThreadRepository for SeaOrmReviewThreadRepository {
         ])
         .map_err(map_scope_error)?;
 
-        ReviewThreadEntity::insert(review_thread_active_model(tenant_id, &record))
+        let model = review_thread_active_model(tenant_id, &record);
+        ReviewThreadEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &review_thread_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -2390,9 +2413,10 @@ impl CommitCommentRepository for SeaOrmCommitCommentRepository {
         ])
         .map_err(map_scope_error)?;
 
-        CommitCommentEntity::insert(commit_comment_active_model(tenant_id, &record))
+        let model = commit_comment_active_model(tenant_id, &record);
+        CommitCommentEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &commit_comment_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -2495,9 +2519,10 @@ impl IssueEventRepository for SeaOrmIssueEventRepository {
         ])
         .map_err(map_scope_error)?;
 
-        IssueEventEntity::insert(issue_event_active_model(tenant_id, &record))
+        let model = issue_event_active_model(tenant_id, &record);
+        IssueEventEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &issue_event_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -2600,9 +2625,10 @@ impl DeploymentRepository for SeaOrmDeploymentRepository {
         ])
         .map_err(map_scope_error)?;
 
-        DeploymentEntity::insert(deployment_active_model(tenant_id, &record))
+        let model = deployment_active_model(tenant_id, &record);
+        DeploymentEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &deployment_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -2699,9 +2725,10 @@ impl PullRequestCommitRepository for SeaOrmPullRequestCommitRepository {
         ])
         .map_err(map_scope_error)?;
 
-        PullRequestCommitEntity::insert(pull_request_commit_active_model(tenant_id, &record))
+        let model = pull_request_commit_active_model(tenant_id, &record);
+        PullRequestCommitEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &pull_request_commit_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -2805,9 +2832,10 @@ impl CommitStatusRepository for SeaOrmCommitStatusRepository {
         ])
         .map_err(map_scope_error)?;
 
-        CommitStatusEntity::insert(commit_status_active_model(tenant_id, &record))
+        let model = commit_status_active_model(tenant_id, &record);
+        CommitStatusEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &commit_status_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -2936,9 +2964,10 @@ impl WorkflowJobRepository for SeaOrmWorkflowJobRepository {
         ])
         .map_err(map_scope_error)?;
 
-        WorkflowJobEntity::insert(workflow_job_active_model(tenant_id, &record))
+        let model = workflow_job_active_model(tenant_id, &record);
+        WorkflowJobEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &workflow_job_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -3037,9 +3066,10 @@ impl IssueReactionRepository for SeaOrmIssueReactionRepository {
         ])
         .map_err(map_scope_error)?;
 
-        IssueReactionEntity::insert(issue_reaction_active_model(tenant_id, &record))
+        let model = issue_reaction_active_model(tenant_id, &record);
+        IssueReactionEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &issue_reaction_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -3168,9 +3198,10 @@ impl CheckRunRepository for SeaOrmCheckRunRepository {
         ])
         .map_err(map_scope_error)?;
 
-        CheckRunEntity::insert(check_run_active_model(tenant_id, &record))
+        let model = check_run_active_model(tenant_id, &record);
+        CheckRunEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &check_run_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)
@@ -3300,9 +3331,10 @@ impl IssueTimelineRepository for SeaOrmIssueTimelineRepository {
         ])
         .map_err(map_scope_error)?;
 
-        IssueTimelineEntity::insert(issue_timeline_active_model(tenant_id, &record))
+        let model = issue_timeline_active_model(tenant_id, &record);
+        IssueTimelineEntity::insert(model.clone())
             .secure()
-            .scope_with_model(scope, &issue_timeline_active_model(tenant_id, &record))
+            .scope_with_model(scope, &model)
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(conn)

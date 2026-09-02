@@ -15,8 +15,10 @@ use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::SecurityContext;
 
 use crate::api::rest::routes::ConcreteService;
+use chrono::{DateTime, Utc};
+
 use crate::domain::error::DomainError;
-use crate::domain::repo::{ListingDirection, ListingFilter, ListingSort};
+use crate::domain::repo::{IssueState, ListingDirection, ListingFilter, ListingSort};
 
 use super::dto::{
     AuthenticatedUserDto, BranchDto, CheckRunDto, CheckRunsPageDto, CommentDto, CommitCommentDto,
@@ -44,24 +46,44 @@ pub struct GithubPageQuery {
 
 impl GithubPageQuery {
     /// The state to filter on, following GitHub: no `state` means `open`,
-    /// `all` means no filter, anything else is passed through as given.
-    fn state_filter(&self) -> Option<&str> {
+    /// `all` means no filter.
+    ///
+    /// # Errors
+    /// `Validation` when the value is not a state GitHub knows.
+    fn state_filter(&self) -> Result<Option<IssueState>, DomainError> {
         match self.state.as_deref() {
-            None => Some("open"),
-            Some("all") => None,
-            Some(state) => Some(state),
+            None => Ok(Some(IssueState::Open)),
+            Some("all") => Ok(None),
+            Some(state) => IssueState::parse(state).map(Some),
         }
+    }
+
+    fn since_filter(&self) -> Result<Option<DateTime<Utc>>, DomainError> {
+        self.since
+            .as_deref()
+            .map(|raw| {
+                DateTime::parse_from_rfc3339(raw)
+                    .map(|at| at.with_timezone(&Utc))
+                    .map_err(|e| DomainError::Validation {
+                        field: "since".to_owned(),
+                        message: format!("`{raw}` is not an RFC3339 timestamp: {e}"),
+                    })
+            })
+            .transpose()
     }
 
     /// The whole listing filter, with GitHub's defaults for anything the
     /// caller left out.
-    fn listing_filter(&self) -> ListingFilter<'_> {
-        ListingFilter {
-            state: self.state_filter(),
+    ///
+    /// # Errors
+    /// Whatever [`Self::state_filter`] or [`Self::since_filter`] returns.
+    fn listing_filter(&self) -> Result<ListingFilter, DomainError> {
+        Ok(ListingFilter {
+            state: self.state_filter()?,
             sort: ListingSort::parse(self.sort.as_deref()),
             direction: ListingDirection::parse(self.direction.as_deref()),
-            since: self.since.as_deref(),
-        }
+            since: self.since_filter()?,
+        })
     }
 }
 
@@ -239,13 +261,10 @@ pub async fn list_issues(
 ) -> GithubList<IssueDto> {
     validate_repo_path(&owner, &name)?;
     let page = query.normalized();
-    let items = svc
-        .list_issues(&ctx, &owner, &name, &page.odata(), query.listing_filter())
-        .await?
-        .items;
-    let total = svc
-        .count_issues(&ctx, &owner, &name, query.listing_filter())
+    let (items, total) = svc
+        .list_issues(&ctx, &owner, &name, &page.odata(), query.listing_filter()?)
         .await?;
+    let items = items.items;
     let path = format!("/repos/{owner}/{name}/issues");
     Ok(respond_counted(&page, &path, page.slice(items), total))
 }
@@ -273,13 +292,10 @@ pub async fn list_pull_requests(
 ) -> GithubList<PullRequestDto> {
     validate_repo_path(&owner, &name)?;
     let page = query.normalized();
-    let items = svc
-        .list_pull_requests(&ctx, &owner, &name, &page.odata(), query.listing_filter())
-        .await?
-        .items;
-    let total = svc
-        .count_pull_requests(&ctx, &owner, &name, query.listing_filter())
+    let (items, total) = svc
+        .list_pull_requests(&ctx, &owner, &name, &page.odata(), query.listing_filter()?)
         .await?;
+    let items = items.items;
     let path = format!("/repos/{owner}/{name}/pulls");
     Ok(respond_counted(&page, &path, page.slice(items), total))
 }
@@ -337,11 +353,8 @@ pub async fn list_commits(
 ) -> GithubList<CommitDto> {
     validate_repo_path(&owner, &name)?;
     let page = query.normalized();
-    let items = svc
-        .list_commits(&ctx, &owner, &name, &page.odata())
-        .await?
-        .items;
-    let total = svc.count_commits(&ctx, &owner, &name).await?;
+    let (items, total) = svc.list_commits(&ctx, &owner, &name, &page.odata()).await?;
+    let items = items.items;
     let path = format!("/repos/{owner}/{name}/commits");
     Ok(respond_counted(&page, &path, page.slice(items), total))
 }
@@ -450,17 +463,15 @@ pub async fn list_workflow_runs(
 ) -> ApiResult<(HeaderMap, JsonBody<WorkflowRunsPageDto>)> {
     validate_repo_path(&owner, &name)?;
     let page = query.normalized();
-    let items = svc
+    let (items, total) = svc
         .list_workflow_runs(&ctx, &owner, &name, &page.odata())
-        .await?
-        .items;
-    let runs: Vec<WorkflowRunDto> = page.slice(items);
+        .await?;
+    let runs: Vec<WorkflowRunDto> = page.slice(items.items);
     let path = format!("/repos/{owner}/{name}/actions/runs");
     let headers = page.link_header(&path, runs.len());
     // GitHub's `total_count` spans every page, so it is a count, not the
     // length of the slice being served.
-    let total_count =
-        i64::try_from(svc.count_workflow_runs(&ctx, &owner, &name).await?).unwrap_or(i64::MAX);
+    let total_count = i64::try_from(total).unwrap_or(i64::MAX);
     Ok((
         headers,
         Json(WorkflowRunsPageDto {
@@ -656,15 +667,13 @@ pub async fn list_workflow_jobs(
     Query(query): Query<GithubPageQuery>,
 ) -> ApiResult<(HeaderMap, JsonBody<WorkflowJobsPageDto>)> {
     let page = query.normalized();
-    let items = svc
+    let (items, total) = svc
         .list_workflow_jobs(&ctx, &owner, &name, run_id, &page.odata())
-        .await?
-        .items;
-    let jobs: Vec<WorkflowJobDto> = page.slice(items);
+        .await?;
+    let jobs: Vec<WorkflowJobDto> = page.slice(items.items);
     let path = format!("/repos/{owner}/{name}/actions/runs/{run_id}/jobs");
     let headers = page.link_header(&path, jobs.len());
-    let total_count = i64::try_from(svc.count_workflow_jobs(&ctx, &owner, &name, run_id).await?)
-        .unwrap_or(i64::MAX);
+    let total_count = i64::try_from(total).unwrap_or(i64::MAX);
     Ok((headers, Json(WorkflowJobsPageDto { total_count, jobs })))
 }
 
@@ -675,15 +684,13 @@ pub async fn list_check_runs(
     Query(query): Query<GithubPageQuery>,
 ) -> ApiResult<(HeaderMap, JsonBody<CheckRunsPageDto>)> {
     let page = query.normalized();
-    let items = svc
+    let (items, total) = svc
         .list_check_runs(&ctx, &owner, &name, &sha, &page.odata())
-        .await?
-        .items;
-    let check_runs: Vec<CheckRunDto> = page.slice(items);
+        .await?;
+    let check_runs: Vec<CheckRunDto> = page.slice(items.items);
     let path = format!("/repos/{owner}/{name}/commits/{sha}/check-runs");
     let headers = page.link_header(&path, check_runs.len());
-    let total_count =
-        i64::try_from(svc.count_check_runs(&ctx, &owner, &name, &sha).await?).unwrap_or(i64::MAX);
+    let total_count = i64::try_from(total).unwrap_or(i64::MAX);
     Ok((
         headers,
         Json(CheckRunsPageDto {

@@ -12,8 +12,7 @@ use github_mirror_sdk::{
     PullRequest, PullRequestCommit, PullRequestFile, Release, Repo, Review, ReviewComment,
     ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
-
-use crate::domain::service::{MirrorStatus, SyncSummary};
+use github_mirror_sdk::{MirrorStatus, SyncSummary};
 
 /// Deliberately without `api_base_url`: `/health` is registered
 /// `.anonymous()`, and the configured upstream host is infrastructure detail

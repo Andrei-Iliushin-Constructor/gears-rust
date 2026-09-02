@@ -8,7 +8,7 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use github_mirror::api::rest::routes::{ConcreteService, register_routes};
-use github_mirror::domain::ports::github::{FetchedRepository, ListingCompleteness};
+use github_mirror::domain::ports::github::{FetchedRepository, Listing, ListingCompleteness};
 use github_mirror::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
     CommitRecord, CommitStatusRecord, ContributorRecord, DeploymentRecord, IssueEventRecord,
@@ -793,10 +793,9 @@ fn recon_fetched(issue_ids: &[i64], issues_complete: bool) -> FetchedRepository 
     result.issue_reactions = vec![];
     result.check_runs = vec![];
     result.issue_timeline = vec![];
-    result.complete = ListingCompleteness {
-        issues: issues_complete,
-        ..ListingCompleteness::all_complete()
-    };
+    let mut complete = ListingCompleteness::all_complete();
+    complete.set(Listing::Issues, issues_complete);
+    result.complete = complete;
     result
 }
 
