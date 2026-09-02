@@ -80,7 +80,7 @@ impl LicenseFeature for License {}
 const GITHUB_DOCS_URL: &str = "https://docs.github.com/rest";
 
 /// Biggest error body worth rewriting. A problem document is a few hundred
-/// bytes; anything larger is not one, and is passed through untouched.
+/// bytes; anything larger is not one, and is dropped rather than rewritten.
 const MAX_ERROR_BODY: usize = 64 * 1024;
 
 /// Restate a failed response in GitHub's error shape.
@@ -97,8 +97,21 @@ async fn github_error_body(response: Response) -> Response {
     }
 
     let (mut parts, body) = response.into_parts();
-    let Ok(bytes) = axum::body::to_bytes(body, MAX_ERROR_BODY).await else {
-        return Response::from_parts(parts, Body::empty());
+    let bytes = match axum::body::to_bytes(body, MAX_ERROR_BODY).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            // The body is gone, so the announced length no longer describes
+            // what is sent; leaving `Content-Length` would make the response
+            // unparseable.
+            tracing::warn!(
+                %status,
+                content_length = ?parts.headers.get(header::CONTENT_LENGTH),
+                error = %e,
+                "error body too large or unreadable; answering without it"
+            );
+            parts.headers.remove(header::CONTENT_LENGTH);
+            return Response::from_parts(parts, Body::empty());
+        }
     };
 
     // `title` is the human-readable summary ("Not Found"), which is what

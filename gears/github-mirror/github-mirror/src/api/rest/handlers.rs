@@ -15,6 +15,7 @@ use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::SecurityContext;
 
 use crate::api::rest::routes::ConcreteService;
+use crate::domain::error::DomainError;
 use crate::domain::repo::{ListingDirection, ListingFilter, ListingSort};
 
 use super::dto::{
@@ -198,11 +199,34 @@ pub async fn list_repos(
     Ok(Json(page.map_items(RepoDto::from)))
 }
 
+/// GitHub owner and repository names are ASCII letters, digits, `.`, `_`
+/// and `-`. The path segments arrive percent-decoded, so anything else —
+/// a `?`, `#`, `/`, a quote — could re-shape the URL or GraphQL query the
+/// mirror sends to GitHub with its own token; such values are rejected
+/// here, before any of them is used.
+fn validate_repo_path(owner: &str, name: &str) -> Result<(), DomainError> {
+    for (field, value) in [("owner", owner), ("name", name)] {
+        let well_formed = !value.is_empty()
+            && value.len() <= 100
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-');
+        if !well_formed {
+            return Err(DomainError::Validation {
+                field: field.to_owned(),
+                message: "must be 1-100 characters from [A-Za-z0-9._-]".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
 pub async fn sync_repository(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<ConcreteService>>,
     Path((owner, name)): Path<(String, String)>,
 ) -> ApiResult<JsonBody<SyncSummaryDto>> {
+    validate_repo_path(&owner, &name)?;
     let summary = svc.sync_repository(&ctx, &owner, &name).await?;
     Ok(Json(summary.into()))
 }
@@ -213,6 +237,7 @@ pub async fn list_issues(
     Path((owner, name)): Path<(String, String)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<IssueDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized();
     let items = svc
         .list_issues(&ctx, &owner, &name, &page.odata(), query.listing_filter())
@@ -246,6 +271,7 @@ pub async fn list_pull_requests(
     Path((owner, name)): Path<(String, String)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<PullRequestDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized();
     let items = svc
         .list_pull_requests(&ctx, &owner, &name, &page.odata(), query.listing_filter())
@@ -309,6 +335,7 @@ pub async fn list_commits(
     Path((owner, name)): Path<(String, String)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<CommitDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized();
     let items = svc
         .list_commits(&ctx, &owner, &name, &page.odata())
@@ -325,6 +352,7 @@ pub async fn list_branches(
     Path((owner, name)): Path<(String, String)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<BranchDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized();
     let items = svc
         .list_branches(&ctx, &owner, &name, &page.odata())
@@ -340,6 +368,7 @@ pub async fn list_tags(
     Path((owner, name)): Path<(String, String)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<TagDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized();
     let items = svc
         .list_tags(&ctx, &owner, &name, &page.odata())
@@ -355,6 +384,7 @@ pub async fn list_releases(
     Path((owner, name)): Path<(String, String)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<ReleaseDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized();
     let items = svc
         .list_releases(&ctx, &owner, &name, &page.odata())
@@ -370,6 +400,7 @@ pub async fn list_milestones(
     Path((owner, name)): Path<(String, String)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<MilestoneDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized();
     let items = svc
         .list_milestones(&ctx, &owner, &name, &page.odata())
@@ -385,6 +416,7 @@ pub async fn list_labels(
     Path((owner, name)): Path<(String, String)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<LabelDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized();
     let items = svc
         .list_labels(&ctx, &owner, &name, &page.odata())
@@ -400,6 +432,7 @@ pub async fn list_contributors(
     Path((owner, name)): Path<(String, String)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<ContributorDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized();
     let items = svc
         .list_contributors(&ctx, &owner, &name, &page.odata())
@@ -415,6 +448,7 @@ pub async fn list_workflow_runs(
     Path((owner, name)): Path<(String, String)>,
     Query(query): Query<GithubPageQuery>,
 ) -> ApiResult<(HeaderMap, JsonBody<WorkflowRunsPageDto>)> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized();
     let items = svc
         .list_workflow_runs(&ctx, &owner, &name, &page.odata())
@@ -465,6 +499,7 @@ pub async fn get_repo(
     Extension(svc): Extension<Arc<ConcreteService>>,
     Path((owner, name)): Path<(String, String)>,
 ) -> ApiResult<JsonBody<RepoDto>> {
+    validate_repo_path(&owner, &name)?;
     let repo = svc.get_repo(&ctx, &owner, &name).await?;
     Ok(Json(repo.into()))
 }
@@ -574,6 +609,7 @@ pub async fn list_deployments(
     Path((owner, name)): Path<(String, String)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<DeploymentDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized();
     let items = svc
         .list_deployments(&ctx, &owner, &name, &page.odata())
