@@ -31,6 +31,7 @@ pub mod review_comments_006;
 pub mod review_comments_diff_anchors_029;
 pub mod review_threads_017;
 pub mod reviews_007;
+pub mod support;
 pub mod sync_sessions_029;
 pub mod sync_watermarks_030;
 pub mod tags_015;

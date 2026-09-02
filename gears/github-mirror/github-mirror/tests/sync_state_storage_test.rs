@@ -2,6 +2,8 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use authz_resolver_sdk::pep::{AccessRequest, ResourceType};
 use github_mirror::domain::repo::{
     EntityFingerprintRecord, EntityFingerprintRepository, SyncSessionRecord, SyncSessionRepository,
@@ -54,17 +56,15 @@ fn session_record(id: Uuid, status: &str, created_at: &str) -> SyncSessionRecord
 #[tokio::test]
 async fn a_session_is_created_updated_and_listed_newest_first() {
     let db = common::inmem_db().await;
-    let provider = DBProvider::<DbError>::new(db);
-    let conn = provider.conn().expect("conn");
+    let provider = Arc::new(DBProvider::<DbError>::new(db));
     let ctx = common::caller_in(Uuid::new_v4());
     let tenant = ctx.subject_tenant_id();
     let scope = scope_for(&ctx).await;
-    let repo = SeaOrmSyncSessionRepository::new();
+    let repo = SeaOrmSyncSessionRepository::new(Arc::clone(&provider));
 
     let first = Uuid::new_v4();
     let second = Uuid::new_v4();
     repo.upsert(
-        &conn,
         &scope,
         tenant,
         session_record(first, "queued", "2026-08-25T10:00:00Z"),
@@ -72,7 +72,6 @@ async fn a_session_is_created_updated_and_listed_newest_first() {
     .await
     .expect("first insert");
     repo.upsert(
-        &conn,
         &scope,
         tenant,
         session_record(second, "queued", "2026-08-25T11:00:00Z"),
@@ -85,12 +84,12 @@ async fn a_session_is_created_updated_and_listed_newest_first() {
     finished.ended_at = Some("2026-08-25T10:00:30Z".to_owned());
     finished.progress_percent = 100;
     finished.summary_json = Some(r#"{"issues_synced":2}"#.to_owned());
-    repo.upsert(&conn, &scope, tenant, finished)
+    repo.upsert(&scope, tenant, finished)
         .await
         .expect("state transition upsert");
 
     let loaded = repo
-        .find_by_id(&conn, &scope, first)
+        .find_by_id(&scope, first)
         .await
         .expect("find must succeed")
         .expect("session must exist");
@@ -103,7 +102,7 @@ async fn a_session_is_created_updated_and_listed_newest_first() {
     assert_eq!(loaded.ended_at.as_deref(), Some("2026-08-25T10:00:30Z"));
 
     let recent = repo
-        .list_recent(&conn, &scope, 10)
+        .list_recent(&scope, 10)
         .await
         .expect("list must succeed");
     assert_eq!(recent.len(), 2);
@@ -114,15 +113,13 @@ async fn a_session_is_created_updated_and_listed_newest_first() {
 #[tokio::test]
 async fn sessions_are_tenant_scoped() {
     let db = common::inmem_db().await;
-    let provider = DBProvider::<DbError>::new(db);
-    let conn = provider.conn().expect("conn");
-    let repo = SeaOrmSyncSessionRepository::new();
+    let provider = Arc::new(DBProvider::<DbError>::new(db));
+    let repo = SeaOrmSyncSessionRepository::new(Arc::clone(&provider));
 
     let owner = common::caller_in(Uuid::new_v4());
     let owner_scope = scope_for(&owner).await;
     let id = Uuid::new_v4();
     repo.upsert(
-        &conn,
         &owner_scope,
         owner.subject_tenant_id(),
         session_record(id, "in_progress", "2026-08-25T10:00:00Z"),
@@ -133,7 +130,7 @@ async fn sessions_are_tenant_scoped() {
     let stranger = common::caller_in(Uuid::new_v4());
     let stranger_scope = scope_for(&stranger).await;
     let seen = repo
-        .find_by_id(&conn, &stranger_scope, id)
+        .find_by_id(&stranger_scope, id)
         .await
         .expect("find must succeed");
     assert!(
@@ -141,7 +138,7 @@ async fn sessions_are_tenant_scoped() {
         "another tenant must not see the session at all"
     );
     assert!(
-        repo.list_recent(&conn, &stranger_scope, 10)
+        repo.list_recent(&stranger_scope, 10)
             .await
             .expect("list must succeed")
             .is_empty()
@@ -151,12 +148,11 @@ async fn sessions_are_tenant_scoped() {
 #[tokio::test]
 async fn a_watermark_is_keyed_by_repo_and_family_and_promotes_its_candidate() {
     let db = common::inmem_db().await;
-    let provider = DBProvider::<DbError>::new(db);
-    let conn = provider.conn().expect("conn");
+    let provider = Arc::new(DBProvider::<DbError>::new(db));
     let ctx = common::caller_in(Uuid::new_v4());
     let tenant = ctx.subject_tenant_id();
     let scope = scope_for(&ctx).await;
-    let repo = SeaOrmSyncWatermarkRepository::new();
+    let repo = SeaOrmSyncWatermarkRepository::new(Arc::clone(&provider));
 
     let sweeping = SyncWatermarkRecord {
         repo_id: 42,
@@ -166,7 +162,7 @@ async fn a_watermark_is_keyed_by_repo_and_family_and_promotes_its_candidate() {
         sweep_in_progress: true,
         candidate_high_water: Some("2026-08-25T09:00:00Z".to_owned()),
     };
-    repo.upsert(&conn, &scope, tenant, sweeping)
+    repo.upsert(&scope, tenant, sweeping)
         .await
         .expect("first upsert");
 
@@ -178,12 +174,12 @@ async fn a_watermark_is_keyed_by_repo_and_family_and_promotes_its_candidate() {
         sweep_in_progress: false,
         candidate_high_water: None,
     };
-    repo.upsert(&conn, &scope, tenant, promoted)
+    repo.upsert(&scope, tenant, promoted)
         .await
         .expect("promotion upsert");
 
     let loaded = repo
-        .find(&conn, &scope, 42, "issues")
+        .find(&scope, 42, "issues")
         .await
         .expect("find must succeed")
         .expect("watermark must exist");
@@ -195,7 +191,7 @@ async fn a_watermark_is_keyed_by_repo_and_family_and_promotes_its_candidate() {
     assert!(loaded.candidate_high_water.is_none());
 
     assert!(
-        repo.find(&conn, &scope, 42, "pull_requests")
+        repo.find(&scope, 42, "pull_requests")
             .await
             .expect("find must succeed")
             .is_none(),
@@ -206,12 +202,11 @@ async fn a_watermark_is_keyed_by_repo_and_family_and_promotes_its_candidate() {
 #[tokio::test]
 async fn a_fingerprint_upsert_is_idempotent_and_tracks_refinement() {
     let db = common::inmem_db().await;
-    let provider = DBProvider::<DbError>::new(db);
-    let conn = provider.conn().expect("conn");
+    let provider = Arc::new(DBProvider::<DbError>::new(db));
     let ctx = common::caller_in(Uuid::new_v4());
     let tenant = ctx.subject_tenant_id();
     let scope = scope_for(&ctx).await;
-    let repo = SeaOrmEntityFingerprintRepository::new();
+    let repo = SeaOrmEntityFingerprintRepository::new(Arc::clone(&provider));
 
     let pending = EntityFingerprintRecord {
         repo_id: 42,
@@ -224,7 +219,7 @@ async fn a_fingerprint_upsert_is_idempotent_and_tracks_refinement() {
         last_refined_at: None,
         refinement_status: "pending".to_owned(),
     };
-    repo.upsert(&conn, &scope, tenant, pending.clone())
+    repo.upsert(&scope, tenant, pending.clone())
         .await
         .expect("first upsert");
 
@@ -232,12 +227,12 @@ async fn a_fingerprint_upsert_is_idempotent_and_tracks_refinement() {
     complete.fingerprint = "00ab".to_owned();
     complete.refinement_status = "complete".to_owned();
     complete.last_refined_at = Some("2026-08-25T09:05:00Z".to_owned());
-    repo.upsert(&conn, &scope, tenant, complete)
+    repo.upsert(&scope, tenant, complete)
         .await
         .expect("second upsert");
 
     let loaded = repo
-        .find(&conn, &scope, 42, "issues", "11")
+        .find(&scope, 42, "issues", "11")
         .await
         .expect("find must succeed")
         .expect("fingerprint must exist");

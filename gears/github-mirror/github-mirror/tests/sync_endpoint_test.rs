@@ -8,7 +8,7 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use github_mirror::api::rest::routes::{ConcreteService, register_routes};
-use github_mirror::domain::ports::github::{FetchedRepository, ListingCompleteness};
+use github_mirror::domain::ports::github::{FetchedRepository, Listing, ListingCompleteness};
 use github_mirror::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
     CommitRecord, CommitStatusRecord, ContributorRecord, DeploymentRecord, IssueEventRecord,
@@ -720,6 +720,18 @@ async fn sync_is_idempotent() {
 
     // Drained between the two requests: back-to-back requests would collapse
     // into one run, which `a_second_sync_of_a_repo_in_flight_reuses_it` covers.
+    let listings = [
+        "/repos/rust-lang/rust/issues",
+        "/repos/rust-lang/rust/pulls",
+        "/repos/rust-lang/rust/commits",
+        "/repos/rust-lang/rust/labels",
+        "/repos/rust-lang/rust/milestones",
+        "/repos/rust-lang/rust/releases",
+        "/repos/rust-lang/rust/branches",
+        "/repos/rust-lang/rust/tags",
+        "/repos/rust-lang/rust/contributors",
+    ];
+
     let first = post(
         router.clone(),
         "/github-mirror/v1/repos/rust-lang/rust/sync",
@@ -727,6 +739,20 @@ async fn sync_is_idempotent() {
     .await;
     assert_eq!(first.status(), StatusCode::ACCEPTED);
     assert_eq!(pump.drain(&service).await, 1);
+
+    let mut after_first = Vec::new();
+    for path in listings {
+        let response = get(router.clone(), path).await;
+        assert_eq!(response.status(), StatusCode::OK, "{path} must list");
+        let listed = body_json(response).await;
+        after_first.push(
+            listed
+                .as_array()
+                .unwrap_or_else(|| panic!("{path} must answer with an array"))
+                .len(),
+        );
+    }
+
     let second = post(
         router.clone(),
         "/github-mirror/v1/repos/rust-lang/rust/sync",
@@ -735,8 +761,22 @@ async fn sync_is_idempotent() {
     assert_eq!(second.status(), StatusCode::ACCEPTED);
     assert_eq!(pump.drain(&service).await, 1, "both jobs must run");
 
-    let repos = body_json(get(router, "/github-mirror/v1/repos").await).await;
+    let repos = body_json(get(router.clone(), "/github-mirror/v1/repos").await).await;
     assert_eq!(repos["items"].as_array().expect("items").len(), 1);
+
+    for (path, expected) in listings.into_iter().zip(after_first) {
+        let response = get(router.clone(), path).await;
+        assert_eq!(response.status(), StatusCode::OK, "{path} must list");
+        let listed = body_json(response).await;
+        assert_eq!(
+            listed
+                .as_array()
+                .unwrap_or_else(|| panic!("{path} must answer with an array"))
+                .len(),
+            expected,
+            "{path} must hold the same rows after a second sync, not duplicates"
+        );
+    }
 }
 
 #[tokio::test]
@@ -975,10 +1015,9 @@ fn recon_fetched(issue_ids: &[i64], issues_complete: bool) -> FetchedRepository 
     result.issue_reactions = vec![];
     result.check_runs = vec![];
     result.issue_timeline = vec![];
-    result.complete = ListingCompleteness {
-        issues: issues_complete,
-        ..ListingCompleteness::all_complete()
-    };
+    let mut complete = ListingCompleteness::all_complete();
+    complete.set(Listing::Issues, issues_complete);
+    result.complete = complete;
     result
 }
 

@@ -60,6 +60,16 @@ use grpc_hub as _;
 /// Released by the test to let the start phase complete.
 static START_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(0);
 
+/// Posted by the gate gear the instant its `start` has recorded its observation,
+/// before it blocks on [`START_GATE`]. The test acquires it to establish a
+/// happens-before with [`CLUSTER_WAS_STARTED_FIRST`]: without it the polling
+/// thread can reach the ordering assertion before the spawned lifecycle task has
+/// even reached the gate gear's `start`, reading the atomic's default `false`
+/// (the framework guarantees the *ordering* - `run_start_phase` awaits each gear
+/// in `gears_by_system_priority` order - so the only way the flag reads `false`
+/// is a test that reads it too early, which is what flaked under CI load).
+static GATE_REACHED_START: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(0);
+
 /// What the gate gear saw when its own `start` ran — the Profile 1 ordering
 /// observation, recorded rather than assumed (see [`StartGate`]).
 static CLUSTER_WAS_STARTED_FIRST: std::sync::atomic::AtomicBool =
@@ -110,6 +120,13 @@ impl toolkit::contracts::RunnableCapability for StartGate {
                 .is_some_and(|client| client.cache_backend("orders").is_ok());
             CLUSTER_WAS_STARTED_FIRST.store(published, std::sync::atomic::Ordering::SeqCst);
         }
+
+        // Announce that `start` has run and the observation is recorded, so the
+        // test can read `CLUSTER_WAS_STARTED_FIRST` with a happens-before rather
+        // than racing the spawned lifecycle task to it. Posted before the block
+        // below, so the test's ordering assertion is unblocked while the phase is
+        // still held open here.
+        GATE_REACHED_START.add_permits(1);
 
         // Blocks until the test grants a permit. `forget` so a second start (there
         // is none) would block again rather than inherit the permit.
@@ -364,6 +381,19 @@ async fn probes_serve_before_start_completes_and_all_four_answer_after() {
 
     let lifecycle = tokio::spawn(run_oop_serving(run, serve));
 
+    // 0. Wait until the start phase has provably reached the gate gear (and so has
+    //    already run - and awaited to completion - every earlier gear, cluster
+    //    among them, since `run_start_phase` is sequential and system-first). This
+    //    is the happens-before every "during startup" assertion below relies on:
+    //    the gate gear is now parked inside its `start`, holding the phase open, so
+    //    the probe states are a genuine mid-startup snapshot and
+    //    `CLUSTER_WAS_STARTED_FIRST` is recorded rather than still at its default.
+    tokio::time::timeout(Duration::from_secs(10), GATE_REACHED_START.acquire())
+        .await
+        .expect("the start phase must reach the gate gear within 10s")
+        .expect("the gate-reached semaphore is never closed")
+        .forget();
+
     // 1. Liveness answers while the start phase is still blocked on the gate. This
     //    is the criterion's "binds probes before `start`", and it is checked
     //    against a phase that provably has not returned rather than against a
@@ -408,7 +438,8 @@ async fn probes_serve_before_start_completes_and_all_four_answer_after() {
     //    cluster had already published its profiles by the time a non-`system`
     //    gear's `start` ran, with no `deps` edge in this process. This is what
     //    makes `deps = [cluster]` unnecessary - and it must be unnecessary, because
-    //    it is fatal in Profile 3 (`tests/consumer_wiring.rs`).
+    //    it is fatal in Profile 3 (`tests/consumer_wiring.rs`). The read is safe
+    //    because step 0 already synchronized on the gate gear having recorded it.
     assert!(
         CLUSTER_WAS_STARTED_FIRST.load(Ordering::SeqCst),
         "cluster's `start` must precede a non-system gear's `start` by tier alone; \

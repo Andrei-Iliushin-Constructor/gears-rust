@@ -1173,3 +1173,72 @@ async fn a_listing_follows_the_link_header_past_the_first_page() {
         fetched.labels.iter().map(|l| &l.name).collect::<Vec<_>>()
     );
 }
+
+#[tokio::test]
+async fn unauthorized_maps_to_access_lost() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/acme/private");
+            then.status(401);
+        })
+        .await;
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let result = client
+        .fetch_repository("acme", "private", &opts(ScopeConfig::default()))
+        .await;
+
+    assert!(
+        matches!(result, Err(DomainError::AccessLost(_))),
+        "a 401 means the mirror's own credentials stopped working, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn plain_forbidden_maps_to_access_lost() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/acme/gone");
+            then.status(403);
+        })
+        .await;
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let result = client
+        .fetch_repository("acme", "gone", &opts(ScopeConfig::default()))
+        .await;
+
+    assert!(
+        matches!(result, Err(DomainError::AccessLost(_))),
+        "a 403 without rate-limit headers is lost access, not a rate limit, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_rate_limited_response_is_retried_before_giving_up() {
+    let server = MockServer::start_async().await;
+    let limited = server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/acme/busy");
+            then.status(403)
+                .header("retry-after", "0")
+                .header("x-ratelimit-remaining", "0");
+        })
+        .await;
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let result = client
+        .fetch_repository("acme", "busy", &opts(ScopeConfig::default()))
+        .await;
+
+    assert!(
+        matches!(result, Err(DomainError::Internal(_))),
+        "a rate limit that never clears fails after the retries, got {result:?}"
+    );
+    assert!(
+        limited.calls_async().await > 1,
+        "the client must retry a rate-limited response rather than give up on the first"
+    );
+}

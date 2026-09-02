@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use strum::IntoEnumIterator;
 use tokio::sync::{Semaphore, SemaphorePermit};
-
-use sea_orm::prelude::DateTimeUtc;
 
 use crate::domain::error::DomainError;
 use crate::domain::ports::github::{
-    FetchOptions, FetchedRepository, GithubPort, ListingCompleteness,
+    FetchOptions, FetchedRepository, GithubPort, Listing, ListingCompleteness,
 };
 use crate::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
@@ -411,7 +411,11 @@ impl GithubClient {
         }
     }
 
-    async fn post_graphql(&self, query: &str) -> Result<serde_json::Value, DomainError> {
+    async fn post_graphql(
+        &self,
+        query: &str,
+        variables: serde_json::Value,
+    ) -> Result<serde_json::Value, DomainError> {
         let url = format!("{}/graphql", self.api_base_url.trim_end_matches('/'));
 
         let mut attempt: u32 = 0;
@@ -421,7 +425,7 @@ impl GithubClient {
             let mut request = self
                 .http
                 .post(&url)
-                .json(&serde_json::json!({ "query": query }));
+                .json(&serde_json::json!({ "query": query, "variables": variables }));
             if let Some(token) = &self.token {
                 request = request.bearer_auth(token);
             }
@@ -1436,17 +1440,17 @@ fn labels_json(labels: &[GhLabelRef]) -> Option<String> {
 }
 
 /// GitHub's RFC3339 text as an instant; `None` when it does not parse.
-fn parse_github_timestamp(raw: &str) -> Option<DateTimeUtc> {
-    chrono::DateTime::parse_from_rfc3339(raw)
+fn parse_github_timestamp(raw: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(raw)
         .ok()
-        .map(|stamp| stamp.with_timezone(&chrono::Utc))
+        .map(|stamp| stamp.with_timezone(&Utc))
 }
 
 /// Widen a record's first/last-seen window with another observation.
 fn merge_seen_window(
     record: &mut ContributorRecord,
-    first_seen_at: Option<DateTimeUtc>,
-    last_seen_at: Option<DateTimeUtc>,
+    first_seen_at: Option<DateTime<Utc>>,
+    last_seen_at: Option<DateTime<Utc>>,
 ) {
     if let Some(first) = first_seen_at
         && record.first_seen_at.is_none_or(|held| first < held)
@@ -1521,13 +1525,13 @@ fn commit_file_record(repo_id: i64, commit_sha: &str, f: GhPullFile) -> CommitFi
     }
 }
 
-fn review_threads_query(owner: &str, name: &str, pull_number: i64) -> String {
-    format!(
-        "query {{ repository(owner: \"{owner}\", name: \"{name}\") {{ \
-         pullRequest(number: {pull_number}) {{ reviewThreads(first: {FIRST_PAGE_SIZE}) {{ \
-         nodes {{ id isResolved isOutdated path line resolvedBy {{ login }} \
-         comments(first: 1) {{ totalCount }} }} }} }} }} }}"
-    )
+/// The query text is fixed; `owner`, `name` and the pull number travel as
+/// GraphQL variables so no request value is ever spliced into the query
+/// string itself.
+const REVIEW_THREADS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $first: Int!) {      repository(owner: $owner, name: $name) {      pullRequest(number: $number) { reviewThreads(first: $first) {      nodes { id isResolved isOutdated path line resolvedBy { login }      comments(first: 1) { totalCount } } } } } }";
+
+fn review_threads_variables(owner: &str, name: &str, pull_number: i64) -> serde_json::Value {
+    serde_json::json!({ "owner": owner, "name": name, "number": pull_number, "first": FIRST_PAGE_SIZE })
 }
 
 fn review_thread_record(
@@ -2037,7 +2041,7 @@ impl GithubClient {
                 options,
             )
             .await?;
-        let (issue_events, issue_events_complete): (Vec<GhIssueEvent>, bool) = self
+        let (issue_events, _issue_events_complete): (Vec<GhIssueEvent>, bool) = self
             .get_json_all(
                 &format!("/repos/{owner}/{name}/issues/events?per_page={FIRST_PAGE_SIZE}"),
                 options,
@@ -2062,11 +2066,11 @@ impl GithubClient {
 
         Ok(IssueFamily {
             people,
-            complete: ListingCompleteness {
-                issues: issues_complete,
-                comments: comments_complete,
-                issue_events: issue_events_complete,
-                ..ListingCompleteness::default()
+            complete: {
+                let mut complete = ListingCompleteness::none();
+                complete.set(Listing::Issues, issues_complete);
+                complete.set(Listing::Comments, comments_complete);
+                complete
             },
             issues: issue_records,
             comments: comments
@@ -2126,10 +2130,11 @@ impl GithubClient {
 
         Ok(PullFamily {
             people,
-            complete: ListingCompleteness {
-                pull_requests: pull_requests_complete,
-                review_comments: review_comments_complete,
-                ..ListingCompleteness::default()
+            complete: {
+                let mut complete = ListingCompleteness::none();
+                complete.set(Listing::PullRequests, pull_requests_complete);
+                complete.set(Listing::ReviewComments, review_comments_complete);
+                complete
             },
             pull_requests: pull_records,
             review_comments: review_comments
@@ -2164,7 +2169,7 @@ impl GithubClient {
                 options,
             )
             .await?;
-        let (commit_comments, commit_comments_complete): (Vec<GhCommitComment>, bool) = self
+        let (commit_comments, _commit_comments_complete): (Vec<GhCommitComment>, bool) = self
             .get_json_all(
                 &format!("/repos/{owner}/{name}/comments?per_page={FIRST_PAGE_SIZE}"),
                 options,
@@ -2188,10 +2193,10 @@ impl GithubClient {
 
         Ok(CommitFamily {
             people,
-            complete: ListingCompleteness {
-                commits: commits_complete,
-                commit_comments: commit_comments_complete,
-                ..ListingCompleteness::default()
+            complete: {
+                let mut complete = ListingCompleteness::none();
+                complete.set(Listing::Commits, commits_complete);
+                complete
             },
             commits: commit_records,
             commit_files,
@@ -2221,7 +2226,7 @@ impl GithubClient {
                     options,
                 )
                 .await?;
-            family.complete.labels = labels_complete;
+            family.complete.set(Listing::Labels, labels_complete);
             family.labels = labels
                 .into_iter()
                 .map(|l| label_record(repo_id, l))
@@ -2237,7 +2242,9 @@ impl GithubClient {
                     options,
                 )
                 .await?;
-            family.complete.milestones = milestones_complete;
+            family
+                .complete
+                .set(Listing::Milestones, milestones_complete);
             family.milestones = milestones
                 .into_iter()
                 .map(|m| milestone_record(repo_id, m))
@@ -2251,7 +2258,7 @@ impl GithubClient {
                     options,
                 )
                 .await?;
-            family.complete.releases = releases_complete;
+            family.complete.set(Listing::Releases, releases_complete);
             family.releases = releases
                 .into_iter()
                 .map(|r| release_record(repo_id, r))
@@ -2265,7 +2272,7 @@ impl GithubClient {
                     options,
                 )
                 .await?;
-            family.complete.branches = branches_complete;
+            family.complete.set(Listing::Branches, branches_complete);
             family.branches = branches
                 .into_iter()
                 .map(|b| branch_record(repo_id, b))
@@ -2277,7 +2284,7 @@ impl GithubClient {
                     options,
                 )
                 .await?;
-            family.complete.tags = tags_complete;
+            family.complete.set(Listing::Tags, tags_complete);
             family.tags = tags.into_iter().map(|t| tag_record(repo_id, t)).collect();
         }
 
@@ -2302,7 +2309,7 @@ impl GithubClient {
                 options,
             )
             .await?;
-        let (deployments, deployments_complete): (Vec<GhDeployment>, bool) = self
+        let (deployments, _deployments_complete): (Vec<GhDeployment>, bool) = self
             .get_json_all(
                 &format!("/repos/{owner}/{name}/deployments?per_page={FIRST_PAGE_SIZE}"),
                 options,
@@ -2317,10 +2324,7 @@ impl GithubClient {
         };
 
         Ok(ActionsFamily {
-            complete: ListingCompleteness {
-                deployments: deployments_complete,
-                ..ListingCompleteness::default()
-            },
+            complete: ListingCompleteness::none(),
             workflow_runs: runs
                 .workflow_runs
                 .into_iter()
@@ -2414,7 +2418,10 @@ impl GithubClient {
             // failure is logged and this pull's threads are left empty rather than
             // propagated with `?`.
             match self
-                .post_graphql(&review_threads_query(owner, name, pull.number))
+                .post_graphql(
+                    REVIEW_THREADS_QUERY,
+                    review_threads_variables(owner, name, pull.number),
+                )
                 .await
             {
                 Ok(threads) => {
@@ -2496,29 +2503,17 @@ impl GithubPort for GithubClient {
         // Only a listing walked to its final page may be used to reconcile
         // deletions; a family the scope switched off, or one cut short by the
         // page cap, reports `false` and is left alone.
-        let complete = ListingCompleteness {
-            issues: issues.complete.issues,
-            pull_requests: pulls.complete.pull_requests,
-            commits: commits.complete.commits,
-            comments: issues.complete.comments,
-            review_comments: pulls.complete.review_comments,
-            labels: meta.complete.labels,
-            milestones: meta.complete.milestones,
-            releases: meta.complete.releases,
-            branches: meta.complete.branches,
-            tags: meta.complete.tags,
-            // Derived, so exactly as complete as the listings it was read
-            // out of.
-            contributors: issues.complete.issues
-                && issues.complete.comments
-                && pulls.complete.pull_requests
-                && pulls.complete.review_comments
-                && commits.complete.commits
-                && commits.complete.commit_comments,
-            issue_events: issues.complete.issue_events,
-            commit_comments: commits.complete.commit_comments,
-            deployments: actions.complete.deployments,
-        };
+        let mut complete = ListingCompleteness::none();
+        for listing in Listing::iter() {
+            complete.set(
+                listing,
+                issues.complete.is_complete(listing)
+                    || pulls.complete.is_complete(listing)
+                    || commits.complete.is_complete(listing)
+                    || meta.complete.is_complete(listing)
+                    || actions.complete.is_complete(listing),
+            );
+        }
 
         Ok(FetchedRepository {
             repository: repository_record(repo),

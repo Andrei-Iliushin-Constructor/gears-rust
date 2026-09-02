@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use authz_resolver_sdk::{
-    AuthZResolverClient, AuthZResolverError, PolicyEnforcer,
+    AuthZResolverApi, PolicyEnforcer,
     constraints::{Constraint, InPredicate, Predicate},
     models::{EvaluationRequest, EvaluationResponse, EvaluationResponseContext},
 };
@@ -21,55 +21,28 @@ use github_mirror::infra::storage::sea_orm_repo::{
     SeaOrmPullRequestCommitRepository, SeaOrmPullRequestFileRepository,
     SeaOrmPullRequestRepository, SeaOrmReleaseRepository, SeaOrmRepoRepository,
     SeaOrmRepoSyncStatusRepository, SeaOrmReviewCommentRepository, SeaOrmReviewRepository,
-    SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository, SeaOrmTagRepository,
-    SeaOrmWorkflowJobRepository, SeaOrmWorkflowRunRepository,
+    SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository, SeaOrmSyncWriter,
+    SeaOrmTagRepository, SeaOrmWorkflowJobRepository, SeaOrmWorkflowRunRepository,
 };
+use toolkit::api::canonical_prelude::CanonicalError;
 use toolkit::{ClientHub, ConfigProvider, GearCtx};
 use toolkit_db::migration_runner::run_migrations_for_testing;
 use toolkit_db::{ConnectOpts, DBProvider, Db, connect_db};
-use toolkit_security::{SecurityContext, pep_properties};
+use toolkit_security::{PlatformSecurityContext, SecurityContext, pep_properties};
 use uuid::Uuid;
 
-pub type ConcreteService = Service<
-    SeaOrmRepoRepository,
-    SeaOrmIssueRepository,
-    SeaOrmPullRequestRepository,
-    SeaOrmCommitRepository,
-    SeaOrmCommentRepository,
-    SeaOrmReviewCommentRepository,
-    SeaOrmReviewRepository,
-    SeaOrmLabelRepository,
-    SeaOrmMilestoneRepository,
-    SeaOrmReleaseRepository,
-    SeaOrmBranchRepository,
-    SeaOrmContributorRepository,
-    SeaOrmWorkflowRunRepository,
-    SeaOrmPullRequestFileRepository,
-    SeaOrmTagRepository,
-    SeaOrmCommitFileRepository,
-    SeaOrmReviewThreadRepository,
-    SeaOrmCommitCommentRepository,
-    SeaOrmIssueEventRepository,
-    SeaOrmDeploymentRepository,
-    SeaOrmPullRequestCommitRepository,
-    SeaOrmCommitStatusRepository,
-    SeaOrmWorkflowJobRepository,
-    SeaOrmIssueReactionRepository,
-    SeaOrmCheckRunRepository,
-    SeaOrmIssueTimelineRepository,
-    SeaOrmSyncSessionRepository,
-    SeaOrmRepoSyncStatusRepository,
->;
+pub type ConcreteService = Service;
 
 /// PDP fake: allows everything, constrained to the caller's tenant.
 pub struct MockAuthZResolver;
 
 #[async_trait]
-impl AuthZResolverClient for MockAuthZResolver {
+impl AuthZResolverApi for MockAuthZResolver {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         let root_id = request
             .context
             .tenant_context
@@ -83,7 +56,7 @@ impl AuthZResolverClient for MockAuthZResolver {
                     .and_then(|v| v.as_str())
                     .and_then(|s| Uuid::parse_str(s).ok())
             })
-            .ok_or_else(|| AuthZResolverError::Internal("tenant context is required".to_owned()))?;
+            .ok_or_else(|| CanonicalError::internal("tenant context is required").create())?;
 
         let predicates = vec![Predicate::In(InPredicate::new(
             pep_properties::OWNER_TENANT_ID,
@@ -104,11 +77,12 @@ impl AuthZResolverClient for MockAuthZResolver {
 pub struct DenyAllAuthZResolver;
 
 #[async_trait]
-impl AuthZResolverClient for DenyAllAuthZResolver {
+impl AuthZResolverApi for DenyAllAuthZResolver {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(EvaluationResponse {
             decision: false,
             context: EvaluationResponseContext::default(),
@@ -162,12 +136,12 @@ pub async fn inmem_db() -> Db {
 }
 
 pub fn enforcer() -> PolicyEnforcer {
-    let authz: Arc<dyn AuthZResolverClient> = Arc::new(MockAuthZResolver);
+    let authz: Arc<dyn AuthZResolverApi> = Arc::new(MockAuthZResolver);
     PolicyEnforcer::new(authz)
 }
 
 pub fn deny_enforcer() -> PolicyEnforcer {
-    let authz: Arc<dyn AuthZResolverClient> = Arc::new(DenyAllAuthZResolver);
+    let authz: Arc<dyn AuthZResolverApi> = Arc::new(DenyAllAuthZResolver);
     PolicyEnforcer::new(authz)
 }
 
@@ -185,36 +159,38 @@ pub fn service_with_enforcer(
     github: Arc<dyn GithubPort>,
     policy_enforcer: PolicyEnforcer,
 ) -> Arc<ConcreteService> {
+    let db = Arc::new(DBProvider::new(db));
     Arc::new(Service::new(
-        Arc::new(DBProvider::new(db)),
-        Arc::new(SeaOrmRepoRepository::new()),
-        Arc::new(SeaOrmIssueRepository::new()),
-        Arc::new(SeaOrmPullRequestRepository::new()),
-        Arc::new(SeaOrmCommitRepository::new()),
-        Arc::new(SeaOrmCommentRepository::new()),
-        Arc::new(SeaOrmReviewCommentRepository::new()),
-        Arc::new(SeaOrmReviewRepository::new()),
-        Arc::new(SeaOrmLabelRepository::new()),
-        Arc::new(SeaOrmMilestoneRepository::new()),
-        Arc::new(SeaOrmReleaseRepository::new()),
-        Arc::new(SeaOrmBranchRepository::new()),
-        Arc::new(SeaOrmContributorRepository::new()),
-        Arc::new(SeaOrmWorkflowRunRepository::new()),
-        Arc::new(SeaOrmPullRequestFileRepository::new()),
-        Arc::new(SeaOrmTagRepository::new()),
-        Arc::new(SeaOrmCommitFileRepository::new()),
-        Arc::new(SeaOrmReviewThreadRepository::new()),
-        Arc::new(SeaOrmCommitCommentRepository::new()),
-        Arc::new(SeaOrmIssueEventRepository::new()),
-        Arc::new(SeaOrmDeploymentRepository::new()),
-        Arc::new(SeaOrmPullRequestCommitRepository::new()),
-        Arc::new(SeaOrmCommitStatusRepository::new()),
-        Arc::new(SeaOrmWorkflowJobRepository::new()),
-        Arc::new(SeaOrmIssueReactionRepository::new()),
-        Arc::new(SeaOrmCheckRunRepository::new()),
-        Arc::new(SeaOrmIssueTimelineRepository::new()),
-        Arc::new(SeaOrmSyncSessionRepository::new()),
-        Arc::new(SeaOrmRepoSyncStatusRepository::new()),
+        Arc::clone(&db),
+        Arc::new(SeaOrmRepoRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmIssueRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmPullRequestRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmCommitRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmCommentRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmReviewCommentRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmReviewRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmLabelRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmMilestoneRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmReleaseRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmBranchRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmContributorRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmWorkflowRunRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmPullRequestFileRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmTagRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmCommitFileRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmReviewThreadRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmCommitCommentRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmIssueEventRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmDeploymentRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmPullRequestCommitRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmCommitStatusRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmWorkflowJobRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmIssueReactionRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmCheckRunRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmIssueTimelineRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmSyncSessionRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmRepoSyncStatusRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmSyncWriter::new(Arc::clone(&db))),
         github,
         policy_enforcer,
         ServiceConfig {
@@ -250,8 +226,8 @@ impl ConfigProvider for StaticConfig {
 /// A `GearCtx` good enough for `Gear::init`: config + hub with a fake PDP + an
 /// in-memory database with migrations applied.
 pub async fn gear_ctx(hub: Arc<ClientHub>, section: Option<serde_json::Value>) -> GearCtx {
-    let authz: Arc<dyn AuthZResolverClient> = Arc::new(MockAuthZResolver);
-    hub.register::<dyn AuthZResolverClient>(authz);
+    let authz: Arc<dyn AuthZResolverApi> = Arc::new(MockAuthZResolver);
+    hub.register::<dyn AuthZResolverApi>(authz);
 
     GearCtx::new(
         "github-mirror",
