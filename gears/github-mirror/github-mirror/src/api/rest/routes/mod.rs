@@ -15,49 +15,11 @@ use toolkit::api::OpenApiRegistry;
 use toolkit::api::operation_builder::{CORE_GLOBAL_BASE_LICENSE_FEATURE, LicenseFeature};
 
 use crate::domain::service::Service;
-use crate::infra::storage::sea_orm_repo::{
-    SeaOrmBranchRepository, SeaOrmCheckRunRepository, SeaOrmCommentRepository,
-    SeaOrmCommitCommentRepository, SeaOrmCommitFileRepository, SeaOrmCommitRepository,
-    SeaOrmCommitStatusRepository, SeaOrmContributorRepository, SeaOrmDeploymentRepository,
-    SeaOrmIssueEventRepository, SeaOrmIssueReactionRepository, SeaOrmIssueRepository,
-    SeaOrmIssueTimelineRepository, SeaOrmLabelRepository, SeaOrmMilestoneRepository,
-    SeaOrmPullRequestCommitRepository, SeaOrmPullRequestFileRepository,
-    SeaOrmPullRequestRepository, SeaOrmReleaseRepository, SeaOrmRepoRepository,
-    SeaOrmReviewCommentRepository, SeaOrmReviewRepository, SeaOrmReviewThreadRepository,
-    SeaOrmTagRepository, SeaOrmWorkflowJobRepository, SeaOrmWorkflowRunRepository,
-};
 
 pub mod github;
 pub mod v1;
 
-pub type ConcreteService = Service<
-    SeaOrmRepoRepository,
-    SeaOrmIssueRepository,
-    SeaOrmPullRequestRepository,
-    SeaOrmCommitRepository,
-    SeaOrmCommentRepository,
-    SeaOrmReviewCommentRepository,
-    SeaOrmReviewRepository,
-    SeaOrmLabelRepository,
-    SeaOrmMilestoneRepository,
-    SeaOrmReleaseRepository,
-    SeaOrmBranchRepository,
-    SeaOrmContributorRepository,
-    SeaOrmWorkflowRunRepository,
-    SeaOrmPullRequestFileRepository,
-    SeaOrmTagRepository,
-    SeaOrmCommitFileRepository,
-    SeaOrmReviewThreadRepository,
-    SeaOrmCommitCommentRepository,
-    SeaOrmIssueEventRepository,
-    SeaOrmDeploymentRepository,
-    SeaOrmPullRequestCommitRepository,
-    SeaOrmCommitStatusRepository,
-    SeaOrmWorkflowJobRepository,
-    SeaOrmIssueReactionRepository,
-    SeaOrmCheckRunRepository,
-    SeaOrmIssueTimelineRepository,
->;
+pub type ConcreteService = Service;
 
 pub(crate) const API_TAG: &str = "GitHub Mirror";
 pub(crate) const PAGE_DOC: &str = "Page number of the results to fetch (GitHub-style)";

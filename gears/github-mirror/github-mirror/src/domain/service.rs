@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use authz_resolver_sdk::PolicyEnforcer;
 use authz_resolver_sdk::pep::{AccessRequest, ResourceType};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use github_mirror_sdk::{
     Branch, CheckRun, Comment, Commit, CommitComment, CommitFile, CommitStatus, Contributor,
     Deployment, Issue, IssueEvent, IssueReaction, IssueTimelineEvent, Label, Milestone,
@@ -11,12 +11,11 @@ use github_mirror_sdk::{
 };
 use toolkit_macros::domain_model;
 use toolkit_odata::{CursorV1, ODataQuery, Page, PageInfo, SortDir};
-use toolkit_security::{AccessScope, SecurityContext, pep_properties};
+use toolkit_security::{SecurityContext, pep_properties};
 
 use super::error::DomainError;
-use strum::IntoEnumIterator;
 
-use super::ports::github::{GithubPort, Listing, ListingCompleteness};
+use super::ports::github::GithubPort;
 use super::repo::{
     BranchRecord, BranchRepository, CheckRunRecord, CheckRunRepository, CommentRecord,
     CommentRepository, CommitCommentRecord, CommitCommentRepository, CommitFileRecord,
@@ -29,8 +28,8 @@ use super::repo::{
     PullRequestFileRecord, PullRequestFileRepository, PullRequestRecord, PullRequestRepository,
     ReleaseRecord, ReleaseRepository, RepoRecord, RepoRepository, ReviewCommentRecord,
     ReviewCommentRepository, ReviewRecord, ReviewRepository, ReviewThreadRecord,
-    ReviewThreadRepository, TagRecord, TagRepository, WorkflowJobRecord, WorkflowJobRepository,
-    WorkflowRunRecord, WorkflowRunRepository,
+    ReviewThreadRepository, SyncWriter, TagRecord, TagRepository, WorkflowJobRecord,
+    WorkflowJobRepository, WorkflowRunRecord, WorkflowRunRepository,
 };
 
 /// The gear's name, taken from the `#[toolkit::gear]` attribute so the
@@ -54,38 +53,9 @@ async fn release_sync_lock(lock: toolkit_db::DbLockGuard, lock_key: &str) {
 /// advisory lock indefinitely.
 const SYNC_FETCH_BUDGET: std::time::Duration = std::time::Duration::from_mins(30);
 
-/// How many stored contributors one merge reads back. A repository with more
-/// distinct people than this loses nothing already written — the merge simply
-/// cannot widen the rows it did not see.
-const CONTRIBUTOR_MERGE_LIMIT: u64 = 10_000;
-
-/// The earlier of two optional instants, ignoring a missing one.
-///
-/// `flatten()` first, because `Option`'s own ordering puts `None` below every
-/// `Some`: plain `a.min(b)` would answer `None` whenever one side is missing.
-/// The mirror image needs no helper — `Option::max` already skips `None` for
-/// the same reason, which is why only this direction is written out.
-fn earliest(a: Option<DateTime<Utc>>, b: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
-    [a, b].into_iter().flatten().min()
-}
-
-/// The current instant as RFC3339 text, matching how every other timestamp
 const DEFAULT_LIST_LIMIT: u64 = 50;
 
 pub(crate) type DbProvider = toolkit_db::DBProvider<toolkit_db::DbError>;
-
-/// One mirrored table's upsert pass: writes every fetched record of
-/// `$field` and evaluates to how many rows the pass wrote.
-macro_rules! sync_table {
-    ($self:ident, $conn:expr, $scope:expr, $tenant:expr, $field:ident, $records:expr) => {{
-        let mut synced: u64 = 0;
-        for record in $records {
-            $self.$field.upsert($conn, $scope, $tenant, record).await?;
-            synced += 1;
-        }
-        synced
-    }};
-}
 
 pub(crate) const REPO_RESOURCE: ResourceType = ResourceType::from_static(
     "github_mirror.repo",
@@ -233,61 +203,35 @@ pub struct ServiceConfig {
 }
 
 #[domain_model]
-pub struct Service<
-    R: RepoRepository,
-    I: IssueRepository,
-    P: PullRequestRepository,
-    C: CommitRepository,
-    M: CommentRepository,
-    V: ReviewCommentRepository,
-    W: ReviewRepository,
-    L: LabelRepository,
-    N: MilestoneRepository,
-    E: ReleaseRepository,
-    B: BranchRepository,
-    O: ContributorRepository,
-    F: WorkflowRunRepository,
-    G: PullRequestFileRepository,
-    T: TagRepository,
-    D: CommitFileRepository,
-    H: ReviewThreadRepository,
-    K: CommitCommentRepository,
-    X: IssueEventRepository,
-    Y: DeploymentRepository,
-    Z: PullRequestCommitRepository,
-    S: CommitStatusRepository,
-    J: WorkflowJobRepository,
-    Q: IssueReactionRepository,
-    U: CheckRunRepository,
-    A: IssueTimelineRepository,
-> {
+pub struct Service {
     db: Arc<DbProvider>,
-    repo: Arc<R>,
-    issues: Arc<I>,
-    pull_requests: Arc<P>,
-    commits: Arc<C>,
-    comments: Arc<M>,
-    review_comments: Arc<V>,
-    reviews: Arc<W>,
-    labels: Arc<L>,
-    milestones: Arc<N>,
-    releases: Arc<E>,
-    branches: Arc<B>,
-    contributors: Arc<O>,
-    workflow_runs: Arc<F>,
-    pull_request_files: Arc<G>,
-    tags: Arc<T>,
-    commit_files: Arc<D>,
-    review_threads: Arc<H>,
-    commit_comments: Arc<K>,
-    issue_events: Arc<X>,
-    deployments: Arc<Y>,
-    pull_request_commits: Arc<Z>,
-    commit_statuses: Arc<S>,
-    workflow_jobs: Arc<J>,
-    issue_reactions: Arc<Q>,
-    check_runs: Arc<U>,
-    issue_timeline: Arc<A>,
+    repo: Arc<dyn RepoRepository>,
+    issues: Arc<dyn IssueRepository>,
+    pull_requests: Arc<dyn PullRequestRepository>,
+    commits: Arc<dyn CommitRepository>,
+    comments: Arc<dyn CommentRepository>,
+    review_comments: Arc<dyn ReviewCommentRepository>,
+    reviews: Arc<dyn ReviewRepository>,
+    labels: Arc<dyn LabelRepository>,
+    milestones: Arc<dyn MilestoneRepository>,
+    releases: Arc<dyn ReleaseRepository>,
+    branches: Arc<dyn BranchRepository>,
+    contributors: Arc<dyn ContributorRepository>,
+    workflow_runs: Arc<dyn WorkflowRunRepository>,
+    pull_request_files: Arc<dyn PullRequestFileRepository>,
+    tags: Arc<dyn TagRepository>,
+    commit_files: Arc<dyn CommitFileRepository>,
+    review_threads: Arc<dyn ReviewThreadRepository>,
+    commit_comments: Arc<dyn CommitCommentRepository>,
+    issue_events: Arc<dyn IssueEventRepository>,
+    deployments: Arc<dyn DeploymentRepository>,
+    pull_request_commits: Arc<dyn PullRequestCommitRepository>,
+    commit_statuses: Arc<dyn CommitStatusRepository>,
+    workflow_jobs: Arc<dyn WorkflowJobRepository>,
+    issue_reactions: Arc<dyn IssueReactionRepository>,
+    check_runs: Arc<dyn CheckRunRepository>,
+    issue_timeline: Arc<dyn IssueTimelineRepository>,
+    sync_writer: Arc<dyn SyncWriter>,
     github: Arc<dyn GithubPort>,
     policy_enforcer: PolicyEnforcer,
     config: ServiceConfig,
@@ -300,35 +244,7 @@ pub struct Service<
 ///
 /// Exists so a caller can obtain an owned handle to hand into a `'static`
 /// closure (e.g. a DB transaction) without borrowing `&self` across it.
-impl<
-    R: RepoRepository,
-    I: IssueRepository,
-    P: PullRequestRepository,
-    C: CommitRepository,
-    M: CommentRepository,
-    V: ReviewCommentRepository,
-    W: ReviewRepository,
-    L: LabelRepository,
-    N: MilestoneRepository,
-    E: ReleaseRepository,
-    B: BranchRepository,
-    O: ContributorRepository,
-    F: WorkflowRunRepository,
-    G: PullRequestFileRepository,
-    T: TagRepository,
-    D: CommitFileRepository,
-    H: ReviewThreadRepository,
-    K: CommitCommentRepository,
-    X: IssueEventRepository,
-    Y: DeploymentRepository,
-    Z: PullRequestCommitRepository,
-    S: CommitStatusRepository,
-    J: WorkflowJobRepository,
-    Q: IssueReactionRepository,
-    U: CheckRunRepository,
-    A: IssueTimelineRepository,
-> Clone for Service<R, I, P, C, M, V, W, L, N, E, B, O, F, G, T, D, H, K, X, Y, Z, S, J, Q, U, A>
-{
+impl Clone for Service {
     fn clone(&self) -> Self {
         Self {
             db: Arc::clone(&self.db),
@@ -358,6 +274,7 @@ impl<
             issue_reactions: Arc::clone(&self.issue_reactions),
             check_runs: Arc::clone(&self.check_runs),
             issue_timeline: Arc::clone(&self.issue_timeline),
+            sync_writer: Arc::clone(&self.sync_writer),
             github: Arc::clone(&self.github),
             policy_enforcer: self.policy_enforcer.clone(),
             config: self.config.clone(),
@@ -365,64 +282,37 @@ impl<
     }
 }
 
-impl<
-    R: RepoRepository,
-    I: IssueRepository,
-    P: PullRequestRepository,
-    C: CommitRepository,
-    M: CommentRepository,
-    V: ReviewCommentRepository,
-    W: ReviewRepository,
-    L: LabelRepository,
-    N: MilestoneRepository,
-    E: ReleaseRepository,
-    B: BranchRepository,
-    O: ContributorRepository,
-    F: WorkflowRunRepository,
-    G: PullRequestFileRepository,
-    T: TagRepository,
-    D: CommitFileRepository,
-    H: ReviewThreadRepository,
-    K: CommitCommentRepository,
-    X: IssueEventRepository,
-    Y: DeploymentRepository,
-    Z: PullRequestCommitRepository,
-    S: CommitStatusRepository,
-    J: WorkflowJobRepository,
-    Q: IssueReactionRepository,
-    U: CheckRunRepository,
-    A: IssueTimelineRepository,
-> Service<R, I, P, C, M, V, W, L, N, E, B, O, F, G, T, D, H, K, X, Y, Z, S, J, Q, U, A>
-{
+impl Service {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<DbProvider>,
-        repo: Arc<R>,
-        issues: Arc<I>,
-        pull_requests: Arc<P>,
-        commits: Arc<C>,
-        comments: Arc<M>,
-        review_comments: Arc<V>,
-        reviews: Arc<W>,
-        labels: Arc<L>,
-        milestones: Arc<N>,
-        releases: Arc<E>,
-        branches: Arc<B>,
-        contributors: Arc<O>,
-        workflow_runs: Arc<F>,
-        pull_request_files: Arc<G>,
-        tags: Arc<T>,
-        commit_files: Arc<D>,
-        review_threads: Arc<H>,
-        commit_comments: Arc<K>,
-        issue_events: Arc<X>,
-        deployments: Arc<Y>,
-        pull_request_commits: Arc<Z>,
-        commit_statuses: Arc<S>,
-        workflow_jobs: Arc<J>,
-        issue_reactions: Arc<Q>,
-        check_runs: Arc<U>,
-        issue_timeline: Arc<A>,
+        repo: Arc<dyn RepoRepository>,
+        issues: Arc<dyn IssueRepository>,
+        pull_requests: Arc<dyn PullRequestRepository>,
+        commits: Arc<dyn CommitRepository>,
+        comments: Arc<dyn CommentRepository>,
+        review_comments: Arc<dyn ReviewCommentRepository>,
+        reviews: Arc<dyn ReviewRepository>,
+        labels: Arc<dyn LabelRepository>,
+        milestones: Arc<dyn MilestoneRepository>,
+        releases: Arc<dyn ReleaseRepository>,
+        branches: Arc<dyn BranchRepository>,
+        contributors: Arc<dyn ContributorRepository>,
+        workflow_runs: Arc<dyn WorkflowRunRepository>,
+        pull_request_files: Arc<dyn PullRequestFileRepository>,
+        tags: Arc<dyn TagRepository>,
+        commit_files: Arc<dyn CommitFileRepository>,
+        review_threads: Arc<dyn ReviewThreadRepository>,
+        commit_comments: Arc<dyn CommitCommentRepository>,
+        issue_events: Arc<dyn IssueEventRepository>,
+        deployments: Arc<dyn DeploymentRepository>,
+        pull_request_commits: Arc<dyn PullRequestCommitRepository>,
+        commit_statuses: Arc<dyn CommitStatusRepository>,
+        workflow_jobs: Arc<dyn WorkflowJobRepository>,
+        issue_reactions: Arc<dyn IssueReactionRepository>,
+        check_runs: Arc<dyn CheckRunRepository>,
+        issue_timeline: Arc<dyn IssueTimelineRepository>,
+        sync_writer: Arc<dyn SyncWriter>,
         github: Arc<dyn GithubPort>,
         policy_enforcer: PolicyEnforcer,
         config: ServiceConfig,
@@ -455,6 +345,7 @@ impl<
             issue_reactions,
             check_runs,
             issue_timeline,
+            sync_writer,
             github,
             policy_enforcer,
             config,
@@ -484,10 +375,9 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         self.repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)
     }
@@ -516,16 +406,15 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         self.issues
-            .find_by_number(&conn, &scope, repository.id, number)
+            .find_by_number(&scope, repository.id, number)
             .await?
             .ok_or(DomainError::NotFound)
     }
@@ -554,16 +443,15 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         self.pull_requests
-            .find_by_number(&conn, &scope, repository.id, number)
+            .find_by_number(&scope, repository.id, number)
             .await?
             .ok_or(DomainError::NotFound)
     }
@@ -592,16 +480,15 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         self.commits
-            .find_by_sha(&conn, &scope, repository.id, sha)
+            .find_by_sha(&scope, repository.id, sha)
             .await?
             .ok_or(DomainError::NotFound)
     }
@@ -638,7 +525,6 @@ impl<
             .await?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
-        let conn = self.db.conn()?;
 
         // Keyset pagination on the unique sort key: fetch one row past the
         // page to learn whether a next page exists at all.
@@ -647,7 +533,7 @@ impl<
             .as_ref()
             .and_then(|c| c.k.first())
             .map(String::as_str);
-        let mut items = self.repo.list(&conn, &scope, limit + 1, after).await?;
+        let mut items = self.repo.list(&scope, limit + 1, after).await?;
         let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
             items.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
             // A dropped encode error would hand back `next_cursor: None`, and
@@ -705,8 +591,7 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
-        self.repo.upsert(&conn, &scope, tenant_id, record).await
+        self.repo.upsert(&scope, tenant_id, record).await
     }
 
     /// The repository's issues, filtered as GitHub's list endpoint filters.
@@ -737,18 +622,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .issues
-            .list_by_repo(&conn, &scope, repository.id, limit, filter)
+            .list_by_repo(&scope, repository.id, limit, filter)
             .await?;
 
         // Counted on the scope and repository already resolved above: the
@@ -756,7 +640,7 @@ impl<
         // a second policy evaluation and repository lookup per request.
         let total = self
             .issues
-            .count_by_repo(&conn, &scope, repository.id, filter)
+            .count_by_repo(&scope, repository.id, filter)
             .await?;
 
         Ok((
@@ -799,11 +683,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -811,7 +694,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.issues.upsert(&conn, &scope, tenant_id, record).await
+        self.issues.upsert(&scope, tenant_id, record).await
     }
 
     /// The repository's pull requests, filtered as GitHub's list endpoint
@@ -843,18 +726,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .pull_requests
-            .list_by_repo(&conn, &scope, repository.id, limit, filter)
+            .list_by_repo(&scope, repository.id, limit, filter)
             .await?;
 
         // Counted on the scope and repository already resolved above: the
@@ -862,7 +744,7 @@ impl<
         // a second policy evaluation and repository lookup per request.
         let total = self
             .pull_requests
-            .count_by_repo(&conn, &scope, repository.id, filter)
+            .count_by_repo(&scope, repository.id, filter)
             .await?;
 
         Ok((
@@ -905,11 +787,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -917,9 +798,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.pull_requests
-            .upsert(&conn, &scope, tenant_id, record)
-            .await
+        self.pull_requests.upsert(&scope, tenant_id, record).await
     }
 
     /// The repository's mirrored commits, newest first.
@@ -946,27 +825,23 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .commits
-            .list_by_repo(&conn, &scope, repository.id, limit)
+            .list_by_repo(&scope, repository.id, limit)
             .await?;
 
         // Counted on the scope and repository already resolved above: the
         // GitHub-compatible listings report a total, and doing it here saves
         // a second policy evaluation and repository lookup per request.
-        let total = self
-            .commits
-            .count_by_repo(&conn, &scope, repository.id)
-            .await?;
+        let total = self.commits.count_by_repo(&scope, repository.id).await?;
 
         Ok((
             Page::new(
@@ -1008,11 +883,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -1020,7 +894,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.commits.upsert(&conn, &scope, tenant_id, record).await
+        self.commits.upsert(&scope, tenant_id, record).await
     }
 
     /// List mirrored comments of one issue/PR (`owner/name` + number),
@@ -1049,18 +923,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .comments
-            .list_by_issue(&conn, &scope, repository.id, issue_number, limit)
+            .list_by_issue(&scope, repository.id, issue_number, limit)
             .await?;
 
         Ok(Page::new(
@@ -1098,11 +971,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -1110,7 +982,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.comments.upsert(&conn, &scope, tenant_id, record).await
+        self.comments.upsert(&scope, tenant_id, record).await
     }
 
     /// List mirrored review comments of one pull request, tenant-scoped,
@@ -1139,18 +1011,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .review_comments
-            .list_by_pull(&conn, &scope, repository.id, pull_number, limit)
+            .list_by_pull(&scope, repository.id, pull_number, limit)
             .await?;
 
         Ok(Page::new(
@@ -1188,11 +1059,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -1200,9 +1070,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.review_comments
-            .upsert(&conn, &scope, tenant_id, record)
-            .await
+        self.review_comments.upsert(&scope, tenant_id, record).await
     }
 
     /// List mirrored reviews of one pull request, tenant-scoped, oldest
@@ -1231,18 +1099,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .reviews
-            .list_by_pull(&conn, &scope, repository.id, pull_number, limit)
+            .list_by_pull(&scope, repository.id, pull_number, limit)
             .await?;
 
         Ok(Page::new(
@@ -1280,11 +1147,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -1292,7 +1158,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.reviews.upsert(&conn, &scope, tenant_id, record).await
+        self.reviews.upsert(&scope, tenant_id, record).await
     }
 
     /// List mirrored labels of one repository (`owner/name`), tenant-scoped,
@@ -1320,18 +1186,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .labels
-            .list_by_repo(&conn, &scope, repository.id, limit)
+            .list_by_repo(&scope, repository.id, limit)
             .await?;
 
         Ok(Page::new(
@@ -1369,11 +1234,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -1381,7 +1245,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.labels.upsert(&conn, &scope, tenant_id, record).await
+        self.labels.upsert(&scope, tenant_id, record).await
     }
 
     /// List mirrored milestones of one repository (`owner/name`),
@@ -1409,18 +1273,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .milestones
-            .list_by_repo(&conn, &scope, repository.id, limit)
+            .list_by_repo(&scope, repository.id, limit)
             .await?;
 
         Ok(Page::new(
@@ -1458,11 +1321,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -1470,9 +1332,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.milestones
-            .upsert(&conn, &scope, tenant_id, record)
-            .await
+        self.milestones.upsert(&scope, tenant_id, record).await
     }
 
     /// List mirrored releases of one repository (`owner/name`),
@@ -1500,18 +1360,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .releases
-            .list_by_repo(&conn, &scope, repository.id, limit)
+            .list_by_repo(&scope, repository.id, limit)
             .await?;
 
         Ok(Page::new(
@@ -1549,11 +1408,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -1561,7 +1419,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.releases.upsert(&conn, &scope, tenant_id, record).await
+        self.releases.upsert(&scope, tenant_id, record).await
     }
 
     /// List mirrored branch heads of one repository (`owner/name`),
@@ -1589,18 +1447,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .branches
-            .list_by_repo(&conn, &scope, repository.id, limit)
+            .list_by_repo(&scope, repository.id, limit)
             .await?;
 
         Ok(Page::new(
@@ -1638,11 +1495,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -1650,7 +1506,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.branches.upsert(&conn, &scope, tenant_id, record).await
+        self.branches.upsert(&scope, tenant_id, record).await
     }
 
     /// List mirrored contributors of one repository (`owner/name`),
@@ -1678,18 +1534,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .contributors
-            .list_by_repo(&conn, &scope, repository.id, limit)
+            .list_by_repo(&scope, repository.id, limit)
             .await?;
 
         Ok(Page::new(
@@ -1727,11 +1582,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -1739,9 +1593,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.contributors
-            .upsert(&conn, &scope, tenant_id, record)
-            .await
+        self.contributors.upsert(&scope, tenant_id, record).await
     }
 
     /// # Errors
@@ -1766,18 +1618,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .workflow_runs
-            .list_by_repo(&conn, &scope, repository.id, limit)
+            .list_by_repo(&scope, repository.id, limit)
             .await?;
 
         // Counted on the scope and repository already resolved above: the
@@ -1785,7 +1636,7 @@ impl<
         // a second policy evaluation and repository lookup per request.
         let total = self
             .workflow_runs
-            .count_by_repo(&conn, &scope, repository.id)
+            .count_by_repo(&scope, repository.id)
             .await?;
 
         Ok((
@@ -1826,11 +1677,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -1838,9 +1688,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.workflow_runs
-            .upsert(&conn, &scope, tenant_id, record)
-            .await
+        self.workflow_runs.upsert(&scope, tenant_id, record).await
     }
 
     /// List mirrored changed files of one pull request, tenant-scoped, by
@@ -1869,18 +1717,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .pull_request_files
-            .list_by_pull(&conn, &scope, repository.id, pull_number, limit)
+            .list_by_pull(&scope, repository.id, pull_number, limit)
             .await?;
 
         Ok(Page::new(
@@ -1919,11 +1766,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -1932,7 +1778,7 @@ impl<
             ..record
         };
         self.pull_request_files
-            .upsert(&conn, &scope, tenant_id, record)
+            .upsert(&scope, tenant_id, record)
             .await
     }
 
@@ -1961,19 +1807,15 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
-        let items = self
-            .tags
-            .list_by_repo(&conn, &scope, repository.id, limit)
-            .await?;
+        let items = self.tags.list_by_repo(&scope, repository.id, limit).await?;
 
         Ok(Page::new(
             items,
@@ -2010,11 +1852,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -2022,7 +1863,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.tags.upsert(&conn, &scope, tenant_id, record).await
+        self.tags.upsert(&scope, tenant_id, record).await
     }
 
     /// List mirrored changed files of one commit, tenant-scoped, by file
@@ -2051,18 +1892,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .commit_files
-            .list_by_commit(&conn, &scope, repository.id, commit_sha, limit)
+            .list_by_commit(&scope, repository.id, commit_sha, limit)
             .await?;
 
         Ok(Page::new(
@@ -2100,11 +1940,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -2112,9 +1951,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.commit_files
-            .upsert(&conn, &scope, tenant_id, record)
-            .await
+        self.commit_files.upsert(&scope, tenant_id, record).await
     }
 
     /// List mirrored review threads of one pull request, tenant-scoped, by
@@ -2143,18 +1980,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .review_threads
-            .list_by_pull(&conn, &scope, repository.id, pull_number, limit)
+            .list_by_pull(&scope, repository.id, pull_number, limit)
             .await?;
 
         Ok(Page::new(
@@ -2192,11 +2028,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -2204,9 +2039,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.review_threads
-            .upsert(&conn, &scope, tenant_id, record)
-            .await
+        self.review_threads.upsert(&scope, tenant_id, record).await
     }
 
     /// List mirrored comments of one commit, tenant-scoped, oldest first.
@@ -2234,18 +2067,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .commit_comments
-            .list_by_commit(&conn, &scope, repository.id, commit_sha, limit)
+            .list_by_commit(&scope, repository.id, commit_sha, limit)
             .await?;
 
         Ok(Page::new(
@@ -2284,11 +2116,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -2296,9 +2127,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.commit_comments
-            .upsert(&conn, &scope, tenant_id, record)
-            .await
+        self.commit_comments.upsert(&scope, tenant_id, record).await
     }
 
     /// List mirrored events of one issue, tenant-scoped, oldest first.
@@ -2326,18 +2155,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .issue_events
-            .list_by_issue(&conn, &scope, repository.id, issue_number, limit)
+            .list_by_issue(&scope, repository.id, issue_number, limit)
             .await?;
 
         Ok(Page::new(
@@ -2375,11 +2203,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -2387,9 +2214,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.issue_events
-            .upsert(&conn, &scope, tenant_id, record)
-            .await
+        self.issue_events.upsert(&scope, tenant_id, record).await
     }
 
     /// List mirrored deployments of one repository (`owner/name`),
@@ -2417,18 +2242,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .deployments
-            .list_by_repo(&conn, &scope, repository.id, limit)
+            .list_by_repo(&scope, repository.id, limit)
             .await?;
 
         Ok(Page::new(
@@ -2466,11 +2290,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -2478,9 +2301,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.deployments
-            .upsert(&conn, &scope, tenant_id, record)
-            .await
+        self.deployments.upsert(&scope, tenant_id, record).await
     }
 
     /// List the mirrored commits of one pull request, tenant-scoped,
@@ -2509,18 +2330,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .pull_request_commits
-            .list_by_pull(&conn, &scope, repository.id, pull_number, limit)
+            .list_by_pull(&scope, repository.id, pull_number, limit)
             .await?;
 
         Ok(Page::new(
@@ -2559,11 +2379,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -2572,7 +2391,7 @@ impl<
             ..record
         };
         self.pull_request_commits
-            .upsert(&conn, &scope, tenant_id, record)
+            .upsert(&scope, tenant_id, record)
             .await
     }
 
@@ -2601,18 +2420,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .commit_statuses
-            .list_by_commit(&conn, &scope, repository.id, commit_sha, limit)
+            .list_by_commit(&scope, repository.id, commit_sha, limit)
             .await?;
 
         Ok(Page::new(
@@ -2651,11 +2469,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -2663,9 +2480,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.commit_statuses
-            .upsert(&conn, &scope, tenant_id, record)
-            .await
+        self.commit_statuses.upsert(&scope, tenant_id, record).await
     }
 
     /// List mirrored jobs of one workflow run, tenant-scoped, by job id.
@@ -2693,18 +2508,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .workflow_jobs
-            .list_by_run(&conn, &scope, repository.id, run_id, limit)
+            .list_by_run(&scope, repository.id, run_id, limit)
             .await?;
 
         // Counted on the scope and repository already resolved above: the
@@ -2712,7 +2526,7 @@ impl<
         // a second policy evaluation and repository lookup per request.
         let total = self
             .workflow_jobs
-            .count_by_run(&conn, &scope, repository.id, run_id)
+            .count_by_run(&scope, repository.id, run_id)
             .await?;
 
         Ok((
@@ -2753,11 +2567,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -2765,9 +2578,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.workflow_jobs
-            .upsert(&conn, &scope, tenant_id, record)
-            .await
+        self.workflow_jobs.upsert(&scope, tenant_id, record).await
     }
 
     /// List mirrored reactions of one issue or pull request, tenant-scoped.
@@ -2795,18 +2606,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .issue_reactions
-            .list_by_issue(&conn, &scope, repository.id, issue_number, limit)
+            .list_by_issue(&scope, repository.id, issue_number, limit)
             .await?;
 
         Ok(Page::new(
@@ -2844,11 +2654,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -2856,9 +2665,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.issue_reactions
-            .upsert(&conn, &scope, tenant_id, record)
-            .await
+        self.issue_reactions.upsert(&scope, tenant_id, record).await
     }
 
     /// List mirrored check runs of one commit, tenant-scoped, by check-run id.
@@ -2886,18 +2693,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .check_runs
-            .list_by_commit(&conn, &scope, repository.id, head_sha, limit)
+            .list_by_commit(&scope, repository.id, head_sha, limit)
             .await?;
 
         // Counted on the scope and repository already resolved above: the
@@ -2905,7 +2711,7 @@ impl<
         // a second policy evaluation and repository lookup per request.
         let total = self
             .check_runs
-            .count_by_commit(&conn, &scope, repository.id, head_sha)
+            .count_by_commit(&scope, repository.id, head_sha)
             .await?;
 
         Ok((
@@ -2946,11 +2752,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -2958,9 +2763,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.check_runs
-            .upsert(&conn, &scope, tenant_id, record)
-            .await
+        self.check_runs.upsert(&scope, tenant_id, record).await
     }
 
     /// List the mirrored timeline of one issue or pull request, in the order
@@ -2989,18 +2792,17 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         let items = self
             .issue_timeline
-            .list_by_issue(&conn, &scope, repository.id, issue_number, limit)
+            .list_by_issue(&scope, repository.id, issue_number, limit)
             .await?;
 
         Ok(Page::new(
@@ -3038,11 +2840,10 @@ impl<
             )
             .await?;
 
-        let conn = self.db.conn()?;
         let full_name = format!("{owner}/{name}");
         let repository = self
             .repo
-            .find_by_full_name(&conn, &scope, &full_name)
+            .find_by_full_name(&scope, &full_name)
             .await?
             .ok_or(DomainError::NotFound)?;
 
@@ -3050,9 +2851,7 @@ impl<
             repo_id: repository.id,
             ..record
         };
-        self.issue_timeline
-            .upsert(&conn, &scope, tenant_id, record)
-            .await
+        self.issue_timeline.upsert(&scope, tenant_id, record).await
     }
 
     /// Cheap DB reachability probe for the platform's readiness aggregation
@@ -3062,126 +2861,6 @@ impl<
     #[must_use]
     pub(crate) fn db_reachable(&self) -> bool {
         self.db.conn().is_ok()
-    }
-
-    /// Fold this sync's derived contributors into the rows already stored.
-    ///
-    /// A derived contributor is only ever evidence of what the sync saw: a
-    /// run narrowed to issues cannot know that someone also reviewed pull
-    /// requests last month. So roles union and the seen-at window widens — a
-    /// person is never demoted by a narrower run.
-    async fn merge_known_contributors<DBR: toolkit_db::secure::DBRunner>(
-        &self,
-        conn: &DBR,
-        scope: &AccessScope,
-        repo_id: i64,
-        derived: Vec<ContributorRecord>,
-    ) -> Result<Vec<ContributorRecord>, DomainError> {
-        if derived.is_empty() {
-            return Ok(derived);
-        }
-
-        let known = self
-            .contributors
-            .list_by_repo(conn, scope, repo_id, CONTRIBUTOR_MERGE_LIMIT)
-            .await?;
-        let known: std::collections::HashMap<i64, Contributor> =
-            known.into_iter().map(|c| (c.user_id, c)).collect();
-
-        Ok(derived
-            .into_iter()
-            .map(|mut record| {
-                let Some(stored) = known.get(&record.user_id) else {
-                    return record;
-                };
-                for role in &stored.roles {
-                    if !record.roles.iter().any(|held| held == role) {
-                        record.roles.push(role.clone());
-                    }
-                }
-                record.roles.sort();
-                record.first_seen_at = earliest(record.first_seen_at, stored.first_seen_at);
-                record.last_seen_at = record.last_seen_at.max(stored.last_seen_at);
-                record
-            })
-            .collect())
-    }
-
-    /// Hard-delete rows this sync did not see, family by family, but only
-    /// where the listing was walked to its final page: absence from a
-    /// truncated listing proves nothing (PRD 5.2's "complete and verifiable
-    /// local replica" requires reconciling upstream deletions; the
-    /// completeness gate is what makes doing so safe).
-    ///
-    /// The match over [`Listing`] is exhaustive, so a family added to that
-    /// enum must be given a delete here before this compiles.
-    async fn reconcile_stale<DBR: toolkit_db::secure::DBRunner>(
-        &self,
-        conn: &DBR,
-        scope: &AccessScope,
-        complete: &ListingCompleteness,
-        repo_id: i64,
-        watermark: DateTime<Utc>,
-    ) -> Result<u64, DomainError> {
-        let mut deleted = 0;
-        for listing in Listing::iter() {
-            if !complete.is_complete(listing) {
-                continue;
-            }
-            deleted += match listing {
-                Listing::Issues => {
-                    self.issues
-                        .delete_stale(conn, scope, repo_id, watermark)
-                        .await
-                }
-                Listing::PullRequests => {
-                    self.pull_requests
-                        .delete_stale(conn, scope, repo_id, watermark)
-                        .await
-                }
-                Listing::Commits => {
-                    self.commits
-                        .delete_stale(conn, scope, repo_id, watermark)
-                        .await
-                }
-                Listing::Comments => {
-                    self.comments
-                        .delete_stale(conn, scope, repo_id, watermark)
-                        .await
-                }
-                Listing::ReviewComments => {
-                    self.review_comments
-                        .delete_stale(conn, scope, repo_id, watermark)
-                        .await
-                }
-                Listing::Labels => {
-                    self.labels
-                        .delete_stale(conn, scope, repo_id, watermark)
-                        .await
-                }
-                Listing::Milestones => {
-                    self.milestones
-                        .delete_stale(conn, scope, repo_id, watermark)
-                        .await
-                }
-                Listing::Releases => {
-                    self.releases
-                        .delete_stale(conn, scope, repo_id, watermark)
-                        .await
-                }
-                Listing::Branches => {
-                    self.branches
-                        .delete_stale(conn, scope, repo_id, watermark)
-                        .await
-                }
-                Listing::Tags => {
-                    self.tags
-                        .delete_stale(conn, scope, repo_id, watermark)
-                        .await
-                }
-            }?;
-        }
-        Ok(deleted)
     }
 
     /// Fetch one repository from GitHub (first slice: repo + first page of
@@ -3207,35 +2886,7 @@ impl<
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
-    ) -> Result<SyncSummary, DomainError>
-    where
-        R: 'static,
-        I: 'static,
-        P: 'static,
-        C: 'static,
-        M: 'static,
-        V: 'static,
-        W: 'static,
-        L: 'static,
-        N: 'static,
-        E: 'static,
-        B: 'static,
-        O: 'static,
-        F: 'static,
-        G: 'static,
-        T: 'static,
-        D: 'static,
-        H: 'static,
-        K: 'static,
-        X: 'static,
-        Y: 'static,
-        Z: 'static,
-        S: 'static,
-        J: 'static,
-        Q: 'static,
-        U: 'static,
-        A: 'static,
-    {
+    ) -> Result<SyncSummary, DomainError> {
         let tenant_id = ctx.subject_tenant_id();
 
         let scope = self
@@ -3280,254 +2931,10 @@ impl<
                 )));
             }
         };
-        let complete = fetched.complete;
 
-        // All ~26 tables are written as one transaction: a failure partway
-        // through must not leave some tables current and others stale.
-        let service = self.clone();
         let summary = self
-            .db
-            .db()
-            .transaction_ref_mapped(move |tx| {
-                Box::pin(async move {
-                    let repository = service
-                        .repo
-                        .upsert(tx, &scope, tenant_id, fetched.repository)
-                        .await?;
-
-                    let issues_synced =
-                        sync_table!(service, tx, &scope, tenant_id, issues, fetched.issues);
-
-                    let pull_requests_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        pull_requests,
-                        fetched.pull_requests
-                    );
-
-                    let commits_synced =
-                        sync_table!(service, tx, &scope, tenant_id, commits, fetched.commits);
-
-                    let comments_synced =
-                        sync_table!(service, tx, &scope, tenant_id, comments, fetched.comments);
-
-                    let review_comments_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        review_comments,
-                        fetched.review_comments
-                    );
-
-                    let reviews_synced =
-                        sync_table!(service, tx, &scope, tenant_id, reviews, fetched.reviews);
-
-                    let labels_synced =
-                        sync_table!(service, tx, &scope, tenant_id, labels, fetched.labels);
-
-                    let milestones_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        milestones,
-                        fetched.milestones
-                    );
-
-                    let releases_synced =
-                        sync_table!(service, tx, &scope, tenant_id, releases, fetched.releases);
-
-                    let branches_synced =
-                        sync_table!(service, tx, &scope, tenant_id, branches, fetched.branches);
-
-                    // Contributors are derived from whatever this sync
-                    // happened to fetch, so writing them straight would
-                    // narrow the set every time the scope narrows. Merge
-                    // with what earlier syncs already learned instead.
-                    let contributors = service
-                        .merge_known_contributors(tx, &scope, repository.id, fetched.contributors)
-                        .await?;
-                    let contributors_synced =
-                        sync_table!(service, tx, &scope, tenant_id, contributors, contributors);
-
-                    let workflow_runs_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        workflow_runs,
-                        fetched.workflow_runs
-                    );
-
-                    let pull_request_files_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        pull_request_files,
-                        fetched.pull_request_files
-                    );
-
-                    let tags_synced =
-                        sync_table!(service, tx, &scope, tenant_id, tags, fetched.tags);
-
-                    let commit_files_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        commit_files,
-                        fetched.commit_files
-                    );
-
-                    let review_threads_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        review_threads,
-                        fetched.review_threads
-                    );
-
-                    let commit_comments_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        commit_comments,
-                        fetched.commit_comments
-                    );
-
-                    let issue_events_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        issue_events,
-                        fetched.issue_events
-                    );
-
-                    let deployments_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        deployments,
-                        fetched.deployments
-                    );
-
-                    let pull_request_commits_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        pull_request_commits,
-                        fetched.pull_request_commits
-                    );
-
-                    let commit_statuses_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        commit_statuses,
-                        fetched.commit_statuses
-                    );
-
-                    let workflow_jobs_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        workflow_jobs,
-                        fetched.workflow_jobs
-                    );
-
-                    let issue_reactions_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        issue_reactions,
-                        fetched.issue_reactions
-                    );
-
-                    let check_runs_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        check_runs,
-                        fetched.check_runs
-                    );
-                    // Rows are keyed by position, so a shorter timeline would
-                    // leave the old tail behind: clear each fetched issue
-                    // before rewriting it.
-                    let refetched: Vec<i64> = fetched
-                        .issue_timeline
-                        .iter()
-                        .map(|event| event.issue_number)
-                        .collect::<std::collections::HashSet<_>>()
-                        .into_iter()
-                        .collect();
-                    service
-                        .issue_timeline
-                        .delete_by_issues(tx, &scope, repository.id, &refetched)
-                        .await?;
-                    let issue_timeline_synced = sync_table!(
-                        service,
-                        tx,
-                        &scope,
-                        tenant_id,
-                        issue_timeline,
-                        fetched.issue_timeline
-                    );
-
-                    let stale_rows_deleted = service
-                        .reconcile_stale(tx, &scope, &complete, repository.id, watermark)
-                        .await?;
-                    if stale_rows_deleted > 0 {
-                        tracing::info!(
-                            repository = %repository.full_name,
-                            stale_rows_deleted,
-                            "reconciled upstream deletions"
-                        );
-                    }
-
-                    Ok(SyncSummary {
-                        repository: repository.full_name,
-                        issues_synced,
-                        pull_requests_synced,
-                        commits_synced,
-                        comments_synced,
-                        review_comments_synced,
-                        reviews_synced,
-                        labels_synced,
-                        milestones_synced,
-                        releases_synced,
-                        branches_synced,
-                        contributors_synced,
-                        workflow_runs_synced,
-                        pull_request_files_synced,
-                        tags_synced,
-                        commit_files_synced,
-                        review_threads_synced,
-                        commit_comments_synced,
-                        issue_events_synced,
-                        deployments_synced,
-                        pull_request_commits_synced,
-                        commit_statuses_synced,
-                        workflow_jobs_synced,
-                        issue_reactions_synced,
-                        check_runs_synced,
-                        issue_timeline_synced,
-                        stale_rows_deleted,
-                    })
-                })
-            })
+            .sync_writer
+            .write_sync(&scope, tenant_id, fetched, watermark)
             .await;
 
         // Deterministic unlock on the way out; a failed release is only
