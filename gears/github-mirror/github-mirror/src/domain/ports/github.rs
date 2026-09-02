@@ -38,9 +38,9 @@ pub enum Listing {
 /// Which top-level listings this fetch walked to their final page.
 ///
 /// Deletion reconciliation may only run against a listing that is provably
-/// complete: "absent from a truncated page" says nothing about existence.
-/// On this increment the client fetches first pages only, so a listing is
-/// complete exactly when its response advertises no next page.
+/// complete: "absent from a truncated page" says nothing about existence. A
+/// listing is complete when the walk reached a response advertising no next
+/// page, and incomplete when it stopped at the page cap with more to fetch.
 #[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListingCompleteness {
