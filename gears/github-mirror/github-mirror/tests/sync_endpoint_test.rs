@@ -684,8 +684,15 @@ async fn sync_is_idempotent() {
 
     let mut after_first = Vec::new();
     for path in listings {
-        let listed = body_json(get(router.clone(), path).await).await;
-        after_first.push(listed.as_array().map(Vec::len));
+        let response = get(router.clone(), path).await;
+        assert_eq!(response.status(), StatusCode::OK, "{path} must list");
+        let listed = body_json(response).await;
+        after_first.push(
+            listed
+                .as_array()
+                .unwrap_or_else(|| panic!("{path} must answer with an array"))
+                .len(),
+        );
     }
 
     let second = post(
@@ -699,9 +706,14 @@ async fn sync_is_idempotent() {
     assert_eq!(repos["items"].as_array().expect("items").len(), 1);
 
     for (path, expected) in listings.into_iter().zip(after_first) {
-        let listed = body_json(get(router.clone(), path).await).await;
+        let response = get(router.clone(), path).await;
+        assert_eq!(response.status(), StatusCode::OK, "{path} must list");
+        let listed = body_json(response).await;
         assert_eq!(
-            listed.as_array().map(Vec::len),
+            listed
+                .as_array()
+                .unwrap_or_else(|| panic!("{path} must answer with an array"))
+                .len(),
             expected,
             "{path} must hold the same rows after a second sync, not duplicates"
         );
