@@ -2,7 +2,7 @@
 
 mod common;
 
-use github_mirror::domain::repo::RepoRecord;
+use github_mirror::domain::repo::{BranchRecord, LabelRecord, PageWindow, RepoRecord};
 use toolkit_odata::ODataQuery;
 use uuid::Uuid;
 
@@ -147,4 +147,79 @@ async fn a_pdp_denial_surfaces_as_forbidden() {
         matches!(err, DomainError::Forbidden(_)),
         "expected Forbidden, got {err:?}"
     );
+}
+
+#[tokio::test]
+async fn child_rows_of_a_shared_repository_stay_with_their_tenant() {
+    let service = common::service("https://api.github.com").await;
+    let tenant_a = common::caller_in(Uuid::new_v4());
+    let tenant_b = common::caller_in(Uuid::new_v4());
+
+    for (tenant, suffix) in [(&tenant_a, "a"), (&tenant_b, "b")] {
+        service
+            .upsert_repo(tenant, repo(700, "shared"))
+            .await
+            .unwrap_or_else(|e| panic!("repo seed for {suffix} must succeed: {e}"));
+        service
+            .upsert_branch(
+                tenant,
+                "acme",
+                "shared",
+                BranchRecord {
+                    repo_id: 700,
+                    name: format!("branch-{suffix}"),
+                    commit_sha: format!("sha-{suffix}"),
+                    protected: false,
+                },
+            )
+            .await
+            .unwrap_or_else(|e| panic!("branch seed for {suffix} must succeed: {e}"));
+        service
+            .upsert_label(
+                tenant,
+                "acme",
+                "shared",
+                LabelRecord {
+                    id: 900,
+                    repo_id: 700,
+                    name: format!("label-{suffix}"),
+                    color: "ffffff".to_owned(),
+                    is_default: false,
+                    description: None,
+                },
+            )
+            .await
+            .unwrap_or_else(|e| panic!("label seed for {suffix} must succeed: {e}"));
+    }
+
+    let window = PageWindow::first(50);
+    for (tenant, suffix) in [(&tenant_a, "a"), (&tenant_b, "b")] {
+        let branches = service
+            .list_branches(tenant, "acme", "shared", window)
+            .await
+            .unwrap_or_else(|e| panic!("branch list for {suffix} must succeed: {e}"));
+        assert_eq!(
+            branches
+                .items
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![format!("branch-{suffix}")],
+            "a tenant must see only its own branches of a shared repository"
+        );
+
+        let labels = service
+            .list_labels(tenant, "acme", "shared", window)
+            .await
+            .unwrap_or_else(|e| panic!("label list for {suffix} must succeed: {e}"));
+        assert_eq!(
+            labels
+                .items
+                .iter()
+                .map(|l| l.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![format!("label-{suffix}")],
+            "a tenant must see only its own labels of a shared repository"
+        );
+    }
 }
