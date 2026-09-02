@@ -18,7 +18,7 @@ use crate::api::rest::routes::ConcreteService;
 use chrono::{DateTime, Utc};
 
 use crate::domain::error::DomainError;
-use crate::domain::repo::{IssueState, ListingDirection, ListingFilter, ListingSort};
+use crate::domain::repo::{IssueState, ListingDirection, ListingFilter, ListingSort, PageWindow};
 
 use super::dto::{
     AuthenticatedUserDto, BranchDto, CheckRunDto, CheckRunsPageDto, CommentDto, CommitCommentDto,
@@ -31,6 +31,13 @@ use super::dto::{
 
 const DEFAULT_PER_PAGE: u64 = 30;
 const MAX_PER_PAGE: u64 = 100;
+/// Furthest row page-based paging may reach.
+///
+/// GitHub answers `page * per_page > 1000` with a 422 telling the caller to
+/// switch to cursor paging, so the mirror stops in the same place: it keeps
+/// the surfaces identical and stops an arbitrary `?page=` from becoming an
+/// arbitrary SQL `OFFSET`.
+const MAX_PAGED_ROWS: u64 = 1_000;
 
 /// GitHub-style pagination query (`?page=2&per_page=50`), plus the `state`
 /// filter the issue and pull listings accept.
@@ -93,36 +100,41 @@ struct GithubPage {
 }
 
 impl GithubPageQuery {
-    fn normalized(&self) -> GithubPage {
-        GithubPage {
-            page: self.page.filter(|p| *p >= 1).unwrap_or(1),
-            per_page: self
-                .per_page
-                .filter(|p| *p >= 1)
-                .unwrap_or(DEFAULT_PER_PAGE)
-                .min(MAX_PER_PAGE),
+    /// # Errors
+    /// `Validation` when the requested page reaches past
+    /// [`MAX_PAGED_ROWS`], which is where GitHub itself stops.
+    fn normalized(&self) -> Result<GithubPage, DomainError> {
+        let page = self.page.filter(|p| *p >= 1).unwrap_or(1);
+        let per_page = self
+            .per_page
+            .filter(|p| *p >= 1)
+            .unwrap_or(DEFAULT_PER_PAGE)
+            .min(MAX_PER_PAGE);
+
+        if page.saturating_mul(per_page) > MAX_PAGED_ROWS {
+            return Err(DomainError::Validation {
+                field: "page".to_owned(),
+                message: concat!(
+                    "Pagination with the page parameter is not supported for large datasets, ",
+                    "please use cursor based pagination (after/before)"
+                )
+                .to_owned(),
+            });
         }
+
+        Ok(GithubPage { page, per_page })
     }
 }
 
 impl GithubPage {
-    fn odata(&self) -> ODataQuery {
-        ODataQuery {
-            limit: Some(self.page.saturating_mul(self.per_page)),
-            ..ODataQuery::default()
-        }
+    /// The rows this page needs, as an offset the database applies: asking
+    /// for page 50 reads one page, not fifty.
+    fn window(&self) -> PageWindow {
+        PageWindow::new(self.per_page, (self.page - 1).saturating_mul(self.per_page))
     }
 
-    fn slice<T, D: From<T>>(&self, items: Vec<T>) -> Vec<D> {
-        let start =
-            usize::try_from((self.page - 1).saturating_mul(self.per_page)).unwrap_or(usize::MAX);
-        let take = usize::try_from(self.per_page).unwrap_or(usize::MAX);
-        items
-            .into_iter()
-            .skip(start)
-            .take(take)
-            .map(D::from)
-            .collect()
+    fn convert<T, D: From<T>>(items: Vec<T>) -> Vec<D> {
+        items.into_iter().map(D::from).collect()
     }
 
     fn link_header(&self, path: &str, returned: usize) -> HeaderMap {
@@ -260,13 +272,18 @@ pub async fn list_issues(
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<IssueDto> {
     validate_repo_path(&owner, &name)?;
-    let page = query.normalized();
+    let page = query.normalized()?;
     let (items, total) = svc
-        .list_issues(&ctx, &owner, &name, &page.odata(), query.listing_filter()?)
+        .list_issues(&ctx, &owner, &name, page.window(), query.listing_filter()?)
         .await?;
     let items = items.items;
     let path = format!("/repos/{owner}/{name}/issues");
-    Ok(respond_counted(&page, &path, page.slice(items), total))
+    Ok(respond_counted(
+        &page,
+        &path,
+        GithubPage::convert(items),
+        total,
+    ))
 }
 
 pub async fn list_comments(
@@ -275,13 +292,13 @@ pub async fn list_comments(
     Path((owner, name, number)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<CommentDto> {
-    let page = query.normalized();
+    let page = query.normalized()?;
     let items = svc
-        .list_comments(&ctx, &owner, &name, number, &page.odata())
+        .list_comments(&ctx, &owner, &name, number, page.window())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/issues/{number}/comments");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond(&page, &path, GithubPage::convert(items)))
 }
 
 pub async fn list_pull_requests(
@@ -291,13 +308,18 @@ pub async fn list_pull_requests(
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<PullRequestDto> {
     validate_repo_path(&owner, &name)?;
-    let page = query.normalized();
+    let page = query.normalized()?;
     let (items, total) = svc
-        .list_pull_requests(&ctx, &owner, &name, &page.odata(), query.listing_filter()?)
+        .list_pull_requests(&ctx, &owner, &name, page.window(), query.listing_filter()?)
         .await?;
     let items = items.items;
     let path = format!("/repos/{owner}/{name}/pulls");
-    Ok(respond_counted(&page, &path, page.slice(items), total))
+    Ok(respond_counted(
+        &page,
+        &path,
+        GithubPage::convert(items),
+        total,
+    ))
 }
 
 pub async fn list_reviews(
@@ -306,13 +328,13 @@ pub async fn list_reviews(
     Path((owner, name, number)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<ReviewDto> {
-    let page = query.normalized();
+    let page = query.normalized()?;
     let items = svc
-        .list_reviews(&ctx, &owner, &name, number, &page.odata())
+        .list_reviews(&ctx, &owner, &name, number, page.window())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/pulls/{number}/reviews");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond(&page, &path, GithubPage::convert(items)))
 }
 
 pub async fn list_review_comments(
@@ -321,13 +343,13 @@ pub async fn list_review_comments(
     Path((owner, name, number)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<ReviewCommentDto> {
-    let page = query.normalized();
+    let page = query.normalized()?;
     let items = svc
-        .list_review_comments(&ctx, &owner, &name, number, &page.odata())
+        .list_review_comments(&ctx, &owner, &name, number, page.window())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/pulls/{number}/comments");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond(&page, &path, GithubPage::convert(items)))
 }
 
 pub async fn list_pull_request_files(
@@ -336,13 +358,13 @@ pub async fn list_pull_request_files(
     Path((owner, name, number)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<PullRequestFileDto> {
-    let page = query.normalized();
+    let page = query.normalized()?;
     let items = svc
-        .list_pull_request_files(&ctx, &owner, &name, number, &page.odata())
+        .list_pull_request_files(&ctx, &owner, &name, number, page.window())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/pulls/{number}/files");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond(&page, &path, GithubPage::convert(items)))
 }
 
 pub async fn list_commits(
@@ -352,11 +374,16 @@ pub async fn list_commits(
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<CommitDto> {
     validate_repo_path(&owner, &name)?;
-    let page = query.normalized();
-    let (items, total) = svc.list_commits(&ctx, &owner, &name, &page.odata()).await?;
+    let page = query.normalized()?;
+    let (items, total) = svc.list_commits(&ctx, &owner, &name, page.window()).await?;
     let items = items.items;
     let path = format!("/repos/{owner}/{name}/commits");
-    Ok(respond_counted(&page, &path, page.slice(items), total))
+    Ok(respond_counted(
+        &page,
+        &path,
+        GithubPage::convert(items),
+        total,
+    ))
 }
 
 pub async fn list_branches(
@@ -366,13 +393,13 @@ pub async fn list_branches(
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<BranchDto> {
     validate_repo_path(&owner, &name)?;
-    let page = query.normalized();
+    let page = query.normalized()?;
     let items = svc
-        .list_branches(&ctx, &owner, &name, &page.odata())
+        .list_branches(&ctx, &owner, &name, page.window())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/branches");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond(&page, &path, GithubPage::convert(items)))
 }
 
 pub async fn list_tags(
@@ -382,13 +409,13 @@ pub async fn list_tags(
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<TagDto> {
     validate_repo_path(&owner, &name)?;
-    let page = query.normalized();
+    let page = query.normalized()?;
     let items = svc
-        .list_tags(&ctx, &owner, &name, &page.odata())
+        .list_tags(&ctx, &owner, &name, page.window())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/tags");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond(&page, &path, GithubPage::convert(items)))
 }
 
 pub async fn list_releases(
@@ -398,13 +425,13 @@ pub async fn list_releases(
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<ReleaseDto> {
     validate_repo_path(&owner, &name)?;
-    let page = query.normalized();
+    let page = query.normalized()?;
     let items = svc
-        .list_releases(&ctx, &owner, &name, &page.odata())
+        .list_releases(&ctx, &owner, &name, page.window())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/releases");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond(&page, &path, GithubPage::convert(items)))
 }
 
 pub async fn list_milestones(
@@ -414,13 +441,13 @@ pub async fn list_milestones(
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<MilestoneDto> {
     validate_repo_path(&owner, &name)?;
-    let page = query.normalized();
+    let page = query.normalized()?;
     let items = svc
-        .list_milestones(&ctx, &owner, &name, &page.odata())
+        .list_milestones(&ctx, &owner, &name, page.window())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/milestones");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond(&page, &path, GithubPage::convert(items)))
 }
 
 pub async fn list_labels(
@@ -430,13 +457,13 @@ pub async fn list_labels(
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<LabelDto> {
     validate_repo_path(&owner, &name)?;
-    let page = query.normalized();
+    let page = query.normalized()?;
     let items = svc
-        .list_labels(&ctx, &owner, &name, &page.odata())
+        .list_labels(&ctx, &owner, &name, page.window())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/labels");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond(&page, &path, GithubPage::convert(items)))
 }
 
 pub async fn list_contributors(
@@ -446,13 +473,13 @@ pub async fn list_contributors(
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<ContributorDto> {
     validate_repo_path(&owner, &name)?;
-    let page = query.normalized();
+    let page = query.normalized()?;
     let items = svc
-        .list_contributors(&ctx, &owner, &name, &page.odata())
+        .list_contributors(&ctx, &owner, &name, page.window())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/contributors");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond(&page, &path, GithubPage::convert(items)))
 }
 
 pub async fn list_workflow_runs(
@@ -462,11 +489,11 @@ pub async fn list_workflow_runs(
     Query(query): Query<GithubPageQuery>,
 ) -> ApiResult<(HeaderMap, JsonBody<WorkflowRunsPageDto>)> {
     validate_repo_path(&owner, &name)?;
-    let page = query.normalized();
+    let page = query.normalized()?;
     let (items, total) = svc
-        .list_workflow_runs(&ctx, &owner, &name, &page.odata())
+        .list_workflow_runs(&ctx, &owner, &name, page.window())
         .await?;
-    let runs: Vec<WorkflowRunDto> = page.slice(items.items);
+    let runs: Vec<WorkflowRunDto> = GithubPage::convert(items.items);
     let path = format!("/repos/{owner}/{name}/actions/runs");
     let headers = page.link_header(&path, runs.len());
     // GitHub's `total_count` spans every page, so it is a count, not the
@@ -560,13 +587,13 @@ pub async fn list_commit_comments(
     Path((owner, name, sha)): Path<(String, String, String)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<CommitCommentDto> {
-    let page = query.normalized();
+    let page = query.normalized()?;
     let items = svc
-        .list_commit_comments(&ctx, &owner, &name, &sha, &page.odata())
+        .list_commit_comments(&ctx, &owner, &name, &sha, page.window())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/commits/{sha}/comments");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond(&page, &path, GithubPage::convert(items)))
 }
 
 pub async fn list_issue_events(
@@ -575,13 +602,13 @@ pub async fn list_issue_events(
     Path((owner, name, number)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<IssueEventDto> {
-    let page = query.normalized();
+    let page = query.normalized()?;
     let items = svc
-        .list_issue_events(&ctx, &owner, &name, number, &page.odata())
+        .list_issue_events(&ctx, &owner, &name, number, page.window())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/issues/{number}/events");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond(&page, &path, GithubPage::convert(items)))
 }
 
 pub async fn list_issue_reactions(
@@ -590,13 +617,13 @@ pub async fn list_issue_reactions(
     Path((owner, name, number)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<IssueReactionDto> {
-    let page = query.normalized();
+    let page = query.normalized()?;
     let items = svc
-        .list_issue_reactions(&ctx, &owner, &name, number, &page.odata())
+        .list_issue_reactions(&ctx, &owner, &name, number, page.window())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/issues/{number}/reactions");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond(&page, &path, GithubPage::convert(items)))
 }
 
 pub async fn list_issue_timeline(
@@ -605,13 +632,13 @@ pub async fn list_issue_timeline(
     Path((owner, name, number)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<IssueTimelineEventDto> {
-    let page = query.normalized();
+    let page = query.normalized()?;
     let items = svc
-        .list_issue_timeline(&ctx, &owner, &name, number, &page.odata())
+        .list_issue_timeline(&ctx, &owner, &name, number, page.window())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/issues/{number}/timeline");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond(&page, &path, GithubPage::convert(items)))
 }
 
 pub async fn list_deployments(
@@ -621,13 +648,13 @@ pub async fn list_deployments(
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<DeploymentDto> {
     validate_repo_path(&owner, &name)?;
-    let page = query.normalized();
+    let page = query.normalized()?;
     let items = svc
-        .list_deployments(&ctx, &owner, &name, &page.odata())
+        .list_deployments(&ctx, &owner, &name, page.window())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/deployments");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond(&page, &path, GithubPage::convert(items)))
 }
 
 pub async fn list_pull_request_commits(
@@ -636,13 +663,13 @@ pub async fn list_pull_request_commits(
     Path((owner, name, number)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<CommitDto> {
-    let page = query.normalized();
+    let page = query.normalized()?;
     let items = svc
-        .list_pull_request_commits(&ctx, &owner, &name, number, &page.odata())
+        .list_pull_request_commits(&ctx, &owner, &name, number, page.window())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/pulls/{number}/commits");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond(&page, &path, GithubPage::convert(items)))
 }
 
 pub async fn list_commit_statuses(
@@ -651,13 +678,13 @@ pub async fn list_commit_statuses(
     Path((owner, name, sha)): Path<(String, String, String)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<CommitStatusDto> {
-    let page = query.normalized();
+    let page = query.normalized()?;
     let items = svc
-        .list_commit_statuses(&ctx, &owner, &name, &sha, &page.odata())
+        .list_commit_statuses(&ctx, &owner, &name, &sha, page.window())
         .await?
         .items;
     let path = format!("/repos/{owner}/{name}/commits/{sha}/statuses");
-    Ok(respond(&page, &path, page.slice(items)))
+    Ok(respond(&page, &path, GithubPage::convert(items)))
 }
 
 pub async fn list_workflow_jobs(
@@ -666,11 +693,11 @@ pub async fn list_workflow_jobs(
     Path((owner, name, run_id)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> ApiResult<(HeaderMap, JsonBody<WorkflowJobsPageDto>)> {
-    let page = query.normalized();
+    let page = query.normalized()?;
     let (items, total) = svc
-        .list_workflow_jobs(&ctx, &owner, &name, run_id, &page.odata())
+        .list_workflow_jobs(&ctx, &owner, &name, run_id, page.window())
         .await?;
-    let jobs: Vec<WorkflowJobDto> = page.slice(items.items);
+    let jobs: Vec<WorkflowJobDto> = GithubPage::convert(items.items);
     let path = format!("/repos/{owner}/{name}/actions/runs/{run_id}/jobs");
     let headers = page.link_header(&path, jobs.len());
     let total_count = i64::try_from(total).unwrap_or(i64::MAX);
@@ -683,11 +710,11 @@ pub async fn list_check_runs(
     Path((owner, name, sha)): Path<(String, String, String)>,
     Query(query): Query<GithubPageQuery>,
 ) -> ApiResult<(HeaderMap, JsonBody<CheckRunsPageDto>)> {
-    let page = query.normalized();
+    let page = query.normalized()?;
     let (items, total) = svc
-        .list_check_runs(&ctx, &owner, &name, &sha, &page.odata())
+        .list_check_runs(&ctx, &owner, &name, &sha, page.window())
         .await?;
-    let check_runs: Vec<CheckRunDto> = page.slice(items.items);
+    let check_runs: Vec<CheckRunDto> = GithubPage::convert(items.items);
     let path = format!("/repos/{owner}/{name}/commits/{sha}/check-runs");
     let headers = page.link_header(&path, check_runs.len());
     let total_count = i64::try_from(total).unwrap_or(i64::MAX);
@@ -722,7 +749,7 @@ pub async fn list_user_repos(
     Extension(svc): Extension<Arc<ConcreteService>>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<RepoDto> {
-    let page = query.normalized();
-    let items = svc.list_repos(&ctx, &page.odata()).await?.items;
-    Ok(respond(&page, "/user/repos", page.slice(items)))
+    let page = query.normalized()?;
+    let items = svc.list_repos_page(&ctx, page.window()).await?;
+    Ok(respond(&page, "/user/repos", GithubPage::convert(items)))
 }
