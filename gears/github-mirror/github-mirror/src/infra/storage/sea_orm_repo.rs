@@ -8,6 +8,10 @@ use chrono::Utc;
 use crate::domain::ports::github::{FetchedRepository, Listing, ListingCompleteness};
 use crate::domain::repo::SyncWriter;
 use crate::domain::service::DbProvider;
+use crate::infra::storage::odata_mapper::{
+    CommitFileField, CommitFileODataMapper, RepoField, RepoODataMapper, ReviewThreadField,
+    ReviewThreadODataMapper,
+};
 use github_mirror_sdk::{
     Branch, CheckRun, Comment, Commit, CommitComment, CommitFile, CommitStatus, Contributor,
     Deployment, Issue, IssueEvent, IssueReaction, IssueTimelineEvent, Label, Milestone,
@@ -16,9 +20,11 @@ use github_mirror_sdk::{
 };
 use sea_orm::prelude::DateTimeUtc;
 use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, Order};
+use toolkit_db::odata::sea_orm_filter::{LimitCfg, paginate_odata};
 use toolkit_db::secure::{
     DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureOnConflict,
 };
+use toolkit_odata::{ODataQuery, Page, SortDir};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
@@ -85,6 +91,17 @@ fn github_instant(at: chrono::DateTime<chrono::Utc>) -> String {
     at.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
+/// Page-size bounds for the `OData` listings: the platform default, capped so a
+/// caller cannot ask for the whole table in one request.
+const LIST_LIMITS: LimitCfg = LimitCfg {
+    default: 50,
+    max: 200,
+};
+
+fn map_odata_error(e: impl std::fmt::Display) -> DomainError {
+    DomainError::internal(e.to_string())
+}
+
 fn map_scope_error(e: ScopeError) -> DomainError {
     match e {
         ScopeError::Denied(msg) => DomainError::forbidden(msg),
@@ -130,11 +147,10 @@ impl RepoRepository for SeaOrmRepoRepository {
     async fn list(
         &self,
         scope: &AccessScope,
-        limit: u64,
-        after: Option<&str>,
-    ) -> Result<Vec<Repo>, DomainError> {
+        query: &ODataQuery,
+    ) -> Result<Page<Repo>, DomainError> {
         let conn = self.db.conn()?;
-        repo_list_in(&conn, scope, limit, after).await
+        repo_list_in(&conn, scope, query).await
     }
 
     async fn find_by_full_name(
@@ -1102,10 +1118,10 @@ impl CommitFileRepository for SeaOrmCommitFileRepository {
         scope: &AccessScope,
         repo_id: i64,
         commit_sha: &str,
-        limit: u64,
-    ) -> Result<Vec<CommitFile>, DomainError> {
+        query: &ODataQuery,
+    ) -> Result<Page<CommitFile>, DomainError> {
         let conn = self.db.conn()?;
-        commit_file_list_by_commit_in(&conn, scope, repo_id, commit_sha, limit).await
+        commit_file_list_by_commit_in(&conn, scope, repo_id, commit_sha, query).await
     }
 }
 
@@ -1156,10 +1172,10 @@ impl ReviewThreadRepository for SeaOrmReviewThreadRepository {
         scope: &AccessScope,
         repo_id: i64,
         pull_number: i64,
-        limit: u64,
-    ) -> Result<Vec<ReviewThread>, DomainError> {
+        query: &ODataQuery,
+    ) -> Result<Page<ReviewThread>, DomainError> {
         let conn = self.db.conn()?;
-        review_thread_list_by_pull_in(&conn, scope, repo_id, pull_number, limit).await
+        review_thread_list_by_pull_in(&conn, scope, repo_id, pull_number, query).await
     }
 }
 
@@ -1730,24 +1746,18 @@ async fn repo_upsert_in<C: DBRunner>(
 async fn repo_list_in<C: DBRunner>(
     conn: &C,
     scope: &AccessScope,
-    limit: u64,
-    after: Option<&str>,
-) -> Result<Vec<Repo>, DomainError> {
-    let mut condition = sea_orm::Condition::all();
-    if let Some(after) = after {
-        condition = condition.add(repositories::Column::FullName.gt(after));
-    }
-    let rows = RepoEntity::find()
-        .secure()
-        .scope_with(scope)
-        .filter(condition)
-        .order_by(repositories::Column::FullName, Order::Asc)
-        .limit(limit)
-        .all(conn)
-        .await
-        .map_err(map_scope_error)?;
-
-    Ok(rows.into_iter().map(Into::into).collect())
+    query: &ODataQuery,
+) -> Result<Page<Repo>, DomainError> {
+    paginate_odata::<RepoField, RepoODataMapper, _, _, _, _>(
+        RepoEntity::find().secure().scope_with(scope),
+        conn,
+        query,
+        ("full_name", SortDir::Asc),
+        LIST_LIMITS,
+        Into::into,
+    )
+    .await
+    .map_err(map_odata_error)
 }
 
 async fn repo_find_by_full_name_in<C: DBRunner>(
@@ -3272,23 +3282,22 @@ async fn commit_file_list_by_commit_in<C: DBRunner>(
     scope: &AccessScope,
     repo_id: i64,
     commit_sha: &str,
-    limit: u64,
-) -> Result<Vec<CommitFile>, DomainError> {
-    let rows = CommitFileEntity::find()
-        .secure()
-        .scope_with(scope)
-        .filter(
+    query: &ODataQuery,
+) -> Result<Page<CommitFile>, DomainError> {
+    paginate_odata::<CommitFileField, CommitFileODataMapper, _, _, _, _>(
+        CommitFileEntity::find().secure().scope_with(scope).filter(
             sea_orm::Condition::all()
                 .add(commit_files::Column::RepoId.eq(repo_id))
                 .add(commit_files::Column::CommitSha.eq(commit_sha)),
-        )
-        .order_by(commit_files::Column::Filename, Order::Asc)
-        .limit(limit)
-        .all(conn)
-        .await
-        .map_err(map_scope_error)?;
-
-    Ok(rows.into_iter().map(Into::into).collect())
+        ),
+        conn,
+        query,
+        ("filename", SortDir::Asc),
+        LIST_LIMITS,
+        Into::into,
+    )
+    .await
+    .map_err(map_odata_error)
 }
 
 async fn review_thread_upsert_in<C: DBRunner>(
@@ -3342,23 +3351,25 @@ async fn review_thread_list_by_pull_in<C: DBRunner>(
     scope: &AccessScope,
     repo_id: i64,
     pull_number: i64,
-    limit: u64,
-) -> Result<Vec<ReviewThread>, DomainError> {
-    let rows = ReviewThreadEntity::find()
-        .secure()
-        .scope_with(scope)
-        .filter(
-            sea_orm::Condition::all()
-                .add(review_threads::Column::RepoId.eq(repo_id))
-                .add(review_threads::Column::PullNumber.eq(pull_number)),
-        )
-        .order_by(review_threads::Column::Id, Order::Asc)
-        .limit(limit)
-        .all(conn)
-        .await
-        .map_err(map_scope_error)?;
-
-    Ok(rows.into_iter().map(Into::into).collect())
+    query: &ODataQuery,
+) -> Result<Page<ReviewThread>, DomainError> {
+    paginate_odata::<ReviewThreadField, ReviewThreadODataMapper, _, _, _, _>(
+        ReviewThreadEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(review_threads::Column::RepoId.eq(repo_id))
+                    .add(review_threads::Column::PullNumber.eq(pull_number)),
+            ),
+        conn,
+        query,
+        ("id", SortDir::Asc),
+        LIST_LIMITS,
+        Into::into,
+    )
+    .await
+    .map_err(map_odata_error)
 }
 
 async fn commit_comment_upsert_in<C: DBRunner>(
