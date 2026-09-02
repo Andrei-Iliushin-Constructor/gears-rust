@@ -350,6 +350,13 @@ pub struct SendMessageRequestDto {
     pub parent_message_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<CapabilityValueDto>>,
+    /// Opaque per-turn client context (device, locale, active error state, …)
+    /// persisted on the user message row and echoed back on reads as the
+    /// message's `metadata`. Engine-reserved keys (`model_used`, `finish_reason`,
+    /// `temperature_used`, `usage`, `summarized_message_ids`) and payloads larger
+    /// than 8 KiB serialized are rejected with `400`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<JsonValue>,
 }
 
 /// Body for `POST /chat-engine/v1/messages/{id}/recreate`.
