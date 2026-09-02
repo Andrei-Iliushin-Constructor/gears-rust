@@ -4,14 +4,14 @@ use github_mirror_sdk::{
     Branch, CheckRun, Comment, Commit, CommitComment, CommitFile, CommitStatus, Contributor,
     Deployment, Issue, IssueEvent, IssueReaction, IssueTimelineEvent, Label, Milestone,
     PullRequest, PullRequestCommit, PullRequestFile, Release, Repo, Review, ReviewComment,
-    ReviewThread, Tag, WorkflowJob, WorkflowRun,
+    ReviewThread, SyncSummary, Tag, WorkflowJob, WorkflowRun,
 };
-use toolkit_db::secure::DBRunner;
 use toolkit_macros::domain_model;
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 use super::error::DomainError;
+use super::ports::github::FetchedRepository;
 
 /// Write-side record for a mirrored repository (what sync knows about it).
 #[domain_model]
@@ -34,26 +34,23 @@ pub struct RepoRecord {
 
 #[async_trait]
 pub trait RepoRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: RepoRecord,
     ) -> Result<Repo, DomainError>;
 
     /// `after`: keyset cursor — only rows whose `full_name` sorts after it.
-    async fn list<C: DBRunner>(
+    async fn list(
         &self,
-        conn: &C,
         scope: &AccessScope,
         limit: u64,
         after: Option<&str>,
     ) -> Result<Vec<Repo>, DomainError>;
 
-    async fn find_by_full_name<C: DBRunner>(
+    async fn find_by_full_name(
         &self,
-        conn: &C,
         scope: &AccessScope,
         full_name: &str,
     ) -> Result<Option<Repo>, DomainError>;
@@ -186,34 +183,30 @@ impl ListingDirection {
 pub trait IssueRepository: Send + Sync {
     /// How many issues match `filter` in total, for the `Link` header's
     /// `rel="last"` — it spans every page, so it cannot be read off one.
-    async fn count_by_repo<C: DBRunner>(
+    async fn count_by_repo(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         filter: ListingFilter,
     ) -> Result<u64, DomainError>;
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: IssueRecord,
     ) -> Result<Issue, DomainError>;
 
     /// `state`: GitHub's `open`/`closed` filter, or `None` for every state.
-    async fn list_by_repo<C: DBRunner>(
+    async fn list_by_repo(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
         filter: ListingFilter,
     ) -> Result<Vec<Issue>, DomainError>;
 
-    async fn find_by_number<C: DBRunner>(
+    async fn find_by_number(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         number: i64,
@@ -222,9 +215,8 @@ pub trait IssueRepository: Send + Sync {
     /// `extracted_before` — rows the sync that set the watermark did not
     /// see. Only called for a listing fetched to completion; a truncated or
     /// scope-disabled listing proves nothing about absence.
-    async fn delete_stale<C: DBRunner>(
+    async fn delete_stale(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         extracted_before: DateTime<Utc>,
@@ -275,16 +267,14 @@ pub struct PullRequestRecord {
 #[async_trait]
 pub trait PullRequestRepository: Send + Sync {
     /// How many pull requests match `filter` in total.
-    async fn count_by_repo<C: DBRunner>(
+    async fn count_by_repo(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         filter: ListingFilter,
     ) -> Result<u64, DomainError>;
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: PullRequestRecord,
@@ -292,18 +282,16 @@ pub trait PullRequestRepository: Send + Sync {
 
     /// `state`: GitHub's `open`/`closed` filter, or `None` for every state.
     /// A merged pull request is `closed` upstream, so no extra case is needed.
-    async fn list_by_repo<C: DBRunner>(
+    async fn list_by_repo(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
         filter: ListingFilter,
     ) -> Result<Vec<PullRequest>, DomainError>;
 
-    async fn find_by_number<C: DBRunner>(
+    async fn find_by_number(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         number: i64,
@@ -312,9 +300,8 @@ pub trait PullRequestRepository: Send + Sync {
     /// `extracted_before` — rows the sync that set the watermark did not
     /// see. Only called for a listing fetched to completion; a truncated or
     /// scope-disabled listing proves nothing about absence.
-    async fn delete_stale<C: DBRunner>(
+    async fn delete_stale(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         extracted_before: DateTime<Utc>,
@@ -339,31 +326,23 @@ pub struct CommitRecord {
 #[async_trait]
 pub trait CommitRepository: Send + Sync {
     /// How many commits this repository has in total.
-    async fn count_by_repo<C: DBRunner>(
+    async fn count_by_repo(&self, scope: &AccessScope, repo_id: i64) -> Result<u64, DomainError>;
+    async fn upsert(
         &self,
-        conn: &C,
-        scope: &AccessScope,
-        repo_id: i64,
-    ) -> Result<u64, DomainError>;
-    async fn upsert<C: DBRunner>(
-        &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: CommitRecord,
     ) -> Result<Commit, DomainError>;
 
-    async fn list_by_repo<C: DBRunner>(
+    async fn list_by_repo(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
     ) -> Result<Vec<Commit>, DomainError>;
 
-    async fn find_by_sha<C: DBRunner>(
+    async fn find_by_sha(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         sha: &str,
@@ -372,9 +351,8 @@ pub trait CommitRepository: Send + Sync {
     /// `extracted_before` — rows the sync that set the watermark did not
     /// see. Only called for a listing fetched to completion; a truncated or
     /// scope-disabled listing proves nothing about absence.
-    async fn delete_stale<C: DBRunner>(
+    async fn delete_stale(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         extracted_before: DateTime<Utc>,
@@ -397,17 +375,15 @@ pub struct CommentRecord {
 
 #[async_trait]
 pub trait CommentRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: CommentRecord,
     ) -> Result<Comment, DomainError>;
 
-    async fn list_by_issue<C: DBRunner>(
+    async fn list_by_issue(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         issue_number: i64,
@@ -417,9 +393,8 @@ pub trait CommentRepository: Send + Sync {
     /// `extracted_before` — rows the sync that set the watermark did not
     /// see. Only called for a listing fetched to completion; a truncated or
     /// scope-disabled listing proves nothing about absence.
-    async fn delete_stale<C: DBRunner>(
+    async fn delete_stale(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         extracted_before: DateTime<Utc>,
@@ -463,17 +438,15 @@ pub struct ReviewCommentRecord {
 
 #[async_trait]
 pub trait ReviewCommentRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: ReviewCommentRecord,
     ) -> Result<ReviewComment, DomainError>;
 
-    async fn list_by_pull<C: DBRunner>(
+    async fn list_by_pull(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         pull_number: i64,
@@ -483,9 +456,8 @@ pub trait ReviewCommentRepository: Send + Sync {
     /// `extracted_before` — rows the sync that set the watermark did not
     /// see. Only called for a listing fetched to completion; a truncated or
     /// scope-disabled listing proves nothing about absence.
-    async fn delete_stale<C: DBRunner>(
+    async fn delete_stale(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         extracted_before: DateTime<Utc>,
@@ -509,17 +481,15 @@ pub struct ReviewRecord {
 
 #[async_trait]
 pub trait ReviewRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: ReviewRecord,
     ) -> Result<Review, DomainError>;
 
-    async fn list_by_pull<C: DBRunner>(
+    async fn list_by_pull(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         pull_number: i64,
@@ -541,17 +511,15 @@ pub struct LabelRecord {
 
 #[async_trait]
 pub trait LabelRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: LabelRecord,
     ) -> Result<Label, DomainError>;
 
-    async fn list_by_repo<C: DBRunner>(
+    async fn list_by_repo(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
@@ -560,9 +528,8 @@ pub trait LabelRepository: Send + Sync {
     /// `extracted_before` — rows the sync that set the watermark did not
     /// see. Only called for a listing fetched to completion; a truncated or
     /// scope-disabled listing proves nothing about absence.
-    async fn delete_stale<C: DBRunner>(
+    async fn delete_stale(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         extracted_before: DateTime<Utc>,
@@ -590,17 +557,15 @@ pub struct MilestoneRecord {
 
 #[async_trait]
 pub trait MilestoneRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: MilestoneRecord,
     ) -> Result<Milestone, DomainError>;
 
-    async fn list_by_repo<C: DBRunner>(
+    async fn list_by_repo(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
@@ -609,9 +574,8 @@ pub trait MilestoneRepository: Send + Sync {
     /// `extracted_before` — rows the sync that set the watermark did not
     /// see. Only called for a listing fetched to completion; a truncated or
     /// scope-disabled listing proves nothing about absence.
-    async fn delete_stale<C: DBRunner>(
+    async fn delete_stale(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         extracted_before: DateTime<Utc>,
@@ -640,17 +604,15 @@ pub struct ReleaseRecord {
 
 #[async_trait]
 pub trait ReleaseRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: ReleaseRecord,
     ) -> Result<Release, DomainError>;
 
-    async fn list_by_repo<C: DBRunner>(
+    async fn list_by_repo(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
@@ -659,9 +621,8 @@ pub trait ReleaseRepository: Send + Sync {
     /// `extracted_before` — rows the sync that set the watermark did not
     /// see. Only called for a listing fetched to completion; a truncated or
     /// scope-disabled listing proves nothing about absence.
-    async fn delete_stale<C: DBRunner>(
+    async fn delete_stale(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         extracted_before: DateTime<Utc>,
@@ -680,17 +641,15 @@ pub struct BranchRecord {
 
 #[async_trait]
 pub trait BranchRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: BranchRecord,
     ) -> Result<Branch, DomainError>;
 
-    async fn list_by_repo<C: DBRunner>(
+    async fn list_by_repo(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
@@ -699,9 +658,8 @@ pub trait BranchRepository: Send + Sync {
     /// `extracted_before` — rows the sync that set the watermark did not
     /// see. Only called for a listing fetched to completion; a truncated or
     /// scope-disabled listing proves nothing about absence.
-    async fn delete_stale<C: DBRunner>(
+    async fn delete_stale(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         extracted_before: DateTime<Utc>,
@@ -730,17 +688,15 @@ pub struct ContributorRecord {
 
 #[async_trait]
 pub trait ContributorRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: ContributorRecord,
     ) -> Result<Contributor, DomainError>;
 
-    async fn list_by_repo<C: DBRunner>(
+    async fn list_by_repo(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
@@ -772,23 +728,16 @@ pub struct WorkflowRunRecord {
 pub trait WorkflowRunRepository: Send + Sync {
     /// How many runs this repository has in total, for GitHub's
     /// `total_count`, which spans every page rather than the current one.
-    async fn count_by_repo<C: DBRunner>(
+    async fn count_by_repo(&self, scope: &AccessScope, repo_id: i64) -> Result<u64, DomainError>;
+    async fn upsert(
         &self,
-        conn: &C,
-        scope: &AccessScope,
-        repo_id: i64,
-    ) -> Result<u64, DomainError>;
-    async fn upsert<C: DBRunner>(
-        &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: WorkflowRunRecord,
     ) -> Result<WorkflowRun, DomainError>;
 
-    async fn list_by_repo<C: DBRunner>(
+    async fn list_by_repo(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
@@ -815,17 +764,15 @@ pub struct PullRequestFileRecord {
 
 #[async_trait]
 pub trait PullRequestFileRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: PullRequestFileRecord,
     ) -> Result<PullRequestFile, DomainError>;
 
-    async fn list_by_pull<C: DBRunner>(
+    async fn list_by_pull(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         pull_number: i64,
@@ -844,17 +791,15 @@ pub struct TagRecord {
 
 #[async_trait]
 pub trait TagRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: TagRecord,
     ) -> Result<Tag, DomainError>;
 
-    async fn list_by_repo<C: DBRunner>(
+    async fn list_by_repo(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
@@ -863,9 +808,8 @@ pub trait TagRepository: Send + Sync {
     /// `extracted_before` — rows the sync that set the watermark did not
     /// see. Only called for a listing fetched to completion; a truncated or
     /// scope-disabled listing proves nothing about absence.
-    async fn delete_stale<C: DBRunner>(
+    async fn delete_stale(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         extracted_before: DateTime<Utc>,
@@ -889,17 +833,15 @@ pub struct CommitFileRecord {
 
 #[async_trait]
 pub trait CommitFileRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: CommitFileRecord,
     ) -> Result<CommitFile, DomainError>;
 
-    async fn list_by_commit<C: DBRunner>(
+    async fn list_by_commit(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         commit_sha: &str,
@@ -924,17 +866,15 @@ pub struct ReviewThreadRecord {
 
 #[async_trait]
 pub trait ReviewThreadRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: ReviewThreadRecord,
     ) -> Result<ReviewThread, DomainError>;
 
-    async fn list_by_pull<C: DBRunner>(
+    async fn list_by_pull(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         pull_number: i64,
@@ -960,17 +900,15 @@ pub struct CommitCommentRecord {
 
 #[async_trait]
 pub trait CommitCommentRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: CommitCommentRecord,
     ) -> Result<CommitComment, DomainError>;
 
-    async fn list_by_commit<C: DBRunner>(
+    async fn list_by_commit(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         commit_sha: &str,
@@ -996,17 +934,15 @@ pub struct IssueEventRecord {
 
 #[async_trait]
 pub trait IssueEventRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: IssueEventRecord,
     ) -> Result<IssueEvent, DomainError>;
 
-    async fn list_by_issue<C: DBRunner>(
+    async fn list_by_issue(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         issue_number: i64,
@@ -1032,17 +968,15 @@ pub struct DeploymentRecord {
 
 #[async_trait]
 pub trait DeploymentRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: DeploymentRecord,
     ) -> Result<Deployment, DomainError>;
 
-    async fn list_by_repo<C: DBRunner>(
+    async fn list_by_repo(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         limit: u64,
@@ -1065,17 +999,15 @@ pub struct PullRequestCommitRecord {
 
 #[async_trait]
 pub trait PullRequestCommitRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: PullRequestCommitRecord,
     ) -> Result<PullRequestCommit, DomainError>;
 
-    async fn list_by_pull<C: DBRunner>(
+    async fn list_by_pull(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         pull_number: i64,
@@ -1101,17 +1033,15 @@ pub struct CommitStatusRecord {
 
 #[async_trait]
 pub trait CommitStatusRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: CommitStatusRecord,
     ) -> Result<CommitStatus, DomainError>;
 
-    async fn list_by_commit<C: DBRunner>(
+    async fn list_by_commit(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         commit_sha: &str,
@@ -1141,24 +1071,21 @@ pub struct WorkflowJobRecord {
 #[async_trait]
 pub trait WorkflowJobRepository: Send + Sync {
     /// How many jobs this run has in total, for GitHub's `total_count`.
-    async fn count_by_run<C: DBRunner>(
+    async fn count_by_run(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         run_id: i64,
     ) -> Result<u64, DomainError>;
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: WorkflowJobRecord,
     ) -> Result<WorkflowJob, DomainError>;
 
-    async fn list_by_run<C: DBRunner>(
+    async fn list_by_run(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         run_id: i64,
@@ -1180,17 +1107,15 @@ pub struct IssueReactionRecord {
 
 #[async_trait]
 pub trait IssueReactionRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: IssueReactionRecord,
     ) -> Result<IssueReaction, DomainError>;
 
-    async fn list_by_issue<C: DBRunner>(
+    async fn list_by_issue(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         issue_number: i64,
@@ -1224,24 +1149,21 @@ pub struct CheckRunRecord {
 pub trait CheckRunRepository: Send + Sync {
     /// How many check runs this commit has in total, for GitHub's
     /// `total_count`.
-    async fn count_by_commit<C: DBRunner>(
+    async fn count_by_commit(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         head_sha: &str,
     ) -> Result<u64, DomainError>;
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: CheckRunRecord,
     ) -> Result<CheckRun, DomainError>;
 
-    async fn list_by_commit<C: DBRunner>(
+    async fn list_by_commit(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         head_sha: &str,
@@ -1264,17 +1186,15 @@ pub struct IssueTimelineEventRecord {
 
 #[async_trait]
 pub trait IssueTimelineRepository: Send + Sync {
-    async fn upsert<C: DBRunner>(
+    async fn upsert(
         &self,
-        conn: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
         record: IssueTimelineEventRecord,
     ) -> Result<IssueTimelineEvent, DomainError>;
 
-    async fn list_by_issue<C: DBRunner>(
+    async fn list_by_issue(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         issue_number: i64,
@@ -1287,11 +1207,21 @@ pub trait IssueTimelineRepository: Send + Sync {
     /// that grew shorter upstream — a deleted comment removes its entry —
     /// would leave the tail of the previous, longer run behind. Clearing the
     /// issues first is what keeps a re-sync idempotent (PRD 5.3).
-    async fn delete_by_issues<C: DBRunner>(
+    async fn delete_by_issues(
         &self,
-        conn: &C,
         scope: &AccessScope,
         repo_id: i64,
         issue_numbers: &[i64],
     ) -> Result<u64, DomainError>;
+}
+
+#[async_trait]
+pub trait SyncWriter: Send + Sync {
+    async fn write_sync(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        fetched: FetchedRepository,
+        watermark: DateTime<Utc>,
+    ) -> Result<SyncSummary, DomainError>;
 }
