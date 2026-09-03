@@ -13,7 +13,7 @@
 //! only forgoes an optimisation.
 
 use async_trait::async_trait;
-use sha2::{Digest as _, Sha256};
+use aws_lc_rs::digest::{self, SHA256};
 
 use crate::domain::error::DomainError;
 
@@ -30,13 +30,13 @@ impl CacheKey {
     /// Compute the key for one request.
     #[must_use]
     pub fn compute(method: &str, url: &str, accept: &str) -> Self {
-        let mut hasher = Sha256::new();
+        let mut hasher = digest::Context::new(&SHA256);
         hasher.update(method.to_ascii_uppercase().as_bytes());
         hasher.update(b"\x00");
         hasher.update(url.as_bytes());
         hasher.update(b"\x00");
         hasher.update(accept.as_bytes());
-        Self(hex::encode(hasher.finalize()))
+        Self(hex::encode(hasher.finish().as_ref()))
     }
 
     #[must_use]
