@@ -25,7 +25,6 @@ types-registry = { workspace = true }
 
 # ToolKit dependencies
 toolkit = { workspace = true }
-toolkit-gts = { workspace = true }
 toolkit-macros = { workspace = true }
 
 # GTS types
@@ -53,3 +52,4 @@ inventory = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
 tokio-util = { workspace = true }
+toolkit-gts = { workspace = true }

@@ -326,6 +326,43 @@ async fn all_violations_are_collected() {
     );
 }
 
+/// Without the cap the error payload would grow with the caller's own input:
+/// one violation per missing required property, and the caller names the
+/// contract.
+#[tokio::test]
+async fn violations_are_capped_per_contract_object() {
+    let over_cap = MAX_REPORTED_VIOLATIONS + 5;
+    let properties: serde_json::Map<String, Value> = (0..over_cap)
+        .map(|i| (format!("p{i}"), json!({ "type": "string" })))
+        .collect();
+
+    let mut body = <TestModelUsageResourceV1 as GtsSchema>::gts_schema_with_refs();
+    let metadata = &mut body["allOf"][1]["properties"]["metadata"];
+    metadata["required"] = json!(properties.keys().collect::<Vec<_>>());
+    metadata["properties"] = Value::Object(properties);
+    let wide = GtsTypeSchema::try_new(
+        GtsTypeId::new(MODEL_USAGE_RESOURCE),
+        body,
+        None,
+        Some(Arc::new(resource_base_schema())),
+    )
+    .expect("a contract with many required properties is well formed");
+
+    let validator =
+        validator(FakeContractRegistry::new().with_contracts([user_subject_schema(), wide]));
+    let req = request(
+        subject(USER_SUBJECT, None, json!({ "category": "internal" })),
+        resource(MODEL_USAGE_RESOURCE, None, json!({})),
+    );
+
+    let violations = violations_of(&validator, &req).await;
+    assert_eq!(
+        violations.len(),
+        MAX_REPORTED_VIOLATIONS,
+        "{over_cap} missing properties must report as {MAX_REPORTED_VIOLATIONS} violations"
+    );
+}
+
 #[tokio::test]
 async fn uncompilable_contract_schema_is_catalog_drift() {
     let mut body = <TestModelUsageResourceV1 as GtsSchema>::gts_schema_with_refs();

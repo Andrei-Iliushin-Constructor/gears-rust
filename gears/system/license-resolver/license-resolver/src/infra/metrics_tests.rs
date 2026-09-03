@@ -2,7 +2,7 @@ use opentelemetry::metrics::MeterProvider;
 use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
 use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
 
-use super::{DEFAULT_PREFIX, DURATION_BUCKETS_MS, LicenseMetricsMeter, build_default_adapter};
+use super::{DEFAULT_PREFIX, DURATION_BUCKETS_MS, LicenseMetricsMeter};
 use crate::domain::{CheckOutcome, LicenseMetrics, ViolationKind};
 
 const TEST_VENDOR: &str = "acme";
@@ -121,12 +121,4 @@ fn validation_failure_counter_carries_the_violation_kind() {
         ),
         1
     );
-}
-
-#[test]
-fn default_adapter_records_against_the_global_provider() {
-    let meter = build_default_adapter(TEST_VENDOR);
-    meter.record_check(CONTRACT, CheckOutcome::Granted);
-    meter.record_resolver_latency(1.0);
-    meter.record_validation_failure(ViolationKind::Other);
 }

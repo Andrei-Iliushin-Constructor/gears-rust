@@ -137,22 +137,21 @@ fn a_rule_naming_the_bare_licensing_base_is_rejected() {
 }
 
 #[test]
-fn an_unconstrained_rule_matches_the_pair() {
-    assert!(rule().matches(&request()));
-}
-
-#[test]
 fn a_rule_for_another_subject_type_does_not_match() {
     let mut other = rule();
     other.subject_type = OTHER_SUBJECT_TYPE.to_owned();
     assert!(!other.matches(&request()));
 }
 
-/// A grant for the whole type also answers a check naming one instance of it.
+/// A grant for the whole type answers a check naming one instance of it, and
+/// an id-less check about the type as a class.
 #[test]
-fn a_whole_type_grant_answers_an_instance_check() {
+fn a_whole_type_grant_answers_any_check_for_that_type() {
     let grant = rule();
     assert!(grant.matches(&request()));
+
+    let whole_type = request_for(subject(None, json!({})), resource(None, json!({})), tenant());
+    assert!(grant.matches(&whole_type));
 }
 
 /// The converse must not hold: a grant for one instance is not a licence for
