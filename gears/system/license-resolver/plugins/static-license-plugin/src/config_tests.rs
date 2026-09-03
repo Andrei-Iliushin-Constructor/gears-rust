@@ -150,7 +150,11 @@ fn a_whole_type_grant_answers_any_check_for_that_type() {
     let grant = rule();
     assert!(grant.matches(&request()));
 
-    let whole_type = request_for(subject(None, json!({})), resource(None, json!({})), tenant());
+    let whole_type = request_for(
+        subject(None, json!({})),
+        resource(None, json!({})),
+        tenant(),
+    );
     assert!(grant.matches(&whole_type));
 }
 
