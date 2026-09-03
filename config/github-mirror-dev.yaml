@@ -238,6 +238,8 @@ gears:
       # concurrency, so raise the second one only with a token pool).
       max_concurrent_syncs: 4
       max_concurrent_requests: 8
+      # Tasks (list pages, single entities) in flight inside one sync.
+      max_concurrent_tasks: 4
 
 # OpenTelemetry configuration (resource identity, tracing, metrics)
 opentelemetry:

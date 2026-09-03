@@ -4,7 +4,7 @@ use github_mirror_sdk::{
     Branch, CheckRun, Comment, Commit, CommitComment, CommitFile, CommitStatus, Contributor,
     Deployment, Issue, IssueEvent, IssueReaction, IssueTimelineEvent, Label, Milestone,
     PullRequest, PullRequestCommit, PullRequestFile, Release, Repo, Review, ReviewComment,
-    ReviewThread, SyncSummary, Tag, WorkflowJob, WorkflowRun,
+    ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
 use toolkit_macros::domain_model;
 use toolkit_odata::{ODataQuery, Page};
@@ -12,7 +12,10 @@ use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 use super::error::DomainError;
-use super::ports::github::FetchedRepository;
+use super::ports::github::{
+    ActionsListing, CommitDetail, CommitListing, IssueDetail, IssueListing, ListingCompleteness,
+    MetadataListing, PullDetail, PullListing,
+};
 
 /// Write-side record for a mirrored repository (what sync knows about it).
 #[domain_model]
@@ -1404,13 +1407,97 @@ pub trait EntityFingerprintRepository: Send + Sync {
     ) -> Result<Option<EntityFingerprintRecord>, DomainError>;
 }
 
+/// The storage side of one sync, one method per task.
+///
+/// Every method is one transaction, so a task either lands whole or not at
+/// all; a sync interrupted between tasks leaves every table internally
+/// consistent, which is what makes re-running it the resume mechanism
+/// (DESIGN §4, ADR-0001). Contributors ride along with the listing or detail
+/// they were seen in and are merged with what earlier syncs already learned.
 #[async_trait]
 pub trait SyncWriter: Send + Sync {
-    async fn write_sync(
+    async fn write_repository(
         &self,
         scope: &AccessScope,
         tenant_id: Uuid,
-        fetched: FetchedRepository,
+        repository: RepoRecord,
+    ) -> Result<Repo, DomainError>;
+
+    async fn write_issue_listing(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        listing: IssueListing,
+    ) -> Result<(), DomainError>;
+
+    async fn write_issue_detail(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        detail: IssueDetail,
+    ) -> Result<(), DomainError>;
+
+    async fn write_pull_listing(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        listing: PullListing,
+    ) -> Result<(), DomainError>;
+
+    async fn write_pull_detail(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        detail: PullDetail,
+    ) -> Result<(), DomainError>;
+
+    async fn write_commit_listing(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        listing: CommitListing,
+    ) -> Result<(), DomainError>;
+
+    async fn write_commit_detail(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        detail: CommitDetail,
+    ) -> Result<(), DomainError>;
+
+    async fn write_metadata_listing(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        listing: MetadataListing,
+    ) -> Result<(), DomainError>;
+
+    async fn write_actions_listing(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        listing: ActionsListing,
+    ) -> Result<(), DomainError>;
+
+    async fn write_workflow_jobs(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        jobs: Vec<WorkflowJobRecord>,
+    ) -> Result<(), DomainError>;
+
+    /// Hard-delete rows of every complete listing that this sync did not
+    /// touch (`extracted_at` before `watermark`); returns how many went.
+    async fn reconcile_stale(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        complete: &ListingCompleteness,
         watermark: DateTime<Utc>,
-    ) -> Result<SyncSummary, DomainError>;
+    ) -> Result<u64, DomainError>;
 }

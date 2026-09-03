@@ -1,8 +1,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
 
 use github_mirror::domain::error::DomainError;
-use github_mirror::domain::ports::github::{FetchOptions, GithubPort};
-use github_mirror::domain::scope::ScopeConfig;
+use github_mirror::domain::ports::github::{
+    FetchOptions, FetchedRepository, GithubPort, IssueDetailWants, ListingCompleteness,
+};
+use github_mirror::domain::repo::ContributorRecord;
+use github_mirror::domain::scope::{CollectionMode, ScopeConfig};
 use github_mirror::infra::github::cache::{CacheKey, CachedResponse, HttpCache};
 use github_mirror::infra::github::client::GithubClient;
 use httpmock::MockServer;
@@ -452,6 +455,165 @@ fn shipped_scope() -> ScopeConfig {
     github_mirror::config::GithubMirrorConfig::default().scope
 }
 
+/// Everything the sync's tasks would fetch for one repository, gathered into
+/// the one-value shape these tests assert on: the port is called the way the
+/// phases call it — listings first, then one refinement per entity.
+async fn fetch_repository(
+    client: &GithubClient,
+    owner: &str,
+    name: &str,
+    options: &FetchOptions,
+) -> Result<FetchedRepository, DomainError> {
+    let repository = client
+        .fetch_repository_metadata(owner, name, options)
+        .await?;
+    let repo_id = repository.id;
+    let collection = options.scope.collection;
+
+    let issues = client.list_issues(owner, name, repo_id, options).await?;
+    let pulls = client
+        .list_pull_requests(owner, name, repo_id, options)
+        .await?;
+    let commits = client.list_commits(owner, name, repo_id, options).await?;
+    let meta = client.list_metadata(owner, name, repo_id, options).await?;
+    let actions = client.list_actions(owner, name, repo_id, options).await?;
+
+    let mut complete = ListingCompleteness::none();
+    for part in [
+        &issues.complete,
+        &pulls.complete,
+        &commits.complete,
+        &meta.complete,
+    ] {
+        complete.absorb(part);
+    }
+    let mut people: Vec<ContributorRecord> = Vec::new();
+    people.extend(issues.contributors);
+    people.extend(pulls.contributors);
+    people.extend(commits.contributors);
+
+    let (mut issue_reactions, mut issue_timeline) = (Vec::new(), Vec::new());
+    for issue in &issues.issues {
+        let open = issue.state == "open";
+        let wants = IssueDetailWants {
+            reactions: collection.reactions.includes(open),
+            timeline: collection.timeline.includes(open),
+        };
+        if !(wants.reactions || wants.timeline) {
+            continue;
+        }
+        let detail = client
+            .refine_issue(owner, name, repo_id, issue.number, wants, options)
+            .await?;
+        issue_reactions.extend(detail.reactions);
+        issue_timeline.extend(detail.timeline);
+    }
+
+    let mut pull_requests = Vec::new();
+    let (mut reviews, mut pull_request_files, mut pull_request_commits, mut review_threads) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for pull in &pulls.pull_requests {
+        let detail = client
+            .refine_pull_request(owner, name, repo_id, pull.number, options)
+            .await?;
+        pull_requests.push(detail.pull_request);
+        reviews.extend(detail.reviews);
+        pull_request_files.extend(detail.files);
+        pull_request_commits.extend(detail.commits);
+        review_threads.extend(detail.review_threads);
+        people.extend(detail.contributors);
+    }
+
+    let with_ci = collection.actions != CollectionMode::None;
+    let mut commit_records = Vec::new();
+    let (mut commit_files, mut commit_statuses, mut check_runs) =
+        (Vec::new(), Vec::new(), Vec::new());
+    for commit in &commits.commits {
+        let detail = client
+            .refine_commit(owner, name, repo_id, &commit.sha, with_ci, options)
+            .await?;
+        commit_records.push(detail.commit);
+        commit_files.extend(detail.files);
+        commit_statuses.extend(detail.statuses);
+        check_runs.extend(detail.check_runs);
+    }
+
+    let mut workflow_jobs = Vec::new();
+    if with_ci {
+        for run in &actions.workflow_runs {
+            workflow_jobs.extend(
+                client
+                    .refine_workflow_run(owner, name, repo_id, run.id, options)
+                    .await?,
+            );
+        }
+    }
+
+    Ok(FetchedRepository {
+        repository,
+        complete,
+        issues: issues.issues,
+        pull_requests,
+        commits: commit_records,
+        comments: issues.comments,
+        review_comments: pulls.review_comments,
+        reviews,
+        labels: meta.labels,
+        milestones: meta.milestones,
+        releases: meta.releases,
+        branches: meta.branches,
+        contributors: merge_people(people),
+        workflow_runs: actions.workflow_runs,
+        pull_request_files,
+        tags: meta.tags,
+        commit_files,
+        review_threads,
+        commit_comments: commits.commit_comments,
+        issue_events: issues.issue_events,
+        deployments: actions.deployments,
+        pull_request_commits,
+        commit_statuses,
+        workflow_jobs,
+        issue_reactions,
+        check_runs,
+        issue_timeline,
+    })
+}
+
+/// One record per person across families: roles unioned and sorted, the
+/// seen-at window widened, ordered by user id — what the writer's merge does.
+fn merge_people(records: Vec<ContributorRecord>) -> Vec<ContributorRecord> {
+    let mut by_user: std::collections::BTreeMap<i64, ContributorRecord> =
+        std::collections::BTreeMap::new();
+    for record in records {
+        match by_user.entry(record.user_id) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(record);
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                let mine = slot.get_mut();
+                for role in record.roles {
+                    if !mine.roles.contains(&role) {
+                        mine.roles.push(role);
+                    }
+                }
+                mine.first_seen_at = match (mine.first_seen_at, record.first_seen_at) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
+                mine.last_seen_at = mine.last_seen_at.max(record.last_seen_at);
+            }
+        }
+    }
+    by_user
+        .into_values()
+        .map(|mut record| {
+            record.roles.sort();
+            record
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn fetch_repository_maps_github_payloads_into_records() {
     let server = MockServer::start_async().await;
@@ -634,8 +796,7 @@ async fn fetch_repository_maps_github_payloads_into_records() {
 
     let client =
         GithubClient::new(server.base_url(), Some("tok".to_owned())).expect("client must build");
-    let fetched = client
-        .fetch_repository("rust-lang", "rust", &opts(shipped_scope()))
+    let fetched = fetch_repository(&client, "rust-lang", "rust", &opts(shipped_scope()))
         .await
         .expect("fetch must succeed");
 
@@ -915,9 +1076,7 @@ async fn github_404_maps_to_not_found() {
         .await;
 
     let client = GithubClient::new(server.base_url(), None).expect("client must build");
-    let result = client
-        .fetch_repository("acme", "nope", &opts(ScopeConfig::default()))
-        .await;
+    let result = fetch_repository(&client, "acme", "nope", &opts(ScopeConfig::default())).await;
 
     assert!(matches!(result, Err(DomainError::NotFound)));
 }
@@ -933,9 +1092,7 @@ async fn github_server_error_maps_to_internal() {
         .await;
 
     let client = GithubClient::new(server.base_url(), None).expect("client must build");
-    let result = client
-        .fetch_repository("acme", "flaky", &opts(ScopeConfig::default()))
-        .await;
+    let result = fetch_repository(&client, "acme", "flaky", &opts(ScopeConfig::default())).await;
 
     assert!(matches!(result, Err(DomainError::Internal(_))));
 }
@@ -951,9 +1108,7 @@ async fn malformed_json_maps_to_internal() {
         .await;
 
     let client = GithubClient::new(server.base_url(), None).expect("client must build");
-    let result = client
-        .fetch_repository("acme", "garbage", &opts(ScopeConfig::default()))
-        .await;
+    let result = fetch_repository(&client, "acme", "garbage", &opts(ScopeConfig::default())).await;
 
     assert!(matches!(result, Err(DomainError::Internal(_))));
 }
@@ -993,8 +1148,7 @@ async fn a_narrow_scope_skips_the_calls_it_does_not_need() {
     scope.objects.labels = true;
 
     let client = GithubClient::new(server.base_url(), None).expect("client must build");
-    let fetched = client
-        .fetch_repository("rust-lang", "rust", &opts(scope))
+    let fetched = fetch_repository(&client, "rust-lang", "rust", &opts(scope))
         .await
         .expect("fetch must succeed");
 
@@ -1094,15 +1248,13 @@ async fn a_stored_etag_turns_the_next_sync_into_a_free_304() {
         force: false,
     };
 
-    let fresh = client
-        .fetch_repository("rust-lang", "rust", &options)
+    let fresh = fetch_repository(&client, "rust-lang", "rust", &options)
         .await
         .expect("first fetch");
     first.assert_calls_async(1).await;
     revalidated.assert_calls_async(0).await;
 
-    let cached = client
-        .fetch_repository("rust-lang", "rust", &options)
+    let cached = fetch_repository(&client, "rust-lang", "rust", &options)
         .await
         .expect("second fetch");
     revalidated.assert_calls_async(1).await;
@@ -1117,8 +1269,7 @@ async fn a_stored_etag_turns_the_next_sync_into_a_free_304() {
         force: true,
         ..options
     };
-    client
-        .fetch_repository("rust-lang", "rust", &forced)
+    fetch_repository(&client, "rust-lang", "rust", &forced)
         .await
         .expect("forced fetch");
     first.assert_calls_async(2).await;
@@ -1160,8 +1311,7 @@ async fn a_listing_follows_the_link_header_past_the_first_page() {
     let mut scope = repo_only_scope();
     scope.objects.labels = true;
 
-    let fetched = client
-        .fetch_repository("rust-lang", "rust", &opts(scope))
+    let fetched = fetch_repository(&client, "rust-lang", "rust", &opts(scope))
         .await
         .expect("fetch must succeed");
 
@@ -1185,9 +1335,7 @@ async fn unauthorized_maps_to_access_lost() {
         .await;
 
     let client = GithubClient::new(server.base_url(), None).expect("client must build");
-    let result = client
-        .fetch_repository("acme", "private", &opts(ScopeConfig::default()))
-        .await;
+    let result = fetch_repository(&client, "acme", "private", &opts(ScopeConfig::default())).await;
 
     assert!(
         matches!(result, Err(DomainError::AccessLost(_))),
@@ -1206,9 +1354,7 @@ async fn plain_forbidden_maps_to_access_lost() {
         .await;
 
     let client = GithubClient::new(server.base_url(), None).expect("client must build");
-    let result = client
-        .fetch_repository("acme", "gone", &opts(ScopeConfig::default()))
-        .await;
+    let result = fetch_repository(&client, "acme", "gone", &opts(ScopeConfig::default())).await;
 
     assert!(
         matches!(result, Err(DomainError::AccessLost(_))),
@@ -1229,9 +1375,7 @@ async fn a_rate_limited_response_is_retried_before_giving_up() {
         .await;
 
     let client = GithubClient::new(server.base_url(), None).expect("client must build");
-    let result = client
-        .fetch_repository("acme", "busy", &opts(ScopeConfig::default()))
-        .await;
+    let result = fetch_repository(&client, "acme", "busy", &opts(ScopeConfig::default())).await;
 
     assert!(
         matches!(result, Err(DomainError::Internal(_))),

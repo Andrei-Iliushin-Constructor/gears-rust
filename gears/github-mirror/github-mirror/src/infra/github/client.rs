@@ -3,12 +3,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use strum::IntoEnumIterator;
 use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::domain::error::DomainError;
 use crate::domain::ports::github::{
-    FetchOptions, FetchedRepository, GithubPort, Listing, ListingCompleteness,
+    ActionsListing, CommitDetail, CommitListing, FetchOptions, GithubPort, IssueDetail,
+    IssueDetailWants, IssueListing, Listing, ListingCompleteness, MetadataListing, PullDetail,
+    PullListing,
 };
 use crate::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
@@ -18,33 +19,19 @@ use crate::domain::repo::{
     ReviewCommentRecord, ReviewRecord, ReviewThreadRecord, TagRecord, WorkflowJobRecord,
     WorkflowRunRecord,
 };
-use crate::domain::scope::CollectionMode;
 use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache, NoCache};
 use crate::infra::github::pagination::parse_link_next;
 
 /// Items asked for per request. GitHub's maximum, so a listing of a given
 /// size costs the fewest requests.
 const FIRST_PAGE_SIZE: u32 = 100;
-/// GitHub serves reviews and changed files only per pull request, so
-/// sync-lite fetches them for the first few pulls of the page to keep the
-/// call count bounded.
-const PER_PULL_SYNC_CAP: usize = 10;
-/// Commit stats and files come only from the per-commit detail endpoint,
-/// fetched for the first few commits of the page for the same reason.
-const PER_COMMIT_SYNC_CAP: usize = 10;
-/// Jobs are only reachable per workflow run, so the sync walks the first
-/// few runs of the page for the same reason.
-const PER_RUN_SYNC_CAP: usize = 10;
-/// Reactions are only reachable per issue, so the sync walks the first few
-/// issues of the page for the same reason.
-const PER_ISSUE_SYNC_CAP: usize = 10;
 const ACCEPT_JSON: &str = "application/vnd.github+json";
 
 /// Most pages one listing will walk before giving up.
 ///
-/// A stopgap: the sync is still a single inline pass, so an unbounded walk of
-/// a large repository would run for hours. The scheduler replaces this with
-/// per-task budgeting (#4632 slice 5).
+/// An Indexing task still gathers its whole listing before writing it, so
+/// this bounds one task's memory and call count. It goes when listings stream
+/// page by page into the writer (#4632 slice 6, memory NFR).
 const MAX_PAGES: usize = 10;
 
 const USER_AGENT: &str = concat!("cf-gears-github-mirror/", env!("CARGO_PKG_VERSION"));
@@ -841,8 +828,12 @@ struct GhCommitStats {
     deletions: i64,
 }
 
+/// `GET /repos/{owner}/{name}/commits/{sha}`: the listing entry's fields plus
+/// the stats and changed files only the detail endpoint carries.
 #[derive(Debug, Deserialize)]
 struct GhCommitDetail {
+    #[serde(flatten)]
+    base: GhCommit,
     stats: Option<GhCommitStats>,
     #[serde(default)]
     files: Vec<GhPullFile>,
@@ -1350,27 +1341,6 @@ impl DerivedContributors {
         merge_seen_window(entry, at, at);
     }
 
-    /// Fold another family's sightings in: roles union, counts add, the
-    /// seen-at window widens.
-    fn absorb(&mut self, other: Self) {
-        for (user_id, record) in other.by_user {
-            match self.by_user.entry(user_id) {
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(record);
-                }
-                std::collections::hash_map::Entry::Occupied(mut slot) => {
-                    let mine = slot.get_mut();
-                    for role in record.roles {
-                        if !mine.roles.contains(&role) {
-                            mine.roles.push(role);
-                        }
-                    }
-                    merge_seen_window(mine, record.first_seen_at, record.last_seen_at);
-                }
-            }
-        }
-    }
-
     /// Stable output: by user id, each record's roles sorted.
     fn into_records(self) -> Vec<ContributorRecord> {
         let mut records: Vec<ContributorRecord> = self.by_user.into_values().collect();
@@ -1750,283 +1720,32 @@ fn commit_record(repo_id: i64, c: GhCommit) -> CommitRecord {
     }
 }
 
-/// The per-commit slices of one sync pass.
-struct CommitDetails {
-    commit_files: Vec<CommitFileRecord>,
-    commit_statuses: Vec<CommitStatusRecord>,
-    check_runs: Vec<CheckRunRecord>,
-}
-
-/// The issues a per-issue sub-resource should be fetched for, under `mode`.
-///
-/// `Open` keeps only open issues — the actionable working set — which is what
-/// makes the default cost roughly one call per open issue rather than one per
-/// issue ever filed.
-fn in_collection_mode(issues: &[IssueRecord], mode: CollectionMode) -> Vec<IssueRecord> {
-    if mode == CollectionMode::None {
-        return Vec::new();
-    }
-    issues
-        .iter()
-        .filter(|i| mode.includes(i.state == "open"))
-        .cloned()
-        .collect()
-}
-
-/// The issue slice of one sync pass: issues and everything hanging off them.
-#[derive(Default)]
-struct IssueFamily {
-    /// People seen in this family's entities (PRD 5.2's derivation).
-    people: DerivedContributors,
-    /// Which of this family's listings were walked to their end; a family the
-    /// scope switched off stays all-`false`, so absence proves nothing.
-    complete: ListingCompleteness,
-    issues: Vec<IssueRecord>,
-    comments: Vec<CommentRecord>,
-    issue_events: Vec<IssueEventRecord>,
-    issue_reactions: Vec<IssueReactionRecord>,
-    issue_timeline: Vec<IssueTimelineEventRecord>,
-}
-
-/// The pull-request slice of one sync pass.
-#[derive(Default)]
-struct PullFamily {
-    people: DerivedContributors,
-    complete: ListingCompleteness,
-    pull_requests: Vec<PullRequestRecord>,
-    review_comments: Vec<ReviewCommentRecord>,
-    reviews: Vec<ReviewRecord>,
-    pull_request_files: Vec<PullRequestFileRecord>,
-    review_threads: Vec<ReviewThreadRecord>,
-    pull_request_commits: Vec<PullRequestCommitRecord>,
-}
-
-/// The commit slice of one sync pass.
-#[derive(Default)]
-struct CommitFamily {
-    people: DerivedContributors,
-    complete: ListingCompleteness,
-    commits: Vec<CommitRecord>,
-    commit_files: Vec<CommitFileRecord>,
-    commit_comments: Vec<CommitCommentRecord>,
-    commit_statuses: Vec<CommitStatusRecord>,
-    check_runs: Vec<CheckRunRecord>,
-}
-
-/// The repository-metadata slice: the cheap single-page list endpoints.
-#[derive(Default)]
-struct MetadataFamily {
-    complete: ListingCompleteness,
-    labels: Vec<LabelRecord>,
-    milestones: Vec<MilestoneRecord>,
-    releases: Vec<ReleaseRecord>,
-    branches: Vec<BranchRecord>,
-    tags: Vec<TagRecord>,
-}
-
-/// The GitHub Actions slice: workflow runs, their jobs, and deployments.
-#[derive(Default)]
-struct ActionsFamily {
-    complete: ListingCompleteness,
-    workflow_runs: Vec<WorkflowRunRecord>,
-    workflow_jobs: Vec<WorkflowJobRecord>,
-    deployments: Vec<DeploymentRecord>,
-}
-
-/// The per-pull-request slices of one sync pass.
-struct PullDetails {
-    reviews: Vec<ReviewRecord>,
-    pull_request_files: Vec<PullRequestFileRecord>,
-    review_threads: Vec<ReviewThreadRecord>,
-    pull_request_commits: Vec<PullRequestCommitRecord>,
-    /// People seen reviewing, harvested here because the review objects do
-    /// not survive the mapping to `ReviewRecord`.
-    reviewers: DerivedContributors,
-}
-
-impl GithubClient {
-    /// Fetch the per-commit detail slice, filling each record's line counts
-    /// on the way, for the first `PER_COMMIT_SYNC_CAP` commits.
-    async fn fetch_commit_details(
+#[async_trait]
+impl GithubPort for GithubClient {
+    async fn fetch_repository_metadata(
         &self,
         owner: &str,
         name: &str,
-        repo_id: i64,
-        commit_records: &mut [CommitRecord],
-        with_ci: bool,
         options: &FetchOptions,
-    ) -> Result<CommitDetails, DomainError> {
-        let mut commit_files: Vec<CommitFileRecord> = Vec::new();
-        let mut commit_statuses: Vec<CommitStatusRecord> = Vec::new();
-        let mut check_runs: Vec<CheckRunRecord> = Vec::new();
-        for commit in commit_records.iter_mut().take(PER_COMMIT_SYNC_CAP) {
-            let detail: GhCommitDetail = self
-                .get_json(
-                    &format!("/repos/{owner}/{name}/commits/{}", commit.sha),
-                    options,
-                )
-                .await?;
-            if let Some(stats) = detail.stats {
-                commit.additions = stats.additions;
-                commit.deletions = stats.deletions;
-            }
-            commit_files.extend(
-                detail
-                    .files
-                    .into_iter()
-                    .map(|f| commit_file_record(repo_id, &commit.sha, f)),
-            );
-
-            if !with_ci {
-                continue;
-            }
-
-            let (statuses, _): (Vec<GhCommitStatus>, bool) = self
-                .get_json_all(
-                    &format!(
-                        "/repos/{owner}/{name}/commits/{}/statuses?per_page={FIRST_PAGE_SIZE}",
-                        commit.sha
-                    ),
-                    options,
-                )
-                .await?;
-            commit_statuses.extend(
-                statuses
-                    .into_iter()
-                    .map(|s| commit_status_record(repo_id, &commit.sha, s)),
-            );
-
-            let checks: GhCheckRunsPage = self
-                .get_json(
-                    &format!(
-                        "/repos/{owner}/{name}/commits/{}/check-runs?per_page={FIRST_PAGE_SIZE}",
-                        commit.sha
-                    ),
-                    options,
-                )
-                .await?;
-            check_runs.extend(
-                checks
-                    .check_runs
-                    .into_iter()
-                    .map(|c| check_run_record(repo_id, c)),
-            );
-        }
-
-        Ok(CommitDetails {
-            commit_files,
-            commit_statuses,
-            check_runs,
-        })
+    ) -> Result<RepoRecord, DomainError> {
+        let repo: GhRepository = self
+            .get_json(&format!("/repos/{owner}/{name}"), options)
+            .await?;
+        Ok(repository_record(repo))
     }
 
-    /// Fetch the timeline of the first `PER_ISSUE_SYNC_CAP` issues. The
-    /// entries stay raw JSON: the forty-odd event types share no schema.
-    async fn fetch_issue_timeline(
-        &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        issues: &[IssueRecord],
-        options: &FetchOptions,
-    ) -> Result<Vec<IssueTimelineEventRecord>, DomainError> {
-        let mut timeline: Vec<IssueTimelineEventRecord> = Vec::new();
-        for issue in issues.iter().take(PER_ISSUE_SYNC_CAP) {
-            let (entries, _): (Vec<serde_json::Value>, bool) = self
-                .get_json_all(
-                    &format!(
-                        "/repos/{owner}/{name}/issues/{}/timeline?per_page={FIRST_PAGE_SIZE}",
-                        issue.number
-                    ),
-                    options,
-                )
-                .await?;
-            timeline.extend(entries.iter().enumerate().map(|(position, entry)| {
-                issue_timeline_record(repo_id, issue.number, position, entry)
-            }));
-        }
-
-        Ok(timeline)
-    }
-
-    /// Fetch the reactions of the first `PER_ISSUE_SYNC_CAP` issues; GitHub
-    /// only exposes reactions per issue, so there is no repo-wide listing.
-    async fn fetch_issue_reactions(
-        &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        issues: &[IssueRecord],
-        options: &FetchOptions,
-    ) -> Result<Vec<IssueReactionRecord>, DomainError> {
-        let mut reactions: Vec<IssueReactionRecord> = Vec::new();
-        for issue in issues.iter().take(PER_ISSUE_SYNC_CAP) {
-            let (page, _): (Vec<GhIssueReaction>, bool) = self
-                .get_json_all(
-                    &format!(
-                        "/repos/{owner}/{name}/issues/{}/reactions?per_page={FIRST_PAGE_SIZE}",
-                        issue.number
-                    ),
-                    options,
-                )
-                .await?;
-            reactions.extend(
-                page.into_iter()
-                    .map(|r| issue_reaction_record(repo_id, issue.number, r)),
-            );
-        }
-
-        Ok(reactions)
-    }
-
-    /// Fetch the jobs of the first `PER_RUN_SYNC_CAP` workflow runs; GitHub
-    /// only exposes jobs per run, so there is no repo-wide listing to use.
-    async fn fetch_workflow_jobs(
-        &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        runs: &[GhWorkflowRun],
-        options: &FetchOptions,
-    ) -> Result<Vec<WorkflowJobRecord>, DomainError> {
-        let mut jobs: Vec<WorkflowJobRecord> = Vec::new();
-        for run in runs.iter().take(PER_RUN_SYNC_CAP) {
-            let page: GhWorkflowJobsPage = self
-                .get_json(
-                    &format!(
-                        "/repos/{owner}/{name}/actions/runs/{}/jobs?per_page={FIRST_PAGE_SIZE}",
-                        run.id
-                    ),
-                    options,
-                )
-                .await?;
-            jobs.extend(
-                page.jobs
-                    .into_iter()
-                    .map(|j| workflow_job_record(repo_id, j)),
-            );
-        }
-
-        Ok(jobs)
-    }
-
-    /// Fetch the per-pull-request slices for the first
-    /// `PER_PULL_SYNC_CAP` pull requests, filling each record's line counts
-    /// on the way.
-    /// Issues plus their comments, events, reactions and timeline.
-    ///
-    /// Reactions and timeline are per-issue sub-resources and dominate the
-    /// call count, so each has its own [`CollectionMode`] on top of the
-    /// object-level `issues` flag.
-    async fn fetch_issue_family(
+    /// Issues plus the repo-wide comment and event listings. Reactions and
+    /// the timeline are per-issue sub-resources and dominate the call count,
+    /// so they belong to [`Self::refine_issue`].
+    async fn list_issues(
         &self,
         owner: &str,
         name: &str,
         repo_id: i64,
         options: &FetchOptions,
-    ) -> Result<IssueFamily, DomainError> {
+    ) -> Result<IssueListing, DomainError> {
         if !options.scope.objects.issues {
-            return Ok(IssueFamily::default());
+            return Ok(IssueListing::default());
         }
 
         let (issues, issues_complete): (Vec<GhIssue>, bool) = self
@@ -2048,31 +1767,17 @@ impl GithubClient {
             )
             .await?;
 
-        let people = derive_issue_people(repo_id, &issues, &comments);
-        let issue_records: Vec<IssueRecord> = issues
-            .into_iter()
-            .map(|i| issue_record(repo_id, i))
-            .collect();
+        let contributors = derive_issue_people(repo_id, &issues, &comments).into_records();
+        let mut complete = ListingCompleteness::none();
+        complete.set(Listing::Issues, issues_complete);
+        complete.set(Listing::Comments, comments_complete);
 
-        let for_reactions = in_collection_mode(&issue_records, options.scope.collection.reactions);
-        let issue_reactions = self
-            .fetch_issue_reactions(owner, name, repo_id, &for_reactions, options)
-            .await?;
-
-        let for_timeline = in_collection_mode(&issue_records, options.scope.collection.timeline);
-        let issue_timeline = self
-            .fetch_issue_timeline(owner, name, repo_id, &for_timeline, options)
-            .await?;
-
-        Ok(IssueFamily {
-            people,
-            complete: {
-                let mut complete = ListingCompleteness::none();
-                complete.set(Listing::Issues, issues_complete);
-                complete.set(Listing::Comments, comments_complete);
-                complete
-            },
-            issues: issue_records,
+        Ok(IssueListing {
+            complete,
+            issues: issues
+                .into_iter()
+                .map(|i| issue_record(repo_id, i))
+                .collect(),
             comments: comments
                 .into_iter()
                 .filter_map(|c| comment_record(repo_id, c))
@@ -2081,21 +1786,66 @@ impl GithubClient {
                 .into_iter()
                 .map(|e| issue_event_record(repo_id, e))
                 .collect(),
-            issue_reactions,
-            issue_timeline,
+            contributors,
         })
     }
 
-    /// Pull requests plus their reviews, comments, files and commits.
-    async fn fetch_pull_family(
+    async fn refine_issue(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: i64,
+        number: i64,
+        wants: IssueDetailWants,
+        options: &FetchOptions,
+    ) -> Result<IssueDetail, DomainError> {
+        let mut detail = IssueDetail {
+            issue_number: number,
+            ..IssueDetail::default()
+        };
+        if wants.reactions {
+            let (page, _): (Vec<GhIssueReaction>, bool) = self
+                .get_json_all(
+                    &format!(
+                        "/repos/{owner}/{name}/issues/{number}/reactions?per_page={FIRST_PAGE_SIZE}"
+                    ),
+                    options,
+                )
+                .await?;
+            detail.reactions = page
+                .into_iter()
+                .map(|r| issue_reaction_record(repo_id, number, r))
+                .collect();
+        }
+        if wants.timeline {
+            // The entries stay raw JSON: the forty-odd event types share no
+            // schema.
+            let (entries, _): (Vec<serde_json::Value>, bool) = self
+                .get_json_all(
+                    &format!(
+                        "/repos/{owner}/{name}/issues/{number}/timeline?per_page={FIRST_PAGE_SIZE}"
+                    ),
+                    options,
+                )
+                .await?;
+            detail.timeline = entries
+                .iter()
+                .enumerate()
+                .map(|(position, entry)| issue_timeline_record(repo_id, number, position, entry))
+                .collect();
+        }
+        Ok(detail)
+    }
+
+    async fn list_pull_requests(
         &self,
         owner: &str,
         name: &str,
         repo_id: i64,
         options: &FetchOptions,
-    ) -> Result<PullFamily, DomainError> {
+    ) -> Result<PullListing, DomainError> {
         if !options.scope.objects.pull_requests {
-            return Ok(PullFamily::default());
+            return Ok(PullListing::default());
         }
 
         let (pulls, pull_requests_complete): (Vec<GhPullRequest>, bool) = self
@@ -2111,56 +1861,141 @@ impl GithubClient {
             )
             .await?;
 
-        let mut people = derive_pull_people(repo_id, &pulls, &review_comments);
-        let mut pull_records: Vec<PullRequestRecord> = pulls
-            .into_iter()
-            .map(|p| pull_request_record(repo_id, p))
-            .collect();
+        let contributors = derive_pull_people(repo_id, &pulls, &review_comments).into_records();
+        let mut complete = ListingCompleteness::none();
+        complete.set(Listing::PullRequests, pull_requests_complete);
+        complete.set(Listing::ReviewComments, review_comments_complete);
 
-        let PullDetails {
-            reviews,
-            pull_request_files,
-            review_threads,
-            pull_request_commits,
-            reviewers,
-        } = self
-            .fetch_pull_details(owner, name, repo_id, &mut pull_records, options)
-            .await?;
-        people.absorb(reviewers);
-
-        Ok(PullFamily {
-            people,
-            complete: {
-                let mut complete = ListingCompleteness::none();
-                complete.set(Listing::PullRequests, pull_requests_complete);
-                complete.set(Listing::ReviewComments, review_comments_complete);
-                complete
-            },
-            pull_requests: pull_records,
+        Ok(PullListing {
+            complete,
+            pull_requests: pulls
+                .into_iter()
+                .map(|p| pull_request_record(repo_id, p))
+                .collect(),
             review_comments: review_comments
                 .into_iter()
                 .filter_map(|c| review_comment_record(repo_id, c))
                 .collect(),
-            reviews,
-            pull_request_files,
-            review_threads,
-            pull_request_commits,
+            contributors,
         })
     }
 
-    /// Commits plus their files, comments and CI results.
-    ///
-    /// Statuses and check runs are CI, so they follow the `actions`
-    /// collection mode rather than the `commits` object flag alone.
-    async fn fetch_commit_family(
+    /// The pull's own detail record — the per-pull payload carries the line
+    /// counts the listing omits — plus its reviews, files, commits and
+    /// review threads.
+    async fn refine_pull_request(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: i64,
+        number: i64,
+        options: &FetchOptions,
+    ) -> Result<PullDetail, DomainError> {
+        let pull: GhPullRequest = self
+            .get_json(&format!("/repos/{owner}/{name}/pulls/{number}"), options)
+            .await?;
+        let mut pull_request = pull_request_record(repo_id, pull);
+
+        let mut reviewers = DerivedContributors::default();
+        let (page, _): (Vec<GhReview>, bool) = self
+            .get_json_all(
+                &format!("/repos/{owner}/{name}/pulls/{number}/reviews?per_page={FIRST_PAGE_SIZE}"),
+                options,
+            )
+            .await?;
+        for review in &page {
+            reviewers.track(
+                repo_id,
+                review.user.as_ref(),
+                roles::REVIEWER,
+                review.submitted_at.as_deref(),
+            );
+        }
+        let reviews = page
+            .into_iter()
+            .map(|r| review_record(repo_id, number, r))
+            .collect();
+
+        let (files, _): (Vec<GhPullFile>, bool) = self
+            .get_json_all(
+                &format!("/repos/{owner}/{name}/pulls/{number}/files?per_page={FIRST_PAGE_SIZE}"),
+                options,
+            )
+            .await?;
+        // Only when the payload did not carry the totals: a full file walk is
+        // the fallback, not the source of truth.
+        if pull_request.lines_added == 0 {
+            pull_request.lines_added = files.iter().map(|f| f.additions).sum();
+        }
+        if pull_request.lines_removed == 0 {
+            pull_request.lines_removed = files.iter().map(|f| f.deletions).sum();
+        }
+        let files = files
+            .into_iter()
+            .map(|f| pull_request_file_record(repo_id, number, f))
+            .collect();
+
+        let (pull_commits, _): (Vec<GhCommit>, bool) = self
+            .get_json_all(
+                &format!("/repos/{owner}/{name}/pulls/{number}/commits?per_page={FIRST_PAGE_SIZE}"),
+                options,
+            )
+            .await?;
+        let commits = pull_commits
+            .into_iter()
+            .map(|c| pull_request_commit_record(repo_id, number, c))
+            .collect();
+
+        // A GraphQL failure must not veto the REST data already fetched for
+        // this pull: review threads are one supplementary dataset among many,
+        // so a failure is logged and the threads are left empty.
+        let review_threads = match self
+            .post_graphql(
+                REVIEW_THREADS_QUERY,
+                review_threads_variables(owner, name, number),
+            )
+            .await
+        {
+            Ok(threads) => threads["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+                .as_array()
+                .map(|nodes| {
+                    nodes
+                        .iter()
+                        .filter_map(|n| review_thread_record(repo_id, number, n))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!(
+                    owner,
+                    name,
+                    pull_number = number,
+                    error = %e,
+                    "review threads (GraphQL) failed for this pull request; sync continues without them"
+                );
+                Vec::new()
+            }
+        };
+
+        Ok(PullDetail {
+            pull_request,
+            reviews,
+            files,
+            commits,
+            review_threads,
+            contributors: reviewers.into_records(),
+        })
+    }
+
+    async fn list_commits(
         &self,
         owner: &str,
         name: &str,
         repo_id: i64,
         options: &FetchOptions,
-    ) -> Result<CommitFamily, DomainError> {
+    ) -> Result<CommitListing, DomainError> {
         if !options.scope.objects.commits {
-            return Ok(CommitFamily::default());
+            return Ok(CommitListing::default());
         }
 
         let (commits, commits_complete): (Vec<GhCommit>, bool) = self
@@ -2176,48 +2011,96 @@ impl GithubClient {
             )
             .await?;
 
-        let people = derive_commit_people(repo_id, &commits, &commit_comments);
-        let mut commit_records: Vec<CommitRecord> = commits
-            .into_iter()
-            .map(|c| commit_record(repo_id, c))
-            .collect();
+        let contributors = derive_commit_people(repo_id, &commits, &commit_comments).into_records();
+        let mut complete = ListingCompleteness::none();
+        complete.set(Listing::Commits, commits_complete);
 
-        let with_ci = options.scope.collection.actions != CollectionMode::None;
-        let CommitDetails {
-            commit_files,
-            commit_statuses,
-            check_runs,
-        } = self
-            .fetch_commit_details(owner, name, repo_id, &mut commit_records, with_ci, options)
-            .await?;
-
-        Ok(CommitFamily {
-            people,
-            complete: {
-                let mut complete = ListingCompleteness::none();
-                complete.set(Listing::Commits, commits_complete);
-                complete
-            },
-            commits: commit_records,
-            commit_files,
+        Ok(CommitListing {
+            complete,
+            commits: commits
+                .into_iter()
+                .map(|c| commit_record(repo_id, c))
+                .collect(),
             commit_comments: commit_comments
                 .into_iter()
                 .map(|c| commit_comment_record(repo_id, c))
                 .collect(),
-            commit_statuses,
+            contributors,
+        })
+    }
+
+    /// The per-commit detail: the record with its stats, its files, and —
+    /// when CI is in scope — its statuses and check runs.
+    async fn refine_commit(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: i64,
+        sha: &str,
+        with_ci: bool,
+        options: &FetchOptions,
+    ) -> Result<CommitDetail, DomainError> {
+        let detail: GhCommitDetail = self
+            .get_json(&format!("/repos/{owner}/{name}/commits/{sha}"), options)
+            .await?;
+        let mut commit = commit_record(repo_id, detail.base);
+        if let Some(stats) = detail.stats {
+            commit.additions = stats.additions;
+            commit.deletions = stats.deletions;
+        }
+        let files = detail
+            .files
+            .into_iter()
+            .map(|f| commit_file_record(repo_id, sha, f))
+            .collect();
+
+        let (mut statuses, mut check_runs) = (Vec::new(), Vec::new());
+        if with_ci {
+            let (page, _): (Vec<GhCommitStatus>, bool) = self
+                .get_json_all(
+                    &format!(
+                        "/repos/{owner}/{name}/commits/{sha}/statuses?per_page={FIRST_PAGE_SIZE}"
+                    ),
+                    options,
+                )
+                .await?;
+            statuses = page
+                .into_iter()
+                .map(|s| commit_status_record(repo_id, sha, s))
+                .collect();
+
+            let checks: GhCheckRunsPage = self
+                .get_json(
+                    &format!(
+                        "/repos/{owner}/{name}/commits/{sha}/check-runs?per_page={FIRST_PAGE_SIZE}"
+                    ),
+                    options,
+                )
+                .await?;
+            check_runs = checks
+                .check_runs
+                .into_iter()
+                .map(|c| check_run_record(repo_id, c))
+                .collect();
+        }
+
+        Ok(CommitDetail {
+            commit,
+            files,
+            statuses,
             check_runs,
         })
     }
 
     /// The cheap single-page list endpoints, each behind its own flag.
-    async fn fetch_metadata_family(
+    async fn list_metadata(
         &self,
         owner: &str,
         name: &str,
         repo_id: i64,
         options: &FetchOptions,
-    ) -> Result<MetadataFamily, DomainError> {
-        let mut family = MetadataFamily::default();
+    ) -> Result<MetadataListing, DomainError> {
+        let mut listing = MetadataListing::default();
 
         if options.scope.objects.labels {
             let (labels, labels_complete): (Vec<GhLabel>, bool) = self
@@ -2226,8 +2109,8 @@ impl GithubClient {
                     options,
                 )
                 .await?;
-            family.complete.set(Listing::Labels, labels_complete);
-            family.labels = labels
+            listing.complete.set(Listing::Labels, labels_complete);
+            listing.labels = labels
                 .into_iter()
                 .map(|l| label_record(repo_id, l))
                 .collect();
@@ -2242,10 +2125,10 @@ impl GithubClient {
                     options,
                 )
                 .await?;
-            family
+            listing
                 .complete
                 .set(Listing::Milestones, milestones_complete);
-            family.milestones = milestones
+            listing.milestones = milestones
                 .into_iter()
                 .map(|m| milestone_record(repo_id, m))
                 .collect();
@@ -2258,8 +2141,8 @@ impl GithubClient {
                     options,
                 )
                 .await?;
-            family.complete.set(Listing::Releases, releases_complete);
-            family.releases = releases
+            listing.complete.set(Listing::Releases, releases_complete);
+            listing.releases = releases
                 .into_iter()
                 .map(|r| release_record(repo_id, r))
                 .collect();
@@ -2272,8 +2155,8 @@ impl GithubClient {
                     options,
                 )
                 .await?;
-            family.complete.set(Listing::Branches, branches_complete);
-            family.branches = branches
+            listing.complete.set(Listing::Branches, branches_complete);
+            listing.branches = branches
                 .into_iter()
                 .map(|b| branch_record(repo_id, b))
                 .collect();
@@ -2284,23 +2167,24 @@ impl GithubClient {
                     options,
                 )
                 .await?;
-            family.complete.set(Listing::Tags, tags_complete);
-            family.tags = tags.into_iter().map(|t| tag_record(repo_id, t)).collect();
+            listing.complete.set(Listing::Tags, tags_complete);
+            listing.tags = tags.into_iter().map(|t| tag_record(repo_id, t)).collect();
         }
 
-        Ok(family)
+        Ok(listing)
     }
 
-    /// Workflow runs, their jobs, and deployments.
-    async fn fetch_actions_family(
+    /// Workflow runs and deployments; jobs are per run, see
+    /// [`Self::refine_workflow_run`].
+    async fn list_actions(
         &self,
         owner: &str,
         name: &str,
         repo_id: i64,
         options: &FetchOptions,
-    ) -> Result<ActionsFamily, DomainError> {
+    ) -> Result<ActionsListing, DomainError> {
         if !options.scope.objects.github_actions {
-            return Ok(ActionsFamily::default());
+            return Ok(ActionsListing::default());
         }
 
         let runs: GhWorkflowRunsPage = self
@@ -2316,21 +2200,12 @@ impl GithubClient {
             )
             .await?;
 
-        let workflow_jobs = if options.scope.collection.actions == CollectionMode::None {
-            Vec::new()
-        } else {
-            self.fetch_workflow_jobs(owner, name, repo_id, &runs.workflow_runs, options)
-                .await?
-        };
-
-        Ok(ActionsFamily {
-            complete: ListingCompleteness::none(),
+        Ok(ActionsListing {
             workflow_runs: runs
                 .workflow_runs
                 .into_iter()
                 .map(|w| workflow_run_record(repo_id, w))
                 .collect(),
-            workflow_jobs,
             deployments: deployments
                 .into_iter()
                 .map(|d| deployment_record(repo_id, d))
@@ -2338,127 +2213,29 @@ impl GithubClient {
         })
     }
 
-    async fn fetch_pull_details(
+    async fn refine_workflow_run(
         &self,
         owner: &str,
         name: &str,
         repo_id: i64,
-        pull_records: &mut [PullRequestRecord],
+        run_id: i64,
         options: &FetchOptions,
-    ) -> Result<PullDetails, DomainError> {
-        let mut reviews: Vec<ReviewRecord> = Vec::new();
-        let mut pull_request_files: Vec<PullRequestFileRecord> = Vec::new();
-        let mut review_threads: Vec<ReviewThreadRecord> = Vec::new();
-        let mut pull_request_commits: Vec<PullRequestCommitRecord> = Vec::new();
-        let mut reviewers = DerivedContributors::default();
-        for pull in pull_records.iter_mut().take(PER_PULL_SYNC_CAP) {
-            let (page, _): (Vec<GhReview>, bool) = self
-                .get_json_all(
-                    &format!(
-                        "/repos/{owner}/{name}/pulls/{}/reviews?per_page={FIRST_PAGE_SIZE}",
-                        pull.number
-                    ),
-                    options,
-                )
-                .await?;
-            for review in &page {
-                reviewers.track(
-                    repo_id,
-                    review.user.as_ref(),
-                    roles::REVIEWER,
-                    review.submitted_at.as_deref(),
-                );
-            }
-            reviews.extend(
-                page.into_iter()
-                    .map(|r| review_record(repo_id, pull.number, r)),
-            );
-
-            let (files, _): (Vec<GhPullFile>, bool) = self
-                .get_json_all(
-                    &format!(
-                        "/repos/{owner}/{name}/pulls/{}/files?per_page={FIRST_PAGE_SIZE}",
-                        pull.number
-                    ),
-                    options,
-                )
-                .await?;
-            // Only when the payload did not carry the totals: a full file
-            // walk is the fallback, not the source of truth.
-            if pull.lines_added == 0 {
-                pull.lines_added = files.iter().map(|f| f.additions).sum();
-            }
-            if pull.lines_removed == 0 {
-                pull.lines_removed = files.iter().map(|f| f.deletions).sum();
-            }
-            pull_request_files.extend(
-                files
-                    .into_iter()
-                    .map(|f| pull_request_file_record(repo_id, pull.number, f)),
-            );
-
-            let (pull_commits, _): (Vec<GhCommit>, bool) = self
-                .get_json_all(
-                    &format!(
-                        "/repos/{owner}/{name}/pulls/{}/commits?per_page={FIRST_PAGE_SIZE}",
-                        pull.number
-                    ),
-                    options,
-                )
-                .await?;
-            pull_request_commits.extend(
-                pull_commits
-                    .into_iter()
-                    .map(|c| pull_request_commit_record(repo_id, pull.number, c)),
-            );
-
-            // A GraphQL failure here must not veto everything already fetched for
-            // this repo (REST issues, commits, other pulls' reviews/files/commits,
-            // ...): review threads are one supplementary dataset among many, so a
-            // failure is logged and this pull's threads are left empty rather than
-            // propagated with `?`.
-            match self
-                .post_graphql(
-                    REVIEW_THREADS_QUERY,
-                    review_threads_variables(owner, name, pull.number),
-                )
-                .await
-            {
-                Ok(threads) => {
-                    let nodes =
-                        threads["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
-                            .as_array()
-                            .cloned()
-                            .unwrap_or_default();
-                    review_threads.extend(
-                        nodes
-                            .iter()
-                            .filter_map(|n| review_thread_record(repo_id, pull.number, n)),
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        owner,
-                        name,
-                        pull_number = pull.number,
-                        error = %e,
-                        "review threads (GraphQL) failed for this pull request; sync continues without them"
-                    );
-                }
-            }
-        }
-        Ok(PullDetails {
-            reviews,
-            pull_request_files,
-            review_threads,
-            pull_request_commits,
-            reviewers,
-        })
+    ) -> Result<Vec<WorkflowJobRecord>, DomainError> {
+        let page: GhWorkflowJobsPage = self
+            .get_json(
+                &format!(
+                    "/repos/{owner}/{name}/actions/runs/{run_id}/jobs?per_page={FIRST_PAGE_SIZE}"
+                ),
+                options,
+            )
+            .await?;
+        Ok(page
+            .jobs
+            .into_iter()
+            .map(|j| workflow_job_record(repo_id, j))
+            .collect())
     }
-}
 
-#[async_trait]
-impl GithubPort for GithubClient {
     async fn clear_cache(
         &self,
         tenant_id: uuid::Uuid,
@@ -2471,83 +2248,5 @@ impl GithubPort for GithubClient {
             None => format!("{base}/repos/{owner}/"),
         };
         self.cache.clear(tenant_id, &prefix).await
-    }
-
-    async fn fetch_repository(
-        &self,
-        owner: &str,
-        name: &str,
-        options: &FetchOptions,
-    ) -> Result<FetchedRepository, DomainError> {
-        let repo: GhRepository = self
-            .get_json(&format!("/repos/{owner}/{name}"), options)
-            .await?;
-        let repo_id = repo.id;
-
-        let issues = self
-            .fetch_issue_family(owner, name, repo_id, options)
-            .await?;
-        let pulls = self
-            .fetch_pull_family(owner, name, repo_id, options)
-            .await?;
-        let commits = self
-            .fetch_commit_family(owner, name, repo_id, options)
-            .await?;
-        let meta = self
-            .fetch_metadata_family(owner, name, repo_id, options)
-            .await?;
-        let actions = self
-            .fetch_actions_family(owner, name, repo_id, options)
-            .await?;
-
-        // Only a listing walked to its final page may be used to reconcile
-        // deletions; a family the scope switched off, or one cut short by the
-        // page cap, reports `false` and is left alone.
-        let mut complete = ListingCompleteness::none();
-        for listing in Listing::iter() {
-            complete.set(
-                listing,
-                issues.complete.is_complete(listing)
-                    || pulls.complete.is_complete(listing)
-                    || commits.complete.is_complete(listing)
-                    || meta.complete.is_complete(listing)
-                    || actions.complete.is_complete(listing),
-            );
-        }
-
-        Ok(FetchedRepository {
-            repository: repository_record(repo),
-            complete,
-            issues: issues.issues,
-            pull_requests: pulls.pull_requests,
-            commits: commits.commits,
-            comments: issues.comments,
-            review_comments: pulls.review_comments,
-            reviews: pulls.reviews,
-            labels: meta.labels,
-            milestones: meta.milestones,
-            releases: meta.releases,
-            branches: meta.branches,
-            contributors: {
-                let mut people = issues.people;
-                people.absorb(pulls.people);
-                people.absorb(commits.people);
-                people.into_records()
-            },
-            workflow_runs: actions.workflow_runs,
-            pull_request_files: pulls.pull_request_files,
-            tags: meta.tags,
-            commit_files: commits.commit_files,
-            review_threads: pulls.review_threads,
-            commit_comments: commits.commit_comments,
-            issue_events: issues.issue_events,
-            deployments: actions.deployments,
-            pull_request_commits: pulls.pull_request_commits,
-            commit_statuses: commits.commit_statuses,
-            workflow_jobs: actions.workflow_jobs,
-            issue_reactions: issues.issue_reactions,
-            check_runs: commits.check_runs,
-            issue_timeline: issues.issue_timeline,
-        })
     }
 }

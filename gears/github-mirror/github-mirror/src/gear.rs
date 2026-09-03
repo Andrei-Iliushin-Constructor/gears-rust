@@ -152,6 +152,7 @@ impl Gear for GithubMirrorGear {
                 api_base_url: cfg.api_base_url,
                 scope: cfg.scope,
                 max_concurrent_syncs: cfg.max_concurrent_syncs,
+                max_concurrent_tasks: cfg.max_concurrent_tasks,
             },
         ));
 

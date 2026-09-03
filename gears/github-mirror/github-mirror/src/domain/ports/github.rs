@@ -49,7 +49,7 @@ pub enum Listing {
     Tags,
 }
 
-/// Which top-level listings this fetch walked to their final page.
+/// Which top-level listings a fetch walked to their final page.
 ///
 /// Deletion reconciliation may only run against a listing that is provably
 /// complete: "absent from a truncated page" says nothing about existence. A
@@ -93,9 +93,115 @@ impl ListingCompleteness {
     pub fn is_complete(&self, listing: Listing) -> bool {
         self.complete.contains(&listing)
     }
+
+    /// Fold another family's flags in: a listing is complete if either side
+    /// walked it to the end.
+    pub fn absorb(&mut self, other: &Self) {
+        self.complete.extend(other.complete.iter().copied());
+    }
 }
 
-/// What one sync-lite pass fetched from GitHub for a repository.
+/// What indexing the issue family lists: the repo-wide issue, comment and
+/// event listings, plus the people seen in them (PRD §5.2 derivation).
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IssueListing {
+    pub complete: ListingCompleteness,
+    pub issues: Vec<IssueRecord>,
+    pub comments: Vec<CommentRecord>,
+    pub issue_events: Vec<IssueEventRecord>,
+    pub contributors: Vec<ContributorRecord>,
+}
+
+/// Which per-issue sub-resources a refinement should fetch, decided by the
+/// collection scope and the issue's state.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IssueDetailWants {
+    pub reactions: bool,
+    pub timeline: bool,
+}
+
+/// The per-issue sub-resources: reactions and the timeline.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IssueDetail {
+    pub issue_number: i64,
+    pub reactions: Vec<IssueReactionRecord>,
+    pub timeline: Vec<IssueTimelineEventRecord>,
+}
+
+/// What indexing the pull-request family lists.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PullListing {
+    pub complete: ListingCompleteness,
+    pub pull_requests: Vec<PullRequestRecord>,
+    pub review_comments: Vec<ReviewCommentRecord>,
+    pub contributors: Vec<ContributorRecord>,
+}
+
+/// One pull request refined: the detail record (which, unlike the listing
+/// entry, carries the line counts) and everything hanging off it.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullDetail {
+    pub pull_request: PullRequestRecord,
+    pub reviews: Vec<ReviewRecord>,
+    pub files: Vec<PullRequestFileRecord>,
+    pub commits: Vec<PullRequestCommitRecord>,
+    pub review_threads: Vec<ReviewThreadRecord>,
+    /// People seen reviewing; the review objects do not survive the mapping
+    /// to `ReviewRecord`, so they are harvested here.
+    pub contributors: Vec<ContributorRecord>,
+}
+
+/// What indexing the commit family lists.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CommitListing {
+    pub complete: ListingCompleteness,
+    pub commits: Vec<CommitRecord>,
+    pub commit_comments: Vec<CommitCommentRecord>,
+    pub contributors: Vec<ContributorRecord>,
+}
+
+/// One commit refined: the detail record (with its stats) plus files and CI.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitDetail {
+    pub commit: CommitRecord,
+    pub files: Vec<CommitFileRecord>,
+    pub statuses: Vec<CommitStatusRecord>,
+    pub check_runs: Vec<CheckRunRecord>,
+}
+
+/// The cheap repository-metadata listings, each behind its own scope flag.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MetadataListing {
+    pub complete: ListingCompleteness,
+    pub labels: Vec<LabelRecord>,
+    pub milestones: Vec<MilestoneRecord>,
+    pub releases: Vec<ReleaseRecord>,
+    pub branches: Vec<BranchRecord>,
+    pub tags: Vec<TagRecord>,
+}
+
+/// The GitHub Actions listings: workflow runs and deployments. Jobs are only
+/// reachable per run, so they come from [`GithubPort::refine_workflow_run`].
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ActionsListing {
+    pub workflow_runs: Vec<WorkflowRunRecord>,
+    pub deployments: Vec<DeploymentRecord>,
+}
+
+/// Everything one full sync of a repository amounts to, in one value.
+///
+/// The sync itself no longer moves data in this shape — it runs one task per
+/// listing and per entity — but a fake GitHub in tests still serves a repo
+/// from one of these, slicing it per port call.
 #[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchedRepository {
@@ -132,19 +238,98 @@ pub struct FetchedRepository {
 
 /// Outbound port to GitHub's REST API (implemented in `infra/github`).
 ///
-/// Fetches a repository and its mirrored families, walking each listing until
-/// GitHub reports no next page or the walk hits its page cap.
+/// One method per sync task: the listings an Indexing task walks, and the
+/// per-entity detail a Refinement task fetches. A method for an object type
+/// the scope switched off returns an empty value without a GitHub call — the
+/// point of the scope is the request budget, not the size of the result.
 #[async_trait]
 pub trait GithubPort: Send + Sync {
-    /// Fetch everything `options.scope` asks for. A disabled object type
-    /// costs no GitHub call at all — the point of the scope is the request
-    /// budget, not the size of the result.
-    async fn fetch_repository(
+    /// The repository itself (Discovery).
+    async fn fetch_repository_metadata(
         &self,
         owner: &str,
         name: &str,
         options: &FetchOptions,
-    ) -> Result<FetchedRepository, DomainError>;
+    ) -> Result<RepoRecord, DomainError>;
+
+    async fn list_issues(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: i64,
+        options: &FetchOptions,
+    ) -> Result<IssueListing, DomainError>;
+
+    async fn refine_issue(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: i64,
+        number: i64,
+        wants: IssueDetailWants,
+        options: &FetchOptions,
+    ) -> Result<IssueDetail, DomainError>;
+
+    async fn list_pull_requests(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: i64,
+        options: &FetchOptions,
+    ) -> Result<PullListing, DomainError>;
+
+    async fn refine_pull_request(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: i64,
+        number: i64,
+        options: &FetchOptions,
+    ) -> Result<PullDetail, DomainError>;
+
+    async fn list_commits(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: i64,
+        options: &FetchOptions,
+    ) -> Result<CommitListing, DomainError>;
+
+    /// `with_ci` adds the commit's statuses and check runs.
+    async fn refine_commit(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: i64,
+        sha: &str,
+        with_ci: bool,
+        options: &FetchOptions,
+    ) -> Result<CommitDetail, DomainError>;
+
+    async fn list_metadata(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: i64,
+        options: &FetchOptions,
+    ) -> Result<MetadataListing, DomainError>;
+
+    async fn list_actions(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: i64,
+        options: &FetchOptions,
+    ) -> Result<ActionsListing, DomainError>;
+
+    async fn refine_workflow_run(
+        &self,
+        owner: &str,
+        name: &str,
+        repo_id: i64,
+        run_id: i64,
+        options: &FetchOptions,
+    ) -> Result<Vec<WorkflowJobRecord>, DomainError>;
 
     /// Drop cached responses for one owner, or one `owner/name` repository,
     /// and report how many entries went (DESIGN §4 `clear_cache`).

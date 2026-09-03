@@ -42,6 +42,11 @@ pub struct GithubMirrorConfig {
     /// never run them.
     #[serde(default = "default_max_concurrent_syncs")]
     pub max_concurrent_syncs: usize,
+    /// How many tasks one repository's sync runs at the same time: list
+    /// pages being indexed and entities being refined. The reference
+    /// implementation's `--max-concurrent`.
+    #[serde(default = "default_max_concurrent_tasks")]
+    pub max_concurrent_tasks: usize,
     /// Ceiling on GitHub requests in flight across every running sync.
     ///
     /// GitHub's secondary rate limit triggers on concurrency rather than
@@ -62,6 +67,11 @@ fn default_max_concurrent_syncs() -> usize {
 /// GitHub requests in flight at once when the config says nothing.
 fn default_max_concurrent_requests() -> usize {
     8
+}
+
+/// Tasks in flight inside one sync when the config says nothing.
+fn default_max_concurrent_tasks() -> usize {
+    4
 }
 
 fn default_compression() -> String {
@@ -163,6 +173,7 @@ impl Default for GithubMirrorConfig {
             scope: default_scope(),
             cache_compression: default_compression(),
             max_concurrent_syncs: default_max_concurrent_syncs(),
+            max_concurrent_tasks: default_max_concurrent_tasks(),
             max_concurrent_requests: default_max_concurrent_requests(),
         }
     }

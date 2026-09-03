@@ -9,7 +9,11 @@ use authz_resolver_sdk::{
     models::{EvaluationRequest, EvaluationResponse, EvaluationResponseContext},
 };
 use github_mirror::domain::error::DomainError;
-use github_mirror::domain::ports::github::{FetchedRepository, GithubPort, ListingCompleteness};
+use github_mirror::domain::ports::github::{
+    ActionsListing, CommitDetail, CommitListing, FetchOptions, FetchedRepository, GithubPort,
+    IssueDetail, IssueDetailWants, IssueListing, ListingCompleteness, MetadataListing, PullDetail,
+    PullListing,
+};
 use github_mirror::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
     CommitRecord, CommitStatusRecord, ContributorRecord, DeploymentRecord, IssueEventRecord,
@@ -98,20 +102,248 @@ impl AuthZResolverApi for DenyAllAuthZResolver {
     }
 }
 
-/// GitHub fake: serves a pre-baked fetch result, or `NotFound` when empty.
+/// GitHub fake: serves a pre-baked repository, sliced per port call, or
+/// `NotFound` when empty.
 pub struct FakeGithub {
     pub result: Option<FetchedRepository>,
 }
 
+impl FakeGithub {
+    fn fixture(&self) -> Result<&FetchedRepository, DomainError> {
+        self.result.as_ref().ok_or(DomainError::NotFound)
+    }
+}
+
 #[async_trait]
 impl GithubPort for FakeGithub {
-    async fn fetch_repository(
+    async fn fetch_repository_metadata(
         &self,
         _owner: &str,
         _name: &str,
-        _options: &github_mirror::domain::ports::github::FetchOptions,
-    ) -> Result<FetchedRepository, DomainError> {
-        self.result.clone().ok_or(DomainError::NotFound)
+        _options: &FetchOptions,
+    ) -> Result<RepoRecord, DomainError> {
+        Ok(self.fixture()?.repository.clone())
+    }
+
+    async fn list_issues(
+        &self,
+        _owner: &str,
+        _name: &str,
+        _repo_id: i64,
+        _options: &FetchOptions,
+    ) -> Result<IssueListing, DomainError> {
+        let f = self.fixture()?;
+        Ok(IssueListing {
+            complete: f.complete.clone(),
+            issues: f.issues.clone(),
+            comments: f.comments.clone(),
+            issue_events: f.issue_events.clone(),
+            contributors: f.contributors.clone(),
+        })
+    }
+
+    async fn refine_issue(
+        &self,
+        _owner: &str,
+        _name: &str,
+        _repo_id: i64,
+        number: i64,
+        wants: IssueDetailWants,
+        _options: &FetchOptions,
+    ) -> Result<IssueDetail, DomainError> {
+        let f = self.fixture()?;
+        Ok(IssueDetail {
+            issue_number: number,
+            reactions: if wants.reactions {
+                f.issue_reactions
+                    .iter()
+                    .filter(|r| r.issue_number == number)
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            timeline: if wants.timeline {
+                f.issue_timeline
+                    .iter()
+                    .filter(|e| e.issue_number == number)
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        })
+    }
+
+    async fn list_pull_requests(
+        &self,
+        _owner: &str,
+        _name: &str,
+        _repo_id: i64,
+        _options: &FetchOptions,
+    ) -> Result<PullListing, DomainError> {
+        let f = self.fixture()?;
+        Ok(PullListing {
+            complete: f.complete.clone(),
+            pull_requests: f.pull_requests.clone(),
+            review_comments: f.review_comments.clone(),
+            contributors: Vec::new(),
+        })
+    }
+
+    async fn refine_pull_request(
+        &self,
+        _owner: &str,
+        _name: &str,
+        _repo_id: i64,
+        number: i64,
+        _options: &FetchOptions,
+    ) -> Result<PullDetail, DomainError> {
+        let f = self.fixture()?;
+        let pull_request = f
+            .pull_requests
+            .iter()
+            .find(|p| p.number == number)
+            .cloned()
+            .ok_or(DomainError::NotFound)?;
+        Ok(PullDetail {
+            pull_request,
+            reviews: f
+                .reviews
+                .iter()
+                .filter(|r| r.pull_number == number)
+                .cloned()
+                .collect(),
+            files: f
+                .pull_request_files
+                .iter()
+                .filter(|r| r.pull_number == number)
+                .cloned()
+                .collect(),
+            commits: f
+                .pull_request_commits
+                .iter()
+                .filter(|r| r.pull_number == number)
+                .cloned()
+                .collect(),
+            review_threads: f
+                .review_threads
+                .iter()
+                .filter(|r| r.pull_number == number)
+                .cloned()
+                .collect(),
+            contributors: Vec::new(),
+        })
+    }
+
+    async fn list_commits(
+        &self,
+        _owner: &str,
+        _name: &str,
+        _repo_id: i64,
+        _options: &FetchOptions,
+    ) -> Result<CommitListing, DomainError> {
+        let f = self.fixture()?;
+        Ok(CommitListing {
+            complete: f.complete.clone(),
+            commits: f.commits.clone(),
+            commit_comments: f.commit_comments.clone(),
+            contributors: Vec::new(),
+        })
+    }
+
+    async fn refine_commit(
+        &self,
+        _owner: &str,
+        _name: &str,
+        _repo_id: i64,
+        sha: &str,
+        with_ci: bool,
+        _options: &FetchOptions,
+    ) -> Result<CommitDetail, DomainError> {
+        let f = self.fixture()?;
+        let commit = f
+            .commits
+            .iter()
+            .find(|c| c.sha == sha)
+            .cloned()
+            .ok_or(DomainError::NotFound)?;
+        Ok(CommitDetail {
+            commit,
+            files: f
+                .commit_files
+                .iter()
+                .filter(|r| r.commit_sha == sha)
+                .cloned()
+                .collect(),
+            statuses: if with_ci {
+                f.commit_statuses
+                    .iter()
+                    .filter(|r| r.commit_sha == sha)
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            check_runs: if with_ci {
+                f.check_runs
+                    .iter()
+                    .filter(|r| r.head_sha == sha)
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        })
+    }
+
+    async fn list_metadata(
+        &self,
+        _owner: &str,
+        _name: &str,
+        _repo_id: i64,
+        _options: &FetchOptions,
+    ) -> Result<MetadataListing, DomainError> {
+        let f = self.fixture()?;
+        Ok(MetadataListing {
+            complete: f.complete.clone(),
+            labels: f.labels.clone(),
+            milestones: f.milestones.clone(),
+            releases: f.releases.clone(),
+            branches: f.branches.clone(),
+            tags: f.tags.clone(),
+        })
+    }
+
+    async fn list_actions(
+        &self,
+        _owner: &str,
+        _name: &str,
+        _repo_id: i64,
+        _options: &FetchOptions,
+    ) -> Result<ActionsListing, DomainError> {
+        let f = self.fixture()?;
+        Ok(ActionsListing {
+            workflow_runs: f.workflow_runs.clone(),
+            deployments: f.deployments.clone(),
+        })
+    }
+
+    async fn refine_workflow_run(
+        &self,
+        _owner: &str,
+        _name: &str,
+        _repo_id: i64,
+        run_id: i64,
+        _options: &FetchOptions,
+    ) -> Result<Vec<WorkflowJobRecord>, DomainError> {
+        Ok(self
+            .fixture()?
+            .workflow_jobs
+            .iter()
+            .filter(|j| j.run_id == run_id)
+            .cloned()
+            .collect())
     }
 
     async fn clear_cache(
@@ -205,6 +437,7 @@ pub fn service_with_enforcer(
             api_base_url: api_base_url.to_owned(),
             scope: github_mirror::domain::scope::ScopeConfig::default(),
             max_concurrent_syncs: 1,
+            max_concurrent_tasks: 1,
         },
     ))
 }

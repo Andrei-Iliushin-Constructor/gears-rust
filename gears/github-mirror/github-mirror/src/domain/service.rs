@@ -12,6 +12,7 @@ use github_mirror_sdk::{
     ReviewComment, ReviewThread, SyncSummary, Tag, WorkflowJob, WorkflowRun,
 };
 use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
 use toolkit_macros::domain_model;
 use toolkit_odata::{ODataQuery, Page, PageInfo};
 use toolkit_security::{AccessScope, SecurityContext, pep_properties};
@@ -35,6 +36,7 @@ use super::repo::{
     SyncSessionRepository, SyncWriter, TagRecord, TagRepository, WorkflowJobRecord,
     WorkflowJobRepository, WorkflowRunRecord, WorkflowRunRepository,
 };
+use super::scheduler::{MirrorWorker, RepoPhaseRunner, RunState, TaskPhase, Worker};
 use super::scope::ScopeConfig;
 
 /// The gear's name, taken from the `#[toolkit::gear]` attribute so the
@@ -349,6 +351,8 @@ pub struct ServiceConfig {
     pub scope: ScopeConfig,
     /// How many repositories may sync at the same time.
     pub max_concurrent_syncs: usize,
+    /// How many tasks one repository's sync runs at the same time.
+    pub max_concurrent_tasks: usize,
 }
 
 #[domain_model]
@@ -3525,23 +3529,17 @@ impl Service {
         self.db.conn().is_ok()
     }
 
-    /// Fetch one repository from GitHub (first slice: repo + first page of
-    /// issues, pull requests, and commits) and upsert it into the mirror.
+    /// Sync one repository from GitHub into the mirror: the 5-phase runner
+    /// (DESIGN §4) under the per-repo advisory lock, then the deletion pass.
     ///
-    /// The REST face of the PRD's `sync_repo` entry point; the inline fetch
-    /// is replaced by a queued sync session when the engine lands
-    /// (gears-rust#4632).
+    /// Every task writes its own transaction, so a run that stops partway
+    /// leaves the tables consistent and the next run picks up where it left
+    /// off (ADR-0001: resume by re-running, no persisted task state).
     ///
     /// # Errors
     /// `DomainError::NotFound` when GitHub does not know the repository,
-    /// `Forbidden` on PDP denial, `Internal` on GitHub/storage failures.
-    // One `sync_table!` pass per mirrored table, in the order the PRD
-    // lists them: mechanical repetition, not additional real logic.
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cognitive_complexity,
-        clippy::too_many_lines
-    )]
+    /// `Conflict` when a sync of it is already running, `Forbidden` on PDP
+    /// denial, `Internal` when tasks failed or the run outlived its budget.
     pub async fn sync_repository(
         &self,
         ctx: &SecurityContext,
@@ -3574,40 +3572,91 @@ impl Service {
             Err(e) => return Err(DomainError::Database(e)),
         };
 
-        let watermark = Utc::now();
-        let fetched = match tokio::time::timeout(
-            SYNC_FETCH_BUDGET,
-            self.github.fetch_repository(owner, name, options),
-        )
-        .await
-        {
-            Ok(Ok(fetched)) => fetched,
-            Ok(Err(fetch_error)) => {
-                release_sync_lock(sync_lock, &lock_key).await;
-                return Err(fetch_error);
-            }
-            Err(_elapsed) => {
-                release_sync_lock(sync_lock, &lock_key).await;
-                return Err(DomainError::internal(format!(
-                    "the sync of {owner}/{name} ran past its {} second budget",
-                    SYNC_FETCH_BUDGET.as_secs()
-                )));
-            }
-        };
-        progress.fetched();
-
-        let summary = self
-            .sync_writer
-            .write_sync(&scope, tenant_id, fetched, watermark)
-            .await;
+        let run = Arc::new(RunState::new(
+            Uuid::new_v4(),
+            scope,
+            tenant_id,
+            owner,
+            name,
+            *options,
+        ));
+        let outcome = self.run_phases(&run, progress).await;
 
         // Deterministic unlock on the way out; a failed release is only
         // logged — the guard's Drop already queued a best-effort release,
         // and the sync itself succeeded or failed on its own merits.
         release_sync_lock(sync_lock, &lock_key).await;
-        if summary.is_ok() {
-            progress.stored();
+        outcome
+    }
+
+    /// The part of a sync that runs under the lock: phases, then reconciliation.
+    async fn run_phases(
+        &self,
+        run: &Arc<RunState>,
+        progress: &SyncProgress,
+    ) -> Result<SyncSummary, DomainError> {
+        // Captured before any row is written: every upsert in this sync stamps
+        // `extracted_at` with a later instant, so "extracted_at < watermark"
+        // identifies exactly the rows this sync did not touch.
+        let watermark = Utc::now();
+
+        let worker: Arc<dyn Worker> = Arc::new(MirrorWorker::new(
+            Arc::clone(&self.github),
+            Arc::clone(&self.sync_writer),
+            Arc::clone(run),
+        ));
+        let runner = RepoPhaseRunner::new(
+            vec![worker],
+            run.session_id,
+            self.config.max_concurrent_tasks,
+            CancellationToken::new(),
+        );
+        let mut report = tokio::time::timeout(SYNC_FETCH_BUDGET, runner.run())
+            .await
+            .map_err(|_elapsed| {
+                DomainError::internal(format!(
+                    "the sync of {}/{} ran past its {} second budget",
+                    run.owner,
+                    run.name,
+                    SYNC_FETCH_BUDGET.as_secs()
+                ))
+            })?;
+        progress.fetched();
+
+        // Discovery failing is the repository failing: GitHub's own answer
+        // (404, 403 ...) is the sync's outcome, not a task statistic.
+        if let Some(discovery) = report
+            .failures
+            .iter()
+            .position(|failure| failure.phase == TaskPhase::Discovery)
+        {
+            return Err(report.failures.swap_remove(discovery).error);
         }
-        summary
+        if !report.failures.is_empty() {
+            let detail: Vec<String> = report.failures.iter().map(ToString::to_string).collect();
+            return Err(DomainError::internal(format!(
+                "{} of {} sync tasks failed: {}",
+                report.tasks_failed(),
+                report.tasks_done + report.tasks_failed(),
+                detail.join("; ")
+            )));
+        }
+
+        let stale_rows_deleted = self
+            .sync_writer
+            .reconcile_stale(&run.scope, run.repo_id()?, &run.completeness(), watermark)
+            .await?;
+        if stale_rows_deleted > 0 {
+            tracing::info!(
+                repository = %format!("{}/{}", run.owner, run.name),
+                stale_rows_deleted,
+                "reconciled upstream deletions"
+            );
+        }
+        progress.stored();
+
+        let mut summary = run.summary();
+        summary.stale_rows_deleted = stale_rows_deleted;
+        Ok(summary)
     }
 }

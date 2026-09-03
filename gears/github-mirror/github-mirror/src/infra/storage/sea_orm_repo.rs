@@ -4,7 +4,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use strum::IntoEnumIterator;
 
-use crate::domain::ports::github::{FetchedRepository, Listing, ListingCompleteness};
+use crate::domain::ports::github::{
+    ActionsListing, CommitDetail, CommitListing, IssueDetail, IssueListing, Listing,
+    ListingCompleteness, MetadataListing, PullDetail, PullListing,
+};
 use crate::domain::repo::{PageWindow, SyncWriter};
 use crate::domain::service::DbProvider;
 use crate::infra::storage::odata_mapper::{
@@ -15,7 +18,7 @@ use github_mirror_sdk::{
     Branch, CheckRun, Comment, Commit, CommitComment, CommitFile, CommitStatus, Contributor,
     Deployment, Issue, IssueEvent, IssueReaction, IssueTimelineEvent, Label, Milestone,
     PullRequest, PullRequestCommit, PullRequestFile, Release, Repo, Review, ReviewComment,
-    ReviewThread, SyncSummary, Tag, WorkflowJob, WorkflowRun,
+    ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
 use sea_orm::prelude::DateTimeUtc;
 use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, Order};
@@ -4250,9 +4253,9 @@ async fn reconcile_stale<C: DBRunner>(
     Ok(deleted)
 }
 
-/// Writes one sync's whole result: all 26 tables plus the deletion pass, in a
-/// single transaction, so a failure partway through cannot leave some tables
-/// current and others stale.
+/// Writes one sync task's result — a listing, one entity's detail, or the
+/// deletion pass — as a single transaction, so a task lands whole or not at
+/// all.
 pub struct SeaOrmSyncWriter {
     db: Arc<DbProvider>,
 }
@@ -4264,237 +4267,326 @@ impl SeaOrmSyncWriter {
     }
 }
 
+async fn write_contributors_in<C: DBRunner>(
+    conn: &C,
+    scope: &AccessScope,
+    tenant_id: Uuid,
+    repo_id: i64,
+    derived: Vec<ContributorRecord>,
+) -> Result<(), DomainError> {
+    let merged = merge_known_contributors(conn, scope, repo_id, derived).await?;
+    sync_table!(conn, scope, tenant_id, contributor_upsert_in, merged);
+    Ok(())
+}
+
 #[async_trait]
 impl SyncWriter for SeaOrmSyncWriter {
-    async fn write_sync(
+    async fn write_repository(
         &self,
         scope: &AccessScope,
         tenant_id: Uuid,
-        fetched: FetchedRepository,
-        watermark: DateTimeUtc,
-    ) -> Result<SyncSummary, DomainError> {
+        repository: RepoRecord,
+    ) -> Result<Repo, DomainError> {
         let scope = scope.clone();
-        let complete = fetched.complete.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move { repo_upsert_in(tx, &scope, tenant_id, repository).await })
+            })
+            .await
+    }
+
+    async fn write_issue_listing(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        listing: IssueListing,
+    ) -> Result<(), DomainError> {
+        let scope = scope.clone();
         self.db
             .db()
             .transaction_ref_mapped(move |tx| {
                 Box::pin(async move {
-                    let repository =
-                        repo_upsert_in(tx, &scope, tenant_id, fetched.repository).await?;
-
-                    let issues_synced =
-                        sync_table!(tx, &scope, tenant_id, issue_upsert_in, fetched.issues);
-
-                    let pull_requests_synced = sync_table!(
-                        tx,
-                        &scope,
-                        tenant_id,
-                        pull_request_upsert_in,
-                        fetched.pull_requests
-                    );
-
-                    let commits_synced =
-                        sync_table!(tx, &scope, tenant_id, commit_upsert_in, fetched.commits);
-
-                    let comments_synced =
-                        sync_table!(tx, &scope, tenant_id, comment_upsert_in, fetched.comments);
-
-                    let review_comments_synced = sync_table!(
-                        tx,
-                        &scope,
-                        tenant_id,
-                        review_comment_upsert_in,
-                        fetched.review_comments
-                    );
-
-                    let reviews_synced =
-                        sync_table!(tx, &scope, tenant_id, review_upsert_in, fetched.reviews);
-
-                    let labels_synced =
-                        sync_table!(tx, &scope, tenant_id, label_upsert_in, fetched.labels);
-
-                    let milestones_synced = sync_table!(
-                        tx,
-                        &scope,
-                        tenant_id,
-                        milestone_upsert_in,
-                        fetched.milestones
-                    );
-
-                    let releases_synced =
-                        sync_table!(tx, &scope, tenant_id, release_upsert_in, fetched.releases);
-
-                    let branches_synced =
-                        sync_table!(tx, &scope, tenant_id, branch_upsert_in, fetched.branches);
-
-                    // Contributors are derived from whatever this sync
-                    // happened to fetch, so writing them straight would
-                    // narrow the set every time the scope narrows. Merge
-                    // with what earlier syncs already learned instead.
-                    let contributors =
-                        merge_known_contributors(tx, &scope, repository.id, fetched.contributors)
-                            .await?;
-                    let contributors_synced =
-                        sync_table!(tx, &scope, tenant_id, contributor_upsert_in, contributors);
-
-                    let workflow_runs_synced = sync_table!(
-                        tx,
-                        &scope,
-                        tenant_id,
-                        workflow_run_upsert_in,
-                        fetched.workflow_runs
-                    );
-
-                    let pull_request_files_synced = sync_table!(
-                        tx,
-                        &scope,
-                        tenant_id,
-                        pull_request_file_upsert_in,
-                        fetched.pull_request_files
-                    );
-
-                    let tags_synced =
-                        sync_table!(tx, &scope, tenant_id, tag_upsert_in, fetched.tags);
-
-                    let commit_files_synced = sync_table!(
-                        tx,
-                        &scope,
-                        tenant_id,
-                        commit_file_upsert_in,
-                        fetched.commit_files
-                    );
-
-                    let review_threads_synced = sync_table!(
-                        tx,
-                        &scope,
-                        tenant_id,
-                        review_thread_upsert_in,
-                        fetched.review_threads
-                    );
-
-                    let commit_comments_synced = sync_table!(
-                        tx,
-                        &scope,
-                        tenant_id,
-                        commit_comment_upsert_in,
-                        fetched.commit_comments
-                    );
-
-                    let issue_events_synced = sync_table!(
+                    sync_table!(tx, &scope, tenant_id, issue_upsert_in, listing.issues);
+                    sync_table!(tx, &scope, tenant_id, comment_upsert_in, listing.comments);
+                    sync_table!(
                         tx,
                         &scope,
                         tenant_id,
                         issue_event_upsert_in,
-                        fetched.issue_events
+                        listing.issue_events
                     );
+                    write_contributors_in(tx, &scope, tenant_id, repo_id, listing.contributors)
+                        .await
+                })
+            })
+            .await
+    }
 
-                    let deployments_synced = sync_table!(
-                        tx,
-                        &scope,
-                        tenant_id,
-                        deployment_upsert_in,
-                        fetched.deployments
-                    );
-
-                    let pull_request_commits_synced = sync_table!(
-                        tx,
-                        &scope,
-                        tenant_id,
-                        pull_request_commit_upsert_in,
-                        fetched.pull_request_commits
-                    );
-
-                    let commit_statuses_synced = sync_table!(
-                        tx,
-                        &scope,
-                        tenant_id,
-                        commit_status_upsert_in,
-                        fetched.commit_statuses
-                    );
-
-                    let workflow_jobs_synced = sync_table!(
-                        tx,
-                        &scope,
-                        tenant_id,
-                        workflow_job_upsert_in,
-                        fetched.workflow_jobs
-                    );
-
-                    let issue_reactions_synced = sync_table!(
+    async fn write_issue_detail(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        detail: IssueDetail,
+    ) -> Result<(), DomainError> {
+        let scope = scope.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    sync_table!(
                         tx,
                         &scope,
                         tenant_id,
                         issue_reaction_upsert_in,
-                        fetched.issue_reactions
-                    );
-
-                    let check_runs_synced = sync_table!(
-                        tx,
-                        &scope,
-                        tenant_id,
-                        check_run_upsert_in,
-                        fetched.check_runs
+                        detail.reactions
                     );
                     // Rows are keyed by position, so a shorter timeline would
-                    // leave the old tail behind: clear each fetched issue
-                    // before rewriting it.
-                    let refetched: Vec<i64> = fetched
-                        .issue_timeline
-                        .iter()
-                        .map(|event| event.issue_number)
-                        .collect::<std::collections::HashSet<_>>()
-                        .into_iter()
-                        .collect();
-                    issue_timeline_delete_by_issues_in(tx, &scope, repository.id, &refetched)
+                    // leave the old tail behind: clear the issue before
+                    // rewriting it.
+                    issue_timeline_delete_by_issues_in(tx, &scope, repo_id, &[detail.issue_number])
                         .await?;
-                    let issue_timeline_synced = sync_table!(
+                    sync_table!(
                         tx,
                         &scope,
                         tenant_id,
                         issue_timeline_upsert_in,
-                        fetched.issue_timeline
+                        detail.timeline
                     );
-
-                    let stale_rows_deleted =
-                        reconcile_stale(tx, &scope, &complete, repository.id, watermark).await?;
-                    if stale_rows_deleted > 0 {
-                        tracing::info!(
-                            repository = %repository.full_name,
-                            stale_rows_deleted,
-                            "reconciled upstream deletions"
-                        );
-                    }
-
-                    Ok(SyncSummary {
-                        repository: repository.full_name,
-                        issues_synced,
-                        pull_requests_synced,
-                        commits_synced,
-                        comments_synced,
-                        review_comments_synced,
-                        reviews_synced,
-                        labels_synced,
-                        milestones_synced,
-                        releases_synced,
-                        branches_synced,
-                        contributors_synced,
-                        workflow_runs_synced,
-                        pull_request_files_synced,
-                        tags_synced,
-                        commit_files_synced,
-                        review_threads_synced,
-                        commit_comments_synced,
-                        issue_events_synced,
-                        deployments_synced,
-                        pull_request_commits_synced,
-                        commit_statuses_synced,
-                        workflow_jobs_synced,
-                        issue_reactions_synced,
-                        check_runs_synced,
-                        issue_timeline_synced,
-                        stale_rows_deleted,
-                    })
+                    Ok(())
                 })
+            })
+            .await
+    }
+
+    async fn write_pull_listing(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        listing: PullListing,
+    ) -> Result<(), DomainError> {
+        let scope = scope.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    sync_table!(
+                        tx,
+                        &scope,
+                        tenant_id,
+                        pull_request_upsert_in,
+                        listing.pull_requests
+                    );
+                    sync_table!(
+                        tx,
+                        &scope,
+                        tenant_id,
+                        review_comment_upsert_in,
+                        listing.review_comments
+                    );
+                    write_contributors_in(tx, &scope, tenant_id, repo_id, listing.contributors)
+                        .await
+                })
+            })
+            .await
+    }
+
+    async fn write_pull_detail(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        detail: PullDetail,
+    ) -> Result<(), DomainError> {
+        let scope = scope.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    pull_request_upsert_in(tx, &scope, tenant_id, detail.pull_request).await?;
+                    sync_table!(tx, &scope, tenant_id, review_upsert_in, detail.reviews);
+                    sync_table!(
+                        tx,
+                        &scope,
+                        tenant_id,
+                        pull_request_file_upsert_in,
+                        detail.files
+                    );
+                    sync_table!(
+                        tx,
+                        &scope,
+                        tenant_id,
+                        pull_request_commit_upsert_in,
+                        detail.commits
+                    );
+                    sync_table!(
+                        tx,
+                        &scope,
+                        tenant_id,
+                        review_thread_upsert_in,
+                        detail.review_threads
+                    );
+                    write_contributors_in(tx, &scope, tenant_id, repo_id, detail.contributors).await
+                })
+            })
+            .await
+    }
+
+    async fn write_commit_listing(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        listing: CommitListing,
+    ) -> Result<(), DomainError> {
+        let scope = scope.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    sync_table!(tx, &scope, tenant_id, commit_upsert_in, listing.commits);
+                    sync_table!(
+                        tx,
+                        &scope,
+                        tenant_id,
+                        commit_comment_upsert_in,
+                        listing.commit_comments
+                    );
+                    write_contributors_in(tx, &scope, tenant_id, repo_id, listing.contributors)
+                        .await
+                })
+            })
+            .await
+    }
+
+    async fn write_commit_detail(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        detail: CommitDetail,
+    ) -> Result<(), DomainError> {
+        let scope = scope.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    commit_upsert_in(tx, &scope, tenant_id, detail.commit).await?;
+                    sync_table!(tx, &scope, tenant_id, commit_file_upsert_in, detail.files);
+                    sync_table!(
+                        tx,
+                        &scope,
+                        tenant_id,
+                        commit_status_upsert_in,
+                        detail.statuses
+                    );
+                    sync_table!(
+                        tx,
+                        &scope,
+                        tenant_id,
+                        check_run_upsert_in,
+                        detail.check_runs
+                    );
+                    Ok(())
+                })
+            })
+            .await
+    }
+
+    async fn write_metadata_listing(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        listing: MetadataListing,
+    ) -> Result<(), DomainError> {
+        let scope = scope.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    sync_table!(tx, &scope, tenant_id, label_upsert_in, listing.labels);
+                    sync_table!(
+                        tx,
+                        &scope,
+                        tenant_id,
+                        milestone_upsert_in,
+                        listing.milestones
+                    );
+                    sync_table!(tx, &scope, tenant_id, release_upsert_in, listing.releases);
+                    sync_table!(tx, &scope, tenant_id, branch_upsert_in, listing.branches);
+                    sync_table!(tx, &scope, tenant_id, tag_upsert_in, listing.tags);
+                    Ok(())
+                })
+            })
+            .await
+    }
+
+    async fn write_actions_listing(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        listing: ActionsListing,
+    ) -> Result<(), DomainError> {
+        let scope = scope.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    sync_table!(
+                        tx,
+                        &scope,
+                        tenant_id,
+                        workflow_run_upsert_in,
+                        listing.workflow_runs
+                    );
+                    sync_table!(
+                        tx,
+                        &scope,
+                        tenant_id,
+                        deployment_upsert_in,
+                        listing.deployments
+                    );
+                    Ok(())
+                })
+            })
+            .await
+    }
+
+    async fn write_workflow_jobs(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        jobs: Vec<WorkflowJobRecord>,
+    ) -> Result<(), DomainError> {
+        let scope = scope.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    sync_table!(tx, &scope, tenant_id, workflow_job_upsert_in, jobs);
+                    Ok(())
+                })
+            })
+            .await
+    }
+
+    async fn reconcile_stale(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        complete: &ListingCompleteness,
+        watermark: DateTimeUtc,
+    ) -> Result<u64, DomainError> {
+        let scope = scope.clone();
+        let complete = complete.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(
+                    async move { reconcile_stale(tx, &scope, &complete, repo_id, watermark).await },
+                )
             })
             .await
     }
