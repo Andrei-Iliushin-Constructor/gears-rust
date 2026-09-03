@@ -299,6 +299,7 @@ pub async fn list_comments(
     Path((owner, name, number)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<CommentDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized()?;
     let items = svc
         .list_comments(&ctx, &owner, &name, number, page.window())
@@ -335,6 +336,7 @@ pub async fn list_reviews(
     Path((owner, name, number)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<ReviewDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized()?;
     let items = svc
         .list_reviews(&ctx, &owner, &name, number, page.window())
@@ -350,6 +352,7 @@ pub async fn list_review_comments(
     Path((owner, name, number)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<ReviewCommentDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized()?;
     let items = svc
         .list_review_comments(&ctx, &owner, &name, number, page.window())
@@ -365,6 +368,7 @@ pub async fn list_pull_request_files(
     Path((owner, name, number)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<PullRequestFileDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized()?;
     let items = svc
         .list_pull_request_files(&ctx, &owner, &name, number, page.window())
@@ -521,6 +525,7 @@ pub async fn list_commit_files(
     Path((owner, name, sha)): Path<(String, String, String)>,
     OData(query): OData,
 ) -> ApiResult<JsonPage<CommitFileDto>> {
+    validate_repo_path(&owner, &name)?;
     let page: Page<_> = svc
         .list_commit_files(&ctx, &owner, &name, &sha, &query)
         .await?;
@@ -533,6 +538,7 @@ pub async fn list_review_threads(
     Path((owner, name, number)): Path<(String, String, i64)>,
     OData(query): OData,
 ) -> ApiResult<JsonPage<ReviewThreadDto>> {
+    validate_repo_path(&owner, &name)?;
     let page: Page<_> = svc
         .list_review_threads(&ctx, &owner, &name, number, &query)
         .await?;
@@ -554,6 +560,7 @@ pub async fn get_issue(
     Extension(svc): Extension<Arc<ConcreteService>>,
     Path((owner, name, number)): Path<(String, String, i64)>,
 ) -> ApiResult<JsonBody<IssueDto>> {
+    validate_repo_path(&owner, &name)?;
     let issue = svc.get_issue(&ctx, &owner, &name, number).await?;
     Ok(Json(issue.into()))
 }
@@ -563,6 +570,7 @@ pub async fn get_pull_request(
     Extension(svc): Extension<Arc<ConcreteService>>,
     Path((owner, name, number)): Path<(String, String, i64)>,
 ) -> ApiResult<JsonBody<PullRequestDto>> {
+    validate_repo_path(&owner, &name)?;
     let pull = svc.get_pull_request(&ctx, &owner, &name, number).await?;
     Ok(Json(pull.into()))
 }
@@ -572,6 +580,7 @@ pub async fn get_commit(
     Extension(svc): Extension<Arc<ConcreteService>>,
     Path((owner, name, sha)): Path<(String, String, String)>,
 ) -> ApiResult<JsonBody<CommitDto>> {
+    validate_repo_path(&owner, &name)?;
     let commit = svc.get_commit(&ctx, &owner, &name, &sha).await?;
     let files = svc
         .list_commit_files(&ctx, &owner, &name, &sha, &ODataQuery::default())
@@ -594,6 +603,7 @@ pub async fn list_commit_comments(
     Path((owner, name, sha)): Path<(String, String, String)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<CommitCommentDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized()?;
     let items = svc
         .list_commit_comments(&ctx, &owner, &name, &sha, page.window())
@@ -609,6 +619,7 @@ pub async fn list_issue_events(
     Path((owner, name, number)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<IssueEventDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized()?;
     let items = svc
         .list_issue_events(&ctx, &owner, &name, number, page.window())
@@ -624,6 +635,7 @@ pub async fn list_issue_reactions(
     Path((owner, name, number)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<IssueReactionDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized()?;
     let items = svc
         .list_issue_reactions(&ctx, &owner, &name, number, page.window())
@@ -639,6 +651,7 @@ pub async fn list_issue_timeline(
     Path((owner, name, number)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<IssueTimelineEventDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized()?;
     let items = svc
         .list_issue_timeline(&ctx, &owner, &name, number, page.window())
@@ -670,6 +683,7 @@ pub async fn list_pull_request_commits(
     Path((owner, name, number)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<CommitDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized()?;
     let items = svc
         .list_pull_request_commits(&ctx, &owner, &name, number, page.window())
@@ -685,6 +699,7 @@ pub async fn list_commit_statuses(
     Path((owner, name, sha)): Path<(String, String, String)>,
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<CommitStatusDto> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized()?;
     let items = svc
         .list_commit_statuses(&ctx, &owner, &name, &sha, page.window())
@@ -700,6 +715,7 @@ pub async fn list_workflow_jobs(
     Path((owner, name, run_id)): Path<(String, String, i64)>,
     Query(query): Query<GithubPageQuery>,
 ) -> ApiResult<(HeaderMap, JsonBody<WorkflowJobsPageDto>)> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized()?;
     let (items, total) = svc
         .list_workflow_jobs(&ctx, &owner, &name, run_id, page.window())
@@ -717,6 +733,7 @@ pub async fn list_check_runs(
     Path((owner, name, sha)): Path<(String, String, String)>,
     Query(query): Query<GithubPageQuery>,
 ) -> ApiResult<(HeaderMap, JsonBody<CheckRunsPageDto>)> {
+    validate_repo_path(&owner, &name)?;
     let page = query.normalized()?;
     let (items, total) = svc
         .list_check_runs(&ctx, &owner, &name, &sha, page.window())
