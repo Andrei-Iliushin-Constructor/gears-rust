@@ -95,6 +95,7 @@ mod tests {
             entity_type: entity_type.to_owned(),
             entity_id: None,
             priority: TaskPriority::NORMAL,
+            attempt: 0,
             status: TaskStatus::Running,
             created_at: Utc::now(),
         }

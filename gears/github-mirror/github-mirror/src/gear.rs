@@ -31,8 +31,8 @@ use crate::infra::storage::sea_orm_repo::{
     SeaOrmPullRequestFileRepository, SeaOrmPullRequestRepository, SeaOrmReleaseRepository,
     SeaOrmRepoRepository, SeaOrmRepoSyncStatusRepository, SeaOrmReviewCommentRepository,
     SeaOrmReviewRepository, SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository,
-    SeaOrmSyncWriter, SeaOrmTagRepository, SeaOrmWorkflowJobRepository,
-    SeaOrmWorkflowRunRepository,
+    SeaOrmSyncWatermarkRepository, SeaOrmSyncWriter, SeaOrmTagRepository,
+    SeaOrmWorkflowJobRepository, SeaOrmWorkflowRunRepository,
 };
 
 type ConcreteService = Service;
@@ -148,6 +148,7 @@ impl Gear for GithubMirrorGear {
             repo_sync_status,
             Arc::new(SeaOrmSyncWriter::new(Arc::clone(&db))),
             Arc::new(SeaOrmEntityFingerprintRepository::new(Arc::clone(&db))),
+            Arc::new(SeaOrmSyncWatermarkRepository::new(Arc::clone(&db))),
             github,
             policy_enforcer,
             ServiceConfig {

@@ -8,6 +8,7 @@
 //! entity's detail, in its own transaction, so a run interrupted anywhere
 //! leaves nothing half-written.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use async_trait::async_trait;
@@ -18,7 +19,9 @@ use uuid::Uuid;
 
 use super::change_gate::{self, ChangeGate, GateInputs, entities};
 use super::runner::REPOSITORY_ENTITY;
+use super::sweep_watermark::{SweepWatermark, high_water, is_stale, sweep_families};
 use super::task::{ExtractionTask, NewTask, TaskPhase, TaskPriority};
+use super::verification::{CountGap, GapOutcome, pull_gaps};
 use super::worker::{Worker, WorkerContext};
 use crate::domain::error::DomainError;
 use crate::domain::ports::github::{
@@ -53,6 +56,7 @@ pub struct RunState {
     repo_id: OnceLock<i64>,
     complete: Mutex<ListingCompleteness>,
     summary: Mutex<SyncSummary>,
+    drift: Mutex<Vec<CountGap>>,
 }
 
 impl RunState {
@@ -78,6 +82,7 @@ impl RunState {
                 repository: format!("{owner}/{name}"),
                 ..SyncSummary::default()
             }),
+            drift: Mutex::new(Vec::new()),
         }
     }
 
@@ -118,6 +123,21 @@ impl RunState {
             .absorb(complete);
     }
 
+    pub fn accept_drift(&self, gap: CountGap) {
+        self.drift
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(gap);
+    }
+
+    #[must_use]
+    pub fn drift(&self) -> Vec<CountGap> {
+        self.drift
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     fn tally(&self, add: impl FnOnce(&mut SyncSummary)) {
         add(&mut self.summary.lock().unwrap_or_else(PoisonError::into_inner));
     }
@@ -128,6 +148,7 @@ pub struct MirrorWorker {
     github: Arc<dyn GithubPort>,
     writer: Arc<dyn SyncWriter>,
     gate: Arc<ChangeGate>,
+    watermark: Arc<SweepWatermark>,
     run: Arc<RunState>,
 }
 
@@ -137,12 +158,14 @@ impl MirrorWorker {
         github: Arc<dyn GithubPort>,
         writer: Arc<dyn SyncWriter>,
         gate: Arc<ChangeGate>,
+        watermark: Arc<SweepWatermark>,
         run: Arc<RunState>,
     ) -> Self {
         Self {
             github,
             writer,
             gate,
+            watermark,
             run,
         }
     }
@@ -195,12 +218,25 @@ impl MirrorWorker {
         entity_id: Option<String>,
         priority: TaskPriority,
     ) {
+        self.seed_attempt(ctx, phase, entity_type, entity_id, priority, 0);
+    }
+
+    fn seed_attempt(
+        &self,
+        ctx: &WorkerContext,
+        phase: TaskPhase,
+        entity_type: &str,
+        entity_id: Option<String>,
+        priority: TaskPriority,
+        attempt: u32,
+    ) {
         ctx.queue.enqueue_task(&NewTask {
             session_id: self.run.session_id,
             phase,
             entity_type: entity_type.to_owned(),
             entity_id,
             priority,
+            attempt,
         });
     }
 
@@ -250,14 +286,41 @@ impl MirrorWorker {
     async fn index_issues(&self, ctx: &WorkerContext) -> Result<(), DomainError> {
         let run = &self.run;
         let repo_id = run.repo_id()?;
+        let since = self
+            .watermark
+            .start_sweep(
+                &run.scope,
+                repo_id,
+                sweep_families::ISSUES,
+                run.options.force,
+            )
+            .await?;
         let listing = self
             .github
-            .list_issues(&run.owner, &run.name, repo_id, &run.options)
+            .list_issues(&run.owner, &run.name, repo_id, since, &run.options)
             .await?;
         run.mark_complete(&listing.complete);
+        let seen: Vec<&str> = listing
+            .issues
+            .iter()
+            .map(|i| i.updated_at.as_str())
+            .collect();
+        self.watermark
+            .stage(
+                &run.scope,
+                run.tenant_id,
+                repo_id,
+                sweep_families::ISSUES,
+                high_water(&seen, since),
+            )
+            .await?;
 
         let collection = run.options.scope.collection;
+        let mut swept: HashSet<i64> = HashSet::new();
         for issue in &listing.issues {
+            if !swept.insert(issue.number) || is_stale(Some(&issue.updated_at), since) {
+                continue;
+            }
             let open = issue.state == "open";
             if !(collection.reactions.includes(open) || collection.timeline.includes(open)) {
                 continue;
@@ -374,7 +437,11 @@ impl MirrorWorker {
         Ok(())
     }
 
-    async fn refine_pull_request(&self, task: &ExtractionTask) -> Result<(), DomainError> {
+    async fn refine_pull_request(
+        &self,
+        ctx: &WorkerContext,
+        task: &ExtractionTask,
+    ) -> Result<(), DomainError> {
         let run = &self.run;
         let repo_id = run.repo_id()?;
         let number = entity_number(task)?;
@@ -382,6 +449,7 @@ impl MirrorWorker {
             .github
             .refine_pull_request(&run.owner, &run.name, repo_id, number, &run.options)
             .await?;
+        let gaps = pull_gaps(&detail);
         let (reviews, files, commits, threads, people) = (
             count(&detail.reviews),
             count(&detail.files),
@@ -399,21 +467,91 @@ impl MirrorWorker {
             s.review_threads_synced += threads;
             s.contributors_synced += people;
         });
+        for gap in &gaps {
+            self.report_gap(ctx, number, gap, task.attempt);
+        }
         self.mark_refined(entities::PULL_REQUEST, &number.to_string())
             .await
+    }
+
+    fn report_gap(&self, ctx: &WorkerContext, number: i64, gap: &CountGap, attempt: u32) {
+        let gap = CountGap {
+            repair_attempts: attempt,
+            ..gap.clone()
+        };
+        match gap.outcome() {
+            GapOutcome::Complete => {}
+            GapOutcome::Repair => {
+                tracing::debug!(
+                    pull = number,
+                    entity_type = %gap.entity_type,
+                    expected = gap.expected,
+                    stored = gap.stored,
+                    attempt = attempt + 1,
+                    "repairing a short pull request walk"
+                );
+                self.seed_attempt(
+                    ctx,
+                    TaskPhase::Verification,
+                    entities::PULL_REQUEST,
+                    Some(number.to_string()),
+                    TaskPriority::NORMAL,
+                    attempt + 1,
+                );
+            }
+            GapOutcome::AcceptedDrift => {
+                self.run.accept_drift(gap.clone());
+                tracing::warn!(
+                    pull = number,
+                    entity_type = %gap.entity_type,
+                    expected = gap.expected,
+                    stored = gap.stored,
+                    passes = attempt,
+                    "accepting a pull request count gap GitHub will not serve"
+                );
+            }
+        }
     }
 
     async fn index_commits(&self, ctx: &WorkerContext) -> Result<(), DomainError> {
         let run = &self.run;
         let repo_id = run.repo_id()?;
+        let since = self
+            .watermark
+            .start_sweep(
+                &run.scope,
+                repo_id,
+                sweep_families::COMMITS,
+                run.options.force,
+            )
+            .await?;
         let listing = self
             .github
-            .list_commits(&run.owner, &run.name, repo_id, &run.options)
+            .list_commits(&run.owner, &run.name, repo_id, since, &run.options)
             .await?;
         run.mark_complete(&listing.complete);
+        let seen: Vec<&str> = listing
+            .commits
+            .iter()
+            .filter_map(|c| c.committed_at.as_deref())
+            .collect();
+        self.watermark
+            .stage(
+                &run.scope,
+                run.tenant_id,
+                repo_id,
+                sweep_families::COMMITS,
+                high_water(&seen, since),
+            )
+            .await?;
 
         let with_ci = run.options.scope.collection.actions != CollectionMode::None;
+        let mut swept: HashSet<&str> = HashSet::new();
         for commit in &listing.commits {
+            if !swept.insert(commit.sha.as_str()) || is_stale(commit.committed_at.as_deref(), since)
+            {
+                continue;
+            }
             if !self
                 .needs_refinement(
                     entities::COMMIT,
@@ -585,7 +723,8 @@ impl Worker for MirrorWorker {
                     | entities::COMMIT
                     | entities::WORKFLOW_RUN
             ),
-            TaskPhase::ChangeDetection | TaskPhase::Verification => false,
+            TaskPhase::Verification => entity_type == entities::PULL_REQUEST,
+            TaskPhase::ChangeDetection => false,
         }
     }
 
@@ -598,7 +737,9 @@ impl Worker for MirrorWorker {
             (TaskPhase::Indexing, families::METADATA) => self.index_metadata().await,
             (TaskPhase::Indexing, families::ACTIONS) => self.index_actions(ctx).await,
             (TaskPhase::Refinement, entities::ISSUE) => self.refine_issue(task).await,
-            (TaskPhase::Refinement, entities::PULL_REQUEST) => self.refine_pull_request(task).await,
+            (TaskPhase::Refinement | TaskPhase::Verification, entities::PULL_REQUEST) => {
+                self.refine_pull_request(ctx, task).await
+            }
             (TaskPhase::Refinement, entities::COMMIT) => self.refine_commit(task).await,
             (TaskPhase::Refinement, entities::WORKFLOW_RUN) => self.refine_workflow_run(task).await,
             (phase, other) => Err(DomainError::internal(format!(

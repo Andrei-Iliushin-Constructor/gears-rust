@@ -30,6 +30,7 @@ struct DedupKey {
     phase: TaskPhase,
     entity_type: String,
     entity_id: Option<String>,
+    attempt: u32,
 }
 
 impl DedupKey {
@@ -39,6 +40,7 @@ impl DedupKey {
             phase: task.phase,
             entity_type: task.entity_type.clone(),
             entity_id: task.entity_id.clone(),
+            attempt: task.attempt,
         }
     }
 }
@@ -107,6 +109,7 @@ impl TaskQueue {
             entity_type: task.entity_type.clone(),
             entity_id: task.entity_id.clone(),
             priority: task.priority,
+            attempt: task.attempt,
             status: TaskStatus::Pending,
             created_at: Utc::now(),
         };
@@ -248,6 +251,7 @@ mod tests {
             entity_type: "repository".to_owned(),
             entity_id: None,
             priority: TaskPriority::NORMAL,
+            attempt: 0,
         }
     }
 
@@ -258,6 +262,7 @@ mod tests {
             entity_type: "issue".to_owned(),
             entity_id: Some(entity_id.to_owned()),
             priority,
+            attempt: 0,
         }
     }
 

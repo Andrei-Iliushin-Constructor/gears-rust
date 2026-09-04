@@ -477,11 +477,15 @@ async fn fetch_repository(
     let repo_id = repository.id;
     let collection = options.scope.collection;
 
-    let issues = client.list_issues(owner, name, repo_id, options).await?;
+    let issues = client
+        .list_issues(owner, name, repo_id, None, options)
+        .await?;
     let pulls = client
         .list_pull_requests(owner, name, repo_id, options)
         .await?;
-    let commits = client.list_commits(owner, name, repo_id, options).await?;
+    let commits = client
+        .list_commits(owner, name, repo_id, None, options)
+        .await?;
     let meta = client.list_metadata(owner, name, repo_id, options).await?;
     let actions = client.list_actions(owner, name, repo_id, options).await?;
 

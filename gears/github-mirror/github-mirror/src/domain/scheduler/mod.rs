@@ -16,12 +16,16 @@ pub mod change_gate;
 pub mod mirror_worker;
 pub mod queue;
 pub mod runner;
+pub mod sweep_watermark;
 pub mod task;
+pub mod verification;
 pub mod worker;
 
 pub use change_gate::{ChangeGate, GateInputs, GateReason};
 pub use mirror_worker::{MirrorWorker, RunState};
 pub use queue::TaskQueue;
 pub use runner::{REPOSITORY_ENTITY, RepoPhaseRunner, RunReport, TaskFailure};
+pub use sweep_watermark::{SweepWatermark, sweep_families};
 pub use task::{ExtractionTask, NewTask, TaskPhase, TaskPriority, TaskStatus};
+pub use verification::{CountGap, GapOutcome, MAX_REPAIR};
 pub use worker::{Worker, WorkerContext, WorkerDispatcher};

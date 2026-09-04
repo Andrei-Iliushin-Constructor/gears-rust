@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use strum::IntoEnumIterator;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use toolkit_macros::domain_model;
 
 use crate::domain::error::DomainError;
@@ -151,6 +152,8 @@ pub struct PullDetail {
     pub files: Vec<PullRequestFileRecord>,
     pub commits: Vec<PullRequestCommitRecord>,
     pub review_threads: Vec<ReviewThreadRecord>,
+    /// What GitHub says the pull request holds, when the payload reports it.
+    pub declared: DeclaredCounts,
     /// People seen reviewing; the review objects do not survive the mapping
     /// to `ReviewRecord`, so they are harvested here.
     pub contributors: Vec<ContributorRecord>,
@@ -164,6 +167,15 @@ pub struct CommitListing {
     pub commits: Vec<CommitRecord>,
     pub commit_comments: Vec<CommitCommentRecord>,
     pub contributors: Vec<ContributorRecord>,
+}
+
+/// What a pull request payload says it holds, for the completeness check.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DeclaredCounts {
+    pub commits: Option<i64>,
+    pub files: Option<i64>,
+    pub review_comments: Option<i64>,
 }
 
 /// One commit refined: the detail record (with its stats) plus files and CI.
@@ -257,6 +269,7 @@ pub trait GithubPort: Send + Sync {
         owner: &str,
         name: &str,
         repo_id: i64,
+        since: Option<DateTime<Utc>>,
         options: &FetchOptions,
     ) -> Result<IssueListing, DomainError>;
 
@@ -292,6 +305,7 @@ pub trait GithubPort: Send + Sync {
         owner: &str,
         name: &str,
         repo_id: i64,
+        since: Option<DateTime<Utc>>,
         options: &FetchOptions,
     ) -> Result<CommitListing, DomainError>;
 

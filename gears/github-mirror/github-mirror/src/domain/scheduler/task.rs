@@ -159,6 +159,8 @@ pub struct NewTask {
     /// a commit SHA, a workflow-run id.
     pub entity_id: Option<String>,
     pub priority: TaskPriority,
+    /// Which repair pass this is; 0 for the original task.
+    pub attempt: u32,
 }
 
 /// An ephemeral unit of work, scoped to a single in-memory sync run.
@@ -170,6 +172,7 @@ pub struct ExtractionTask {
     pub entity_type: String,
     pub entity_id: Option<String>,
     pub priority: TaskPriority,
+    pub attempt: u32,
     pub status: TaskStatus,
     pub created_at: DateTime<Utc>,
 }

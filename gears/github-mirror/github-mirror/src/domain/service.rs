@@ -19,7 +19,7 @@ use toolkit_security::{AccessScope, SecurityContext, pep_properties};
 use uuid::Uuid;
 
 use super::error::DomainError;
-use super::ports::github::{FetchOptions, GithubPort};
+use super::ports::github::{FetchOptions, GithubPort, Listing};
 use super::repo::{
     BranchRecord, BranchRepository, CheckRunRecord, CheckRunRepository, CommentRecord,
     CommentRepository, CommitCommentRecord, CommitCommentRepository, CommitFileRecord,
@@ -33,11 +33,14 @@ use super::repo::{
     PullRequestRecord, PullRequestRepository, ReleaseRecord, ReleaseRepository, RepoRecord,
     RepoRepository, RepoSyncStatusRecord, RepoSyncStatusRepository, ReviewCommentRecord,
     ReviewCommentRepository, ReviewRecord, ReviewRepository, ReviewThreadRecord,
-    ReviewThreadRepository, SyncSessionRecord, SyncSessionRepository, SyncWriter, TagRecord,
-    TagRepository, WorkflowJobRecord, WorkflowJobRepository, WorkflowRunRecord,
-    WorkflowRunRepository,
+    ReviewThreadRepository, SyncSessionRecord, SyncSessionRepository, SyncWatermarkRepository,
+    SyncWriter, TagRecord, TagRepository, WorkflowJobRecord, WorkflowJobRepository,
+    WorkflowRunRecord, WorkflowRunRepository,
 };
-use super::scheduler::{ChangeGate, MirrorWorker, RepoPhaseRunner, RunState, TaskPhase, Worker};
+use super::scheduler::{
+    ChangeGate, MirrorWorker, RepoPhaseRunner, RunState, SweepWatermark, TaskPhase, Worker,
+    sweep_families,
+};
 use super::scope::ScopeConfig;
 
 /// The gear's name, taken from the `#[toolkit::gear]` attribute so the
@@ -389,6 +392,7 @@ pub struct Service {
     repo_sync_status: Arc<dyn RepoSyncStatusRepository>,
     sync_writer: Arc<dyn SyncWriter>,
     change_gate: Arc<ChangeGate>,
+    sweep_watermark: Arc<SweepWatermark>,
     github: Arc<dyn GithubPort>,
     policy_enforcer: PolicyEnforcer,
     config: ServiceConfig,
@@ -441,6 +445,7 @@ impl Clone for Service {
             repo_sync_status: Arc::clone(&self.repo_sync_status),
             sync_writer: Arc::clone(&self.sync_writer),
             change_gate: Arc::clone(&self.change_gate),
+            sweep_watermark: Arc::clone(&self.sweep_watermark),
             github: Arc::clone(&self.github),
             policy_enforcer: self.policy_enforcer.clone(),
             config: self.config.clone(),
@@ -485,6 +490,7 @@ impl Service {
         repo_sync_status: Arc<dyn RepoSyncStatusRepository>,
         sync_writer: Arc<dyn SyncWriter>,
         fingerprints: Arc<dyn EntityFingerprintRepository>,
+        watermarks: Arc<dyn SyncWatermarkRepository>,
         github: Arc<dyn GithubPort>,
         policy_enforcer: PolicyEnforcer,
         config: ServiceConfig,
@@ -522,6 +528,7 @@ impl Service {
             repo_sync_status,
             sync_writer,
             change_gate: Arc::new(ChangeGate::new(fingerprints)),
+            sweep_watermark: Arc::new(SweepWatermark::new(watermarks)),
             github,
             policy_enforcer,
             config,
@@ -3609,6 +3616,7 @@ impl Service {
             Arc::clone(&self.github),
             Arc::clone(&self.sync_writer),
             Arc::clone(&self.change_gate),
+            Arc::clone(&self.sweep_watermark),
             Arc::clone(run),
         ));
         let runner = RepoPhaseRunner::new(
@@ -3646,6 +3654,18 @@ impl Service {
                 report.tasks_done + report.tasks_failed(),
                 detail.join("; ")
             )));
+        }
+
+        let completeness = run.completeness();
+        for (family, listing) in [
+            (sweep_families::ISSUES, Listing::Issues),
+            (sweep_families::COMMITS, Listing::Commits),
+        ] {
+            if completeness.is_complete(listing) {
+                self.sweep_watermark
+                    .promote(&run.scope, run.tenant_id, run.repo_id()?, family)
+                    .await?;
+            }
         }
 
         let stale_rows_deleted = self

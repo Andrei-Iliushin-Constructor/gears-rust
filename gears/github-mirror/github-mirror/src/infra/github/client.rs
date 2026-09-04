@@ -7,9 +7,9 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::domain::error::DomainError;
 use crate::domain::ports::github::{
-    ActionsListing, CommitDetail, CommitListing, FetchOptions, GithubPort, IssueDetail,
-    IssueDetailWants, IssueListing, Listing, ListingCompleteness, MetadataListing, PullDetail,
-    PullListing,
+    ActionsListing, CommitDetail, CommitListing, DeclaredCounts, FetchOptions, GithubPort,
+    IssueDetail, IssueDetailWants, IssueListing, Listing, ListingCompleteness, MetadataListing,
+    PullDetail, PullListing,
 };
 use crate::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
@@ -33,6 +33,15 @@ const ACCEPT_JSON: &str = "application/vnd.github+json";
 /// this bounds one task's memory and call count. It goes when listings stream
 /// page by page into the writer (#4632 slice 6, memory NFR).
 const MAX_PAGES: usize = 10;
+
+fn since_param(since: Option<DateTime<Utc>>) -> String {
+    since.map_or_else(String::new, |at| {
+        format!(
+            "&since={}",
+            at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        )
+    })
+}
 
 const USER_AGENT: &str = concat!("cf-gears-github-mirror/", env!("CARGO_PKG_VERSION"));
 
@@ -599,6 +608,12 @@ struct GhPullRequest {
     additions: Option<i64>,
     #[serde(default)]
     deletions: Option<i64>,
+    #[serde(default)]
+    commits: Option<i64>,
+    #[serde(default)]
+    changed_files: Option<i64>,
+    #[serde(default)]
+    review_comments: Option<i64>,
     draft: Option<bool>,
     merged_at: Option<String>,
     head: Option<GhRef>,
@@ -1742,21 +1757,25 @@ impl GithubPort for GithubClient {
         owner: &str,
         name: &str,
         repo_id: i64,
+        since: Option<DateTime<Utc>>,
         options: &FetchOptions,
     ) -> Result<IssueListing, DomainError> {
         if !options.scope.objects.issues {
             return Ok(IssueListing::default());
         }
+        let bound = since_param(since);
 
         let (issues, issues_complete): (Vec<GhIssue>, bool) = self
             .get_json_all(
-                &format!("/repos/{owner}/{name}/issues?state=all&per_page={FIRST_PAGE_SIZE}"),
+                &format!(
+                    "/repos/{owner}/{name}/issues?state=all&per_page={FIRST_PAGE_SIZE}{bound}"
+                ),
                 options,
             )
             .await?;
         let (comments, comments_complete): (Vec<GhComment>, bool) = self
             .get_json_all(
-                &format!("/repos/{owner}/{name}/issues/comments?per_page={FIRST_PAGE_SIZE}"),
+                &format!("/repos/{owner}/{name}/issues/comments?per_page={FIRST_PAGE_SIZE}{bound}"),
                 options,
             )
             .await?;
@@ -1894,6 +1913,11 @@ impl GithubPort for GithubClient {
         let pull: GhPullRequest = self
             .get_json(&format!("/repos/{owner}/{name}/pulls/{number}"), options)
             .await?;
+        let declared = DeclaredCounts {
+            commits: pull.commits,
+            files: pull.changed_files,
+            review_comments: pull.review_comments,
+        };
         let mut pull_request = pull_request_record(repo_id, pull);
 
         let mut reviewers = DerivedContributors::default();
@@ -1983,6 +2007,7 @@ impl GithubPort for GithubClient {
             files,
             commits,
             review_threads,
+            declared,
             contributors: reviewers.into_records(),
         })
     }
@@ -1992,15 +2017,17 @@ impl GithubPort for GithubClient {
         owner: &str,
         name: &str,
         repo_id: i64,
+        since: Option<DateTime<Utc>>,
         options: &FetchOptions,
     ) -> Result<CommitListing, DomainError> {
         if !options.scope.objects.commits {
             return Ok(CommitListing::default());
         }
+        let bound = since_param(since);
 
         let (commits, commits_complete): (Vec<GhCommit>, bool) = self
             .get_json_all(
-                &format!("/repos/{owner}/{name}/commits?per_page={FIRST_PAGE_SIZE}"),
+                &format!("/repos/{owner}/{name}/commits?per_page={FIRST_PAGE_SIZE}{bound}"),
                 options,
             )
             .await?;

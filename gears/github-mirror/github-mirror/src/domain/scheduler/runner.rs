@@ -34,6 +34,8 @@ const STREAMED_PHASES: [TaskPhase; 3] = [
     TaskPhase::Refinement,
 ];
 
+const VERIFICATION_PHASES: [TaskPhase; 1] = [TaskPhase::Verification];
+
 /// How one run went, in tasks.
 #[derive(Debug, Default)]
 pub struct RunReport {
@@ -111,10 +113,15 @@ impl RepoPhaseRunner {
             entity_type: REPOSITORY_ENTITY.to_owned(),
             entity_id: None,
             priority: TaskPriority::NORMAL,
+            attempt: 0,
         });
 
         let mut report = RunReport::default();
-        for phases in [&[TaskPhase::Discovery][..], &STREAMED_PHASES[..]] {
+        for phases in [
+            &[TaskPhase::Discovery][..],
+            &STREAMED_PHASES[..],
+            &VERIFICATION_PHASES[..],
+        ] {
             self.drain(phases, &mut report).await;
             // Discovery is the one task everything else hangs off: without
             // the repository row there is nothing to index.

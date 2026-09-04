@@ -10,9 +10,9 @@ use authz_resolver_sdk::{
 };
 use github_mirror::domain::error::DomainError;
 use github_mirror::domain::ports::github::{
-    ActionsListing, CommitDetail, CommitListing, FetchOptions, FetchedRepository, GithubPort,
-    IssueDetail, IssueDetailWants, IssueListing, ListingCompleteness, MetadataListing, PullDetail,
-    PullListing,
+    ActionsListing, CommitDetail, CommitListing, DeclaredCounts, FetchOptions, FetchedRepository,
+    GithubPort, IssueDetail, IssueDetailWants, IssueListing, ListingCompleteness, MetadataListing,
+    PullDetail, PullListing,
 };
 use github_mirror::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
@@ -33,8 +33,9 @@ use github_mirror::infra::storage::sea_orm_repo::{
     SeaOrmMilestoneRepository, SeaOrmPullRequestCommitRepository, SeaOrmPullRequestFileRepository,
     SeaOrmPullRequestRepository, SeaOrmReleaseRepository, SeaOrmRepoRepository,
     SeaOrmRepoSyncStatusRepository, SeaOrmReviewCommentRepository, SeaOrmReviewRepository,
-    SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository, SeaOrmSyncWriter,
-    SeaOrmTagRepository, SeaOrmWorkflowJobRepository, SeaOrmWorkflowRunRepository,
+    SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository, SeaOrmSyncWatermarkRepository,
+    SeaOrmSyncWriter, SeaOrmTagRepository, SeaOrmWorkflowJobRepository,
+    SeaOrmWorkflowRunRepository,
 };
 use toolkit::api::canonical_prelude::CanonicalError;
 use toolkit::{ClientHub, ConfigProvider, GearCtx};
@@ -130,6 +131,7 @@ impl GithubPort for FakeGithub {
         _owner: &str,
         _name: &str,
         _repo_id: i64,
+        _since: Option<chrono::DateTime<chrono::Utc>>,
         _options: &FetchOptions,
     ) -> Result<IssueListing, DomainError> {
         let f = self.fixture()?;
@@ -232,6 +234,7 @@ impl GithubPort for FakeGithub {
                 .filter(|r| r.pull_number == number)
                 .cloned()
                 .collect(),
+            declared: DeclaredCounts::default(),
             contributors: Vec::new(),
         })
     }
@@ -241,6 +244,7 @@ impl GithubPort for FakeGithub {
         _owner: &str,
         _name: &str,
         _repo_id: i64,
+        _since: Option<chrono::DateTime<chrono::Utc>>,
         _options: &FetchOptions,
     ) -> Result<CommitListing, DomainError> {
         let f = self.fixture()?;
@@ -432,6 +436,7 @@ pub fn service_with_enforcer(
         Arc::new(SeaOrmRepoSyncStatusRepository::new(Arc::clone(&db))),
         Arc::new(SeaOrmSyncWriter::new(Arc::clone(&db))),
         Arc::new(SeaOrmEntityFingerprintRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmSyncWatermarkRepository::new(Arc::clone(&db))),
         github,
         policy_enforcer,
         ServiceConfig {
