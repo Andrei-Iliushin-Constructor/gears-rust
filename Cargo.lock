@@ -2329,6 +2329,7 @@ dependencies = [
  "cf-gears-gear-orchestrator",
  "cf-gears-github-mirror",
  "cf-gears-grpc-hub",
+ "cf-gears-license-resolver",
  "cf-gears-mini-chat",
  "cf-gears-nodes-registry",
  "cf-gears-oagw",
@@ -2340,6 +2341,7 @@ dependencies = [
  "cf-gears-static-authz-plugin",
  "cf-gears-static-credstore-plugin",
  "cf-gears-static-idp-plugin",
+ "cf-gears-static-license-plugin",
  "cf-gears-static-tr-plugin",
  "cf-gears-tenant-resolver",
  "cf-gears-timescaledb-usage-collector-plugin",
@@ -2619,6 +2621,50 @@ dependencies = [
  "url",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "cf-gears-license-resolver"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "cf-gears-license-resolver-sdk",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-gts",
+ "cf-gears-toolkit-macros",
+ "cf-gears-types-registry",
+ "cf-gears-types-registry-sdk",
+ "gts",
+ "inventory",
+ "jsonschema",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "cf-gears-license-resolver-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-gts",
+ "cf-gears-toolkit-security",
+ "gts",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -3190,6 +3236,28 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "cf-gears-static-license-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "cf-gears-license-resolver-sdk",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-gts",
+ "cf-gears-toolkit-macros",
+ "cf-gears-types-registry",
+ "cf-gears-types-registry-sdk",
+ "gts",
+ "inventory",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
