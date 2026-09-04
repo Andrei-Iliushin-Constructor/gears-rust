@@ -1,0 +1,25 @@
+//! In-memory task scheduler for one repository sync (DESIGN §4 "Task Queue
+//! and Scheduling Architecture"), ported from the reference implementation's
+//! `scheduler` crate.
+//!
+//! - [`task`]: [`ExtractionTask`], [`TaskPhase`], [`TaskStatus`], [`TaskPriority`].
+//! - [`queue`]: [`TaskQueue`] — indexed in-memory enqueue / claim / complete.
+//! - [`worker`]: [`Worker`] trait and [`WorkerDispatcher`].
+//! - [`runner`]: [`RepoPhaseRunner`] — phase-ordered executor.
+//! - [`mirror_worker`]: the gear's own [`Worker`], fetching through the GitHub
+//!   port and writing through the sync writer.
+//!
+//! One level up, `gear.rs`'s `SyncPoolRunner` decides *which repository* syncs
+//! next; everything here decides what happens inside one of those syncs.
+
+pub mod mirror_worker;
+pub mod queue;
+pub mod runner;
+pub mod task;
+pub mod worker;
+
+pub use mirror_worker::{MirrorWorker, RunState};
+pub use queue::TaskQueue;
+pub use runner::{REPOSITORY_ENTITY, RepoPhaseRunner, RunReport, TaskFailure};
+pub use task::{ExtractionTask, NewTask, TaskPhase, TaskPriority, TaskStatus};
+pub use worker::{Worker, WorkerContext, WorkerDispatcher};
