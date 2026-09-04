@@ -325,6 +325,13 @@ fn gh_tags_json() -> serde_json::Value {
 fn gh_commit_detail_json() -> serde_json::Value {
     json!({
         "sha": "c1",
+        "commit": {
+            "message": "first",
+            "author": { "date": "2026-08-19T00:00:00Z" },
+            "committer": { "date": "2026-08-19T00:00:00Z" }
+        },
+        "author": { "id": 71, "login": "alice", "type": "User" },
+        "committer": { "id": 72, "login": "bob", "type": "User" },
         "stats": { "additions": 4, "deletions": 1, "total": 5 },
         "files": [
             {
@@ -633,6 +640,12 @@ async fn fetch_repository_maps_github_payloads_into_records() {
         .mock_async(|when, then| {
             when.method("GET").path("/repos/rust-lang/rust/pulls");
             then.status(200).json_body(gh_pulls_json());
+        })
+        .await;
+    server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/rust-lang/rust/pulls/13");
+            then.status(200).json_body(gh_pulls_json()[0].clone());
         })
         .await;
     server

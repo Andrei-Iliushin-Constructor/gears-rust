@@ -25,13 +25,14 @@ use crate::infra::storage::sea_orm_repo::{
     SeaOrmBranchRepository, SeaOrmCheckRunRepository, SeaOrmCommentRepository,
     SeaOrmCommitCommentRepository, SeaOrmCommitFileRepository, SeaOrmCommitRepository,
     SeaOrmCommitStatusRepository, SeaOrmContributorRepository, SeaOrmDeploymentRepository,
-    SeaOrmHttpCache, SeaOrmIssueEventRepository, SeaOrmIssueReactionRepository,
-    SeaOrmIssueRepository, SeaOrmIssueTimelineRepository, SeaOrmLabelRepository,
-    SeaOrmMilestoneRepository, SeaOrmPullRequestCommitRepository, SeaOrmPullRequestFileRepository,
-    SeaOrmPullRequestRepository, SeaOrmReleaseRepository, SeaOrmRepoRepository,
-    SeaOrmRepoSyncStatusRepository, SeaOrmReviewCommentRepository, SeaOrmReviewRepository,
-    SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository, SeaOrmSyncWriter,
-    SeaOrmTagRepository, SeaOrmWorkflowJobRepository, SeaOrmWorkflowRunRepository,
+    SeaOrmEntityFingerprintRepository, SeaOrmHttpCache, SeaOrmIssueEventRepository,
+    SeaOrmIssueReactionRepository, SeaOrmIssueRepository, SeaOrmIssueTimelineRepository,
+    SeaOrmLabelRepository, SeaOrmMilestoneRepository, SeaOrmPullRequestCommitRepository,
+    SeaOrmPullRequestFileRepository, SeaOrmPullRequestRepository, SeaOrmReleaseRepository,
+    SeaOrmRepoRepository, SeaOrmRepoSyncStatusRepository, SeaOrmReviewCommentRepository,
+    SeaOrmReviewRepository, SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository,
+    SeaOrmSyncWriter, SeaOrmTagRepository, SeaOrmWorkflowJobRepository,
+    SeaOrmWorkflowRunRepository,
 };
 
 type ConcreteService = Service;
@@ -146,6 +147,7 @@ impl Gear for GithubMirrorGear {
             sync_sessions,
             repo_sync_status,
             Arc::new(SeaOrmSyncWriter::new(Arc::clone(&db))),
+            Arc::new(SeaOrmEntityFingerprintRepository::new(Arc::clone(&db))),
             github,
             policy_enforcer,
             ServiceConfig {

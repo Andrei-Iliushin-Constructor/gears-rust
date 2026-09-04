@@ -11,10 +11,12 @@
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use async_trait::async_trait;
+use chrono::Utc;
 use github_mirror_sdk::SyncSummary;
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
+use super::change_gate::{self, ChangeGate, GateInputs, entities};
 use super::runner::REPOSITORY_ENTITY;
 use super::task::{ExtractionTask, NewTask, TaskPhase, TaskPriority};
 use super::worker::{Worker, WorkerContext};
@@ -22,7 +24,9 @@ use crate::domain::error::DomainError;
 use crate::domain::ports::github::{
     FetchOptions, GithubPort, IssueDetailWants, ListingCompleteness,
 };
-use crate::domain::repo::SyncWriter;
+use crate::domain::repo::{
+    CommitRecord, IssueRecord, PullRequestRecord, SyncWriter, WorkflowRunRecord,
+};
 use crate::domain::scope::CollectionMode;
 
 /// Entity types of the Indexing tasks, one per family the scope can enable.
@@ -32,14 +36,6 @@ mod families {
     pub const COMMITS: &str = "commits";
     pub const METADATA: &str = "metadata";
     pub const ACTIONS: &str = "actions";
-}
-
-/// Entity types of the Refinement tasks; `entity_id` is the number, SHA or id.
-mod entities {
-    pub const ISSUE: &str = "issue";
-    pub const PULL_REQUEST: &str = "pull_request";
-    pub const COMMIT: &str = "commit";
-    pub const WORKFLOW_RUN: &str = "workflow_run";
 }
 
 /// Everything the tasks of one run share.
@@ -131,6 +127,7 @@ impl RunState {
 pub struct MirrorWorker {
     github: Arc<dyn GithubPort>,
     writer: Arc<dyn SyncWriter>,
+    gate: Arc<ChangeGate>,
     run: Arc<RunState>,
 }
 
@@ -139,13 +136,55 @@ impl MirrorWorker {
     pub fn new(
         github: Arc<dyn GithubPort>,
         writer: Arc<dyn SyncWriter>,
+        gate: Arc<ChangeGate>,
         run: Arc<RunState>,
     ) -> Self {
         Self {
             github,
             writer,
+            gate,
             run,
         }
+    }
+
+    async fn needs_refinement(
+        &self,
+        family: &str,
+        entity_id: &str,
+        inputs: &GateInputs,
+    ) -> Result<bool, DomainError> {
+        let run = &self.run;
+        let reason = self
+            .gate
+            .evaluate(
+                &run.scope,
+                run.tenant_id,
+                run.repo_id()?,
+                family,
+                entity_id,
+                inputs,
+                Utc::now(),
+                run.options.force,
+            )
+            .await?;
+        if let Some(reason) = reason {
+            tracing::debug!(family, entity_id, reason = reason.as_str(), "refining");
+        }
+        Ok(reason.is_some())
+    }
+
+    async fn mark_refined(&self, family: &str, entity_id: &str) -> Result<(), DomainError> {
+        let run = &self.run;
+        self.gate
+            .mark_refined(
+                &run.scope,
+                run.tenant_id,
+                run.repo_id()?,
+                family,
+                entity_id,
+                Utc::now(),
+            )
+            .await
     }
 
     fn seed(
@@ -220,20 +259,28 @@ impl MirrorWorker {
         let collection = run.options.scope.collection;
         for issue in &listing.issues {
             let open = issue.state == "open";
-            if collection.reactions.includes(open) || collection.timeline.includes(open) {
-                let priority = if open {
-                    TaskPriority::OPEN_ISSUE
-                } else {
-                    TaskPriority::CLOSED_ISSUE
-                };
-                self.seed(
-                    ctx,
-                    TaskPhase::Refinement,
-                    entities::ISSUE,
-                    Some(issue.number.to_string()),
-                    priority,
-                );
+            if !(collection.reactions.includes(open) || collection.timeline.includes(open)) {
+                continue;
             }
+            let entity_id = issue.number.to_string();
+            if !self
+                .needs_refinement(entities::ISSUE, &entity_id, &issue_inputs(issue))
+                .await?
+            {
+                continue;
+            }
+            let priority = if open {
+                TaskPriority::OPEN_ISSUE
+            } else {
+                TaskPriority::CLOSED_ISSUE
+            };
+            self.seed(
+                ctx,
+                TaskPhase::Refinement,
+                entities::ISSUE,
+                Some(entity_id),
+                priority,
+            );
         }
 
         let (issues, comments, events, people) = (
@@ -276,7 +323,8 @@ impl MirrorWorker {
             s.issue_reactions_synced += reactions;
             s.issue_timeline_synced += timeline;
         });
-        Ok(())
+        self.mark_refined(entities::ISSUE, &number.to_string())
+            .await
     }
 
     async fn index_pull_requests(&self, ctx: &WorkerContext) -> Result<(), DomainError> {
@@ -289,6 +337,13 @@ impl MirrorWorker {
         run.mark_complete(&listing.complete);
 
         for pull in &listing.pull_requests {
+            let entity_id = pull.number.to_string();
+            if !self
+                .needs_refinement(entities::PULL_REQUEST, &entity_id, &pull_inputs(pull))
+                .await?
+            {
+                continue;
+            }
             let priority = if pull.state == "open" {
                 TaskPriority::OPEN_PR
             } else {
@@ -298,7 +353,7 @@ impl MirrorWorker {
                 ctx,
                 TaskPhase::Refinement,
                 entities::PULL_REQUEST,
-                Some(pull.number.to_string()),
+                Some(entity_id),
                 priority,
             );
         }
@@ -344,7 +399,8 @@ impl MirrorWorker {
             s.review_threads_synced += threads;
             s.contributors_synced += people;
         });
-        Ok(())
+        self.mark_refined(entities::PULL_REQUEST, &number.to_string())
+            .await
     }
 
     async fn index_commits(&self, ctx: &WorkerContext) -> Result<(), DomainError> {
@@ -356,7 +412,18 @@ impl MirrorWorker {
             .await?;
         run.mark_complete(&listing.complete);
 
+        let with_ci = run.options.scope.collection.actions != CollectionMode::None;
         for commit in &listing.commits {
+            if !self
+                .needs_refinement(
+                    entities::COMMIT,
+                    &commit.sha,
+                    &commit_inputs(commit, with_ci),
+                )
+                .await?
+            {
+                continue;
+            }
             self.seed(
                 ctx,
                 TaskPhase::Refinement,
@@ -407,7 +474,7 @@ impl MirrorWorker {
             s.commit_statuses_synced += statuses;
             s.check_runs_synced += checks;
         });
-        Ok(())
+        self.mark_refined(entities::COMMIT, sha).await
     }
 
     async fn index_metadata(&self) -> Result<(), DomainError> {
@@ -448,11 +515,22 @@ impl MirrorWorker {
 
         if run.options.scope.collection.actions != CollectionMode::None {
             for workflow_run in &listing.workflow_runs {
+                let entity_id = workflow_run.id.to_string();
+                if !self
+                    .needs_refinement(
+                        entities::WORKFLOW_RUN,
+                        &entity_id,
+                        &workflow_run_inputs(workflow_run),
+                    )
+                    .await?
+                {
+                    continue;
+                }
                 self.seed(
                     ctx,
                     TaskPhase::Refinement,
                     entities::WORKFLOW_RUN,
-                    Some(workflow_run.id.to_string()),
+                    Some(entity_id),
                     TaskPriority::NORMAL,
                 );
             }
@@ -482,7 +560,8 @@ impl MirrorWorker {
             .write_workflow_jobs(&run.scope, run.tenant_id, jobs)
             .await?;
         run.tally(|s| s.workflow_jobs_synced += count);
-        Ok(())
+        self.mark_refined(entities::WORKFLOW_RUN, &run_id.to_string())
+            .await
     }
 }
 
@@ -529,6 +608,76 @@ impl Worker for MirrorWorker {
     }
 }
 
+fn issue_inputs(issue: &IssueRecord) -> GateInputs {
+    GateInputs {
+        fingerprint: change_gate::fingerprint(vec![
+            ("updated_at", issue.updated_at.clone()),
+            ("state", issue.state.clone()),
+            ("closed_at", issue.closed_at.clone().unwrap_or_default()),
+            ("labels", issue.labels_json.clone().unwrap_or_default()),
+            (
+                "assignees",
+                issue.assignees_json.clone().unwrap_or_default(),
+            ),
+            ("locked", issue.locked.unwrap_or(false).to_string()),
+        ]),
+        child_counts_hash: change_gate::child_counts_hash(&[("comments", issue.comments_count)]),
+        updated_at: Some(issue.updated_at.clone()),
+        node_id: issue.node_id.clone(),
+        terminal: issue.state != "open",
+    }
+}
+
+fn pull_inputs(pull: &PullRequestRecord) -> GateInputs {
+    GateInputs {
+        fingerprint: change_gate::fingerprint(vec![
+            ("updated_at", pull.updated_at.clone()),
+            ("state", pull.state.clone()),
+            ("draft", pull.draft.to_string()),
+            ("merged", pull.merged.to_string()),
+            ("merged_at", pull.merged_at.clone().unwrap_or_default()),
+            ("closed_at", pull.closed_at.clone().unwrap_or_default()),
+            ("head_sha", pull.head_sha.clone().unwrap_or_default()),
+            ("base_sha", pull.base_sha.clone().unwrap_or_default()),
+            ("labels", pull.labels_json.clone().unwrap_or_default()),
+            ("assignees", pull.assignees_json.clone().unwrap_or_default()),
+            (
+                "reviewers",
+                pull.requested_reviewers_json.clone().unwrap_or_default(),
+            ),
+        ]),
+        child_counts_hash: change_gate::child_counts_hash(&[("comments", pull.comments_count)]),
+        updated_at: Some(pull.updated_at.clone()),
+        node_id: pull.node_id.clone(),
+        terminal: pull.state != "open",
+    }
+}
+
+fn commit_inputs(commit: &CommitRecord, with_ci: bool) -> GateInputs {
+    GateInputs {
+        fingerprint: change_gate::fingerprint(vec![("sha", commit.sha.clone())]),
+        child_counts_hash: None,
+        updated_at: commit.committed_at.clone(),
+        node_id: None,
+        terminal: !with_ci,
+    }
+}
+
+fn workflow_run_inputs(run: &WorkflowRunRecord) -> GateInputs {
+    GateInputs {
+        fingerprint: change_gate::fingerprint(vec![
+            ("updated_at", run.updated_at.clone()),
+            ("status", run.status.clone().unwrap_or_default()),
+            ("conclusion", run.conclusion.clone().unwrap_or_default()),
+            ("run_attempt", run.run_attempt.to_string()),
+            ("head_sha", run.head_sha.clone()),
+        ]),
+        child_counts_hash: None,
+        updated_at: Some(run.updated_at.clone()),
+        node_id: None,
+        terminal: run.conclusion.is_some(),
+    }
+}
 /// A number-keyed task's `entity_id`, parsed.
 fn entity_number(task: &ExtractionTask) -> Result<i64, DomainError> {
     task.entity_id

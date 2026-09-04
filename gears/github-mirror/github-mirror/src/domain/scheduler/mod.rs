@@ -12,12 +12,14 @@
 //! One level up, `gear.rs`'s `SyncPoolRunner` decides *which repository* syncs
 //! next; everything here decides what happens inside one of those syncs.
 
+pub mod change_gate;
 pub mod mirror_worker;
 pub mod queue;
 pub mod runner;
 pub mod task;
 pub mod worker;
 
+pub use change_gate::{ChangeGate, GateInputs, GateReason};
 pub use mirror_worker::{MirrorWorker, RunState};
 pub use queue::TaskQueue;
 pub use runner::{REPOSITORY_ENTITY, RepoPhaseRunner, RunReport, TaskFailure};

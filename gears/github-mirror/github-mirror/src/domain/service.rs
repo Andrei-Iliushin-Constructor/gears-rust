@@ -25,18 +25,19 @@ use super::repo::{
     CommentRepository, CommitCommentRecord, CommitCommentRepository, CommitFileRecord,
     CommitFileRepository, CommitRecord, CommitRepository, CommitStatusRecord,
     CommitStatusRepository, ContributorRecord, ContributorRepository, DeploymentRecord,
-    DeploymentRepository, IssueEventRecord, IssueEventRepository, IssueReactionRecord,
-    IssueReactionRepository, IssueRecord, IssueRepository, IssueTimelineEventRecord,
-    IssueTimelineRepository, LabelRecord, LabelRepository, ListingFilter, MilestoneRecord,
-    MilestoneRepository, PageWindow, PullRequestCommitRecord, PullRequestCommitRepository,
-    PullRequestFileRecord, PullRequestFileRepository, PullRequestRecord, PullRequestRepository,
-    ReleaseRecord, ReleaseRepository, RepoRecord, RepoRepository, RepoSyncStatusRecord,
-    RepoSyncStatusRepository, ReviewCommentRecord, ReviewCommentRepository, ReviewRecord,
-    ReviewRepository, ReviewThreadRecord, ReviewThreadRepository, SyncSessionRecord,
-    SyncSessionRepository, SyncWriter, TagRecord, TagRepository, WorkflowJobRecord,
-    WorkflowJobRepository, WorkflowRunRecord, WorkflowRunRepository,
+    DeploymentRepository, EntityFingerprintRepository, IssueEventRecord, IssueEventRepository,
+    IssueReactionRecord, IssueReactionRepository, IssueRecord, IssueRepository,
+    IssueTimelineEventRecord, IssueTimelineRepository, LabelRecord, LabelRepository, ListingFilter,
+    MilestoneRecord, MilestoneRepository, PageWindow, PullRequestCommitRecord,
+    PullRequestCommitRepository, PullRequestFileRecord, PullRequestFileRepository,
+    PullRequestRecord, PullRequestRepository, ReleaseRecord, ReleaseRepository, RepoRecord,
+    RepoRepository, RepoSyncStatusRecord, RepoSyncStatusRepository, ReviewCommentRecord,
+    ReviewCommentRepository, ReviewRecord, ReviewRepository, ReviewThreadRecord,
+    ReviewThreadRepository, SyncSessionRecord, SyncSessionRepository, SyncWriter, TagRecord,
+    TagRepository, WorkflowJobRecord, WorkflowJobRepository, WorkflowRunRecord,
+    WorkflowRunRepository,
 };
-use super::scheduler::{MirrorWorker, RepoPhaseRunner, RunState, TaskPhase, Worker};
+use super::scheduler::{ChangeGate, MirrorWorker, RepoPhaseRunner, RunState, TaskPhase, Worker};
 use super::scope::ScopeConfig;
 
 /// The gear's name, taken from the `#[toolkit::gear]` attribute so the
@@ -387,6 +388,7 @@ pub struct Service {
     sync_sessions: Arc<dyn SyncSessionRepository>,
     repo_sync_status: Arc<dyn RepoSyncStatusRepository>,
     sync_writer: Arc<dyn SyncWriter>,
+    change_gate: Arc<ChangeGate>,
     github: Arc<dyn GithubPort>,
     policy_enforcer: PolicyEnforcer,
     config: ServiceConfig,
@@ -438,6 +440,7 @@ impl Clone for Service {
             sync_sessions: Arc::clone(&self.sync_sessions),
             repo_sync_status: Arc::clone(&self.repo_sync_status),
             sync_writer: Arc::clone(&self.sync_writer),
+            change_gate: Arc::clone(&self.change_gate),
             github: Arc::clone(&self.github),
             policy_enforcer: self.policy_enforcer.clone(),
             config: self.config.clone(),
@@ -481,6 +484,7 @@ impl Service {
         sync_sessions: Arc<dyn SyncSessionRepository>,
         repo_sync_status: Arc<dyn RepoSyncStatusRepository>,
         sync_writer: Arc<dyn SyncWriter>,
+        fingerprints: Arc<dyn EntityFingerprintRepository>,
         github: Arc<dyn GithubPort>,
         policy_enforcer: PolicyEnforcer,
         config: ServiceConfig,
@@ -517,6 +521,7 @@ impl Service {
             sync_sessions,
             repo_sync_status,
             sync_writer,
+            change_gate: Arc::new(ChangeGate::new(fingerprints)),
             github,
             policy_enforcer,
             config,
@@ -3603,6 +3608,7 @@ impl Service {
         let worker: Arc<dyn Worker> = Arc::new(MirrorWorker::new(
             Arc::clone(&self.github),
             Arc::clone(&self.sync_writer),
+            Arc::clone(&self.change_gate),
             Arc::clone(run),
         ));
         let runner = RepoPhaseRunner::new(
