@@ -171,6 +171,67 @@ async fn issues_default_to_open_like_github() {
 }
 
 #[tokio::test]
+async fn a_since_bound_with_fractions_excludes_the_second_it_falls_inside() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let service = common::service("https://api.github.com").await;
+    service
+        .upsert_repo(&ctx, repo_record())
+        .await
+        .expect("repo seed must succeed");
+
+    for (number, updated_at) in [
+        (1, "2026-01-01T00:00:00Z"),
+        (2, "2026-01-01T00:00:01Z"),
+        (3, "2026-01-01T00:00:02Z"),
+    ] {
+        let mut issue = issue_record(number, number, "row");
+        issue.updated_at = updated_at.to_owned();
+        service
+            .upsert_issue(&ctx, "acme", "widget", issue)
+            .await
+            .expect("issue seed must succeed");
+    }
+
+    let router = router_for(service, ctx);
+
+    let half_past = get(
+        router.clone(),
+        "/repos/acme/widget/issues?since=2026-01-01T00:00:00.500Z",
+    )
+    .await;
+    let numbers: Vec<i64> = body_json(half_past)
+        .await
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter_map(|item| item["number"].as_i64())
+        .collect();
+    assert_eq!(
+        numbers,
+        vec![2, 3],
+        "the row stamped 00:00:00Z is before the asked-for instant"
+    );
+
+    let on_the_second = get(
+        router,
+        "/repos/acme/widget/issues?since=2026-01-01T00:00:01Z",
+    )
+    .await;
+    let numbers: Vec<i64> = body_json(on_the_second)
+        .await
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter_map(|item| item["number"].as_i64())
+        .collect();
+    assert_eq!(
+        numbers,
+        vec![2, 3],
+        "a whole-second bound is inclusive of its own second"
+    );
+}
+
+#[tokio::test]
 async fn a_malformed_filter_value_is_refused_with_the_field_named() {
     let ctx = common::caller_in(Uuid::new_v4());
     let service = common::service("https://api.github.com").await;
