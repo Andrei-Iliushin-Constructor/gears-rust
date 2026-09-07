@@ -255,8 +255,9 @@ impl SyncPoolRunner {
         while in_flight.len() < self.max_concurrent {
             let Some(job) = queue.claim_next() else { break };
             let service = self.service.clone();
+            let cancel = self.cancel.clone();
             in_flight.spawn(async move {
-                if let Err(e) = service.run_sync_job(&job).await {
+                if let Err(e) = service.run_sync_job(&job, &cancel).await {
                     warn!(
                         session_id = %job.session_id,
                         repository = %format!("{}/{}", job.owner, job.name),

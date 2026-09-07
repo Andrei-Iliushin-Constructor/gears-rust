@@ -512,7 +512,7 @@ impl SyncPump {
         let mut ran = 0;
         while let Ok(job) = self.rx.try_recv() {
             service
-                .run_sync_job(&job)
+                .run_sync_job(&job, &tokio_util::sync::CancellationToken::new())
                 .await
                 .expect("the session outcome must be recorded");
             ran += 1;

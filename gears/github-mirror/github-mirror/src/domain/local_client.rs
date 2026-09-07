@@ -58,6 +58,7 @@ impl GithubMirrorClientV1 for LocalClient {
                     since: None,
                 },
                 &SyncProgress::new(),
+                &tokio_util::sync::CancellationToken::new(),
             )
             .await
             .map_err(CanonicalError::from)

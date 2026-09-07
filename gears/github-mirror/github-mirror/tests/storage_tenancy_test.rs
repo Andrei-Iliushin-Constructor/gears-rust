@@ -187,6 +187,7 @@ async fn every_child_listing_of_a_shared_repository_stays_with_its_tenant() {
                     since: None,
                 },
                 &SyncProgress::new(),
+                &tokio_util::sync::CancellationToken::new(),
             )
             .await
             .unwrap_or_else(|e| panic!("{who} must be able to sync the shared repository: {e}"));

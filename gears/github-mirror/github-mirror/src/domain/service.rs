@@ -3328,8 +3328,12 @@ impl Service {
     ///
     /// # Errors
     /// Only failures to *persist* the outcome, which the caller logs.
-    pub async fn run_sync_job(&self, job: &SyncJob) -> Result<(), DomainError> {
-        let outcome = self.run_sync_job_inner(job).await;
+    pub async fn run_sync_job(
+        &self,
+        job: &SyncJob,
+        cancel: &CancellationToken,
+    ) -> Result<(), DomainError> {
+        let outcome = self.run_sync_job_inner(job, cancel).await;
         // Released on every path, including the error ones: a claim that
         // outlived its job would block the repository until restart.
         self.release_in_flight(&(
@@ -3341,7 +3345,11 @@ impl Service {
     }
 
     /// The body of [`Self::run_sync_job`], minus the in-flight bookkeeping.
-    async fn run_sync_job_inner(&self, job: &SyncJob) -> Result<(), DomainError> {
+    async fn run_sync_job_inner(
+        &self,
+        job: &SyncJob,
+        cancel: &CancellationToken,
+    ) -> Result<(), DomainError> {
         let tenant_id = job.ctx.subject_tenant_id();
         let scope = self.session_scope(&job.ctx, actions::UPSERT).await?;
 
@@ -3357,7 +3365,9 @@ impl Service {
             .await?;
 
         let progress = SyncProgress::new();
-        let outcome = self.sync_with_heartbeat(job, &progress, &session).await;
+        let outcome = self
+            .sync_with_heartbeat(job, &progress, &session, cancel)
+            .await;
         progress.finished();
 
         let completed = outcome.is_ok();
@@ -3406,6 +3416,7 @@ impl Service {
         job: &SyncJob,
         progress: &SyncProgress,
         session: &SyncSessionRecord,
+        cancel: &CancellationToken,
     ) -> Result<SyncSummary, DomainError> {
         let percent = progress.handle();
         let options = FetchOptions {
@@ -3414,7 +3425,8 @@ impl Service {
             force: job.force,
             since: job.since,
         };
-        let sync = self.sync_repository(&job.ctx, &job.owner, &job.name, &options, progress);
+        let sync =
+            self.sync_repository(&job.ctx, &job.owner, &job.name, &options, progress, cancel);
         let mut sync = std::pin::pin!(sync);
 
         loop {
@@ -3570,6 +3582,7 @@ impl Service {
         name: &str,
         options: &FetchOptions,
         progress: &SyncProgress,
+        cancel: &CancellationToken,
     ) -> Result<SyncSummary, DomainError> {
         let tenant_id = ctx.subject_tenant_id();
 
@@ -3603,7 +3616,7 @@ impl Service {
             name,
             *options,
         ));
-        let outcome = self.run_phases(&run, progress).await;
+        let outcome = self.run_phases(&run, progress, cancel).await;
 
         // Deterministic unlock on the way out; a failed release is only
         // logged — the guard's Drop already queued a best-effort release,
@@ -3617,6 +3630,7 @@ impl Service {
         &self,
         run: &Arc<RunState>,
         progress: &SyncProgress,
+        cancel: &CancellationToken,
     ) -> Result<SyncSummary, DomainError> {
         // Captured before any row is written: every upsert in this sync stamps
         // `extracted_at` with a later instant, so "extracted_at < watermark"
@@ -3635,7 +3649,7 @@ impl Service {
             run.session_id,
             run.tenant_id,
             self.config.max_concurrent_tasks,
-            CancellationToken::new(),
+            cancel.child_token(),
         );
         let mut report = tokio::time::timeout(SYNC_FETCH_BUDGET, runner.run())
             .await
