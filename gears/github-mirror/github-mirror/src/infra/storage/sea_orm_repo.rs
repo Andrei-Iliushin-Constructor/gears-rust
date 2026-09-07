@@ -46,7 +46,8 @@ use crate::domain::repo::{
 };
 
 use super::mapper::{
-    StoredActor, StoredAsset, StoredLabel, StoredStep, decode, decode_list, timeline_payload,
+    StoredActor, StoredAsset, StoredLabel, StoredRow, StoredStep, decode, decode_list,
+    timeline_payload,
 };
 
 use super::entity::branches::{self, Entity as BranchEntity};
@@ -1893,6 +1894,7 @@ async fn issue_upsert_in<C: DBRunner>(
         .await
         .map_err(map_scope_error)?;
 
+    let row = StoredRow::new(record.repo_id, record.number);
     Ok(Issue {
         id: record.id,
         node_id: record.node_id,
@@ -1907,12 +1909,14 @@ async fn issue_upsert_in<C: DBRunner>(
         closed_at: record.closed_at,
         html_url: record.html_url,
         author_login: record.author_login,
-        author: decode::<StoredActor>("author_json", record.author_json.as_deref()).map(Into::into),
+        author: decode::<StoredActor>("author_json", row, record.author_json.as_deref())
+            .map(Into::into),
         assignees: decode_list::<StoredActor, _>(
             "assignees_json",
+            row,
             record.assignees_json.as_deref(),
         ),
-        labels: decode_list::<StoredLabel, _>("labels_json", record.labels_json.as_deref()),
+        labels: decode_list::<StoredLabel, _>("labels_json", row, record.labels_json.as_deref()),
         comments_count: record.comments_count,
         locked: record.locked,
     })
@@ -2078,6 +2082,7 @@ async fn pull_request_upsert_in<C: DBRunner>(
         .await
         .map_err(map_scope_error)?;
 
+    let row = StoredRow::new(record.repo_id, record.number);
     Ok(PullRequest {
         id: record.id,
         node_id: record.node_id,
@@ -2100,16 +2105,19 @@ async fn pull_request_upsert_in<C: DBRunner>(
         head_ref: record.head_ref,
         base_ref: record.base_ref,
         author_login: record.author_login,
-        author: decode::<StoredActor>("author_json", record.author_json.as_deref()).map(Into::into),
+        author: decode::<StoredActor>("author_json", row, record.author_json.as_deref())
+            .map(Into::into),
         assignees: decode_list::<StoredActor, _>(
             "assignees_json",
+            row,
             record.assignees_json.as_deref(),
         ),
-        labels: decode_list::<StoredLabel, _>("labels_json", record.labels_json.as_deref()),
+        labels: decode_list::<StoredLabel, _>("labels_json", row, record.labels_json.as_deref()),
         comments_count: record.comments_count,
         locked: record.locked,
         requested_reviewers: decode_list::<StoredActor, _>(
             "requested_reviewers_json",
+            row,
             record.requested_reviewers_json.as_deref(),
         ),
     })
@@ -2854,7 +2862,11 @@ async fn release_upsert_in<C: DBRunner>(
         created_at: record.created_at,
         published_at: record.published_at,
         html_url: record.html_url,
-        assets: decode_list::<StoredAsset, _>("assets_json", record.assets_json.as_deref()),
+        assets: decode_list::<StoredAsset, _>(
+            "assets_json",
+            StoredRow::new(record.repo_id, record.id),
+            record.assets_json.as_deref(),
+        ),
     })
 }
 
@@ -3850,7 +3862,11 @@ async fn workflow_job_upsert_in<C: DBRunner>(
         started_at: record.started_at,
         completed_at: record.completed_at,
         html_url: record.html_url,
-        steps: decode_list::<StoredStep, _>("steps_json", record.steps_json.as_deref()),
+        steps: decode_list::<StoredStep, _>(
+            "steps_json",
+            StoredRow::new(record.repo_id, record.id),
+            record.steps_json.as_deref(),
+        ),
     })
 }
 
