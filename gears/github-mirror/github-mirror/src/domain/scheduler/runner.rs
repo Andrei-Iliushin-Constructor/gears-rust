@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::queue::TaskQueue;
-use super::task::{ExtractionTask, NewTask, TaskPhase, TaskPriority};
+use super::task::{ExtractionTask, Lane, NewTask, TaskPhase, TaskPriority};
 use super::worker::{Worker, WorkerContext, WorkerDispatcher};
 use crate::domain::error::DomainError;
 
@@ -80,6 +80,7 @@ pub struct RepoPhaseRunner {
     queue: Arc<TaskQueue>,
     dispatcher: Arc<WorkerDispatcher>,
     session_id: Uuid,
+    tenant_id: Uuid,
     max_concurrent_tasks: usize,
     cancel: CancellationToken,
 }
@@ -89,6 +90,7 @@ impl RepoPhaseRunner {
     pub fn new(
         workers: Vec<Arc<dyn Worker>>,
         session_id: Uuid,
+        tenant_id: Uuid,
         max_concurrent_tasks: usize,
         cancel: CancellationToken,
     ) -> Self {
@@ -100,6 +102,7 @@ impl RepoPhaseRunner {
             queue: Arc::new(TaskQueue::new()),
             dispatcher: Arc::new(dispatcher),
             session_id,
+            tenant_id,
             max_concurrent_tasks: max_concurrent_tasks.max(1),
             cancel,
         }
@@ -109,6 +112,7 @@ impl RepoPhaseRunner {
     pub async fn run(&self) -> RunReport {
         self.queue.enqueue_task(&NewTask {
             session_id: self.session_id,
+            tenant_id: self.tenant_id,
             phase: TaskPhase::Discovery,
             entity_type: REPOSITORY_ENTITY.to_owned(),
             entity_id: None,
@@ -140,6 +144,7 @@ impl RepoPhaseRunner {
             cancel: self.cancel.clone(),
         };
         let mut in_flight: JoinSet<TaskOutcome> = JoinSet::new();
+        let mut next_lane = 0usize;
 
         loop {
             if self.cancel.is_cancelled() {
@@ -160,7 +165,7 @@ impl RepoPhaseRunner {
                 continue;
             }
 
-            match self.queue.claim_next_task_in(self.session_id, phases) {
+            match self.claim_round_robin(phases, &mut next_lane) {
                 Some(task) => self.spawn(task, &ctx, &mut in_flight),
                 // Nothing claimable right now: an in-flight Indexing task may
                 // still seed more, so wait for one to finish before deciding
@@ -175,6 +180,26 @@ impl RepoPhaseRunner {
         while let Some(outcome) = in_flight.join_next().await {
             Self::account(outcome, report);
         }
+    }
+
+    /// Take one task, starting from the lane after the last one served, so a
+    /// long pull-request queue cannot starve issues.
+    fn claim_round_robin(
+        &self,
+        phases: &[TaskPhase],
+        next_lane: &mut usize,
+    ) -> Option<ExtractionTask> {
+        for step in 0..Lane::ALL.len() {
+            let lane = Lane::ALL[(*next_lane + step) % Lane::ALL.len()];
+            if let Some(task) = self
+                .queue
+                .claim_next_task_in_lane(self.session_id, phases, lane)
+            {
+                *next_lane = (*next_lane + step + 1) % Lane::ALL.len();
+                return Some(task);
+            }
+        }
+        None
     }
 
     fn spawn(

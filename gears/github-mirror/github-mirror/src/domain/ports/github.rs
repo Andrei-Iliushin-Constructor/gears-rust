@@ -28,6 +28,9 @@ pub struct FetchOptions {
     /// Ignore any cached validator and re-fetch everything (PRD §5.2 force
     /// mode). Fresh responses are still written back to the cache.
     pub force: bool,
+    /// Oldest closed issue or pull request worth collecting (PRD &sect;5.4
+    /// `--since`); open ones are always collected.
+    pub since: Option<DateTime<Utc>>,
 }
 
 /// A top-level listing the sync can reconcile deletions for.

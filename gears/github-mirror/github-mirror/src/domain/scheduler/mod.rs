@@ -26,6 +26,6 @@ pub use mirror_worker::{MirrorWorker, RunState};
 pub use queue::TaskQueue;
 pub use runner::{REPOSITORY_ENTITY, RepoPhaseRunner, RunReport, TaskFailure};
 pub use sweep_watermark::{SweepWatermark, sweep_families};
-pub use task::{ExtractionTask, NewTask, TaskPhase, TaskPriority, TaskStatus};
+pub use task::{ExtractionTask, Lane, NewTask, TaskPhase, TaskPriority, TaskStatus};
 pub use verification::{CountGap, GapOutcome, MAX_REPAIR};
 pub use worker::{Worker, WorkerContext, WorkerDispatcher};

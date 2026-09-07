@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use authz_resolver_sdk::PolicyEnforcer;
 use authz_resolver_sdk::pep::{AccessRequest, ResourceType};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use github_mirror_sdk::{
     Branch, CheckRun, Comment, Commit, CommitComment, CommitFile, CommitStatus, Contributor,
     Deployment, Issue, IssueEvent, IssueReaction, IssueTimelineEvent, Label, Milestone,
@@ -319,6 +319,8 @@ pub struct SyncJob {
     /// `Last-Modified` cache to bypass, so every sync is already a full fetch.
     /// It starts having an effect when conditional requests land (#4630).
     pub force: bool,
+    /// Oldest closed entity worth collecting, from the request.
+    pub since: Option<DateTime<Utc>>,
 }
 
 /// Per-repository run status, the durable half of resume-by-rescan.
@@ -491,7 +493,7 @@ impl Service {
         repo_sync_status: Arc<dyn RepoSyncStatusRepository>,
         sync_writer: Arc<dyn SyncWriter>,
         fingerprints: Arc<dyn EntityFingerprintRepository>,
-        watermarks: Arc<dyn SyncWatermarkRepository>,
+        watermark_store: Arc<dyn SyncWatermarkRepository>,
         github: Arc<dyn GithubPort>,
         policy_enforcer: PolicyEnforcer,
         config: ServiceConfig,
@@ -529,7 +531,7 @@ impl Service {
             repo_sync_status,
             sync_writer,
             change_gate: Arc::new(ChangeGate::new(fingerprints)),
-            sweep_watermark: Arc::new(SweepWatermark::new(watermarks)),
+            sweep_watermark: Arc::new(SweepWatermark::new(watermark_store)),
             github,
             policy_enforcer,
             config,
@@ -3200,7 +3202,7 @@ impl Service {
                 );
                 continue;
             };
-            match self.enqueue_sync(ctx, owner, name, None, force).await {
+            match self.enqueue_sync(ctx, owner, name, None, force, None).await {
                 Ok(session_id) => resumed.push(session_id),
                 Err(e) => tracing::warn!(
                     repository = %repo.repo_full_name,
@@ -3236,6 +3238,7 @@ impl Service {
         name: &str,
         sync_scope: Option<ScopeConfig>,
         force: bool,
+        since: Option<DateTime<Utc>>,
     ) -> Result<Uuid, DomainError> {
         let sync_scope = sync_scope.unwrap_or(self.config.scope);
         sync_scope.validate()?;
@@ -3289,6 +3292,7 @@ impl Service {
             name: name.to_owned(),
             scope: sync_scope,
             force,
+            since,
         };
         if let Err(e) = self.sync_tx.try_send(job) {
             self.release_in_flight(&key).await;
@@ -3408,6 +3412,7 @@ impl Service {
             tenant_id: job.ctx.subject_tenant_id(),
             scope: job.scope,
             force: job.force,
+            since: job.since,
         };
         let sync = self.sync_repository(&job.ctx, &job.owner, &job.name, &options, progress);
         let mut sync = std::pin::pin!(sync);
@@ -3628,6 +3633,7 @@ impl Service {
         let runner = RepoPhaseRunner::new(
             vec![worker],
             run.session_id,
+            run.tenant_id,
             self.config.max_concurrent_tasks,
             CancellationToken::new(),
         );

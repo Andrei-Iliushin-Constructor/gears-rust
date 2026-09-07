@@ -152,6 +152,8 @@ impl Default for TaskPriority {
 pub struct NewTask {
     /// The sync session this task belongs to.
     pub session_id: Uuid,
+    /// The tenant the session runs for.
+    pub tenant_id: Uuid,
     pub phase: TaskPhase,
     /// Entity category (e.g. `"issues"` for a listing, `"issue"` for one).
     pub entity_type: String,
@@ -168,6 +170,7 @@ pub struct NewTask {
 pub struct ExtractionTask {
     pub id: Uuid,
     pub session_id: Uuid,
+    pub tenant_id: Uuid,
     pub phase: TaskPhase,
     pub entity_type: String,
     pub entity_id: Option<String>,
@@ -175,6 +178,41 @@ pub struct ExtractionTask {
     pub attempt: u32,
     pub status: TaskStatus,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Lane {
+    PullRequest,
+    Issue,
+    Generic,
+}
+
+impl Lane {
+    pub const ALL: [Self; 3] = [Self::PullRequest, Self::Issue, Self::Generic];
+
+    #[must_use]
+    pub fn of_entity_type(entity_type: &str) -> Self {
+        match entity_type {
+            "pull_requests" | "pull_request" => Self::PullRequest,
+            "issues" | "issue" => Self::Issue,
+            _ => Self::Generic,
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::PullRequest => "pull requests",
+            Self::Issue => "issues",
+            Self::Generic => "generic",
+        }
+    }
+}
+
+impl std::fmt::Display for Lane {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.label())
+    }
 }
 
 #[cfg(test)]

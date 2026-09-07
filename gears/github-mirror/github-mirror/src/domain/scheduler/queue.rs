@@ -19,13 +19,14 @@ use chrono::{DateTime, Utc};
 use strum::IntoEnumIterator as _;
 use uuid::Uuid;
 
-use super::task::{ExtractionTask, NewTask, TaskPhase, TaskStatus};
+use super::task::{ExtractionTask, Lane, NewTask, TaskPhase, TaskStatus};
 
 /// Idempotency key: a task is unique per `(session, phase, entity_type,
 /// entity_id)`. The session already belongs to exactly one tenant, so tenancy
 /// is carried by the key without a separate column.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct DedupKey {
+    tenant_id: Uuid,
     session_id: Uuid,
     phase: TaskPhase,
     entity_type: String,
@@ -36,6 +37,7 @@ struct DedupKey {
 impl DedupKey {
     fn of(task: &NewTask) -> Self {
         Self {
+            tenant_id: task.tenant_id,
             session_id: task.session_id,
             phase: task.phase,
             entity_type: task.entity_type.clone(),
@@ -105,6 +107,7 @@ impl TaskQueue {
         let row = ExtractionTask {
             id: Uuid::new_v4(),
             session_id: task.session_id,
+            tenant_id: task.tenant_id,
             phase: task.phase,
             entity_type: task.entity_type.clone(),
             entity_id: task.entity_id.clone(),
@@ -134,15 +137,42 @@ impl TaskQueue {
         session_id: Uuid,
         phases: &[TaskPhase],
     ) -> Option<ExtractionTask> {
+        self.claim(session_id, phases, None)
+    }
+
+    /// Claim only from `lane`, so one family cannot starve another.
+    #[must_use]
+    pub fn claim_next_task_in_lane(
+        &self,
+        session_id: Uuid,
+        phases: &[TaskPhase],
+        lane: Lane,
+    ) -> Option<ExtractionTask> {
+        self.claim(session_id, phases, Some(lane))
+    }
+
+    fn claim(
+        &self,
+        session_id: Uuid,
+        phases: &[TaskPhase],
+        lane: Option<Lane>,
+    ) -> Option<ExtractionTask> {
         let mut inner = self.lock();
 
         let (phase, key, id) = TaskPhase::iter()
             .filter(|p| phases.contains(p))
             .find_map(|p| {
-                inner
-                    .pending
-                    .get(&(session_id, p))
-                    .and_then(|bucket| bucket.iter().next())
+                let bucket = inner.pending.get(&(session_id, p))?;
+                bucket
+                    .iter()
+                    .find(|(_, id)| {
+                        lane.is_none_or(|lane| {
+                            inner
+                                .by_id
+                                .get(id)
+                                .is_some_and(|task| Lane::of_entity_type(&task.entity_type) == lane)
+                        })
+                    })
                     .map(|(k, id)| (p, *k, *id))
             })?;
 
@@ -247,6 +277,7 @@ mod tests {
     fn discovery_task(session: Uuid) -> NewTask {
         NewTask {
             session_id: session,
+            tenant_id: Uuid::nil(),
             phase: TaskPhase::Discovery,
             entity_type: "repository".to_owned(),
             entity_id: None,
@@ -258,6 +289,7 @@ mod tests {
     fn refinement_task(session: Uuid, entity_id: &str, priority: TaskPriority) -> NewTask {
         NewTask {
             session_id: session,
+            tenant_id: Uuid::nil(),
             phase: TaskPhase::Refinement,
             entity_type: "issue".to_owned(),
             entity_id: Some(entity_id.to_owned()),
@@ -266,6 +298,83 @@ mod tests {
         }
     }
 
+    fn lane_task(session: Uuid, tenant: Uuid, entity_type: &str, entity_id: &str) -> NewTask {
+        NewTask {
+            session_id: session,
+            tenant_id: tenant,
+            phase: TaskPhase::Refinement,
+            entity_type: entity_type.to_owned(),
+            entity_id: Some(entity_id.to_owned()),
+            priority: TaskPriority::NORMAL,
+            attempt: 0,
+        }
+    }
+
+    #[test]
+    fn the_same_task_for_two_tenants_is_kept_apart() {
+        let session = Uuid::new_v4();
+        let queue = TaskQueue::new();
+        let one = lane_task(session, Uuid::new_v4(), "issue", "11");
+        let other = lane_task(session, Uuid::new_v4(), "issue", "11");
+
+        queue.enqueue_task(&one);
+        queue.enqueue_task(&other);
+
+        assert_eq!(
+            queue.count_for_phase(session, TaskPhase::Refinement),
+            2,
+            "two tenants asking for the same issue must not collapse into one task"
+        );
+    }
+
+    #[test]
+    fn the_same_task_for_one_tenant_is_enqueued_once() {
+        let session = Uuid::new_v4();
+        let tenant = Uuid::new_v4();
+        let queue = TaskQueue::new();
+
+        queue.enqueue_task(&lane_task(session, tenant, "issue", "11"));
+        queue.enqueue_task(&lane_task(session, tenant, "issue", "11"));
+
+        assert_eq!(queue.count_for_phase(session, TaskPhase::Refinement), 1);
+    }
+
+    #[test]
+    fn a_lane_claim_only_takes_its_own_family() {
+        let session = Uuid::new_v4();
+        let tenant = Uuid::new_v4();
+        let queue = TaskQueue::new();
+        queue.enqueue_task(&lane_task(session, tenant, "pull_request", "13"));
+        queue.enqueue_task(&lane_task(session, tenant, "issue", "11"));
+
+        let claimed = queue
+            .claim_next_task_in_lane(session, &[TaskPhase::Refinement], Lane::Issue)
+            .expect("the issue lane has work");
+
+        assert_eq!(claimed.entity_type, "issue");
+    }
+
+    #[test]
+    fn an_empty_lane_claims_nothing() {
+        let session = Uuid::new_v4();
+        let tenant = Uuid::new_v4();
+        let queue = TaskQueue::new();
+        queue.enqueue_task(&lane_task(session, tenant, "issue", "11"));
+
+        assert!(
+            queue
+                .claim_next_task_in_lane(session, &[TaskPhase::Refinement], Lane::PullRequest)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn every_other_family_falls_into_the_generic_lane() {
+        assert_eq!(Lane::of_entity_type("pull_request"), Lane::PullRequest);
+        assert_eq!(Lane::of_entity_type("issue"), Lane::Issue);
+        assert_eq!(Lane::of_entity_type("commit"), Lane::Generic);
+        assert_eq!(Lane::of_entity_type("workflow_run"), Lane::Generic);
+    }
     #[test]
     fn enqueue_is_idempotent() {
         let queue = TaskQueue::new();

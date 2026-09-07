@@ -53,6 +53,9 @@ pub struct SyncQuery {
     pub reactions_scope: Option<String>,
     /// `all` / `open` / `none` for timeline events.
     pub timeline_scope: Option<String>,
+    /// RFC3339 instant; closed issues and pull requests older than this are
+    /// not collected.
+    pub since: Option<String>,
 }
 
 impl SyncQuery {
@@ -83,6 +86,20 @@ impl SyncQuery {
             scope.collection.timeline = CollectionMode::parse(mode)?;
         }
         Ok(Some(scope))
+    }
+
+    /// # Errors
+    /// `Validation` when `since` is not an RFC3339 instant.
+    fn since(&self) -> Result<Option<DateTime<Utc>>, DomainError> {
+        let Some(raw) = self.since.as_deref() else {
+            return Ok(None);
+        };
+        DateTime::parse_from_rfc3339(raw)
+            .map(|at| Some(at.with_timezone(&Utc)))
+            .map_err(|e| DomainError::Validation {
+                field: "since".to_owned(),
+                message: format!("`{raw}` is not an RFC3339 instant: {e}"),
+            })
     }
 }
 
@@ -369,8 +386,16 @@ pub async fn sync_repository(
 ) -> ApiResult<(StatusCode, JsonBody<SyncAcceptedDto>)> {
     validate_repo_path(&owner, &name)?;
     let scope = query.scope(svc.default_scope())?;
+    let since = query.since()?;
     let session_id = svc
-        .enqueue_sync(&ctx, &owner, &name, scope, query.force.unwrap_or(false))
+        .enqueue_sync(
+            &ctx,
+            &owner,
+            &name,
+            scope,
+            query.force.unwrap_or(false),
+            since,
+        )
         .await?;
     Ok((
         StatusCode::ACCEPTED,

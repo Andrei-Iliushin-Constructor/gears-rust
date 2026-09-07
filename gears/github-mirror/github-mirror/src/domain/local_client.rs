@@ -55,6 +55,7 @@ impl GithubMirrorClientV1 for LocalClient {
                     tenant_id: ctx.subject_tenant_id(),
                     scope: ScopeConfig::default(),
                     force: false,
+                    since: None,
                 },
                 &SyncProgress::new(),
             )

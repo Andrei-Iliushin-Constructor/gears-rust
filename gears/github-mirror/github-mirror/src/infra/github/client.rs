@@ -34,6 +34,16 @@ const ACCEPT_JSON: &str = "application/vnd.github+json";
 /// page by page into the writer (#4632 slice 6, memory NFR).
 const MAX_PAGES: usize = 10;
 
+fn within_since(state: &str, updated_at: &str, since: Option<DateTime<Utc>>) -> bool {
+    let Some(since) = since else {
+        return true;
+    };
+    if state == "open" {
+        return true;
+    }
+    DateTime::parse_from_rfc3339(updated_at).is_ok_and(|at| at.with_timezone(&Utc) >= since)
+}
+
 fn since_param(since: Option<DateTime<Utc>>) -> String {
     since.map_or_else(String::new, |at| {
         format!(
@@ -1787,16 +1797,20 @@ impl GithubPort for GithubClient {
             .await?;
 
         let contributors = derive_issue_people(repo_id, &issues, &comments).into_records();
+        let kept: Vec<_> = issues
+            .into_iter()
+            .map(|i| issue_record(repo_id, i))
+            .filter(|i| within_since(&i.state, &i.updated_at, options.since))
+            .collect();
+        let bounded = options.since.is_some();
+
         let mut complete = ListingCompleteness::none();
-        complete.set(Listing::Issues, issues_complete);
-        complete.set(Listing::Comments, comments_complete);
+        complete.set(Listing::Issues, issues_complete && !bounded);
+        complete.set(Listing::Comments, comments_complete && !bounded);
 
         Ok(IssueListing {
             complete,
-            issues: issues
-                .into_iter()
-                .map(|i| issue_record(repo_id, i))
-                .collect(),
+            issues: kept,
             comments: comments
                 .into_iter()
                 .filter_map(|c| comment_record(repo_id, c))
@@ -1881,16 +1895,23 @@ impl GithubPort for GithubClient {
             .await?;
 
         let contributors = derive_pull_people(repo_id, &pulls, &review_comments).into_records();
+        let kept: Vec<_> = pulls
+            .into_iter()
+            .map(|p| pull_request_record(repo_id, p))
+            .filter(|p| within_since(&p.state, &p.updated_at, options.since))
+            .collect();
+        let bounded = options.since.is_some();
+
         let mut complete = ListingCompleteness::none();
-        complete.set(Listing::PullRequests, pull_requests_complete);
-        complete.set(Listing::ReviewComments, review_comments_complete);
+        complete.set(Listing::PullRequests, pull_requests_complete && !bounded);
+        complete.set(
+            Listing::ReviewComments,
+            review_comments_complete && !bounded,
+        );
 
         Ok(PullListing {
             complete,
-            pull_requests: pulls
-                .into_iter()
-                .map(|p| pull_request_record(repo_id, p))
-                .collect(),
+            pull_requests: kept,
             review_comments: review_comments
                 .into_iter()
                 .filter_map(|c| review_comment_record(repo_id, c))

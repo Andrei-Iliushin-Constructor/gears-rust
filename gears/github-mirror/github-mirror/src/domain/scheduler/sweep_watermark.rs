@@ -43,13 +43,13 @@ pub fn high_water(seen: &[&str], threshold: Option<DateTime<Utc>>) -> Option<Dat
 }
 
 pub struct SweepWatermark {
-    watermarks: Arc<dyn SyncWatermarkRepository>,
+    watermark_store: Arc<dyn SyncWatermarkRepository>,
 }
 
 impl SweepWatermark {
     #[must_use]
-    pub fn new(watermarks: Arc<dyn SyncWatermarkRepository>) -> Self {
-        Self { watermarks }
+    pub fn new(watermark_store: Arc<dyn SyncWatermarkRepository>) -> Self {
+        Self { watermark_store }
     }
 
     /// # Errors
@@ -61,7 +61,7 @@ impl SweepWatermark {
         family: &str,
         force: bool,
     ) -> Result<Option<DateTime<Utc>>, DomainError> {
-        let stored = self.watermarks.find(scope, repo_id, family).await?;
+        let stored = self.watermark_store.find(scope, repo_id, family).await?;
         Ok(stop_threshold(stored.as_ref(), force))
     }
 
@@ -75,9 +75,9 @@ impl SweepWatermark {
         family: &str,
         candidate: Option<DateTime<Utc>>,
     ) -> Result<(), DomainError> {
-        let stored = self.watermarks.find(scope, repo_id, family).await?;
+        let stored = self.watermark_store.find(scope, repo_id, family).await?;
         let candidate = candidate.map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
-        self.watermarks
+        self.watermark_store
             .upsert(
                 scope,
                 tenant_id,
@@ -105,13 +105,13 @@ impl SweepWatermark {
         repo_id: i64,
         family: &str,
     ) -> Result<(), DomainError> {
-        let Some(stored) = self.watermarks.find(scope, repo_id, family).await? else {
+        let Some(stored) = self.watermark_store.find(scope, repo_id, family).await? else {
             return Ok(());
         };
         let Some(candidate) = stored.candidate_high_water.clone() else {
             return Ok(());
         };
-        self.watermarks
+        self.watermark_store
             .upsert(
                 scope,
                 tenant_id,

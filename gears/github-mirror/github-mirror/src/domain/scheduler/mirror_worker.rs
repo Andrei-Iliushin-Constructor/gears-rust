@@ -232,6 +232,7 @@ impl MirrorWorker {
     ) {
         ctx.queue.enqueue_task(&NewTask {
             session_id: self.run.session_id,
+            tenant_id: self.run.tenant_id,
             phase,
             entity_type: entity_type.to_owned(),
             entity_id,

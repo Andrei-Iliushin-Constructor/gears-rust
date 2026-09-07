@@ -91,6 +91,7 @@ mod tests {
         ExtractionTask {
             id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
             phase,
             entity_type: entity_type.to_owned(),
             entity_id: None,

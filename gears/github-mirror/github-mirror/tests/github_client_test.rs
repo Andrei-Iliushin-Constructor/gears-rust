@@ -452,6 +452,7 @@ fn opts(scope: ScopeConfig) -> FetchOptions {
         tenant_id: uuid::Uuid::new_v4(),
         scope,
         force: false,
+        since: None,
     }
 }
 
@@ -1263,6 +1264,7 @@ async fn a_stored_etag_turns_the_next_sync_into_a_free_304() {
         tenant_id: tenant,
         scope,
         force: false,
+        since: None,
     };
 
     let fresh = fetch_repository(&client, "rust-lang", "rust", &options)
