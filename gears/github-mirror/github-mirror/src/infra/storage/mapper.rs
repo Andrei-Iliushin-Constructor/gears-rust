@@ -154,11 +154,37 @@ impl From<StoredStep> for WorkflowStep {
 /// against a corrupt or tampered row, not an expected limit.
 const MAX_STORED_JSON_BYTES: usize = 1 << 20;
 
-pub(crate) fn decode<T: serde::de::DeserializeOwned>(field: &str, raw: Option<&str>) -> Option<T> {
+/// Which row a stored JSON column belongs to.
+///
+/// Every issue shares the column name `labels_json`, so the column alone does
+/// not say which row failed to decode. Carrying the repository and the row's
+/// own number or id means a corrupt payload can be found and repaired rather
+/// than only counted.
+#[derive(Clone, Copy)]
+pub(super) struct StoredRow {
+    pub repo_id: i64,
+    /// The row's own key: an issue or pull-request number, or the GitHub id
+    /// of a release or workflow job.
+    pub key: i64,
+}
+
+impl StoredRow {
+    pub(super) const fn new(repo_id: i64, key: i64) -> Self {
+        Self { repo_id, key }
+    }
+}
+
+pub(super) fn decode<T: serde::de::DeserializeOwned>(
+    field: &str,
+    row: StoredRow,
+    raw: Option<&str>,
+) -> Option<T> {
     let raw = raw?;
     if raw.len() > MAX_STORED_JSON_BYTES {
         tracing::warn!(
             field,
+            repo_id = row.repo_id,
+            key = row.key,
             bytes = raw.len(),
             limit = MAX_STORED_JSON_BYTES,
             "stored JSON exceeds the decode limit; serving the empty value"
@@ -170,6 +196,8 @@ pub(crate) fn decode<T: serde::de::DeserializeOwned>(field: &str, raw: Option<&s
         Err(e) => {
             tracing::warn!(
                 field,
+                repo_id = row.repo_id,
+                key = row.key,
                 error = %e,
                 bytes = raw.len(),
                 "stored JSON could not be decoded; serving the empty value"
@@ -179,11 +207,11 @@ pub(crate) fn decode<T: serde::de::DeserializeOwned>(field: &str, raw: Option<&s
     }
 }
 
-pub(super) fn decode_list<S, T>(field: &str, raw: Option<&str>) -> Vec<T>
+pub(super) fn decode_list<S, T>(field: &str, row: StoredRow, raw: Option<&str>) -> Vec<T>
 where
     S: serde::de::DeserializeOwned + Into<T>,
 {
-    decode::<Vec<S>>(field, raw)
+    decode::<Vec<S>>(field, row, raw)
         .unwrap_or_default()
         .into_iter()
         .map(Into::into)
@@ -211,6 +239,7 @@ impl From<repositories::Model> for Repo {
 
 impl From<issues::Model> for Issue {
     fn from(m: issues::Model) -> Self {
+        let row = StoredRow::new(m.repo_id, m.number);
         Self {
             id: m.id,
             node_id: m.node_id,
@@ -225,9 +254,14 @@ impl From<issues::Model> for Issue {
             closed_at: m.closed_at,
             html_url: m.html_url,
             author_login: m.author_login,
-            author: decode::<StoredActor>("author_json", m.author_json.as_deref()).map(Into::into),
-            assignees: decode_list::<StoredActor, _>("assignees_json", m.assignees_json.as_deref()),
-            labels: decode_list::<StoredLabel, _>("labels_json", m.labels_json.as_deref()),
+            author: decode::<StoredActor>("author_json", row, m.author_json.as_deref())
+                .map(Into::into),
+            assignees: decode_list::<StoredActor, _>(
+                "assignees_json",
+                row,
+                m.assignees_json.as_deref(),
+            ),
+            labels: decode_list::<StoredLabel, _>("labels_json", row, m.labels_json.as_deref()),
             comments_count: m.comments_count,
             locked: m.locked,
         }
@@ -236,6 +270,7 @@ impl From<issues::Model> for Issue {
 
 impl From<pull_requests::Model> for PullRequest {
     fn from(m: pull_requests::Model) -> Self {
+        let row = StoredRow::new(m.repo_id, m.number);
         Self {
             id: m.id,
             node_id: m.node_id,
@@ -258,13 +293,19 @@ impl From<pull_requests::Model> for PullRequest {
             head_ref: m.head_ref,
             base_ref: m.base_ref,
             author_login: m.author_login,
-            author: decode::<StoredActor>("author_json", m.author_json.as_deref()).map(Into::into),
-            assignees: decode_list::<StoredActor, _>("assignees_json", m.assignees_json.as_deref()),
-            labels: decode_list::<StoredLabel, _>("labels_json", m.labels_json.as_deref()),
+            author: decode::<StoredActor>("author_json", row, m.author_json.as_deref())
+                .map(Into::into),
+            assignees: decode_list::<StoredActor, _>(
+                "assignees_json",
+                row,
+                m.assignees_json.as_deref(),
+            ),
+            labels: decode_list::<StoredLabel, _>("labels_json", row, m.labels_json.as_deref()),
             comments_count: m.comments_count,
             locked: m.locked,
             requested_reviewers: decode_list::<StoredActor, _>(
                 "requested_reviewers_json",
+                row,
                 m.requested_reviewers_json.as_deref(),
             ),
         }
@@ -394,7 +435,11 @@ impl From<releases::Model> for Release {
             created_at: m.created_at,
             published_at: m.published_at,
             html_url: m.html_url,
-            assets: decode_list::<StoredAsset, _>("assets_json", m.assets_json.as_deref()),
+            assets: decode_list::<StoredAsset, _>(
+                "assets_json",
+                StoredRow::new(m.repo_id, m.id),
+                m.assets_json.as_deref(),
+            ),
         }
     }
 }
@@ -615,7 +660,11 @@ impl From<workflow_jobs::Model> for WorkflowJob {
             started_at: m.started_at,
             completed_at: m.completed_at,
             html_url: m.html_url,
-            steps: decode_list::<StoredStep, _>("steps_json", m.steps_json.as_deref()),
+            steps: decode_list::<StoredStep, _>(
+                "steps_json",
+                StoredRow::new(m.repo_id, m.id),
+                m.steps_json.as_deref(),
+            ),
         }
     }
 }
@@ -663,23 +712,24 @@ impl From<check_runs::Model> for CheckRun {
 /// The warning carries the row's own key, since every timeline payload lives
 /// in the same column and an operator repairing one needs to know which row
 /// it was.
-pub(crate) fn timeline_payload(
+pub(super) fn timeline_payload(
     repo_id: i64,
     issue_number: i64,
     position: i64,
     event: &str,
     raw: Option<&str>,
 ) -> serde_json::Value {
-    decode::<serde_json::Value>("payload_json", raw).unwrap_or_else(|| {
-        tracing::warn!(
-            repo_id,
-            issue_number,
-            position,
-            event,
-            "issue-timeline payload could not be decoded; serving the event name alone"
-        );
-        serde_json::json!({ "event": event })
-    })
+    decode::<serde_json::Value>("payload_json", StoredRow::new(repo_id, issue_number), raw)
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                repo_id,
+                issue_number,
+                position,
+                event,
+                "issue-timeline payload could not be decoded; serving the event name alone"
+            );
+            serde_json::json!({ "event": event })
+        })
 }
 
 impl From<issue_timeline::Model> for IssueTimelineEvent {
