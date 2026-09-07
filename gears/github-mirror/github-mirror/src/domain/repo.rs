@@ -130,6 +130,12 @@ impl PageWindow {
     /// A window within [`Self::MAX_LIMIT`] and [`Self::MAX_OFFSET`], the
     /// only way to build one that skips rows.
     ///
+    /// This is the constructor for a caller-supplied page, so an out-of-range
+    /// value is refused rather than adjusted: a caller that asked for
+    /// something the mirror will not serve should be told, not handed a
+    /// different answer silently. [`Self::first`] clamps instead, because its
+    /// argument is a constant in this crate rather than a request.
+    ///
     /// # Errors
     /// `Validation` when the row count or the offset is past its limit.
     pub fn bounded(limit: u64, offset: u64) -> Result<Self, DomainError> {
@@ -152,6 +158,10 @@ impl PageWindow {
     }
 
     /// The first `limit` rows, clamped to [`Self::MAX_LIMIT`].
+    ///
+    /// Clamped rather than refused because every caller passes a constant
+    /// from this crate, so an over-large value is a bug to cap rather than a
+    /// request to reject; [`Self::bounded`] is the one that answers a caller.
     #[must_use]
     pub const fn first(limit: u64) -> Self {
         Self {
@@ -174,6 +184,57 @@ impl PageWindow {
     #[must_use]
     pub const fn offset(self) -> u64 {
         self.offset
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
+mod page_window_tests {
+    use super::PageWindow;
+    use crate::domain::error::DomainError;
+
+    #[test]
+    fn an_ordinary_window_keeps_both_numbers() {
+        let window = PageWindow::bounded(30, 60).unwrap();
+        assert_eq!(window.limit(), 30);
+        assert_eq!(window.offset(), 60);
+    }
+
+    #[test]
+    fn the_limits_are_inclusive() {
+        let window = PageWindow::bounded(PageWindow::MAX_LIMIT, PageWindow::MAX_OFFSET).unwrap();
+        assert_eq!(window.limit(), PageWindow::MAX_LIMIT);
+        assert_eq!(window.offset(), PageWindow::MAX_OFFSET);
+    }
+
+    #[test]
+    fn a_caller_supplied_window_past_a_limit_is_refused() {
+        let too_many = PageWindow::bounded(PageWindow::MAX_LIMIT + 1, 0);
+        assert!(matches!(
+            too_many,
+            Err(DomainError::Validation { ref field, .. }) if field == "per_page"
+        ));
+
+        let too_far = PageWindow::bounded(30, PageWindow::MAX_OFFSET + 1);
+        assert!(matches!(
+            too_far,
+            Err(DomainError::Validation { ref field, .. }) if field == "page"
+        ));
+    }
+
+    #[test]
+    fn first_clamps_instead_of_refusing() {
+        assert_eq!(PageWindow::first(50).limit(), 50);
+        assert_eq!(PageWindow::first(50).offset(), 0);
+        assert_eq!(
+            PageWindow::first(PageWindow::MAX_LIMIT * 2).limit(),
+            PageWindow::MAX_LIMIT,
+            "its argument is a constant in this crate, so it is capped rather than refused"
+        );
     }
 }
 
@@ -435,8 +496,14 @@ pub struct CommitRecord {
 
 #[async_trait]
 pub trait CommitRepository: Send + Sync {
-    /// How many commits this repository has in total.
-    async fn count_by_repo(&self, scope: &AccessScope, repo_id: i64) -> Result<u64, DomainError>;
+    /// How many commits this repository has, counting only those committed
+    /// at or after `since` when one is given.
+    async fn count_by_repo(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<u64, DomainError>;
     async fn upsert(
         &self,
         scope: &AccessScope,
@@ -444,11 +511,14 @@ pub trait CommitRepository: Send + Sync {
         record: CommitRecord,
     ) -> Result<Commit, DomainError>;
 
+    /// Newest first, keeping only commits committed at or after `since`
+    /// when one is given - GitHub's own `?since=` on this listing.
     async fn list_by_repo(
         &self,
         scope: &AccessScope,
         repo_id: i64,
         window: PageWindow,
+        since: Option<DateTime<Utc>>,
     ) -> Result<Vec<Commit>, DomainError>;
 
     async fn find_by_sha(

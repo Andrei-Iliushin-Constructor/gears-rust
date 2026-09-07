@@ -13,7 +13,7 @@ use toolkit::{ClientHub, Gear, RestApiCapability};
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn init_then_register_rest_serves_health_with_configured_url() {
+async fn init_then_register_rest_serves_health_without_the_upstream_url() {
     let gear = GithubMirrorGear::default();
     let ctx = common::gear_ctx(
         Arc::new(ClientHub::new()),

@@ -100,7 +100,12 @@ fn github_instant(at: chrono::DateTime<chrono::Utc>) -> String {
     let at = if at.timestamp_subsec_nanos() == 0 {
         at
     } else {
-        at.trunc_subsecs(0) + chrono::Duration::seconds(1)
+        at.trunc_subsecs(0)
+            .checked_add_signed(chrono::Duration::seconds(1))
+            // Within a second of the largest representable instant, where
+            // adding one would overflow. That instant is already past every
+            // stored stamp, so it is the right bound to compare against.
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
     };
     at.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
@@ -402,9 +407,14 @@ fn commit_active_model(tenant_id: Uuid, r: &CommitRecord) -> commits::ActiveMode
 
 #[async_trait]
 impl CommitRepository for SeaOrmCommitRepository {
-    async fn count_by_repo(&self, scope: &AccessScope, repo_id: i64) -> Result<u64, DomainError> {
+    async fn count_by_repo(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        since: Option<DateTimeUtc>,
+    ) -> Result<u64, DomainError> {
         let conn = self.db.conn()?;
-        commit_count_by_repo_in(&conn, scope, repo_id).await
+        commit_count_by_repo_in(&conn, scope, repo_id, since).await
     }
 
     async fn delete_stale(
@@ -432,9 +442,10 @@ impl CommitRepository for SeaOrmCommitRepository {
         scope: &AccessScope,
         repo_id: i64,
         window: PageWindow,
+        since: Option<DateTimeUtc>,
     ) -> Result<Vec<Commit>, DomainError> {
         let conn = self.db.conn()?;
-        commit_list_by_repo_in(&conn, scope, repo_id, window).await
+        commit_list_by_repo_in(&conn, scope, repo_id, window, since).await
     }
     async fn find_by_sha(
         &self,
@@ -2199,11 +2210,12 @@ async fn commit_count_by_repo_in<C: DBRunner>(
     conn: &C,
     scope: &AccessScope,
     repo_id: i64,
+    since: Option<DateTimeUtc>,
 ) -> Result<u64, DomainError> {
     CommitEntity::find()
         .secure()
         .scope_with(scope)
-        .filter(sea_orm::Condition::all().add(commits::Column::RepoId.eq(repo_id)))
+        .filter(commit_listing_condition(repo_id, since))
         .count(conn)
         .await
         .map_err(map_scope_error)
@@ -2281,16 +2293,27 @@ async fn commit_upsert_in<C: DBRunner>(
     })
 }
 
+/// One repository's commits, narrowed to those committed at or after
+/// `since`. The count and the page must share it, or the two disagree.
+fn commit_listing_condition(repo_id: i64, since: Option<DateTimeUtc>) -> sea_orm::Condition {
+    let mut condition = sea_orm::Condition::all().add(commits::Column::RepoId.eq(repo_id));
+    if let Some(since) = since {
+        condition = condition.add(commits::Column::CommittedAt.gte(github_instant(since)));
+    }
+    condition
+}
+
 async fn commit_list_by_repo_in<C: DBRunner>(
     conn: &C,
     scope: &AccessScope,
     repo_id: i64,
     window: PageWindow,
+    since: Option<DateTimeUtc>,
 ) -> Result<Vec<Commit>, DomainError> {
     let rows = CommitEntity::find()
         .secure()
         .scope_with(scope)
-        .filter(sea_orm::Condition::all().add(commits::Column::RepoId.eq(repo_id)))
+        .filter(commit_listing_condition(repo_id, since))
         .order_by(commits::Column::CommittedAt, Order::Desc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(commits::Column::Sha, Order::Asc)

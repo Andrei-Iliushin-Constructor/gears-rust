@@ -44,26 +44,43 @@ const fn db_error_kind(e: &toolkit_db::DbError) -> &'static str {
 ///
 /// Today these strings are the mirror's own - a GitHub path and a status,
 /// never an upstream response body - and this keeps that true if a later
-/// message quotes more than it should: a `ghp_`, `github_pat_`, `gho_` or
-/// `Bearer` run is replaced, and a URL keeps only its path.
+/// message quotes more than it should. A `ghp_`, `gho_`, `ghu_` or
+/// `github_pat_` run is replaced; so is the word after an `Authorization`
+/// header name or a `Bearer`/`Basic`/`token` scheme, since a credential
+/// there carries no recognisable prefix of its own; and a URL keeps only
+/// its path.
 fn redacted(msg: &str) -> String {
-    const SECRET_PREFIXES: [&str; 5] = ["ghp_", "gho_", "ghu_", "github_pat_", "Bearer"];
+    const SECRET_PREFIXES: [&str; 4] = ["ghp_", "gho_", "ghu_", "github_pat_"];
+    /// Words whose value is whatever follows them.
+    const CREDENTIAL_INTRODUCERS: [&str; 5] =
+        ["Bearer", "bearer", "Basic", "token", "Authorization:"];
 
-    msg.split_whitespace()
-        .map(|word| {
-            if SECRET_PREFIXES
+    let mut out: Vec<String> = Vec::new();
+    let mut redact_next = false;
+    for word in msg.split_whitespace() {
+        let introduces = CREDENTIAL_INTRODUCERS
+            .iter()
+            .any(|introducer| word.trim_end_matches(':') == introducer.trim_end_matches(':'));
+        let secret = redact_next
+            || introduces
+            || SECRET_PREFIXES
                 .iter()
-                .any(|prefix| word.starts_with(prefix))
-            {
-                "[REDACTED]".to_owned()
-            } else if let Some((path, _)) = word.split_once('?') {
-                format!("{path}?[REDACTED]")
-            } else {
-                word.to_owned()
+                .any(|prefix| word.starts_with(prefix));
+
+        if secret {
+            // One `[REDACTED]` for the whole scheme-and-value run, so a
+            // reader cannot tell how long the credential was.
+            if out.last().map(String::as_str) != Some("[REDACTED]") {
+                out.push("[REDACTED]".to_owned());
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+        } else if let Some((path, _)) = word.split_once('?') {
+            out.push(format!("{path}?[REDACTED]"));
+        } else {
+            out.push(word.to_owned());
+        }
+        redact_next = introduces;
+    }
+    out.join(" ")
 }
 
 impl From<DomainError> for CanonicalError {
@@ -183,14 +200,35 @@ mod tests {
             "GitHub answered 401 for /repos/acme/widget/issues?[REDACTED]"
         );
         assert_eq!(
-            redacted("token ghp_abc123 was refused"),
-            "token [REDACTED] was refused"
-        );
-        assert_eq!(
             redacted("GitHub answered 403 for /repos/acme/widget"),
             "GitHub answered 403 for /repos/acme/widget",
             "an ordinary message must survive intact"
         );
+    }
+
+    #[test]
+    fn a_scheme_takes_the_value_after_it_down_too() {
+        for (message, expected) in [
+            ("token ghp_abc123 was refused", "[REDACTED] was refused"),
+            (
+                "Bearer eyJhbGciOi.payload.sig rejected",
+                "[REDACTED] rejected",
+            ),
+            (
+                "sent Authorization: Bearer eyJhbGciOi to GitHub",
+                "sent [REDACTED] to GitHub",
+            ),
+            ("Basic dXNlcjpwYXNz denied", "[REDACTED] denied"),
+        ] {
+            let out = redacted(message);
+            assert_eq!(out, expected, "{message:?}");
+            for secret in ["ghp_abc123", "eyJhbGciOi", "dXNlcjpwYXNz"] {
+                assert!(
+                    !out.contains(secret),
+                    "{secret} survived redaction of {message:?}: {out}"
+                );
+            }
+        }
     }
 
     #[test]

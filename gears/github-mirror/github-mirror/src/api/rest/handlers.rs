@@ -33,6 +33,14 @@ use super::dto::{
 
 const DEFAULT_PER_PAGE: u64 = 30;
 const MAX_PER_PAGE: u64 = 100;
+/// Longest a filter value may be.
+///
+/// The values GitHub accepts here are words and one timestamp: `closed`,
+/// `updated`, `asc`, `2026-01-01T00:00:00Z`. The bound matters because these
+/// are echoed back in the `Link` header, and the listings that ignore a
+/// filter still carry it there, so without a cap a caller could name its own
+/// response-header size.
+const MAX_FILTER_VALUE: usize = 64;
 
 /// GitHub-style pagination query (`?page=2&per_page=50`), plus the `state`
 /// filter the issue and pull listings accept.
@@ -89,17 +97,37 @@ impl GithubPageQuery {
         })
     }
 
+    /// Every filter parameter the caller sent, with the name it arrived under.
+    fn filter_values(&self) -> [(&'static str, Option<&str>); 4] {
+        [
+            ("state", self.state.as_deref()),
+            ("sort", self.sort.as_deref()),
+            ("direction", self.direction.as_deref()),
+            ("since", self.since.as_deref()),
+        ]
+    }
+
+    /// # Errors
+    /// `Validation` when a filter value is longer than
+    /// [`MAX_FILTER_VALUE`], which no value GitHub accepts is.
+    fn validate_filter_lengths(&self) -> Result<(), DomainError> {
+        for (field, value) in self.filter_values() {
+            if value.is_some_and(|value| value.len() > MAX_FILTER_VALUE) {
+                return Err(DomainError::Validation {
+                    field: field.to_owned(),
+                    message: format!("must be {MAX_FILTER_VALUE} characters or fewer"),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// The filter parameters the caller actually sent, rendered back as a
     /// query string so a `Link` header keeps them: following `rel="next"`
     /// must walk the same filtered listing, not the unfiltered default.
     fn filter_query(&self) -> String {
         let mut query = String::new();
-        for (key, value) in [
-            ("state", self.state.as_deref()),
-            ("sort", self.sort.as_deref()),
-            ("direction", self.direction.as_deref()),
-            ("since", self.since.as_deref()),
-        ] {
+        for (key, value) in self.filter_values() {
             if let Some(value) = value {
                 let encoded: String = form_urlencoded::byte_serialize(value.as_bytes()).collect();
                 query.push('&');
@@ -121,9 +149,10 @@ struct GithubPage {
 
 impl GithubPageQuery {
     /// # Errors
-    /// `Validation` when the requested page starts past
-    /// [`PageWindow::MAX_OFFSET`].
+    /// `Validation` when a filter value is over-long, or when the requested
+    /// page starts past [`PageWindow::MAX_OFFSET`].
     fn normalized(&self) -> Result<GithubPage, DomainError> {
+        self.validate_filter_lengths()?;
         let page = self.page.filter(|p| *p >= 1).unwrap_or(1);
         let per_page = self
             .per_page
@@ -381,7 +410,15 @@ pub async fn list_commits(
 ) -> GithubList<CommitDto> {
     validate_repo_path(&owner, &name)?;
     let page = query.normalized()?;
-    let (items, total) = svc.list_commits(&ctx, &owner, &name, page.window()).await?;
+    let (items, total) = svc
+        .list_commits(
+            &ctx,
+            &owner,
+            &name,
+            page.window(),
+            query.listing_filter()?.since,
+        )
+        .await?;
     let items = items.items;
     let path = format!("/repos/{owner}/{name}/commits");
     Ok(respond_counted(

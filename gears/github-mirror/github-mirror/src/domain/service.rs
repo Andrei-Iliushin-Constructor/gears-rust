@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use authz_resolver_sdk::PolicyEnforcer;
 use authz_resolver_sdk::pep::{AccessRequest, ResourceType};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use github_mirror_sdk::{
     Branch, CheckRun, Comment, Commit, CommitComment, CommitFile, CommitStatus, Contributor,
     Deployment, Issue, IssueEvent, IssueReaction, IssueTimelineEvent, Label, Milestone,
@@ -794,6 +794,7 @@ impl Service {
         owner: &str,
         name: &str,
         window: PageWindow,
+        since: Option<DateTime<Utc>>,
     ) -> Result<(Page<Commit>, u64), DomainError> {
         let scope = self
             .policy_enforcer
@@ -816,13 +817,16 @@ impl Service {
 
         let items = self
             .commits
-            .list_by_repo(&scope, repository.id, window)
+            .list_by_repo(&scope, repository.id, window, since)
             .await?;
 
         // Counted on the scope and repository already resolved above: the
         // GitHub-compatible listings report a total, and doing it here saves
         // a second policy evaluation and repository lookup per request.
-        let total = self.commits.count_by_repo(&scope, repository.id).await?;
+        let total = self
+            .commits
+            .count_by_repo(&scope, repository.id, since)
+            .await?;
 
         Ok((
             Page::new(
