@@ -2549,6 +2549,7 @@ dependencies = [
  "cf-gears-toolkit-odata",
  "cf-gears-toolkit-security",
  "chrono",
+ "serde_json",
 ]
 
 [[package]]
