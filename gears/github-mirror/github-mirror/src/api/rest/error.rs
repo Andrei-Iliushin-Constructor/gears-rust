@@ -13,6 +13,31 @@ pub struct RepositoryError;
 /// returned: the messages name upstream GitHub paths and storage internals.
 const INTERNAL_DETAIL: &str = "The mirror could not complete this request";
 
+/// Which kind of database failure happened, without its text.
+///
+/// A `DbError`'s own message can carry a DSN, a server-returned value or the
+/// statement that failed, so the log records the classification instead: it
+/// is what an operator alerts on, and it cannot leak a credential into a log
+/// sink.
+const fn db_error_kind(e: &toolkit_db::DbError) -> &'static str {
+    match e {
+        toolkit_db::DbError::UnknownDsn(_)
+        | toolkit_db::DbError::InvalidConfig(_)
+        | toolkit_db::DbError::ConfigConflict(_)
+        | toolkit_db::DbError::InvalidParameter(_)
+        | toolkit_db::DbError::EnvVar { .. }
+        | toolkit_db::DbError::UrlParse(_) => "configuration",
+        toolkit_db::DbError::FeatureDisabled(_) => "feature_disabled",
+        toolkit_db::DbError::InvalidSqlitePragma { .. }
+        | toolkit_db::DbError::UnknownSqlitePragma(_)
+        | toolkit_db::DbError::SqlitePragma(_) => "sqlite_pragma",
+        toolkit_db::DbError::Sea(_) => "query",
+        toolkit_db::DbError::Io(_) => "io",
+        toolkit_db::DbError::Lock(_) => "advisory_lock",
+        _ => "other",
+    }
+}
+
 impl From<DomainError> for CanonicalError {
     // Flat match on the domain enum is the whole point of this conversion;
     // the structured `tracing::*!` macros count toward cognitive complexity
@@ -51,7 +76,10 @@ impl From<DomainError> for CanonicalError {
                 CanonicalError::internal(INTERNAL_DETAIL).create()
             }
             DomainError::Database(db_err) => {
-                tracing::error!(error = ?db_err, "github-mirror database error");
+                tracing::error!(
+                    kind = db_error_kind(&db_err),
+                    "github-mirror database error"
+                );
                 CanonicalError::internal(INTERNAL_DETAIL).create()
             }
         }

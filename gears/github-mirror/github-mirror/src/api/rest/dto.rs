@@ -151,6 +151,8 @@ pub struct WorkflowStepDto {
     pub started_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl From<WorkflowStep> for WorkflowStepDto {
@@ -162,6 +164,7 @@ impl From<WorkflowStep> for WorkflowStepDto {
             number: st.number,
             started_at: st.started_at,
             completed_at: st.completed_at,
+            extra: st.extra,
         }
     }
 }
