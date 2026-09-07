@@ -12,6 +12,7 @@ use crate::infra::storage::odata_mapper::{
     CommitFileField, CommitFileODataMapper, RepoField, RepoODataMapper, ReviewThreadField,
     ReviewThreadODataMapper,
 };
+use chrono::SubsecRound as _;
 use github_mirror_sdk::{
     Branch, CheckRun, Comment, Commit, CommitComment, CommitFile, CommitStatus, Contributor,
     Deployment, Issue, IssueEvent, IssueReaction, IssueTimelineEvent, Label, Milestone,
@@ -90,7 +91,17 @@ impl SeaOrmRepoRepository {
 
 /// An instant in the exact shape GitHub writes into the stored `updated_at`
 /// text, so the comparison against that TEXT column is a like-for-like one.
+///
+/// GitHub's own stamps carry no fractional seconds, so a `since` that does
+/// carry them is rounded up to the next whole second: `00:00:00.500Z` becomes
+/// `00:00:01Z`, and a row stamped `00:00:00Z` is correctly left out. Truncating
+/// instead would admit rows from up to a second before the asked-for instant.
 fn github_instant(at: chrono::DateTime<chrono::Utc>) -> String {
+    let at = if at.timestamp_subsec_nanos() == 0 {
+        at
+    } else {
+        at.trunc_subsecs(0) + chrono::Duration::seconds(1)
+    };
     at.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
