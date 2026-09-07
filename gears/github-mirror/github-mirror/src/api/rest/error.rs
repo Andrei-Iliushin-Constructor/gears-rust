@@ -40,6 +40,32 @@ const fn db_error_kind(e: &toolkit_db::DbError) -> &'static str {
     }
 }
 
+/// The message with anything credential-shaped taken out.
+///
+/// Today these strings are the mirror's own - a GitHub path and a status,
+/// never an upstream response body - and this keeps that true if a later
+/// message quotes more than it should: a `ghp_`, `github_pat_`, `gho_` or
+/// `Bearer` run is replaced, and a URL keeps only its path.
+fn redacted(msg: &str) -> String {
+    const SECRET_PREFIXES: [&str; 5] = ["ghp_", "gho_", "ghu_", "github_pat_", "Bearer"];
+
+    msg.split_whitespace()
+        .map(|word| {
+            if SECRET_PREFIXES
+                .iter()
+                .any(|prefix| word.starts_with(prefix))
+            {
+                "[REDACTED]".to_owned()
+            } else if let Some((path, _)) = word.split_once('?') {
+                format!("{path}?[REDACTED]")
+            } else {
+                word.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl From<DomainError> for CanonicalError {
     // Flat match on the domain enum is the whole point of this conversion;
     // the structured `tracing::*!` macros count toward cognitive complexity
@@ -54,7 +80,7 @@ impl From<DomainError> for CanonicalError {
                 .with_field_violation(field, message, "VALIDATION_ERROR")
                 .create(),
             DomainError::AccessLost(msg) => {
-                tracing::warn!(msg = %msg, "github-mirror upstream access lost");
+                tracing::warn!(msg = %redacted(&msg), "github-mirror upstream access lost");
                 RepositoryError::not_found("Repo not found or not accessible")
                     .with_resource("repository")
                     .create()
@@ -63,7 +89,7 @@ impl From<DomainError> for CanonicalError {
                 .with_resource("repository")
                 .create(),
             DomainError::Forbidden(msg) => {
-                tracing::warn!(msg = %msg, "github-mirror access forbidden");
+                tracing::warn!(msg = %redacted(&msg), "github-mirror access forbidden");
                 RepositoryError::not_found("Repo not found or not accessible")
                     .with_resource("repository")
                     .create()
@@ -74,7 +100,7 @@ impl From<DomainError> for CanonicalError {
             // private to one tenant should not be inferable from another
             // tenant's error body.
             DomainError::Internal(msg) => {
-                tracing::error!(msg = %msg, "github-mirror internal error");
+                tracing::error!(msg = %redacted(&msg), "github-mirror internal error");
                 CanonicalError::internal(INTERNAL_DETAIL).create()
             }
             DomainError::Database(db_err) => {
@@ -147,6 +173,23 @@ mod tests {
         assert!(
             body.contains("\"field\":\"since\""),
             "the compat router turns this into GitHub's `errors[]`: {body}"
+        );
+    }
+
+    #[test]
+    fn a_logged_message_keeps_no_credential_and_no_query() {
+        assert_eq!(
+            redacted("GitHub answered 401 for /repos/acme/widget/issues?access_token=ghp_secret"),
+            "GitHub answered 401 for /repos/acme/widget/issues?[REDACTED]"
+        );
+        assert_eq!(
+            redacted("token ghp_abc123 was refused"),
+            "token [REDACTED] was refused"
+        );
+        assert_eq!(
+            redacted("GitHub answered 403 for /repos/acme/widget"),
+            "GitHub answered 403 for /repos/acme/widget",
+            "an ordinary message must survive intact"
         );
     }
 

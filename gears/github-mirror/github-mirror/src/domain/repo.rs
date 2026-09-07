@@ -100,8 +100,8 @@ pub struct IssueRecord {
 /// read the 49 pages before it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageWindow {
-    pub limit: u64,
-    pub offset: u64,
+    limit: u64,
+    offset: u64,
 }
 
 impl PageWindow {
@@ -119,16 +119,31 @@ impl PageWindow {
     /// would upstream.
     pub const MAX_OFFSET: u64 = 9_900;
 
-    /// A window that skips no more rows than [`Self::MAX_OFFSET`].
+    /// Most rows a window may ask for at once.
+    ///
+    /// `offset` alone is not enough of a guard: the row count becomes SQL
+    /// `LIMIT`, so an unbounded one loads a whole table into memory. The
+    /// REST surface caps a page at 100; this is the ceiling for the wider
+    /// internal reads, such as the contributor merge.
+    pub const MAX_LIMIT: u64 = 10_000;
+
+    /// A window within [`Self::MAX_LIMIT`] and [`Self::MAX_OFFSET`], the
+    /// only way to build one that skips rows.
     ///
     /// # Errors
-    /// `Validation` when `offset` is past the limit.
+    /// `Validation` when the row count or the offset is past its limit.
     pub fn bounded(limit: u64, offset: u64) -> Result<Self, DomainError> {
+        if limit > Self::MAX_LIMIT {
+            return Err(DomainError::Validation {
+                field: "per_page".to_owned(),
+                message: format!("a page may hold {} rows at most", Self::MAX_LIMIT),
+            });
+        }
         if offset > Self::MAX_OFFSET {
             return Err(DomainError::Validation {
                 field: "page".to_owned(),
                 message: format!(
-                    "Page-based pagination reaches row {} at most;                      narrow the listing with a filter or a smaller per_page",
+                    "page-based pagination reaches row {} at most; narrow the                      listing with a filter or ask for a smaller per_page",
                     Self::MAX_OFFSET
                 ),
             });
@@ -136,10 +151,29 @@ impl PageWindow {
         Ok(Self { limit, offset })
     }
 
-    /// The first `limit` rows.
+    /// The first `limit` rows, clamped to [`Self::MAX_LIMIT`].
     #[must_use]
     pub const fn first(limit: u64) -> Self {
-        Self { limit, offset: 0 }
+        Self {
+            limit: if limit > Self::MAX_LIMIT {
+                Self::MAX_LIMIT
+            } else {
+                limit
+            },
+            offset: 0,
+        }
+    }
+
+    /// How many rows to read.
+    #[must_use]
+    pub const fn limit(self) -> u64 {
+        self.limit
+    }
+
+    /// How many rows to skip first.
+    #[must_use]
+    pub const fn offset(self) -> u64 {
+        self.offset
     }
 }
 
