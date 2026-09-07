@@ -632,7 +632,7 @@ impl Service {
                 PageInfo {
                     next_cursor: None,
                     prev_cursor: None,
-                    limit: window.limit,
+                    limit: window.limit(),
                 },
             ),
             total,
@@ -735,7 +735,7 @@ impl Service {
                 PageInfo {
                     next_cursor: None,
                     prev_cursor: None,
-                    limit: window.limit,
+                    limit: window.limit(),
                 },
             ),
             total,
@@ -830,7 +830,7 @@ impl Service {
                 PageInfo {
                     next_cursor: None,
                     prev_cursor: None,
-                    limit: window.limit,
+                    limit: window.limit(),
                 },
             ),
             total,
@@ -921,7 +921,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: window.limit,
+                limit: window.limit(),
             },
         ))
     }
@@ -1008,7 +1008,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: window.limit,
+                limit: window.limit(),
             },
         ))
     }
@@ -1095,7 +1095,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: window.limit,
+                limit: window.limit(),
             },
         ))
     }
@@ -1181,7 +1181,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: window.limit,
+                limit: window.limit(),
             },
         ))
     }
@@ -1267,7 +1267,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: window.limit,
+                limit: window.limit(),
             },
         ))
     }
@@ -1353,7 +1353,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: window.limit,
+                limit: window.limit(),
             },
         ))
     }
@@ -1439,7 +1439,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: window.limit,
+                limit: window.limit(),
             },
         ))
     }
@@ -1525,7 +1525,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: window.limit,
+                limit: window.limit(),
             },
         ))
     }
@@ -1617,7 +1617,7 @@ impl Service {
                 PageInfo {
                     next_cursor: None,
                     prev_cursor: None,
-                    limit: window.limit,
+                    limit: window.limit(),
                 },
             ),
             total,
@@ -1706,7 +1706,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: window.limit,
+                limit: window.limit(),
             },
         ))
     }
@@ -1795,7 +1795,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: window.limit,
+                limit: window.limit(),
             },
         ))
     }
@@ -2037,7 +2037,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: window.limit,
+                limit: window.limit(),
             },
         ))
     }
@@ -2124,7 +2124,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: window.limit,
+                limit: window.limit(),
             },
         ))
     }
@@ -2210,7 +2210,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: window.limit,
+                limit: window.limit(),
             },
         ))
     }
@@ -2297,7 +2297,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: window.limit,
+                limit: window.limit(),
             },
         ))
     }
@@ -2387,7 +2387,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: window.limit,
+                limit: window.limit(),
             },
         ))
     }
@@ -2483,7 +2483,7 @@ impl Service {
                 PageInfo {
                     next_cursor: None,
                     prev_cursor: None,
-                    limit: window.limit,
+                    limit: window.limit(),
                 },
             ),
             total,
@@ -2571,7 +2571,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: window.limit,
+                limit: window.limit(),
             },
         ))
     }
@@ -2667,7 +2667,7 @@ impl Service {
                 PageInfo {
                     next_cursor: None,
                     prev_cursor: None,
-                    limit: window.limit,
+                    limit: window.limit(),
                 },
             ),
             total,
@@ -2756,7 +2756,7 @@ impl Service {
             PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: window.limit,
+                limit: window.limit(),
             },
         ))
     }

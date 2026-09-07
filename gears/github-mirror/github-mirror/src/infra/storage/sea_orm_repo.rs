@@ -1780,8 +1780,8 @@ async fn repo_list_window_in<C: DBRunner>(
         .secure()
         .scope_with(scope)
         .order_by(repositories::Column::FullName, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -1949,8 +1949,8 @@ async fn issue_list_by_repo_in<C: DBRunner>(
         .order_by(sort_column, direction)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(issues::Column::Number, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2146,8 +2146,8 @@ async fn pull_request_list_by_repo_in<C: DBRunner>(
         .order_by(sort_column, direction)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(pull_requests::Column::Number, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2275,8 +2275,8 @@ async fn commit_list_by_repo_in<C: DBRunner>(
         .order_by(commits::Column::CommittedAt, Order::Desc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(commits::Column::Sha, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2393,8 +2393,8 @@ async fn comment_list_by_issue_in<C: DBRunner>(
         .order_by(comments::Column::CreatedAt, Order::Asc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(comments::Column::Id, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2518,8 +2518,8 @@ async fn review_comment_list_by_pull_in<C: DBRunner>(
         .order_by(review_comments::Column::CreatedAt, Order::Asc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(review_comments::Column::Id, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2587,8 +2587,8 @@ async fn review_list_by_pull_in<C: DBRunner>(
                 .add(reviews::Column::PullNumber.eq(pull_number)),
         )
         .order_by(reviews::Column::Id, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2671,8 +2671,8 @@ async fn label_list_by_repo_in<C: DBRunner>(
         .scope_with(scope)
         .filter(sea_orm::Condition::all().add(labels::Column::RepoId.eq(repo_id)))
         .order_by(labels::Column::Name, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2771,8 +2771,8 @@ async fn milestone_list_by_repo_in<C: DBRunner>(
         .scope_with(scope)
         .filter(sea_orm::Condition::all().add(milestones::Column::RepoId.eq(repo_id)))
         .order_by(milestones::Column::Number, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2871,8 +2871,8 @@ async fn release_list_by_repo_in<C: DBRunner>(
         .order_by(releases::Column::CreatedAt, Order::Desc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(releases::Column::Id, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -2953,8 +2953,8 @@ async fn branch_list_by_repo_in<C: DBRunner>(
         .scope_with(scope)
         .filter(sea_orm::Condition::all().add(branches::Column::RepoId.eq(repo_id)))
         .order_by(branches::Column::Name, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3021,8 +3021,8 @@ async fn contributor_list_by_repo_in<C: DBRunner>(
         // Derived contributors carry no activity count to rank by, so
         // the unique key is the whole ordering.
         .order_by(contributors::Column::UserId, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3115,8 +3115,8 @@ async fn workflow_run_list_by_repo_in<C: DBRunner>(
         .order_by(workflow_runs::Column::CreatedAt, Order::Desc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(workflow_runs::Column::Id, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3188,8 +3188,8 @@ async fn pull_request_file_list_by_pull_in<C: DBRunner>(
                 .add(pull_request_files::Column::PullNumber.eq(pull_number)),
         )
         .order_by(pull_request_files::Column::Filename, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3265,8 +3265,8 @@ async fn tag_list_by_repo_in<C: DBRunner>(
         .scope_with(scope)
         .filter(sea_orm::Condition::all().add(tags::Column::RepoId.eq(repo_id)))
         .order_by(tags::Column::Name, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3481,8 +3481,8 @@ async fn commit_comment_list_by_commit_in<C: DBRunner>(
         .order_by(commit_comments::Column::CreatedAt, Order::Asc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(commit_comments::Column::Id, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3556,8 +3556,8 @@ async fn issue_event_list_by_issue_in<C: DBRunner>(
         .order_by(issue_events::Column::CreatedAt, Order::Asc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(issue_events::Column::Id, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3626,8 +3626,8 @@ async fn deployment_list_by_repo_in<C: DBRunner>(
         .order_by(deployments::Column::CreatedAt, Order::Desc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(deployments::Column::Id, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3697,8 +3697,8 @@ async fn pull_request_commit_list_by_pull_in<C: DBRunner>(
         .order_by(pull_request_commits::Column::CommittedAt, Order::Asc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(pull_request_commits::Column::Sha, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3772,8 +3772,8 @@ async fn commit_status_list_by_commit_in<C: DBRunner>(
         .order_by(commit_statuses::Column::CreatedAt, Order::Desc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(commit_statuses::Column::Id, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3870,8 +3870,8 @@ async fn workflow_job_list_by_run_in<C: DBRunner>(
                 .add(workflow_jobs::Column::RunId.eq(run_id)),
         )
         .order_by(workflow_jobs::Column::Id, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -3935,8 +3935,8 @@ async fn issue_reaction_list_by_issue_in<C: DBRunner>(
                 .add(issue_reactions::Column::IssueNumber.eq(issue_number)),
         )
         .order_by(issue_reactions::Column::Id, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -4039,8 +4039,8 @@ async fn check_run_list_by_commit_in<C: DBRunner>(
                 .add(check_runs::Column::HeadSha.eq(head_sha)),
         )
         .order_by(check_runs::Column::Id, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -4137,8 +4137,8 @@ async fn issue_timeline_list_by_issue_in<C: DBRunner>(
                 .add(issue_timeline::Column::IssueNumber.eq(issue_number)),
         )
         .order_by(issue_timeline::Column::Position, Order::Asc)
-        .limit(window.limit)
-        .offset(window.offset)
+        .limit(window.limit())
+        .offset(window.offset())
         .all(conn)
         .await
         .map_err(map_scope_error)?;
