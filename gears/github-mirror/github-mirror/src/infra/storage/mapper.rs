@@ -656,16 +656,24 @@ impl From<check_runs::Model> for CheckRun {
     }
 }
 
+/// The stored timeline entry, or a stand-in naming the event when the row
+/// cannot be decoded: the entry's shape is GitHub's, not the mirror's, so
+/// there is nothing else to fall back to.
+pub(crate) fn timeline_payload(event: &str, raw: Option<&str>) -> serde_json::Value {
+    decode::<serde_json::Value>("payload_json", raw)
+        .unwrap_or_else(|| serde_json::json!({ "event": event }))
+}
+
 impl From<issue_timeline::Model> for IssueTimelineEvent {
     fn from(m: issue_timeline::Model) -> Self {
         Self {
             repo_id: m.repo_id,
             issue_number: m.issue_number,
             position: m.position,
+            payload: timeline_payload(&m.event, Some(&m.payload_json)),
             event: m.event,
             created_at: m.created_at,
             actor_login: m.actor_login,
-            payload_json: m.payload_json,
         }
     }
 }

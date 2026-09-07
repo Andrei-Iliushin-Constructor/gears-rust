@@ -637,7 +637,7 @@ impl CheckRun {
 /// nothing, and several of them (`committed`, `cross-referenced`) carry no
 /// numeric id at all. The mirror therefore keys an entry by its position
 /// in the issue's timeline and keeps the GitHub object verbatim in
-/// `payload_json`, so reads can serve back exactly what GitHub sent.
+/// `payload`, so reads can serve back exactly what GitHub sent.
 #[domain_model]
 pub struct IssueTimelineEvent {
     /// Owning repository's GitHub id.
@@ -651,8 +651,8 @@ pub struct IssueTimelineEvent {
     /// Absent on the event types that carry no timestamp of their own.
     pub created_at: Option<String>,
     pub actor_login: Option<String>,
-    /// The whole GitHub timeline entry, kept as raw JSON.
-    pub payload_json: String,
+    /// The whole GitHub timeline entry, as GitHub sent it.
+    pub payload: serde_json::Value,
 }
 
 /// A mirrored GitHub deployment record (read-slice shape).
