@@ -6,8 +6,6 @@
 //! endpoints under `/github-mirror/v1/` (PRD §5.9) keep the platform
 //! shapes.
 
-use crate::infra::storage::mapper::decode;
-
 use github_mirror_sdk::{
     Actor, Branch, CheckRun, Comment, Commit, CommitComment, CommitFile, CommitStatus, Contributor,
     Deployment, Issue, IssueEvent, IssueReaction, IssueTimelineEvent, Label, LabelRef, Milestone,
@@ -153,6 +151,8 @@ pub struct WorkflowStepDto {
     pub started_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl From<WorkflowStep> for WorkflowStepDto {
@@ -164,6 +164,7 @@ impl From<WorkflowStep> for WorkflowStepDto {
             number: st.number,
             started_at: st.started_at,
             completed_at: st.completed_at,
+            extra: st.extra,
         }
     }
 }
@@ -1382,10 +1383,7 @@ pub struct IssueTimelineEventDto {
 
 impl From<IssueTimelineEvent> for IssueTimelineEventDto {
     fn from(e: IssueTimelineEvent) -> Self {
-        let entry = decode::<serde_json::Value>("payload_json", Some(&e.payload_json))
-            .unwrap_or_else(|| serde_json::json!({ "event": e.event }));
-
-        Self { entry }
+        Self { entry: e.payload }
     }
 }
 

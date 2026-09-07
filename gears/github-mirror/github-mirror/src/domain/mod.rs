@@ -5,3 +5,4 @@ pub mod repo;
 pub mod scheduler;
 pub mod scope;
 pub mod service;
+pub mod validate;

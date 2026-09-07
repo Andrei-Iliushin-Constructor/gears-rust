@@ -55,7 +55,9 @@ use crate::domain::repo::{
 use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache};
 use crate::infra::github::compression::{Compression, content_hash};
 
-use super::mapper::{StoredActor, StoredAsset, StoredLabel, StoredStep, decode, decode_list};
+use super::mapper::{
+    StoredActor, StoredAsset, StoredLabel, StoredStep, decode, decode_list, timeline_payload,
+};
 
 use super::entity::branches::{self, Entity as BranchEntity};
 use super::entity::check_runs::{self, Entity as CheckRunEntity};
@@ -4127,10 +4129,10 @@ async fn issue_timeline_upsert_in<C: DBRunner>(
         repo_id: record.repo_id,
         issue_number: record.issue_number,
         position: record.position,
+        payload: timeline_payload(&record.event, Some(&record.payload_json)),
         event: record.event,
         created_at: record.created_at,
         actor_login: record.actor_login,
-        payload_json: record.payload_json,
     })
 }
 

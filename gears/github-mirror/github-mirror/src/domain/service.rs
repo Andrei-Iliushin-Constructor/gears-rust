@@ -42,6 +42,7 @@ use super::scheduler::{
     sweep_families,
 };
 use super::scope::ScopeConfig;
+use super::validate::{repo_full_name, validate_commit_sha};
 
 /// The gear's name, taken from the `#[toolkit::gear]` attribute so the
 /// literal exists in exactly one place.
@@ -561,7 +562,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         self.repo
             .find_by_full_name(&scope, &full_name)
             .await?
@@ -592,7 +593,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -629,7 +630,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -654,6 +655,7 @@ impl Service {
         name: &str,
         sha: &str,
     ) -> Result<Commit, DomainError> {
+        validate_commit_sha(sha)?;
         let scope = self
             .policy_enforcer
             .access_scope_with(
@@ -666,7 +668,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -792,7 +794,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -852,7 +854,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -895,7 +897,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -955,7 +957,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -993,7 +995,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1050,7 +1052,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1090,7 +1092,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1137,7 +1139,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1177,7 +1179,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1224,7 +1226,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1264,7 +1266,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1311,7 +1313,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1350,7 +1352,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1397,7 +1399,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1436,7 +1438,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1483,7 +1485,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1522,7 +1524,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1569,7 +1571,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1608,7 +1610,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1655,7 +1657,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1694,7 +1696,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1741,7 +1743,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1777,7 +1779,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1835,7 +1837,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1875,7 +1877,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1923,7 +1925,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -1964,7 +1966,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2011,7 +2013,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2039,6 +2041,7 @@ impl Service {
         commit_sha: &str,
         query: &ODataQuery,
     ) -> Result<Page<CommitFile>, DomainError> {
+        validate_commit_sha(commit_sha)?;
         let scope = self
             .policy_enforcer
             .access_scope_with(
@@ -2051,7 +2054,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2088,7 +2091,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2128,7 +2131,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2165,7 +2168,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2192,6 +2195,7 @@ impl Service {
         commit_sha: &str,
         window: PageWindow,
     ) -> Result<Page<CommitComment>, DomainError> {
+        validate_commit_sha(commit_sha)?;
         let scope = self
             .policy_enforcer
             .access_scope_with(
@@ -2204,7 +2208,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2252,7 +2256,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2291,7 +2295,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2338,7 +2342,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2377,7 +2381,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2424,7 +2428,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2464,7 +2468,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2512,7 +2516,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2541,6 +2545,7 @@ impl Service {
         commit_sha: &str,
         window: PageWindow,
     ) -> Result<Page<CommitStatus>, DomainError> {
+        validate_commit_sha(commit_sha)?;
         let scope = self
             .policy_enforcer
             .access_scope_with(
@@ -2553,7 +2558,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2601,7 +2606,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2640,7 +2645,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2698,7 +2703,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2737,7 +2742,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2784,7 +2789,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2811,6 +2816,7 @@ impl Service {
         head_sha: &str,
         window: PageWindow,
     ) -> Result<(Page<CheckRun>, u64), DomainError> {
+        validate_commit_sha(head_sha)?;
         let scope = self
             .policy_enforcer
             .access_scope_with(
@@ -2823,7 +2829,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2881,7 +2887,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2921,7 +2927,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)
@@ -2968,7 +2974,7 @@ impl Service {
             )
             .await?;
 
-        let full_name = format!("{owner}/{name}");
+        let full_name = repo_full_name(owner, name)?;
         let repository = self
             .repo
             .find_by_full_name(&scope, &full_name)

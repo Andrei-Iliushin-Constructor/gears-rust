@@ -14,11 +14,13 @@ use serde::Deserialize;
 use toolkit::api::canonical_prelude::*;
 use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::SecurityContext;
+use url::form_urlencoded;
 
 use crate::api::rest::routes::ConcreteService;
 use crate::domain::error::DomainError;
 use crate::domain::repo::{IssueState, ListingDirection, ListingFilter, ListingSort, PageWindow};
 use crate::domain::scope::{CollectionMode, ScopeConfig, SyncScope};
+use crate::domain::validate::{validate_commit_sha, validate_repo_path};
 
 use super::dto::{
     AuthenticatedUserDto, BranchDto, CacheClearedDto, CheckRunDto, CheckRunsPageDto, CommentDto,
@@ -32,13 +34,6 @@ use super::dto::{
 
 const DEFAULT_PER_PAGE: u64 = 30;
 const MAX_PER_PAGE: u64 = 100;
-/// Furthest row page-based paging may reach.
-///
-/// GitHub answers `page * per_page > 1000` with a 422 telling the caller to
-/// switch to cursor paging, so the mirror stops in the same place: it keeps
-/// the surfaces identical and stops an arbitrary `?page=` from becoming an
-/// arbitrary SQL `OFFSET`.
-const MAX_PAGED_ROWS: u64 = 1_000;
 
 /// `?force=true` bypasses the HTTP cache (PRD §5.2 force mode). Accepted and
 /// carried through, but inert until conditional requests land (#4630).
@@ -187,26 +182,51 @@ impl GithubPageQuery {
     /// caller left out.
     ///
     /// # Errors
-    /// Whatever [`Self::state_filter`] or [`Self::since_filter`] returns.
+    /// `Validation` when `state`, `sort`, `direction` or `since` does not
+    /// parse.
     fn listing_filter(&self) -> Result<ListingFilter, DomainError> {
         Ok(ListingFilter {
             state: self.state_filter()?,
-            sort: ListingSort::parse(self.sort.as_deref()),
-            direction: ListingDirection::parse(self.direction.as_deref()),
+            sort: ListingSort::parse(self.sort.as_deref())?,
+            direction: ListingDirection::parse(self.direction.as_deref())?,
             since: self.since_filter()?,
         })
+    }
+
+    /// The filter parameters the caller actually sent, rendered back as a
+    /// query string so a `Link` header keeps them: following `rel="next"`
+    /// must walk the same filtered listing, not the unfiltered default.
+    fn filter_query(&self) -> String {
+        let mut query = String::new();
+        for (key, value) in [
+            ("state", self.state.as_deref()),
+            ("sort", self.sort.as_deref()),
+            ("direction", self.direction.as_deref()),
+            ("since", self.since.as_deref()),
+        ] {
+            if let Some(value) = value {
+                let encoded: String = form_urlencoded::byte_serialize(value.as_bytes()).collect();
+                query.push('&');
+                query.push_str(key);
+                query.push('=');
+                query.push_str(&encoded);
+            }
+        }
+        query
     }
 }
 
 struct GithubPage {
     page: u64,
     per_page: u64,
+    filters: String,
+    window: PageWindow,
 }
 
 impl GithubPageQuery {
     /// # Errors
-    /// `Validation` when the requested page reaches past
-    /// [`MAX_PAGED_ROWS`], which is where GitHub itself stops.
+    /// `Validation` when the requested page starts past
+    /// [`PageWindow::MAX_OFFSET`].
     fn normalized(&self) -> Result<GithubPage, DomainError> {
         let page = self.page.filter(|p| *p >= 1).unwrap_or(1);
         let per_page = self
@@ -214,27 +234,24 @@ impl GithubPageQuery {
             .filter(|p| *p >= 1)
             .unwrap_or(DEFAULT_PER_PAGE)
             .min(MAX_PER_PAGE);
+        let window =
+            PageWindow::bounded(per_page, page.saturating_sub(1).saturating_mul(per_page))?;
 
-        if page.saturating_mul(per_page) > MAX_PAGED_ROWS {
-            return Err(DomainError::Validation {
-                field: "page".to_owned(),
-                message: concat!(
-                    "Pagination with the page parameter is not supported for large datasets, ",
-                    "please use cursor based pagination (after/before)"
-                )
-                .to_owned(),
-            });
-        }
-
-        Ok(GithubPage { page, per_page })
+        Ok(GithubPage {
+            page,
+            per_page,
+            filters: self.filter_query(),
+            window,
+        })
     }
 }
 
 impl GithubPage {
     /// The rows this page needs, as an offset the database applies: asking
-    /// for page 50 reads one page, not fifty.
-    fn window(&self) -> PageWindow {
-        PageWindow::new(self.per_page, (self.page - 1).saturating_mul(self.per_page))
+    /// for page 50 reads one page, not fifty. Bounded when it was built, in
+    /// [`GithubPageQuery::normalized`].
+    const fn window(&self) -> PageWindow {
+        self.window
     }
 
     fn convert<T, D: From<T>>(items: Vec<T>) -> Vec<D> {
@@ -252,31 +269,33 @@ impl GithubPage {
     /// came back short, so on a full page `rel="last"` is omitted rather than
     /// guessed — GitHub itself always knows the total and always sends it.
     fn link_header_with_total(&self, path: &str, returned: usize, total: Option<u64>) -> HeaderMap {
-        // Page-based paging stops at MAX_PAGED_ROWS, so a link past it would
-        // advertise a page this gear answers with 422.
-        let reachable_pages = MAX_PAGED_ROWS.checked_div(self.per_page).unwrap_or(0);
-        let last_page = total
-            .map(|total| total.div_ceil(self.per_page).max(1).min(reachable_pages))
-            .filter(|_| reachable_pages > 0);
+        // Page-based paging stops at PageWindow::MAX_OFFSET, so a link
+        // past it would advertise a page this gear refuses.
+        let reachable_pages = PageWindow::MAX_OFFSET
+            .checked_div(self.per_page)
+            .map_or(1, |pages| pages.saturating_add(1));
+        let last_page =
+            total.map(|total| total.div_ceil(self.per_page).max(1).min(reachable_pages));
         let is_last_page =
             last_page.map_or(returned as u64 != self.per_page, |last| self.page >= last);
+        let filters = self.filters.as_str();
 
         let mut links = Vec::new();
         if !is_last_page && self.page < reachable_pages {
             links.push(format!(
-                "<{path}?page={}&per_page={}>; rel=\"next\"",
+                "<{path}?page={}&per_page={}{filters}>; rel=\"next\"",
                 self.page + 1,
                 self.per_page
             ));
         }
         if self.page > 1 {
             links.push(format!(
-                "<{path}?page={}&per_page={}>; rel=\"prev\"",
+                "<{path}?page={}&per_page={}{filters}>; rel=\"prev\"",
                 self.page - 1,
                 self.per_page
             ));
             links.push(format!(
-                "<{path}?page=1&per_page={}>; rel=\"first\"",
+                "<{path}?page=1&per_page={}{filters}>; rel=\"first\"",
                 self.per_page
             ));
         }
@@ -284,12 +303,12 @@ impl GithubPage {
         // short page proves it is the end.
         if let Some(last) = last_page {
             links.push(format!(
-                "<{path}?page={last}&per_page={}>; rel=\"last\"",
+                "<{path}?page={last}&per_page={}{filters}>; rel=\"last\"",
                 self.per_page
             ));
         } else if is_last_page {
             links.push(format!(
-                "<{path}?page={}&per_page={}>; rel=\"last\"",
+                "<{path}?page={}&per_page={}{filters}>; rel=\"last\"",
                 self.page, self.per_page
             ));
         }
@@ -340,30 +359,6 @@ pub async fn list_repos(
 ) -> ApiResult<JsonPage<RepoDto>> {
     let page: Page<_> = svc.list_repos(&ctx, &query).await?;
     Ok(Json(page.map_items(RepoDto::from)))
-}
-
-/// GitHub owner and repository names are ASCII letters, digits, `.`, `_`
-/// and `-`. The path segments arrive percent-decoded, so anything else —
-/// a `?`, `#`, `/`, a quote — could re-shape the URL or GraphQL query the
-/// mirror sends to GitHub with its own token; such values are rejected
-/// here, before any of them is used.
-fn validate_repo_path(owner: &str, name: &str) -> Result<(), DomainError> {
-    for (field, value) in [("owner", owner), ("name", name)] {
-        let well_formed = !value.is_empty()
-            && value != "."
-            && value != ".."
-            && value.len() <= 100
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-');
-        if !well_formed {
-            return Err(DomainError::Validation {
-                field: field.to_owned(),
-                message: "must be 1-100 characters from [A-Za-z0-9._-]".to_owned(),
-            });
-        }
-    }
-    Ok(())
 }
 
 pub async fn sync_repository(
@@ -641,6 +636,7 @@ pub async fn list_commit_files(
     OData(query): OData,
 ) -> ApiResult<JsonPage<CommitFileDto>> {
     validate_repo_path(&owner, &name)?;
+    validate_commit_sha(&sha)?;
     let page: Page<_> = svc
         .list_commit_files(&ctx, &owner, &name, &sha, &query)
         .await?;
@@ -696,6 +692,7 @@ pub async fn get_commit(
     Path((owner, name, sha)): Path<(String, String, String)>,
 ) -> ApiResult<JsonBody<CommitDto>> {
     validate_repo_path(&owner, &name)?;
+    validate_commit_sha(&sha)?;
     let commit = svc.get_commit(&ctx, &owner, &name, &sha).await?;
     let files = svc
         .list_commit_files(&ctx, &owner, &name, &sha, &ODataQuery::default())
@@ -719,6 +716,7 @@ pub async fn list_commit_comments(
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<CommitCommentDto> {
     validate_repo_path(&owner, &name)?;
+    validate_commit_sha(&sha)?;
     let page = query.normalized()?;
     let items = svc
         .list_commit_comments(&ctx, &owner, &name, &sha, page.window())
@@ -815,6 +813,7 @@ pub async fn list_commit_statuses(
     Query(query): Query<GithubPageQuery>,
 ) -> GithubList<CommitStatusDto> {
     validate_repo_path(&owner, &name)?;
+    validate_commit_sha(&sha)?;
     let page = query.normalized()?;
     let items = svc
         .list_commit_statuses(&ctx, &owner, &name, &sha, page.window())
@@ -849,6 +848,7 @@ pub async fn list_check_runs(
     Query(query): Query<GithubPageQuery>,
 ) -> ApiResult<(HeaderMap, JsonBody<CheckRunsPageDto>)> {
     validate_repo_path(&owner, &name)?;
+    validate_commit_sha(&sha)?;
     let page = query.normalized()?;
     let (items, total) = svc
         .list_check_runs(&ctx, &owner, &name, &sha, page.window())

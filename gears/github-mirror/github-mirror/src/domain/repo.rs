@@ -108,15 +108,41 @@ pub struct PageWindow {
 }
 
 impl PageWindow {
-    #[must_use]
-    pub const fn new(limit: u64, offset: u64) -> Self {
-        Self { limit, offset }
+    /// Largest number of rows a window may skip.
+    ///
+    /// The bound belongs to the type rather than to one caller: every
+    /// listing turns `offset` straight into SQL `OFFSET`, so any surface
+    /// that builds a window - a handler, the local client, an SDK consumer
+    /// - is held to the same limit.
+    ///
+    /// The value is where GitHub stops as well. Measured on
+    /// `/repos/rust-lang/rust/issues`, `per_page=100&page=99` (offset
+    /// 9,800) answers 200 and `per_page=100&page=100` (offset 9,900)
+    /// answers 422, so a client paging the mirror reaches as far as it
+    /// would upstream.
+    pub const MAX_OFFSET: u64 = 9_900;
+
+    /// A window that skips no more rows than [`Self::MAX_OFFSET`].
+    ///
+    /// # Errors
+    /// `Validation` when `offset` is past the limit.
+    pub fn bounded(limit: u64, offset: u64) -> Result<Self, DomainError> {
+        if offset > Self::MAX_OFFSET {
+            return Err(DomainError::Validation {
+                field: "page".to_owned(),
+                message: format!(
+                    "Page-based pagination reaches row {} at most;                      narrow the listing with a filter or a smaller per_page",
+                    Self::MAX_OFFSET
+                ),
+            });
+        }
+        Ok(Self { limit, offset })
     }
 
     /// The first `limit` rows.
     #[must_use]
     pub const fn first(limit: u64) -> Self {
-        Self::new(limit, 0)
+        Self { limit, offset: 0 }
     }
 }
 
@@ -192,23 +218,37 @@ pub enum ListingDirection {
 }
 
 impl ListingSort {
-    /// GitHub's `sort` value; anything else falls back to its default.
-    #[must_use]
-    pub fn parse(raw: Option<&str>) -> Self {
+    /// GitHub's `sort` value, or the default when the caller sent none.
+    ///
+    /// # Errors
+    /// `Validation` when the value is not a sort key, the same way an
+    /// unknown `state` is refused: GitHub answers a mistyped `sort` with a
+    /// validation error rather than quietly sorting by something else.
+    pub fn parse(raw: Option<&str>) -> Result<Self, DomainError> {
         match raw {
-            Some("updated") => Self::Updated,
-            _ => Self::Created,
+            None | Some("created") => Ok(Self::Created),
+            Some("updated") => Ok(Self::Updated),
+            Some(other) => Err(DomainError::Validation {
+                field: "sort".to_owned(),
+                message: format!("`{other}` is not a sort key; use created or updated"),
+            }),
         }
     }
 }
 
 impl ListingDirection {
-    /// GitHub's `direction` value; anything else falls back to its default.
-    #[must_use]
-    pub fn parse(raw: Option<&str>) -> Self {
+    /// GitHub's `direction` value, or the default when the caller sent none.
+    ///
+    /// # Errors
+    /// `Validation` when the value is neither `asc` nor `desc`.
+    pub fn parse(raw: Option<&str>) -> Result<Self, DomainError> {
         match raw {
-            Some("asc") => Self::Asc,
-            _ => Self::Desc,
+            None | Some("desc") => Ok(Self::Desc),
+            Some("asc") => Ok(Self::Asc),
+            Some(other) => Err(DomainError::Validation {
+                field: "direction".to_owned(),
+                message: format!("`{other}` is not a direction; use asc or desc"),
+            }),
         }
     }
 }
@@ -217,6 +257,11 @@ impl ListingDirection {
 pub trait IssueRepository: Send + Sync {
     /// How many issues match `filter` in total, for the `Link` header's
     /// `rel="last"` — it spans every page, so it cannot be read off one.
+    ///
+    /// Counted by its own query, so a write that lands between the count and
+    /// the page it accompanies leaves the two describing different instants:
+    /// the count may be one or two rows off the listing a caller is reading.
+    /// GitHub's own totals are eventually consistent in the same way.
     async fn count_by_repo(
         &self,
         scope: &AccessScope,

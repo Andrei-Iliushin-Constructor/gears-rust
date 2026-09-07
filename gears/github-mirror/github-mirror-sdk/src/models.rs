@@ -54,7 +54,7 @@ pub struct ReleaseAsset {
 
 /// One step of a workflow job.
 #[domain_model]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowStep {
     pub name: String,
     /// `queued`, `in_progress` or `completed`.
@@ -65,6 +65,11 @@ pub struct WorkflowStep {
     pub number: Option<i64>,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
+    /// Step fields GitHub sends that the typed ones above do not name.
+    ///
+    /// The mirror stores GitHub's step payload whole, so a field it does
+    /// not model still reaches the caller.
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Runtime identity of the mirror gear.
@@ -632,7 +637,7 @@ impl CheckRun {
 /// nothing, and several of them (`committed`, `cross-referenced`) carry no
 /// numeric id at all. The mirror therefore keys an entry by its position
 /// in the issue's timeline and keeps the GitHub object verbatim in
-/// `payload_json`, so reads can serve back exactly what GitHub sent.
+/// `payload`, so reads can serve back exactly what GitHub sent.
 #[domain_model]
 pub struct IssueTimelineEvent {
     /// Owning repository's GitHub id.
@@ -646,8 +651,8 @@ pub struct IssueTimelineEvent {
     /// Absent on the event types that carry no timestamp of their own.
     pub created_at: Option<String>,
     pub actor_login: Option<String>,
-    /// The whole GitHub timeline entry, kept as raw JSON.
-    pub payload_json: String,
+    /// The whole GitHub timeline entry, as GitHub sent it.
+    pub payload: serde_json::Value,
 }
 
 /// A mirrored GitHub deployment record (read-slice shape).
@@ -716,7 +721,7 @@ pub struct CommitStatus {
 
 /// A mirrored GitHub Actions workflow job: one job of a workflow run.
 #[domain_model]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowJob {
     /// GitHub's numeric job id.
     pub id: i64,

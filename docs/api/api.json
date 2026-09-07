@@ -19313,6 +19313,7 @@
         "type": "object"
       },
       "WorkflowStepDto": {
+        "additionalProperties": {},
         "description": "One step of a workflow job.",
         "properties": {
           "completed_at": {
