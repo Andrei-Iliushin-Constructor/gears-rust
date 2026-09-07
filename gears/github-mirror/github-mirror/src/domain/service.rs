@@ -3682,6 +3682,13 @@ impl Service {
             )));
         }
 
+        if report.cancelled {
+            return Err(DomainError::internal(format!(
+                "the sync of {}/{} was interrupted before it finished",
+                run.owner, run.name
+            )));
+        }
+
         let completeness = run.completeness();
         for (family, listing) in [
             (sweep_families::ISSUES, Listing::Issues),

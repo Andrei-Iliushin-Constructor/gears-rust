@@ -519,6 +519,23 @@ impl SyncPump {
         }
         ran
     }
+
+    /// Run every queued job under `cancel`, so a test can interrupt a sync.
+    pub async fn drain_under(
+        &mut self,
+        service: &ConcreteService,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> usize {
+        let mut ran = 0;
+        while let Ok(job) = self.rx.try_recv() {
+            service
+                .run_sync_job(&job, cancel)
+                .await
+                .expect("the session outcome must be recorded");
+            ran += 1;
+        }
+        ran
+    }
 }
 
 pub fn caller_in(tenant_id: Uuid) -> SecurityContext {
