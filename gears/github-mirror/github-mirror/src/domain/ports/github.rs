@@ -50,7 +50,7 @@ pub struct ListingCompleteness {
 }
 
 impl ListingCompleteness {
-    /// Nothing complete — the safe default, since it reconciles nothing.
+    /// Nothing complete - the safe default, since it reconciles nothing.
     #[must_use]
     pub fn none() -> Self {
         Self::default()

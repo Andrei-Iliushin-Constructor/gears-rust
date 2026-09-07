@@ -171,6 +171,46 @@ async fn issues_default_to_open_like_github() {
 }
 
 #[tokio::test]
+async fn a_malformed_filter_value_is_refused_with_the_field_named() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let service = common::service("https://api.github.com").await;
+    service
+        .upsert_repo(&ctx, repo_record())
+        .await
+        .expect("repo seed must succeed");
+
+    let router = router_for(service, ctx);
+
+    for (query, field) in [
+        ("since=not-a-timestamp", "since"),
+        ("state=bogus", "state"),
+        ("sort=bogus", "sort"),
+        ("direction=sideways", "direction"),
+    ] {
+        let response = get(
+            router.clone(),
+            &format!("/repos/acme/widget/issues?{query}"),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "?{query} must be refused, not silently ignored"
+        );
+        let json = body_json(response).await;
+        assert_eq!(
+            json["message"], "Validation Failed",
+            "GitHub's wording for a rejected parameter: {json:?}"
+        );
+        assert_eq!(
+            json["errors"][0]["field"], field,
+            "the error must name the offending parameter: {json:?}"
+        );
+        assert_eq!(json["errors"][0]["code"], "invalid", "{json:?}");
+    }
+}
+
+#[tokio::test]
 async fn errors_on_the_compatible_surface_use_githubs_shape() {
     let ctx = common::caller_in(Uuid::new_v4());
     let service = common::service("https://api.github.com").await;
