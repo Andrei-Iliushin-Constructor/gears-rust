@@ -271,45 +271,39 @@ fn a_closed_region_refuses_a_declared_creation() {
     }
 }
 
-/// A revision is not accepted yet, and *that* is what keeps the policy gate from
-/// being optional. SPEC §8.1 step 3 lets a revision bypass the gate — otherwise
-/// closing a region would freeze the entities already in it — but P0 has nothing
-/// that checks the candidate is a revision, so accepting one would make "name a
-/// version" a way past the deployment allowlist. T11 replaces this refusal with
-/// the precondition itself, and restores the bypass with it.
+/// SPEC §8.1 step 3: the gate is for **creations**. A revision names a version,
+/// so closing a region must not freeze the entities already inside it.
+///
+/// Safe only because the declared kind is enforced downstream:
+/// `unit::commit_revision` refuses an identifier the registry does not hold, so
+/// naming a version cannot register anything new here.
 #[test]
-fn a_revision_is_refused_until_revisions_are_admitted() {
+fn a_revision_bypasses_the_policy_gate_in_a_closed_region() {
     let pair = closed();
     let mut req = request(vec![candidate(ACME_TYPE)]);
     req.candidates[0].expected_resource_version = Some(4);
-    match run(&pair, &req) {
-        Err(AcceptanceError::RevisionNotAccepted { gts_id, version }) => {
-            assert_eq!(gts_id, ACME_TYPE);
-            assert_eq!(version, 4);
-        }
-        other => panic!("expected RevisionNotAccepted, got {other:?}"),
-    }
+    let validated = run(&pair, &req).expect("a revision is not gated by the policy");
+    assert_eq!(
+        validated.items[0].precondition,
+        Precondition::Version(4),
+        "the precondition travels to the worker, which is what enforces the claim",
+    );
 }
 
-/// The refusal is about the unimplemented feature and not about the region: an
-/// identifier the policy *admits* is refused identically, so the answer cannot be
-/// read as a policy verdict either way.
+/// The other side of the bypass: it is keyed on the precondition, not on the
+/// region, so a creation in a region the policy *admits* still goes through the gate
+/// and still passes it. The refusal half is
+/// `a_closed_region_refuses_a_declared_creation` above.
 #[test]
-fn a_revision_is_refused_in_an_admitted_region_too() {
-    let pair = open_for_acme();
-    let mut req = request(vec![candidate(ACME_TYPE)]);
-    req.candidates[0].expected_resource_version = Some(4);
-    assert!(matches!(
-        run(&pair, &req),
-        Err(AcceptanceError::RevisionNotAccepted { version: 4, .. })
-    ));
-
-    let mut cf = request(vec![candidate(CF_TYPE)]);
-    cf.candidates[0].expected_resource_version = Some(1);
-    assert!(matches!(
-        run(&closed(), &cf),
-        Err(AcceptanceError::RevisionNotAccepted { version: 1, .. })
-    ));
+fn the_gate_admits_a_creation_in_an_opened_region() {
+    let open = open_for_acme();
+    let creation = request(vec![candidate(ACME_TYPE)]);
+    let validated = run(&open, &creation).expect("an opened region admits its vendor");
+    assert_eq!(
+        validated.items[0].precondition,
+        Precondition::MustNotExist,
+        "and it is a creation that passed the gate, not a revision that skipped it",
+    );
 }
 
 /// The ordering invariant, made observable: a candidate that fails **both** the
@@ -569,7 +563,8 @@ fn force_is_refused_while_the_deployment_disallows_it() {
 }
 
 /// With `force` permitted, the candidate must still *have* a cross-minor check to
-/// waive. All three no-op shapes are refused, and the one real case is accepted.
+/// waive. No-op shapes keep their precise refusal; a real case stays unavailable
+/// until T17 can both evaluate it and persist its provenance.
 #[test]
 fn force_needs_a_cross_minor_check_to_waive() {
     let (policy, mut config) = closed();
@@ -603,7 +598,10 @@ fn force_needs_a_cross_minor_check_to_waive() {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
     }));
-    run(&pair, &req).expect("a second minor of a stable major has a check to waive");
+    assert!(matches!(
+        run(&pair, &req),
+        Err(AcceptanceError::ForceCompatibilityUnavailable { .. })
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -635,4 +633,16 @@ fn a_negative_precondition_is_refused() {
         run(&pair, &req),
         Err(AcceptanceError::NegativePrecondition { version: -1, .. })
     ));
+}
+
+#[test]
+fn a_minor_bearing_type_schema_cannot_be_content_revised() {
+    let pair = closed();
+    let id = gts_id!("cf.core.example.type.v1.2~");
+    let mut req = request(vec![candidate(id)]);
+    req.candidates[0].expected_resource_version = Some(1);
+    match run(&pair, &req) {
+        Err(AcceptanceError::MinorTypeSchemaRevision { gts_id }) => assert_eq!(gts_id, id),
+        other => panic!("expected MinorTypeSchemaRevision, got {other:?}"),
+    }
 }

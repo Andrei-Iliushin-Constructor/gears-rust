@@ -17,9 +17,10 @@
 //! # Not every repository method is a port
 //!
 //! Only the calls the domain makes are here. `list_page`, `mark_deleted`,
-//! `compare_and_swap_version`, `replace_outgoing` and the batch reads stay as
-//! inherent methods until a domain rule needs them: a port method with no domain
-//! caller is an abstraction with nothing to abstract.
+//! `replace_outgoing` and the batch reads stay as inherent methods until a domain
+//! rule needs them: a port method with no domain caller is an abstraction with
+//! nothing to abstract. `compare_and_swap_version` left that list when the revision
+//! commit became its first domain caller.
 
 use async_trait::async_trait;
 use time::OffsetDateTime;
@@ -107,6 +108,18 @@ impl EntityStore for Repos {
     ) -> Result<Option<EntityRow>, ScopeError> {
         EntityRepo::insert(tx, scope, new).await
     }
+
+    async fn compare_and_swap_version(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_id: i64,
+        expected_resource_version: i64,
+        now: OffsetDateTime,
+    ) -> Result<Option<i64>, ScopeError> {
+        EntityRepo::compare_and_swap_version(tx, scope, entity_id, expected_resource_version, now)
+            .await
+    }
 }
 
 #[async_trait]
@@ -146,6 +159,15 @@ impl TypeSchemaStore for Repos {
     ) -> Result<(), ScopeError> {
         TypeSchemaRepo::insert_current(tx, scope, new).await
     }
+
+    async fn update_current_schema(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        new: NewCurrentTypeSchema,
+    ) -> Result<bool, ScopeError> {
+        TypeSchemaRepo::update_current(tx, scope, new).await
+    }
 }
 
 #[async_trait]
@@ -184,6 +206,15 @@ impl InstanceStore for Repos {
         new: NewCurrentInstance,
     ) -> Result<(), ScopeError> {
         InstanceRepo::insert_current(tx, scope, new).await
+    }
+
+    async fn update_current_instance(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        new: NewCurrentInstance,
+    ) -> Result<bool, ScopeError> {
+        InstanceRepo::update_current(tx, scope, new).await
     }
 }
 
@@ -273,6 +304,17 @@ impl OperationStore for Repos {
     ) -> Result<bool, ScopeError> {
         OperationRepo::mark_item_succeeded(tx, scope, item_id, revision_no, resource_version, now)
             .await
+    }
+
+    async fn mark_item_unchanged(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        item_id: i64,
+        resource_version: i64,
+        now: OffsetDateTime,
+    ) -> Result<bool, ScopeError> {
+        OperationRepo::mark_item_unchanged(tx, scope, item_id, resource_version, now).await
     }
 
     async fn mark_item_failed(

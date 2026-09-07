@@ -26,7 +26,7 @@
 pub mod admission;
 // Materialized effective artifacts and the resolution fingerprint (SPEC D3).
 pub mod artifacts;
-// Version-family key derivation (T8; the family rules are T12).
+// Version-family key derivation and the three family rules.
 pub mod family;
 // The transient `gts-rust` store, one per admission unit (SPEC D2, §8.2).
 pub mod gts_store;

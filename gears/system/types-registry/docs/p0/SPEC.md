@@ -308,7 +308,8 @@ out of scope):
 5. Declared dialect, Type Schema candidates — top-level `$schema` present and in the
    closed Draft-07 spelling set; any `$schema` below the root must not differ (ADR-0014).
 6. `force` per candidate — refuse where `allow_compatibility_force` is off, or where the
-   candidate has no cross-minor check to waive.
+   candidate has no cross-minor check to waive. Until T17, also refuse every surviving
+   `force`: there is no comparison to waive and no truthful `compat_forced` to record yet.
 7. ADR-0015 quarantine — refuse a stable candidate whose immediate base, `$ref` targets,
    or `x-gts-ref` targets include a major-0 identifier.
 8. Canonicalize through `gts-rust`, compute the request fingerprint, resolve the
@@ -697,9 +698,10 @@ Migration notes:
 
 ### Declared ceilings
 
-There is no compatibility ceiling: `gts-rust` 0.12.0 supplies the tri-state verdict and
-the content-model classification, so P0 honours `principle-fail-closed` for compatibility
-rather than deviating from it (§7).
+There is no final compatibility ceiling: `gts-rust` 0.12.0 supplies the tri-state verdict and
+the content-model classification, so completed P0 honours `principle-fail-closed` for
+compatibility rather than deviating from it (§7). C9 records the implementation window before
+that final state and must be struck before the database path is exposed.
 
 C1, C3 and C4 are **struck** — resolved in P0 rather than deferred. The rows are kept
 because other documents cite the numbers.
@@ -711,9 +713,10 @@ because other documents cite the numbers.
 | C3 | **Struck by D11.** Was: the inventory pull model is in-process-only (§8.4) and `owning_gear` a hardcoded constant, which **blocks** out-of-process gears rather than degrading them | Resolved in P0 — `owning_gear` lands on the inventory records (T22) and every gear pushes its own (T23–T25) |
 | C4 | **Struck by D2.** Was: startup reads the whole table on the platform boot path, so startup time is linear in entity count | Resolved in P0 — no warm-up read; startup cost is the seed set, not the table (§8.2) |
 | C5 | No operation-retention sweep: terminal operations accumulate | The §3.2 sweep, once volume justifies it |
-| C6 | **No PDP.** Reads and writes are authenticated but not authorized, deviating from `06`'s *"every sensitive DB access MUST be covered by a PDP decision"*. Entities are `#[secure(unrestricted)]`, so a tenant-scoped query fails closed rather than leaking | The deferred identity-to-permission binding; then `tenant_col` + `PolicyEnforcer` (§12) |
+| C6 | **No PDP.** Reads and writes are authenticated but not authorized, deviating from `06`'s *"every sensitive DB access MUST be covered by a PDP decision"*. Entities are `#[secure(unrestricted)]`, so a tenant-scoped query fails closed rather than leaking. **The sharpest edge is the revision path**: §8.1 step 3 asks the registration policy of creations only — correctly, since the policy governs which regions gain members — and nothing takes its place for an edit, so a caller that reaches the submit route can replace the authored content of any entity the registry holds, a platform-seeded `cf.core.*` schema included, in a region the deployment has closed. Bounded in P0 by transport rather than by policy: the mutation routes are internal-only (C8) | Tracked as C6 in the P1 epic #4628 — prerequisite 1 (the deferred identity-to-permission binding), then an owner/principal check before `unit::commit_revision`, and `tenant_col` + `PolicyEnforcer` (§12) |
 | C7 | **The validator has no tenant or projection dimensions.** P0's validator digests `resource_version`, `resolution_fingerprint` and a fixed default-projection marker (§8.5); the SDK cache key likewise carries visibility context and projection as constants. Correct while every read is platform-plane and no `$select` exists, and wrong the moment either arrives | The wire form is a **versioned** JSON object, so P1 adds the chain versions and the real projection digest under a new version and refuses to honour a P0 token |
 | C8 | **Platform-plane mutations are internal-only.** Every P0 operation is platform-plane (`plane = 1`), but an in-process gear has no inbound platform-identity validator, api-gateway has no platform listener, and `OperationBuilder` cannot mark a route platform-only (§8.4). Registration and deletion therefore keep `exposed = false`; internal and non-mutating calls retain authentication, because `.anonymous()` without a platform identity would be a regression | A platform listener with `X-ToolKit-Internal-Token` / `PlatformIdentity`, a declarative platform-plane route marker, and a platform-principal/PDP decision before mutation dispatch. Only then may mutation routes be exposed. This is toolkit/api-gateway work outside this gear, and ADR-0006/0008 already ask for the listener |
+| C9 | **Implementation sequencing only.** T11 makes revisions executable before T14 refreshes reverse impact and T17 compares compatibility. Content revisions **of** minor-bearing Type Schemas remain permanently refused by ADR-0004 — creating one is admissible (§8.1 step 4), editing it is not; during this window every effective `force` also fails closed, and C8 keeps the database mutation path internal | T14 and T17 close the two gaps at Checkpoints 3 and 4, before T24 exposes any consumer. Strike this row when both checkpoints are complete; striking it removes only the temporary `force` refusal, not the ADR-0004 invariant |
 
 Each ceiling gets a `ponytail:`-style source comment naming the bound and the upgrade
 path at the point where it bites.
@@ -948,6 +951,7 @@ gears:
         page_size_max: 1000
       registration_policy: {}          # closed by default; global `cf` implicit
       worker:
+        family_lock_timeout: 5s         # lock retry budget, below gateway timeout
         operation_timeout: 5m
         max_revalidation_attempts: 8
       local_client:

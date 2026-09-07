@@ -21,7 +21,7 @@ use uuid::Uuid;
 use types_registry::config::TypesRegistryConfig;
 use types_registry::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
 use types_registry::domain::admission::unit::{commit_creation, evaluate};
-use types_registry::domain::admission::worker::{WorkerError, run_operation};
+use types_registry::domain::admission::worker::WorkerError;
 use types_registry::domain::admission::{Candidate, OperationDispatch, SubmitRequest};
 use types_registry::domain::artifacts::resolution_fingerprint;
 use types_registry::domain::policy::RegistrationPolicy;
@@ -37,7 +37,7 @@ use types_registry::infra::storage::entity::{
 use types_registry::infra::storage::repo::{EntityRepo, OperationRepo, TypeSchemaRepo};
 
 mod common;
-use common::{allow_all, stores, test_db};
+use common::{allow_all, run_operation, stores, test_db};
 
 const NOW: OffsetDateTime = datetime!(2026-08-18 09:15:30 UTC);
 const LATER: OffsetDateTime = datetime!(2026-08-18 10:20:40 UTC);

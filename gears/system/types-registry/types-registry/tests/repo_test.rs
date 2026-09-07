@@ -23,6 +23,7 @@ use std::sync::Arc;
 use gts::GtsIdPattern;
 use time::OffsetDateTime;
 use time::macros::datetime;
+use toolkit_db::secure::ScopeError;
 use toolkit_db::{DBProvider, DbError};
 use toolkit_gts::gts_id;
 use uuid::Uuid;
@@ -205,11 +206,12 @@ async fn cas_with_the_current_version_advances_it_by_one() {
     let scope = allow_all();
     let id = entity_id(&db, CUSTOMER_V1).await;
 
-    assert!(
+    assert_eq!(
         EntityRepo::compare_and_swap_version(&conn, &scope, id, 1, NOW)
             .await
             .expect("cas"),
-        "a CAS against the current version must succeed"
+        Some(2),
+        "a successful CAS returns the value it wrote"
     );
     let reread = EntityRepo::find_by_gts_id(&conn, &scope, CUSTOMER_V1)
         .await
@@ -226,21 +228,50 @@ async fn cas_with_a_stale_version_affects_no_row_and_reports_it() {
     let scope = allow_all();
     let id = entity_id(&db, CUSTOMER_V1).await;
 
-    assert!(
+    assert_eq!(
         EntityRepo::compare_and_swap_version(&conn, &scope, id, 1, NOW)
             .await
-            .expect("first cas")
+            .expect("first cas"),
+        Some(2)
     );
     let stale = EntityRepo::compare_and_swap_version(&conn, &scope, id, 1, NOW)
         .await
         .expect("a stale CAS reports failure rather than erroring");
-    assert!(!stale, "a stale expected version affects zero rows");
+    assert_eq!(stale, None, "a stale expected version affects zero rows");
 
     let reread = EntityRepo::find_by_gts_id(&conn, &scope, CUSTOMER_V1)
         .await
         .expect("read")
         .expect("row");
     assert_eq!(reread.resource_version, 2, "the failed CAS changed nothing");
+}
+
+#[tokio::test]
+async fn cas_refuses_to_advance_past_the_integer_ceiling() {
+    let db = test_db().await;
+    seed(&db, &[CUSTOMER_V1]).await;
+    let conn = db.conn().expect("conn");
+    let scope = allow_all();
+    let id = entity_id(&db, CUSTOMER_V1).await;
+
+    let error = EntityRepo::compare_and_swap_version(&conn, &scope, id, i64::MAX, NOW)
+        .await
+        .expect_err("the next resource version is not representable");
+    assert!(matches!(error, ScopeError::Db(_)), "got {error}");
+
+    let delete_error = EntityRepo::mark_deleted(&conn, &scope, id, i64::MAX, NOW)
+        .await
+        .expect_err("deletion cannot wrap the same resource version");
+    assert!(
+        matches!(delete_error, ScopeError::Db(_)),
+        "got {delete_error}"
+    );
+
+    let reread = EntityRepo::find_by_gts_id(&conn, &scope, CUSTOMER_V1)
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(reread.resource_version, 1, "overflow changed no row");
 }
 
 #[tokio::test]
@@ -332,10 +363,11 @@ async fn list_excludes_deleted_rows() {
     let conn = db.conn().expect("conn");
     let scope = allow_all();
     let id = entity_id(&db, CUSTOMER_V1).await;
-    assert!(
+    assert_eq!(
         EntityRepo::mark_deleted(&conn, &scope, id, 1, NOW)
             .await
-            .expect("delete")
+            .expect("delete"),
+        Some(2)
     );
 
     let page = EntityRepo::list_page(&conn, &scope, None, PageRequest::first(10))
@@ -370,10 +402,11 @@ async fn a_second_deletion_reports_failure_and_leaves_the_tombstone_alone() {
     let scope = allow_all();
     let id = entity_id(&db, CUSTOMER_V1).await;
 
-    assert!(
+    assert_eq!(
         EntityRepo::mark_deleted(&conn, &scope, id, 1, NOW)
             .await
-            .expect("first delete")
+            .expect("first delete"),
+        Some(2)
     );
     let tombstone = EntityRepo::find_by_gts_id(&conn, &scope, CUSTOMER_V1)
         .await
@@ -384,10 +417,11 @@ async fn a_second_deletion_reports_failure_and_leaves_the_tombstone_alone() {
     assert_eq!(tombstone.resource_version, 2);
 
     let later = NOW + time::Duration::hours(1);
-    assert!(
-        !EntityRepo::mark_deleted(&conn, &scope, id, 2, later)
+    assert_eq!(
+        EntityRepo::mark_deleted(&conn, &scope, id, 2, later)
             .await
             .expect("a second delete reports failure rather than erroring"),
+        None,
         "the row is no longer active, so the CAS must affect zero rows"
     );
     let reread = EntityRepo::find_by_gts_id(&conn, &scope, CUSTOMER_V1)
