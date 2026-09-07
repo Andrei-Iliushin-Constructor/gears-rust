@@ -4108,7 +4108,13 @@ async fn issue_timeline_upsert_in<C: DBRunner>(
         repo_id: record.repo_id,
         issue_number: record.issue_number,
         position: record.position,
-        payload: timeline_payload(&record.event, Some(&record.payload_json)),
+        payload: timeline_payload(
+            record.repo_id,
+            record.issue_number,
+            record.position,
+            &record.event,
+            Some(&record.payload_json),
+        ),
         event: record.event,
         created_at: record.created_at,
         actor_login: record.actor_login,
@@ -4141,7 +4147,7 @@ async fn issue_timeline_list_by_issue_in<C: DBRunner>(
 }
 
 /// How many stored contributors one merge reads back. A repository with more
-/// distinct people than this loses nothing already written — the merge simply
+/// distinct people than this loses nothing already written - the merge simply
 /// cannot widen the rows it did not see.
 const CONTRIBUTOR_MERGE_LIMIT: u64 = 10_000;
 

@@ -76,10 +76,12 @@ async fn github_error_body(response: Response) -> Response {
         }
     };
 
+    let problem = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+
     // `title` is the human-readable summary ("Not Found"), which is what
     // GitHub puts in `message`; `detail` is the fallback when it is absent.
-    let message = serde_json::from_slice::<serde_json::Value>(&bytes)
-        .ok()
+    let message = problem
+        .as_ref()
         .and_then(|problem| {
             problem
                 .get("title")
@@ -94,10 +96,46 @@ async fn github_error_body(response: Response) -> Response {
                 .to_owned()
         });
 
-    let Ok(rendered) = serde_json::to_vec(&serde_json::json!({
+    let mut rendered_body = serde_json::json!({
         "message": message,
         "documentation_url": GITHUB_DOCS_URL,
-    })) else {
+    });
+
+    // A rejected parameter reaches the caller the way GitHub reports one: the
+    // problem document's field violations become `errors[]`, so a client is
+    // told which parameter it got wrong instead of only "Invalid Argument".
+    let violations = problem
+        .as_ref()
+        .and_then(|problem| problem.pointer("/context/field_violations"))
+        .and_then(|value| value.as_array())
+        .map(|violations| {
+            violations
+                .iter()
+                .filter_map(|violation| {
+                    let field = violation.get("field").and_then(|f| f.as_str())?;
+                    let detail = violation
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or_default();
+                    Some(serde_json::json!({
+                        "resource": "Repository",
+                        "field": field,
+                        "code": "invalid",
+                        "message": detail,
+                    }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|violations| !violations.is_empty());
+
+    if let Some(violations) = violations
+        && let Some(object) = rendered_body.as_object_mut()
+    {
+        object.insert("message".to_owned(), "Validation Failed".into());
+        object.insert("errors".to_owned(), serde_json::Value::Array(violations));
+    }
+
+    let Ok(rendered) = serde_json::to_vec(&rendered_body) else {
         return Response::from_parts(parts, Body::from(bytes));
     };
 

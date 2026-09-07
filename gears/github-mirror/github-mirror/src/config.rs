@@ -14,7 +14,7 @@ pub struct GithubMirrorConfig {
     /// environment instead of a checked-in config file; call
     /// [`GithubMirrorConfig::resolved_token`] rather than reading the field.
     /// `SecretString` keeps the value out of every `Debug`/`Display` of the
-    /// config — it prints as `[REDACTED]` — so a startup config dump cannot
+    /// config - it prints as `[REDACTED]` - so a startup config dump cannot
     /// leak a literally-configured PAT.
     #[serde(default)]
     pub github_token: Option<SecretString>,

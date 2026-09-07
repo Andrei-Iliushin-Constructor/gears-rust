@@ -8,7 +8,7 @@ use sea_orm_migration::sea_orm::ConnectionTrait;
 ///
 /// The migration runner applies migrations in **name** order, so on the way
 /// back down a `z_` migration runs before the `CREATE TABLE` migration it
-/// alters — by which time that table may be gone. Asking the schema first is
+/// alters - by which time that table may be gone. Asking the schema first is
 /// the portable check: matching on the error text would only recognise
 /// `SQLite`'s wording and would swallow unrelated failures that happen to
 /// contain it.

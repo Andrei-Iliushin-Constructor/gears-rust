@@ -139,6 +139,18 @@ mod tests {
     }
 
     #[test]
+    fn a_validation_error_carries_the_field_in_its_body() {
+        let body = body_of(DomainError::Validation {
+            field: "since".to_owned(),
+            message: "not an RFC3339 timestamp".to_owned(),
+        });
+        assert!(
+            body.contains("\"field\":\"since\""),
+            "the compat router turns this into GitHub's `errors[]`: {body}"
+        );
+    }
+
+    #[test]
     fn forbidden_and_access_lost_are_indistinguishable_to_the_caller() {
         assert_eq!(
             body_of(DomainError::forbidden("tenant has no scope")),

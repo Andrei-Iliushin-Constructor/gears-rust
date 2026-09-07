@@ -7,7 +7,7 @@
 use toolkit_macros::domain_model;
 
 /// A GitHub account as it appears embedded in an issue, pull request or
-/// review — GitHub's `user` object.
+/// review - GitHub's `user` object.
 #[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Actor {
@@ -59,7 +59,7 @@ pub struct WorkflowStep {
     pub name: String,
     /// `queued`, `in_progress` or `completed`.
     pub status: Option<String>,
-    /// `success`, `failure`, `skipped`, ... — absent until completed.
+    /// `success`, `failure`, `skipped`, ... - absent until completed.
     pub conclusion: Option<String>,
     /// Position in the job, 1-based.
     pub number: Option<i64>,

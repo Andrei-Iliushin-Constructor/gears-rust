@@ -149,8 +149,8 @@ impl From<StoredStep> for WorkflowStep {
 
 /// Most bytes of stored JSON one column may hand the deserializer.
 ///
-/// These payloads are GitHub objects the mirror wrote itself — the largest,
-/// an issue-timeline entry, runs to a few kilobytes — so the cap is a guard
+/// These payloads are GitHub objects the mirror wrote itself - the largest,
+/// an issue-timeline entry, runs to a few kilobytes - so the cap is a guard
 /// against a corrupt or tampered row, not an expected limit.
 const MAX_STORED_JSON_BYTES: usize = 1 << 20;
 
@@ -659,9 +659,27 @@ impl From<check_runs::Model> for CheckRun {
 /// The stored timeline entry, or a stand-in naming the event when the row
 /// cannot be decoded: the entry's shape is GitHub's, not the mirror's, so
 /// there is nothing else to fall back to.
-pub(crate) fn timeline_payload(event: &str, raw: Option<&str>) -> serde_json::Value {
-    decode::<serde_json::Value>("payload_json", raw)
-        .unwrap_or_else(|| serde_json::json!({ "event": event }))
+///
+/// The warning carries the row's own key, since every timeline payload lives
+/// in the same column and an operator repairing one needs to know which row
+/// it was.
+pub(crate) fn timeline_payload(
+    repo_id: i64,
+    issue_number: i64,
+    position: i64,
+    event: &str,
+    raw: Option<&str>,
+) -> serde_json::Value {
+    decode::<serde_json::Value>("payload_json", raw).unwrap_or_else(|| {
+        tracing::warn!(
+            repo_id,
+            issue_number,
+            position,
+            event,
+            "issue-timeline payload could not be decoded; serving the event name alone"
+        );
+        serde_json::json!({ "event": event })
+    })
 }
 
 impl From<issue_timeline::Model> for IssueTimelineEvent {
@@ -670,7 +688,13 @@ impl From<issue_timeline::Model> for IssueTimelineEvent {
             repo_id: m.repo_id,
             issue_number: m.issue_number,
             position: m.position,
-            payload: timeline_payload(&m.event, Some(&m.payload_json)),
+            payload: timeline_payload(
+                m.repo_id,
+                m.issue_number,
+                m.position,
+                &m.event,
+                Some(&m.payload_json),
+            ),
             event: m.event,
             created_at: m.created_at,
             actor_login: m.actor_login,
