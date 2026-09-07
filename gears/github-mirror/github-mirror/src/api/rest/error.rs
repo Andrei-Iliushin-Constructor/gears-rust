@@ -2,6 +2,8 @@
 //! the API layer, so `domain/` stays free of status codes and transport
 //! vocabulary.
 
+#[cfg(test)]
+use toolkit_canonical_errors::Problem;
 use toolkit_canonical_errors::{CanonicalError, resource_error};
 
 use crate::domain::error::DomainError;
@@ -87,12 +89,23 @@ impl From<DomainError> for CanonicalError {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
 mod tests {
     use super::*;
 
     fn status_of(e: DomainError) -> u16 {
         CanonicalError::from(e).status_code()
+    }
+
+    /// What a caller actually receives, so two errors can be compared as the
+    /// caller sees them and not just by status code.
+    fn body_of(e: DomainError) -> String {
+        let problem = Problem::from_error(&CanonicalError::from(e)).unwrap();
+        serde_json::to_string(&problem).unwrap()
     }
 
     #[test]
@@ -122,6 +135,16 @@ mod tests {
                 "bad dsn".to_owned()
             ))),
             500
+        );
+    }
+
+    #[test]
+    fn forbidden_and_access_lost_are_indistinguishable_to_the_caller() {
+        assert_eq!(
+            body_of(DomainError::forbidden("tenant has no scope")),
+            body_of(DomainError::AccessLost("token revoked".to_owned())),
+            "a caller must not be able to tell a private repository from a \
+             missing one, or either from the mirror losing its own access"
         );
     }
 }

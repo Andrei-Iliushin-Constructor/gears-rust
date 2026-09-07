@@ -33,17 +33,6 @@ use super::dto::{
 
 const DEFAULT_PER_PAGE: u64 = 30;
 const MAX_PER_PAGE: u64 = 100;
-/// Largest row offset page-based paging may hand the database.
-///
-/// This is the mirror's own bound rather than a copy of GitHub's rule: it
-/// keeps an arbitrary `?page=` from becoming an arbitrary SQL `OFFSET`. The
-/// value is where GitHub stops too — measured on
-/// `/repos/rust-lang/rust/issues`, `per_page=100&page=99` (offset 9,800)
-/// answers 200 and `per_page=100&page=100` (offset 9,900) answers 422 — so
-/// a client paging the mirror reaches as far as it would upstream. GitHub
-/// reports that with 422; the mirror's canonical validation error is 400
-/// carrying the same body.
-const MAX_PAGE_OFFSET: u64 = 9_900;
 
 /// GitHub-style pagination query (`?page=2&per_page=50`), plus the `state`
 /// filter the issue and pull listings accept.
@@ -89,12 +78,13 @@ impl GithubPageQuery {
     /// caller left out.
     ///
     /// # Errors
-    /// Whatever [`Self::state_filter`] or [`Self::since_filter`] returns.
+    /// `Validation` when `state`, `sort`, `direction` or `since` does not
+    /// parse.
     fn listing_filter(&self) -> Result<ListingFilter, DomainError> {
         Ok(ListingFilter {
             state: self.state_filter()?,
-            sort: ListingSort::parse(self.sort.as_deref()),
-            direction: ListingDirection::parse(self.direction.as_deref()),
+            sort: ListingSort::parse(self.sort.as_deref())?,
+            direction: ListingDirection::parse(self.direction.as_deref())?,
             since: self.since_filter()?,
         })
     }
@@ -126,12 +116,13 @@ struct GithubPage {
     page: u64,
     per_page: u64,
     filters: String,
+    window: PageWindow,
 }
 
 impl GithubPageQuery {
     /// # Errors
     /// `Validation` when the requested page starts past
-    /// [`MAX_PAGE_OFFSET`].
+    /// [`PageWindow::MAX_OFFSET`].
     fn normalized(&self) -> Result<GithubPage, DomainError> {
         let page = self.page.filter(|p| *p >= 1).unwrap_or(1);
         let per_page = self
@@ -139,30 +130,24 @@ impl GithubPageQuery {
             .filter(|p| *p >= 1)
             .unwrap_or(DEFAULT_PER_PAGE)
             .min(MAX_PER_PAGE);
-
-        if page.saturating_sub(1).saturating_mul(per_page) > MAX_PAGE_OFFSET {
-            return Err(DomainError::Validation {
-                field: "page".to_owned(),
-                message: format!(
-                    "Page-based pagination reaches row {MAX_PAGE_OFFSET} at most; \
-                     narrow the listing with a filter or a smaller per_page"
-                ),
-            });
-        }
+        let window =
+            PageWindow::bounded(per_page, page.saturating_sub(1).saturating_mul(per_page))?;
 
         Ok(GithubPage {
             page,
             per_page,
             filters: self.filter_query(),
+            window,
         })
     }
 }
 
 impl GithubPage {
     /// The rows this page needs, as an offset the database applies: asking
-    /// for page 50 reads one page, not fifty.
-    fn window(&self) -> PageWindow {
-        PageWindow::new(self.per_page, (self.page - 1).saturating_mul(self.per_page))
+    /// for page 50 reads one page, not fifty. Bounded when it was built, in
+    /// [`GithubPageQuery::normalized`].
+    const fn window(&self) -> PageWindow {
+        self.window
     }
 
     fn convert<T, D: From<T>>(items: Vec<T>) -> Vec<D> {
@@ -180,9 +165,9 @@ impl GithubPage {
     /// came back short, so on a full page `rel="last"` is omitted rather than
     /// guessed — GitHub itself always knows the total and always sends it.
     fn link_header_with_total(&self, path: &str, returned: usize, total: Option<u64>) -> HeaderMap {
-        // Page-based paging stops at MAX_PAGE_OFFSET, so a link past it
-        // would advertise a page this gear refuses.
-        let reachable_pages = MAX_PAGE_OFFSET
+        // Page-based paging stops at PageWindow::MAX_OFFSET, so a link
+        // past it would advertise a page this gear refuses.
+        let reachable_pages = PageWindow::MAX_OFFSET
             .checked_div(self.per_page)
             .map_or(1, |pages| pages.saturating_add(1));
         let last_page =
