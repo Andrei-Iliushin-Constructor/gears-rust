@@ -220,7 +220,7 @@ async fn every_child_listing_of_a_shared_repository_stays_with_its_tenant() {
                 "commits",
                 fixture.commits.len(),
                 service
-                    .list_commits(tenant, OWNER, NAME, window)
+                    .list_commits(tenant, OWNER, NAME, window, None)
                     .await
                     .expect("commits must list")
                     .0
