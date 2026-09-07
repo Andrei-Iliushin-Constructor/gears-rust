@@ -41,8 +41,12 @@ pub struct TypesRegistryConfig {
     ///
     /// Off by default: waiving compatibility is a deployment decision, and a
     /// registry that accepted `force` because a caller asked would make the
-    /// guarantee advisory. The per-candidate gate is acceptance step 7 (T7);
+    /// guarantee advisory. The per-candidate gate is acceptance step 6 (T7);
     /// this key is what it consults.
+    ///
+    /// **Effectively inert until T17:** without compatibility evaluation, enabling
+    /// this key changes only whether the caller sees `ForceNotPermitted` or
+    /// `ForceCompatibilityUnavailable`; it cannot make a candidate admissible.
     #[serde(default)]
     pub allow_compatibility_force: bool,
 
@@ -143,6 +147,15 @@ impl Default for Limits {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct WorkerSettings {
+    /// Retry-scheduling budget for an inline admission's version-family lock.
+    ///
+    /// **Enforced** by the admission worker. An already in-flight database call
+    /// may complete after this budget, so this is not an end-to-end request
+    /// deadline. It is kept well below the REST gateway timeout so ordinary lock
+    /// contention can be returned as a retryable `503` instead of becoming an
+    /// opaque transport timeout.
+    #[serde(with = "toolkit_utils::humantime_serde")]
+    pub family_lock_timeout: Duration,
     /// Wall-clock bound on one operation's admission.
     ///
     /// **Accepted, not enforced in P0.** There is nothing to time out against: a
@@ -162,6 +175,7 @@ pub struct WorkerSettings {
 impl Default for WorkerSettings {
     fn default() -> Self {
         Self {
+            family_lock_timeout: Duration::from_secs(5),
             operation_timeout: Duration::from_mins(5),
             max_revalidation_attempts: 8,
         }
@@ -339,7 +353,8 @@ impl TypesRegistryConfig {
     ///
     /// # Errors
     /// [`ConfigError::Policy`] for an unparsable region or vendor list, and
-    /// [`ConfigError::Limits`] for a default page size above the maximum.
+    /// [`ConfigError::Limits`] for an invalid limit, or [`ConfigError::Worker`]
+    /// for an invalid worker setting.
     pub fn validate(&self) -> Result<RegistrationPolicy, ConfigError> {
         if self.limits.page_size_default > self.limits.page_size_max {
             return Err(ConfigError::Limits(format!(
@@ -352,7 +367,7 @@ impl TypesRegistryConfig {
                 "limits.page_size_default and limits.page_size_max must be positive".to_owned(),
             ));
         }
-        // The two enforced limits, held to the same standard as the page sizes: a
+        // The enforced admission limits, held to the same standard as the page sizes: a
         // zero here is a deployment that boots and then refuses every request it
         // receives — `BatchTooLarge` for any batch, `AuthoredDocumentTooLarge` for any
         // document — which is worse than a boot that says why.
@@ -364,6 +379,11 @@ impl TypesRegistryConfig {
         if self.limits.authored_document.bytes() == 0 {
             return Err(ConfigError::Limits(
                 "limits.authored_document must be positive: 0 refuses every candidate".to_owned(),
+            ));
+        }
+        if self.worker.family_lock_timeout.is_zero() {
+            return Err(ConfigError::Worker(
+                "worker.family_lock_timeout must be positive".to_owned(),
             ));
         }
         Ok(RegistrationPolicy::compile(&self.registration_policy)?)
@@ -432,6 +452,8 @@ pub enum ConfigError {
     Policy(#[from] PolicyConfigError),
     #[error("invalid limits: {0}")]
     Limits(String),
+    #[error("invalid worker settings: {0}")]
+    Worker(String),
 }
 
 #[cfg(test)]

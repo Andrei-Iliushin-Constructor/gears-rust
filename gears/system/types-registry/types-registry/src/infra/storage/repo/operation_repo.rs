@@ -332,6 +332,46 @@ impl OperationRepo {
         Ok(result.rows_affected == 1)
     }
 
+    /// Record a committed registration that changed **nothing**.
+    ///
+    /// No `result_revision_no`, and that is the whole difference from
+    /// [`Self::mark_item_succeeded`]: an `unchanged` candidate allocates no revision
+    /// number (ADR-0005), and `ck_tr_operation_item_state` enforces that pairing.
+    /// The same CHECK requires `expected_resource_version >= 1`, so a creation
+    /// cannot reach this state.
+    ///
+    /// # Errors
+    /// Propagates the update's failure.
+    pub async fn mark_item_unchanged(
+        runner: &impl DBRunner,
+        scope: &AccessScope,
+        item_id: i64,
+        resource_version: i64,
+        now: OffsetDateTime,
+    ) -> Result<bool, ScopeError> {
+        let result = operation_item::Entity::update_many()
+            .secure()
+            .col_expr(
+                operation_item::Column::Status,
+                Expr::value(OperationItemStatus::Unchanged),
+            )
+            .col_expr(
+                operation_item::Column::RequestPayload,
+                Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                operation_item::Column::ResultResourceVersion,
+                Expr::value(Some(resource_version)),
+            )
+            .col_expr(operation_item::Column::StartedAt, Expr::value(now))
+            .col_expr(operation_item::Column::CompletedAt, Expr::value(now))
+            .filter(non_terminal(item_id))
+            .scope_with(scope)
+            .exec(runner)
+            .await?;
+        Ok(result.rows_affected == 1)
+    }
+
     /// Terminalize one item as `failed`, carrying the structured reason.
     ///
     /// # Errors

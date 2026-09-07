@@ -1,8 +1,11 @@
 //! The `type_schema` / `type_schema_revision` repository: the immutable authored
 //! revisions and the current-state row that points at one of them.
 
+use sea_orm::sea_query::Expr;
 use sea_orm::{ActiveValue::Set, ColumnTrait, Condition, EntityTrait, QueryFilter};
-use toolkit_db::secure::{AccessScope, DBRunner, ScopeError, SecureEntityExt, secure_insert};
+use toolkit_db::secure::{
+    AccessScope, DBRunner, ScopeError, SecureEntityExt, SecureUpdateExt, secure_insert,
+};
 
 use super::IN_CHUNK;
 use crate::domain::ports::{
@@ -90,6 +93,7 @@ impl TypeSchemaRepo {
                 entity_id: r.entity_id,
                 revision_no: r.revision_no,
                 raw_schema: r.raw_schema,
+                content_hash: r.content_hash,
             }));
         }
         Ok(out)
@@ -142,11 +146,10 @@ impl TypeSchemaRepo {
 
     /// Insert the current-state row for a first admission.
     ///
-    /// Insert, not upsert: moving an existing pointer is a *revision*, which
-    /// carries its own preconditions and belongs to T11. A caller that reached
-    /// here for an entity that already has a current row would get a primary-key
-    /// violation, which is the honest outcome — the recheck that should have
-    /// prevented it is missing, and a silent overwrite would hide that.
+    /// Insert, not upsert: moving an existing pointer is a *revision*, and that is
+    /// [`Self::update_current`]. Reaching here for an entity that already has a
+    /// current row raises a primary-key violation, which is the honest outcome — a
+    /// silent overwrite would hide the missing recheck.
     ///
     /// # Errors
     /// Propagates the insert's failure.
@@ -167,5 +170,53 @@ impl TypeSchemaRepo {
         };
         secure_insert::<type_schema::Entity>(am, scope, runner).await?;
         Ok(())
+    }
+
+    /// Move the current-state row onto a newly admitted revision.
+    ///
+    /// Every artifact column moves with the pointer in one statement: D3's artifacts
+    /// are outputs of resolving *that* revision, so a row carrying revision `N + 1`
+    /// beside revision `N`'s `resolved_schema` is a state no reader should see, and
+    /// two statements would create it. `created_at` is deliberately not touched.
+    ///
+    /// `Ok(false)` means the entity has no current row — a lost race, since the
+    /// caller checked. Returned rather than raised, because the caller's transaction
+    /// has to decide what to do with it.
+    ///
+    /// # Errors
+    /// Propagates the update's failure.
+    pub async fn update_current(
+        runner: &impl DBRunner,
+        scope: &AccessScope,
+        new: NewCurrentTypeSchema,
+    ) -> Result<bool, ScopeError> {
+        let result = type_schema::Entity::update_many()
+            .secure()
+            .col_expr(
+                type_schema::Column::RevisionNo,
+                Expr::value(new.revision_no),
+            )
+            .col_expr(
+                type_schema::Column::ResolvedSchema,
+                Expr::value(new.resolved_schema),
+            )
+            .col_expr(
+                type_schema::Column::EffectiveTraits,
+                Expr::value(new.effective_traits),
+            )
+            .col_expr(
+                type_schema::Column::EffectiveTraitsSchema,
+                Expr::value(new.effective_traits_schema),
+            )
+            .col_expr(
+                type_schema::Column::ResolutionFingerprint,
+                Expr::value(new.resolution_fingerprint),
+            )
+            .col_expr(type_schema::Column::UpdatedAt, Expr::value(new.now))
+            .filter(Condition::all().add(type_schema::Column::EntityId.eq(new.entity_id)))
+            .scope_with(scope)
+            .exec(runner)
+            .await?;
+        Ok(result.rows_affected == 1)
     }
 }
