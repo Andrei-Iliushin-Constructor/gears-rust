@@ -124,6 +124,13 @@ pub(super) struct StoredStep {
     started_at: Option<String>,
     #[serde(default)]
     completed_at: Option<String>,
+    /// Everything GitHub sent that the six typed fields do not name.
+    ///
+    /// `steps_json` holds GitHub's own step payload, which used to reach
+    /// clients whole; keeping the rest here means typing the known fields
+    /// costs no data.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl From<StoredStep> for WorkflowStep {
@@ -135,12 +142,29 @@ impl From<StoredStep> for WorkflowStep {
             number: st.number,
             started_at: st.started_at,
             completed_at: st.completed_at,
+            extra: st.extra,
         }
     }
 }
 
+/// Most bytes of stored JSON one column may hand the deserializer.
+///
+/// These payloads are GitHub objects the mirror wrote itself — the largest,
+/// an issue-timeline entry, runs to a few kilobytes — so the cap is a guard
+/// against a corrupt or tampered row, not an expected limit.
+const MAX_STORED_JSON_BYTES: usize = 1 << 20;
+
 pub(crate) fn decode<T: serde::de::DeserializeOwned>(field: &str, raw: Option<&str>) -> Option<T> {
     let raw = raw?;
+    if raw.len() > MAX_STORED_JSON_BYTES {
+        tracing::warn!(
+            field,
+            bytes = raw.len(),
+            limit = MAX_STORED_JSON_BYTES,
+            "stored JSON exceeds the decode limit; serving the empty value"
+        );
+        return None;
+    }
     match serde_json::from_str::<T>(raw) {
         Ok(value) => Some(value),
         Err(e) => {
