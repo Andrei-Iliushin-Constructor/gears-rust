@@ -215,8 +215,9 @@ pub async fn evaluate(
                         let entity = stores.find_by_gts_id(tx, &scope, &type_id).await?;
                         match entity {
                             Some(row) => stores
-                                .find_current_schema(tx, &scope, row.id)
+                                .current_schema_projections(tx, &scope, &[row.id])
                                 .await?
+                                .pop()
                                 .map(|current| (row.id, current.revision_no)),
                             None => None,
                         }

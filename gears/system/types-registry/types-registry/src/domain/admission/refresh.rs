@@ -16,7 +16,8 @@ use crate::domain::artifacts::MaterializedArtifacts;
 use crate::domain::enums::{EntityKind, LifecycleStatus};
 use crate::domain::gts_store::{UnitDocument, load_unit_store};
 use crate::domain::ports::{
-    CurrentSchemaCas, CurrentTypeSchemaRow, EntityRow, NewCurrentTypeSchema, ReverseImpact, Stores,
+    CurrentSchemaCas, CurrentSchemaProjection, EntityRow, NewCurrentTypeSchema, ReverseImpact,
+    Stores,
 };
 
 /// What one refresh wrote.
@@ -154,9 +155,9 @@ pub async fn refresh_dependents(
         }
     };
 
-    // Batch the read to minimize time holding the candidate and family locks.
-    let mut current: HashMap<i64, CurrentTypeSchemaRow> = stores
-        .current_schemas(tx, scope, &subject_ids)
+    // Read only revision numbers and fingerprints while holding the write-order claim.
+    let mut current: HashMap<i64, CurrentSchemaProjection> = stores
+        .current_schema_projections(tx, scope, &subject_ids)
         .await?
         .into_iter()
         .map(|row| (row.entity_id, row))

@@ -1222,16 +1222,19 @@ rollback_and_one_retry`. "One rollback" is read off the versions (revision 2, no
 
 **Added:** `TR/src/domain/admission/vector.rs` + `vector_tests.rs` (10 tests over the pure
 comparison), `TR/tests/revalidation_test.rs` (9 tests),
-`current_schemas_reads_every_named_entity_that_has_one` in `repo_backends_test.rs`,
+`current_projections_read_every_named_entity_that_has_one` in `repo_backends_test.rs`,
 `a_zero_revalidation_budget_fails_startup` in `config_test.rs`,
 `PausePoint::RevisionEntityRead` in `tests/common/mod.rs`.
 
-**One new port, `current_schemas`** — the batched sibling of `find_current_schema`. T14
-declined to add it because *"the alternative is a second batched port whose only caller is
-this loop"*; T15 is the second caller, twice over, and both of its reads run inside a
-transaction. `refresh_dependents` keeps its per-dependent read: moving it would reorder
-reads and writes in tested code for no criterion of this task, and the comment there now
-names T15 as the caller that gave the port its reason.
+**Batched state checks use `current_schema_projections`.** The port returns only
+`entity_id`, `revision_no`, and `resolution_fingerprint`; vector derivation and refresh
+do not load the three materialized documents merely to compare state. Instance evaluation
+uses the same projection to record its conforming type's revision. `current_documents`
+uses this narrow SQL projection for its pointer read and selects only identity, authored
+text, and content hash from the revision table. `find_current_schema` retains the full
+artifacts for entity reads. Transaction boundaries and CAS checks remain unchanged.
+`schema_projection_test.rs` checks the executed SQL excludes unused payload columns;
+the repository backend suite verifies projection values on PostgreSQL and MySQL.
 
 **Clippy-driven extractions, worth naming because they are also better shapes.**
 `process_item` passed the cognitive-complexity bound once the revalidation loop went in, so

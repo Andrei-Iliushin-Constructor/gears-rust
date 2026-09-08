@@ -27,9 +27,9 @@ use crate::domain::enums::{DependencyKind, EntityKind, OwnershipScope};
 use crate::domain::family::FamilyKey;
 use crate::domain::ports::{
     CurrentDocument, CurrentInstanceRow, CurrentInstanceValue, CurrentSchemaCas,
-    CurrentTypeSchemaRow, DependencyClosure, DependencyStore, EntityRow, EntityStore,
-    EntityWriteOrderStore, InstanceStore, NewCurrentInstance, NewCurrentTypeSchema, NewEntity,
-    NewInstanceRevision, NewOperation, NewOperationItem, NewRevision, OperationItemRow,
+    CurrentSchemaProjection, CurrentTypeSchemaRow, DependencyClosure, DependencyStore, EntityRow,
+    EntityStore, EntityWriteOrderStore, InstanceStore, NewCurrentInstance, NewCurrentTypeSchema,
+    NewEntity, NewInstanceRevision, NewOperation, NewOperationItem, NewRevision, OperationItemRow,
     OperationRow, OperationStore, ReverseImpact, TypeSchemaStore, VersionFamilyRow,
     VersionFamilyStore,
 };
@@ -159,13 +159,13 @@ impl TypeSchemaStore for Repos {
         TypeSchemaRepo::find_current(tx, scope, entity_id).await
     }
 
-    async fn current_schemas(
+    async fn current_schema_projections(
         &self,
         tx: &DbTx<'_>,
         scope: &AccessScope,
         entity_ids: &[i64],
-    ) -> Result<Vec<CurrentTypeSchemaRow>, ScopeError> {
-        TypeSchemaRepo::current_states(tx, scope, entity_ids).await
+    ) -> Result<Vec<CurrentSchemaProjection>, ScopeError> {
+        TypeSchemaRepo::current_projections(tx, scope, entity_ids).await
     }
 
     async fn insert_schema_revision(

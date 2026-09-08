@@ -342,9 +342,9 @@ use types_registry::domain::enums::{DependencyKind, EntityKind, OwnershipScope};
 use types_registry::domain::family::FamilyKey;
 use types_registry::domain::ports::{
     CurrentDocument, CurrentInstanceRow, CurrentInstanceValue, CurrentSchemaCas,
-    CurrentTypeSchemaRow, DependencyClosure, DependencyStore, EntityRow, EntityStore,
-    EntityWriteOrderStore, InstanceStore, NewCurrentInstance, NewCurrentTypeSchema, NewEntity,
-    NewInstanceRevision, NewOperation, NewOperationItem, NewRevision, OperationItemRow,
+    CurrentSchemaProjection, CurrentTypeSchemaRow, DependencyClosure, DependencyStore, EntityRow,
+    EntityStore, EntityWriteOrderStore, InstanceStore, NewCurrentInstance, NewCurrentTypeSchema,
+    NewEntity, NewInstanceRevision, NewOperation, NewOperationItem, NewRevision, OperationItemRow,
     OperationRow, OperationStore, ReverseImpact, TypeSchemaStore, VersionFamilyRow,
     VersionFamilyStore,
 };
@@ -556,13 +556,15 @@ impl TypeSchemaStore for PausingStores {
         Ok(out)
     }
 
-    async fn current_schemas(
+    async fn current_schema_projections(
         &self,
         tx: &DbTx<'_>,
         scope: &AccessScope,
         entity_ids: &[i64],
-    ) -> Result<Vec<CurrentTypeSchemaRow>, ScopeError> {
-        self.inner.current_schemas(tx, scope, entity_ids).await
+    ) -> Result<Vec<CurrentSchemaProjection>, ScopeError> {
+        self.inner
+            .current_schema_projections(tx, scope, entity_ids)
+            .await
     }
 
     async fn find_current_schema(
@@ -934,13 +936,15 @@ impl TypeSchemaStore for ClaimSignallingStores {
         Ok(out)
     }
 
-    async fn current_schemas(
+    async fn current_schema_projections(
         &self,
         tx: &DbTx<'_>,
         scope: &AccessScope,
         entity_ids: &[i64],
-    ) -> Result<Vec<CurrentTypeSchemaRow>, ScopeError> {
-        self.inner.current_schemas(tx, scope, entity_ids).await
+    ) -> Result<Vec<CurrentSchemaProjection>, ScopeError> {
+        self.inner
+            .current_schema_projections(tx, scope, entity_ids)
+            .await
     }
 
     async fn find_current_schema(
@@ -1302,13 +1306,15 @@ impl TypeSchemaStore for CasMissStores {
         self.inner.current_documents(tx, scope, entity_ids).await
     }
 
-    async fn current_schemas(
+    async fn current_schema_projections(
         &self,
         tx: &DbTx<'_>,
         scope: &AccessScope,
         entity_ids: &[i64],
-    ) -> Result<Vec<CurrentTypeSchemaRow>, ScopeError> {
-        self.inner.current_schemas(tx, scope, entity_ids).await
+    ) -> Result<Vec<CurrentSchemaProjection>, ScopeError> {
+        self.inner
+            .current_schema_projections(tx, scope, entity_ids)
+            .await
     }
 
     async fn find_current_schema(
