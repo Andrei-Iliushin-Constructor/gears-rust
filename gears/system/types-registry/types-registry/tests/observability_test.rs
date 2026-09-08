@@ -22,7 +22,7 @@ use tracing_subscriber::fmt::MakeWriter;
 use uuid::Uuid;
 
 use common::{
-    PausePoint, PausingStores, TestDir, allow_all, stores, test_db, test_db_file, worker_settings,
+    PausePoint, TestDir, TestStores, allow_all, stores, test_db, test_db_file, worker_settings,
 };
 use types_registry::config::{MetricsConfig, TypesRegistryConfig};
 use types_registry::domain::admission::AdmissionFailureReason;
@@ -695,7 +695,7 @@ async fn a_revalidation_retry_is_counted_by_its_drift_shape() {
 
     // Held after evaluation and immediately before the commit's first statement — see
     // `revalidation_test.rs`.
-    let (paused, reached, resume) = PausingStores::new(PausePoint::BeforeEntityWriteOrderClaim);
+    let (paused, reached, resume) = TestStores::pausing(PausePoint::BeforeEntityWriteOrderClaim);
     let ports: Arc<dyn Stores> = paused;
     let provider = worker(&db);
     let pass = tokio::spawn(async move {

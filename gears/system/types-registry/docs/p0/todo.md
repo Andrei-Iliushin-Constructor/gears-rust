@@ -1429,11 +1429,17 @@ reads as scope rather than as silence.
   pre-existing and not this phase's to clear
 - [x] Gear tests at the checkpoint: **617 passed** on SQLite; **6 passed** on the PostgreSQL and
   MySQL container suites, `revision_race_backends_test` included
+- [x] **Exclusion verified through backend lock waits.** `a_second_commit_waits_for_the_first`
+  observes `types_registry__coordination_state` waits from a separate connection:
+  `pg_blocking_pids` / `pg_stat_activity` on Postgres, `data_lock_waits` / `data_locks` on MySQL.
+  One container per test with no other writer identifies the waiting claim. `ClaimHooks` verifies
+  it stays pending while the row is held and returns after release; a timeout alone was insufficient.
+  Both backends fail the mutation checks: querying another table or signalling return before the call
 - [x] **`make test-types-registry-db` did not run `revision_race_backends_test`, and now does.**
   The suite that proves the `entity_write_order` claim on a backend with real row locking was
   reachable only by hand, so `make ci` never ran it — the container test the last commit added to
   close a P0 blocker was outside the gate meant to protect it. One line in the `Makefile` target
-- [ ] Human review — the four items checked below, one decision open
+- [ ] Human review — four items below; item 3's design decision is resolved
 
 **Handoff review (commit `319eb16a5`), item by item.**
 
@@ -1458,15 +1464,13 @@ reads as scope rather than as silence.
    merely early"*. Both read as instructions T20 and the ADR-0013 purge can follow literally.
    The mechanism is right too: an `UPDATE … SET state_seq = state_seq + 1` holds an exclusive row
    lock to commit, and `#[secure(unrestricted)]` matches every other P0 table.
-3. **`ClaimSignallingStores` — the duplication is real and should become a macro, but not here.**
-   `tests/common/mod.rs` is 1552 lines, of which roughly 1150 are three decorator stacks —
-   `PausingStores`, `ClaimSignallingStores`, `CasMissStores` — each forwarding the same seven port
-   traits and each differing in one or two methods. Rust has no trait delegation, so the shape
-   that removes it is a declarative `forward_stores!` macro generating the pass-through, with the
-   wrapper writing only what it intercepts. T19 and T20 each add interleavings and will each want
-   a fourth and fifth wrapper, so the cost compounds. **Decision open:** do it now as a test-only
-   refactor, or take the fourth wrapper first and let the macro's shape be argued by three
-   examples rather than two.
+3. **Store decorator duplication removed.** `TestStores<H>` in `tests/common/test_stores.rs`
+   implements the seven port traits once. `PauseHooks`, `ClaimHooks`, and `CasMissHooks` supply
+   test-specific behavior through `StoreHooks`, whose methods have no-op defaults.
+   Plain Rust forwarding keeps the signatures directly readable without a delegation macro.
+
+   For T19/T20, interception points are shared: add a `PausePoint` and call site for timing,
+   or a `StoreHooks` method to inspect arguments/results or override a result.
 4. **No stale text survives.** No "wait budget" wording anywhere in the gear. Every remaining
    mention of redelivery either carries the "until T21 … after it" caveat (SPEC lines 528, 594;
    `errors.rs`'s `ConformingTypeAbsent`) or describes ADR-0012's target design, which is where it

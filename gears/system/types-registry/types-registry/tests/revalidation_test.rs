@@ -16,8 +16,7 @@ use toolkit_gts::gts_id;
 use uuid::Uuid;
 
 use common::{
-    CasMissStores, PausePoint, PausingStores, TestDir, allow_all, stores, test_db, test_db_file,
-    worker_settings,
+    PausePoint, TestDir, TestStores, allow_all, stores, test_db, test_db_file, worker_settings,
 };
 use types_registry::config::{TypesRegistryConfig, WorkerSettings};
 use types_registry::domain::admission::AdmissionFailureReason;
@@ -558,7 +557,7 @@ where
     Fut: Future<Output = ()> + Send,
 {
     // Pause before the claim so the mutation can commit in the evaluation gap.
-    let (paused, reached, resume) = PausingStores::new(PausePoint::BeforeEntityWriteOrderClaim);
+    let (paused, reached, resume) = TestStores::pausing(PausePoint::BeforeEntityWriteOrderClaim);
     let ports: Arc<dyn Stores> = paused;
     let provider = worker(db);
     let pass = tokio::spawn(async move {
@@ -902,7 +901,7 @@ async fn a_dependent_refresh_losing_the_compare_and_swap_rolls_the_commit_back()
         submitted(&db, "k-base-2", BASE, base_schema("label"), Some(1)).await;
 
     let derived_id = entity(&db, DERIVED).await.id;
-    let ports = CasMissStores::new(derived_id);
+    let ports = TestStores::cas_miss(derived_id);
     let outcome = commit_the_revision_with(ports, &db, &unit, 1).await;
 
     let Err(WorkerError::RevalidationRequired(VectorDrift::CurrentProjectionMoved { ref gts_id })) =
@@ -966,7 +965,7 @@ async fn a_candidate_current_write_losing_the_compare_and_swap_rolls_the_commit_
         submitted(&db, "k-base-2", BASE, base_schema("label"), Some(1)).await;
 
     let base_id = entity(&db, BASE).await.id;
-    let ports = CasMissStores::new(base_id);
+    let ports = TestStores::cas_miss(base_id);
     let outcome = commit_the_revision_with(ports, &db, &unit, 1).await;
 
     let Err(WorkerError::RevalidationRequired(VectorDrift::CurrentProjectionMoved { ref gts_id })) =
