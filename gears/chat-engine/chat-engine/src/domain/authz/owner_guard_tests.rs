@@ -6,6 +6,7 @@ use super::*;
 
 use chat_engine_sdk::models::{LifecycleState, TenantId, UserId};
 use time::OffsetDateTime;
+use toolkit_security::ScopeConstraint;
 
 fn session(tenant_id: Uuid, user_id: Uuid) -> Session {
     let now = OffsetDateTime::now_utc();
@@ -77,4 +78,93 @@ fn non_uuid_owner_fails_closed() {
     let err = ensure_session_owner(&ctx(user, tenant), &row)
         .expect_err("an unparseable owner id must fail closed");
     assert!(matches!(err, ChatEngineError::NotFound { .. }));
+}
+
+// --------------------------------------------------------------------------
+// caller_scope
+// --------------------------------------------------------------------------
+
+fn owner_values(scope: &AccessScope) -> Vec<Uuid> {
+    scope.all_uuid_values_for(pep_properties::OWNER_ID)
+}
+
+/// An unconstrained allow must collapse to the caller's own owner pair rather
+/// than to every row in the table.
+#[test]
+fn caller_scope_pins_both_halves_of_an_unconstrained_scope() {
+    let tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+    let scope = caller_scope(&ctx(user, tenant), &AccessScope::allow_all());
+
+    assert!(!scope.is_unconstrained() && !scope.is_deny_all());
+    assert!(scope.contains_uuid(pep_properties::OWNER_ID, user));
+    assert!(scope.contains_uuid(pep_properties::OWNER_TENANT_ID, tenant));
+}
+
+/// The shipped-PDP shape: a tenant clamp and nothing else. The tenant filter
+/// is left as the PDP wrote it and the owner clamp is added.
+#[test]
+fn caller_scope_adds_owner_to_a_tenant_only_scope() {
+    let tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+    let scope = caller_scope(&ctx(user, tenant), &AccessScope::for_tenant(tenant));
+
+    assert_eq!(owner_values(&scope), vec![user]);
+    assert!(scope.contains_uuid(pep_properties::OWNER_TENANT_ID, tenant));
+}
+
+/// A PDP tenant predicate must not be replaced by the caller's own tenant: a
+/// policy may legitimately scope to a subtree or a set of tenants.
+#[test]
+fn caller_scope_keeps_an_existing_tenant_predicate() {
+    let caller_tenant = Uuid::new_v4();
+    let other_tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+    let pdp = AccessScope::for_tenants(vec![caller_tenant, other_tenant]);
+
+    let scope = caller_scope(&ctx(user, caller_tenant), &pdp);
+    let tenants = scope.all_uuid_values_for(pep_properties::OWNER_TENANT_ID);
+    assert!(tenants.contains(&caller_tenant) && tenants.contains(&other_tenant));
+}
+
+/// Intersection, not replacement: a policy granting someone else's rows must
+/// not be widened back to the caller — the constraint is dropped, and with no
+/// constraint left the scope is deny-all.
+#[test]
+fn caller_scope_drops_a_constraint_scoped_to_another_owner() {
+    let tenant = Uuid::new_v4();
+    let pdp = AccessScope::single(ScopeConstraint::new(vec![
+        ScopeFilter::eq(pep_properties::OWNER_TENANT_ID, tenant),
+        ScopeFilter::eq(pep_properties::OWNER_ID, Uuid::new_v4()),
+    ]));
+
+    let scope = caller_scope(&ctx(Uuid::new_v4(), tenant), &pdp);
+    assert!(
+        scope.is_deny_all(),
+        "a scope granting another owner's rows must not survive the clamp",
+    );
+}
+
+/// A policy that already grants the caller (among others) is narrowed to the
+/// caller alone.
+#[test]
+fn caller_scope_narrows_a_multi_owner_grant() {
+    let tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+    let pdp = AccessScope::single(ScopeConstraint::new(vec![ScopeFilter::in_uuids(
+        pep_properties::OWNER_ID,
+        vec![user, Uuid::new_v4()],
+    )]));
+
+    let scope = caller_scope(&ctx(user, tenant), &pdp);
+    assert_eq!(owner_values(&scope), vec![user]);
+}
+
+#[test]
+fn caller_scope_keeps_deny_all_denied() {
+    let scope = caller_scope(
+        &ctx(Uuid::new_v4(), Uuid::new_v4()),
+        &AccessScope::deny_all(),
+    );
+    assert!(scope.is_deny_all());
 }

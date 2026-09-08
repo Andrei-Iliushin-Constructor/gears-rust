@@ -21,7 +21,9 @@
 // @cpt-cf-chat-engine-nfr-authentication
 // @cpt-cf-chat-engine-design-auth-model
 
-use toolkit_security::SecurityContext;
+use toolkit_security::{
+    AccessScope, ScopeConstraint, ScopeFilter, SecurityContext, pep_properties,
+};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -55,6 +57,55 @@ pub fn ensure_session_owner(ctx: &SecurityContext, session: &Session) -> Result<
         "session ownership check failed - responding 404 (anti-enumeration)",
     );
     Err(ChatEngineError::not_found("session", session.session_id))
+}
+
+/// Narrow a PDP-compiled scope to the calling subject's own rows.
+///
+/// The row-scoped counterpart of [`ensure_session_owner`], for the operations
+/// that never prefetch a session — they hand an `AccessScope` straight to the
+/// repository (`find_message_by_id_scoped`, `fetch_active_history_scoped`,
+/// `delete_message_subtree_scoped`). Post-filtering the result is not an option
+/// there: it would silently corrupt paging on the list paths, so the caller
+/// clamp has to travel with the scope into the SQL `WHERE`.
+///
+/// Both halves of the owner pair are pinned:
+///
+/// - `owner_id` via the platform's [`AccessScope::ensure_owner`] — injected
+///   where the PDP left it open, intersected where the PDP set it (a policy
+///   that grants someone else's rows loses that constraint, and a scope with
+///   nothing left over becomes deny-all).
+/// - `owner_tenant_id` is injected only where a constraint carries no tenant
+///   filter of its own. A PDP that already scoped the tenant keeps its own
+///   predicate, which may legitimately be a subtree rather than a single id.
+///
+/// Deny-all and unconstrained scopes are handled by `ensure_owner`: deny-all
+/// stays deny-all, and an unconstrained allow collapses to the caller's own
+/// owner pair rather than to every row in the table.
+#[must_use]
+pub fn caller_scope(ctx: &SecurityContext, scope: &AccessScope) -> AccessScope {
+    let owned = scope.ensure_owner(ctx.subject_id());
+    if owned.is_deny_all() {
+        return owned;
+    }
+
+    let tenant_filter = ScopeFilter::eq(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id());
+    let constraints = owned
+        .constraints()
+        .iter()
+        .map(|constraint| {
+            if constraint
+                .filters()
+                .iter()
+                .any(|f| f.property() == pep_properties::OWNER_TENANT_ID)
+            {
+                return constraint.clone();
+            }
+            let mut filters = constraint.filters().to_vec();
+            filters.push(tenant_filter.clone());
+            ScopeConstraint::new(filters)
+        })
+        .collect();
+    AccessScope::from_constraints(constraints)
 }
 
 #[cfg(test)]
