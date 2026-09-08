@@ -334,7 +334,7 @@ async fn a_pass_that_loses_the_item_cas_writes_nothing_at_all() {
         &item.gts_id,
         &payload,
         item.id,
-        common::limits().activation_write_set,
+        &common::limits(),
     )
     .await
     .expect("evaluation")
@@ -374,7 +374,7 @@ async fn a_pass_that_loses_the_item_cas_writes_nothing_at_all() {
                     tx,
                     &allow_all(),
                     &unit,
-                    common::limits().activation_write_set,
+                    &common::limits(),
                     LATER,
                 )
                 .await

@@ -13,6 +13,8 @@ fn a_borrowed_literal_reason_is_its_own_label() {
         "dependent_invalid",
         "revalidation_exhausted",
         "activation_write_set_exceeded",
+        "resolution_closure_exceeded",
+        "resolved_document_too_large",
     ] {
         assert_eq!(reason_label(&Cow::Borrowed(literal)), literal);
     }

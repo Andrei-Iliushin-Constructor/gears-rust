@@ -19,11 +19,14 @@
 //! already final. So the two travel in different positions: `Err(WorkerError)`
 //! versus `Ok(_)` with a failed item.
 //!
-//! # P0 scope
+//! # Current admission scope (through T16)
 //!
-//! One acyclic, reference-free candidate per unit, each item its own unit,
-//! processed in `item_no` order. Creations and content revisions both land here —
-//! the item's stored precondition chooses which commit runs.
+//! Each item is its own unit, processed in `item_no` order. References resolve
+//! against committed dependencies plus this candidate; `gts-rust` validation
+//! rejects circular `$ref`s. T19 adds the batch-wide candidate overlay,
+//! topological ordering and cycle detection over combined `$ref`/derivation edges.
+//! Creations and content revisions both land here — the item's stored precondition
+//! chooses which commit runs.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -235,7 +238,7 @@ async fn commit_evaluated(
                         tx,
                         &tx_scope,
                         unit.as_ref(),
-                        tx_limits.activation_write_set,
+                        &tx_limits,
                         now,
                     )
                     .await
@@ -247,7 +250,7 @@ async fn commit_evaluated(
                             &tx_scope,
                             unit.as_ref(),
                             expected,
-                            tx_limits.activation_write_set,
+                            &tx_limits,
                             now,
                             &tx_metrics,
                         )
@@ -291,7 +294,7 @@ async fn process_item(
             &item.gts_id,
             payload,
             item.id,
-            tuning.limits.activation_write_set,
+            tuning.limits,
         )
         .await?
         {

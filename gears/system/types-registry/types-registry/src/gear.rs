@@ -102,7 +102,7 @@ impl Gear for TypesRegistryGear {
             warn!(
                 keys = ?inert,
                 "types_registry accepted configuration keys that P0 does not enforce; \
-                 each key's documentation names the task that binds it"
+                 see each key's documentation for its enforcement status"
             );
         }
 

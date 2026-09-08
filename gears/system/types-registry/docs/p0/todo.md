@@ -304,7 +304,7 @@ T21's shapes:
 
 - every field now says **enforced** or **accepted, not enforced in P0**, and the latter names the
   task that binds it (T14 for the write set, T15 for `max_revalidation_attempts`, T21 for
-  `operation_timeout`, T27 for the page-size pair, T13/T19 for `resolution_closure`) — the honest
+  `operation_timeout`, T27 for the page-size pair) — the honest
   shape `tenant_ownable` already had;
 - `CLOSURE_BOUND` says it is *its own* bound over what a store build **reads**, not SPEC §8.1
   step 4.6's write set, and its error message no longer borrows the other bound's name;
@@ -312,6 +312,16 @@ T21's shapes:
   not act on, and `init` names them in one `warn!`. Not a boot failure: a P1-ready configuration
   legitimately carries every one of them. The test over it is exhaustive, so binding a key breaks
   that test — which is the reminder to take it out of the list.
+
+**Resolution budgets:**
+
+- [x] `resolution_closure` bounds each candidate or refreshed schema's distinct authored
+  resolution graph, including its own document and the candidate overlay. Converging paths
+  count once; `x-gts-ref` and unrelated documents in the shared refresh store do not count
+- [x] `resolved_document` bounds the canonical UTF-8 bytes of each effective artifact,
+  including the conforming schema used by an Instance. Exactly-at-bound passes; exceeding
+  either budget refuses admission and rolls back any revision and dependent refresh
+- [x] Both settings reject zero at startup and are removed from `inert_limit_keys()`
 
 **Dependencies:** T2
 **Files touched:**
@@ -1009,7 +1019,8 @@ have caught the mistake.
 **`limits` now reach the worker.** `run_operation` takes `&Limits` and carries it to
 `commit_revision`; `activation_write_set` moved off `inert_limit_keys` and gained a
 zero-refusal in `validate()`, alongside the other enforced limits. `resolved_document` and
-`resolution_closure` stay listed as inert — the struct travels, but nothing consults them.
+`resolution_closure` are also enforced, per document, during evaluation and refresh. A
+refresh refusal uses the same rollback channel as the activation-write-set refusal.
 
 **Two shapes came out of the rebase onto the family lock, not out of T14's design.** `Limits`
 and `WorkerSettings` both travel per item, which puts `process_item` one argument over
@@ -1581,6 +1592,9 @@ set.
 - [ ] A failed selected dependency yields `blocked_by_dependency`; a failed lower minor yields `blocked_by_predecessor`
 - [ ] A circular `$ref` between two candidates in one batch is refused as `invalid_schema` — the overlay makes both visible to each other, so this is where the acyclicity invariant is actually tested
 - [ ] A cycle mixing `$ref` with derivation — a base candidate `$ref`ing a schema derived from it — is refused the same way: the ordering runs over the combined edge set, not over `$ref` alone
+- [ ] A candidate with a self-referential GTS `$ref` is refused as `invalid_schema`.
+  For self-cycles and multi-candidate cycles, assert every cycle member fails and no new
+  entity/revision or outgoing edge is committed; existing revisions remain unchanged
 - [ ] The implicit predecessor edge is not written to `dependency`
 - [ ] The ordering is exposed as a pure function over a candidate set, usable without a database — required for unit testing without a fixture DB
 
@@ -1632,6 +1646,10 @@ deletion, running every check in a rollback-only transaction.
 - [ ] Deletion with a live direct registered dependent is refused, reporting a count without identities
 - [ ] A transitive-only dependent does not block
 - [ ] A schema whose `x-gts-ref` names the target does **not** block: the keyword creates no edge, so there is no registered dependent to find
+- [ ] Paired public-service deletion scenarios prove the distinction: an otherwise equivalent
+  `$ref` holder blocks target deletion, while an `x-gts-ref` holder permits it and stays
+  readable. Tenant disable/unavailability scenarios belong to the deferred Availability
+  Evaluator, not T20 or P0
 - [ ] A deleted entity is still exact-readable as deleted, and absent from lists
 - [ ] Dry Run commits nothing, moves no `resource_version`, and its mode is part of the fingerprint
 - [ ] Dry-run `succeeded` omits `resource_version`; dry-run `unchanged` reports the existing one

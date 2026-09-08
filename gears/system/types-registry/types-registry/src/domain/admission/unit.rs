@@ -24,11 +24,13 @@ use toolkit_db::{DBProvider, DbTx};
 use toolkit_macros::domain_model;
 use uuid::Uuid;
 
+use super::bounds::{check_closure, materialize_bounded};
 use super::errors::{ItemFailure, WorkerError};
 use super::fingerprint::canonical_text;
 use super::refresh::refresh_dependents;
 use super::vector::{self, RevisionVector, VectorDrift};
-use crate::domain::artifacts::{MaterializedArtifacts, content_hash, materialize};
+use crate::config::Limits;
+use crate::domain::artifacts::{MaterializedArtifacts, content_hash};
 use crate::domain::dependency::{DependencyEdge, extract_edges};
 use crate::domain::enums::{DependencyKind, EntityKind, LifecycleStatus, OwnershipScope};
 use crate::domain::family::{FamilyKey, admits_new_member, family_key};
@@ -140,7 +142,7 @@ pub enum RevisionCommit {
 /// when this returns: nothing is retained anywhere, and the next invocation reads
 /// the database again.
 ///
-/// `activation_write_set` bounds reverse-impact evaluation before any write begins.
+/// Resolution budgets apply before commit; `activation_write_set` also bounds reverse impact.
 ///
 /// # Errors
 /// [`WorkerError`] for an infrastructure failure, which the outbox handler must
@@ -153,8 +155,9 @@ pub async fn evaluate(
     gts_id: &str,
     canonical_body: &str,
     operation_item_id: i64,
-    activation_write_set: usize,
+    limits: &Limits,
 ) -> Result<Result<EvaluatedUnit, ItemFailure>, WorkerError> {
+    let limits = *limits;
     let id = match GtsId::try_new(gts_id) {
         Ok(id) => id,
         // Acceptance already refused a non-canonical identifier, so reaching here
@@ -224,7 +227,7 @@ pub async fn evaluate(
                     &candidate_id,
                     store.roots(),
                     store.closure_entities(),
-                    activation_write_set,
+                    limits.activation_write_set,
                 )
                 .await?;
                 Ok((store, pair, vector))
@@ -248,6 +251,7 @@ pub async fn evaluate(
             operation_item_id,
             edges,
             vector,
+            &limits,
         )
     })
     .await
@@ -267,7 +271,11 @@ fn evaluate_loaded(
     operation_item_id: i64,
     edges: Vec<DependencyEdge>,
     vector: RevisionVector,
+    limits: &Limits,
 ) -> Result<Result<EvaluatedUnit, ItemFailure>, WorkerError> {
+    if let Err(failure) = check_closure(store.store_mut(), id.id(), limits.resolution_closure) {
+        return Ok(Err(failure));
+    }
     let outcome = if id.is_type() {
         let resolved = match store.store_mut().validate_schema(id.id()) {
             Ok(resolved) => resolved,
@@ -275,9 +283,11 @@ fn evaluate_loaded(
                 return Ok(Err(ItemFailure::new("invalid_schema", e.to_string())));
             }
         };
-        EvaluatedOutcome::TypeSchema {
-            artifacts: materialize(&resolved),
-        }
+        let artifacts = match materialize_bounded(&resolved, limits) {
+            Ok(artifacts) => artifacts,
+            Err(failure) => return Ok(Err(failure)),
+        };
+        EvaluatedOutcome::TypeSchema { artifacts }
     } else {
         // `Some` for every parsed Instance identifier: `get_type_id()` is `None` only
         // for a single segment, which `try_new` above already refused.
@@ -295,6 +305,15 @@ fn evaluate_loaded(
                 type_id,
             });
         };
+        // A type admitted under an older, larger budget must not bypass the
+        // current resolution budget when it is used to validate an Instance.
+        let resolved = match store.store_mut().validate_schema(&type_id) {
+            Ok(resolved) => resolved,
+            Err(error) => return Ok(Err(ItemFailure::new("invalid_schema", error.to_string()))),
+        };
+        if let Err(failure) = materialize_bounded(&resolved, limits) {
+            return Ok(Err(failure));
+        }
         if let Err(e) = store.store_mut().validate_instance(id.id()) {
             return Ok(Err(ItemFailure::new("invalid_value", e.to_string())));
         }
@@ -369,7 +388,7 @@ pub async fn commit_creation(
     tx: &DbTx<'_>,
     scope: &AccessScope,
     unit: &EvaluatedUnit,
-    activation_write_set: usize,
+    limits: &Limits,
     now: OffsetDateTime,
 ) -> Result<Result<CommittedUnit, ItemFailure>, WorkerError> {
     claim_entity_write_order(stores, tx, scope, now).await?;
@@ -407,7 +426,7 @@ pub async fn commit_creation(
         scope,
         &unit.gts_id,
         &unit.vector,
-        activation_write_set,
+        limits.activation_write_set,
     )
     .await?
     {
@@ -738,7 +757,7 @@ pub async fn commit_revision(
     scope: &AccessScope,
     unit: &EvaluatedUnit,
     expected_resource_version: i64,
-    activation_write_set: usize,
+    limits: &Limits,
     now: OffsetDateTime,
     metrics: &Arc<dyn AdmissionMetrics>,
 ) -> Result<Result<RevisionCommit, ItemFailure>, WorkerError> {
@@ -809,7 +828,7 @@ pub async fn commit_revision(
         scope,
         &unit.gts_id,
         &unit.vector,
-        activation_write_set,
+        limits.activation_write_set,
     )
     .await?
     {
@@ -938,17 +957,7 @@ pub async fn commit_revision(
     // Every authored revision replaces its outgoing edges.
     replace_edges(stores, tx, scope, entity.id, &unit.edges).await?;
 
-    refresh_reverse_impact(
-        stores,
-        tx,
-        scope,
-        unit,
-        entity.id,
-        activation_write_set,
-        now,
-        metrics,
-    )
-    .await?;
+    refresh_reverse_impact(stores, tx, scope, unit, entity.id, limits, now, metrics).await?;
 
     // Last, and its `false` rolls everything above back — see `commit_creation`.
     if !stores
@@ -982,14 +991,14 @@ async fn refresh_reverse_impact(
     scope: &AccessScope,
     unit: &EvaluatedUnit,
     entity_id: i64,
-    activation_write_set: usize,
+    limits: &Limits,
     now: OffsetDateTime,
     metrics: &Arc<dyn AdmissionMetrics>,
 ) -> Result<(), WorkerError> {
     if !matches!(unit.outcome, EvaluatedOutcome::TypeSchema { .. }) {
         return Ok(());
     }
-    match refresh_dependents(stores, tx, scope, &[entity_id], activation_write_set, now).await? {
+    match refresh_dependents(stores, tx, scope, &[entity_id], limits, now).await? {
         Ok(outcome) => {
             // Record only write sets that actually commit.
             metrics.observe_activation_write_set(outcome.refreshed.len());

@@ -4,6 +4,9 @@
 
 mod common;
 
+#[path = "refresh/resolution_limits.rs"]
+mod resolution_limits;
+
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -437,13 +440,13 @@ async fn refresh_directly(db: &Provider, roots: &[i64], limits: &Limits) -> Refr
 
     let provider: DBProvider<WorkerError> = DBProvider::new(db.db());
     let roots = roots.to_vec();
-    let bound = limits.activation_write_set;
+    let limits = *limits;
     provider
         .transaction_with_config(commit_write(&provider.db()), move |tx| {
             let roots = roots.clone();
             Box::pin(async move {
                 Ok(
-                    refresh_dependents(stores().as_ref(), tx, &allow_all(), &roots, bound, LATER)
+                    refresh_dependents(stores().as_ref(), tx, &allow_all(), &roots, &limits, LATER)
                         .await?
                         .expect("the refresh must not refuse under the default bound"),
                 )

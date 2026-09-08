@@ -322,14 +322,6 @@ fn the_defaults_report_no_inert_keys() {
 fn each_unenforced_key_is_named_when_it_is_moved_off_its_default() {
     for (limits, expected) in [
         (
-            json!({ "resolved_document": "2MB" }),
-            "limits.resolved_document",
-        ),
-        (
-            json!({ "resolution_closure": 128 }),
-            "limits.resolution_closure",
-        ),
-        (
             json!({ "page_size_default": 50 }),
             "limits.page_size_default",
         ),
@@ -357,12 +349,17 @@ fn each_unenforced_key_is_named_when_it_is_moved_off_its_default() {
 #[test]
 fn the_enforced_limits_are_never_reported_as_inert() {
     let cfg = parse(json!({
-        "limits": { "authored_document": "1MB", "batch_candidates": 7, "activation_write_set": 8 },
+        "limits": {
+            "authored_document": "1MB", "batch_candidates": 7, "activation_write_set": 8,
+            "resolved_document": "2MB", "resolution_closure": 128
+        },
         "worker": { "max_revalidation_attempts": 3 }
     }));
     assert!(cfg.inert_limit_keys().is_empty());
     assert_eq!(cfg.limits.authored_document.bytes(), 1024 * 1024);
     assert_eq!(cfg.limits.batch_candidates, 7);
+    assert_eq!(cfg.limits.resolved_document.bytes(), 2 * 1024 * 1024);
+    assert_eq!(cfg.limits.resolution_closure, 128);
     assert_eq!(
         cfg.limits.activation_write_set, 8,
         "T14 enforces this one: the reverse-impact refusal and the CTE's depth cap"
@@ -378,13 +375,13 @@ fn the_enforced_limits_are_never_reported_as_inert() {
 #[test]
 fn several_inert_keys_are_reported_together() {
     let cfg = parse(json!({
-        "limits": { "resolution_closure": 128, "page_size_max": 500 },
+        "limits": { "page_size_default": 50, "page_size_max": 500 },
         "worker": { "operation_timeout": "10m" }
     }));
     assert_eq!(
         cfg.inert_limit_keys(),
         vec![
-            "limits.resolution_closure",
+            "limits.page_size_default",
             "limits.page_size_max",
             "worker.operation_timeout",
         ],
@@ -397,6 +394,8 @@ fn a_zero_enforced_limit_fails_startup() {
         json!({ "batch_candidates": 0 }),
         json!({ "authored_document": 0 }),
         json!({ "authored_document": "0KB" }),
+        json!({ "resolved_document": 0 }),
+        json!({ "resolution_closure": 0 }),
         json!({ "activation_write_set": 0 }),
     ] {
         let cfg = parse(json!({ "limits": limits.clone() }));
@@ -405,6 +404,13 @@ fn a_zero_enforced_limit_fails_startup() {
             .expect_err(&format!("a zero limit must fail startup: {limits}"));
         assert!(matches!(err, ConfigError::Limits(_)), "got {err}");
     }
+}
+
+#[test]
+fn the_minimum_positive_resolution_budgets_are_valid_configuration() {
+    let cfg = parse(json!({ "limits": { "resolved_document": 1, "resolution_closure": 1 } }));
+    cfg.validate().expect("positive budgets are valid");
+    assert!(cfg.inert_limit_keys().is_empty());
 }
 
 #[test]

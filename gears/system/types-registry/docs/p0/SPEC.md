@@ -643,6 +643,21 @@ is refused with `activation_write_set_exceeded` at **evaluation**, before a tran
 has written anything, and the refresh's own refusal (step 4.6) remains as the backstop
 for a set that grew in between.
 
+**Resolution budgets apply to each document.** Before `gts-rust` resolves a candidate,
+`limits.resolution_closure` counts the candidate itself and the distinct documents reached
+through `$ref`, derivation and Instance conformance in the candidate-overlaid store.
+Converging paths count once; `x-gts-ref`, removed outgoing references and unrelated documents
+loaded for other refresh subjects do not count. Exceeding the budget yields
+`resolution_closure_exceeded`. Each canonical effective artifact must also fit
+`limits.resolved_document` UTF-8 bytes; exceeding it yields `resolved_document_too_large`.
+An Instance's conforming schema is subject to the same byte limit. Both checks also apply
+to each refreshed dependent, and a refresh refusal rolls back the candidate revision and
+all dependent writes. Zero is invalid for either configuration setting.
+
+These are composition and output bounds. The repository's separate 512-entity store-build
+guard still bounds database loading, and `gts-rust` constructs the resolved value before its
+canonical byte size can be checked; the byte limit is not an allocator-level memory cap.
+
 Deletion has its own short protocol, and it opens the same way: a transaction whose **first
 statement** claims the `entity_write_order` row, then the positive `expected_resource_version`
 precondition, the recheck that the target is `ACTIVE` at that version with no direct

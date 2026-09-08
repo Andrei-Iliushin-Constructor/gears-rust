@@ -210,7 +210,7 @@ async fn submitted(
         &item.gts_id,
         &payload,
         item.id,
-        common::limits().activation_write_set,
+        &common::limits(),
     )
     .await
     .expect("evaluation must not fail on infrastructure")
@@ -252,7 +252,7 @@ async fn commit_the_revision_with(
                     &allow_all(),
                     &unit,
                     expected_resource_version,
-                    common::limits().activation_write_set,
+                    &common::limits(),
                     LATER,
                     &common::metrics(),
                 )
@@ -489,7 +489,7 @@ async fn a_creation_whose_dependency_moved_after_evaluation_rolls_the_commit_bac
                     tx,
                     &allow_all(),
                     &candidate,
-                    common::limits().activation_write_set,
+                    &common::limits(),
                     LATER,
                 )
                 .await

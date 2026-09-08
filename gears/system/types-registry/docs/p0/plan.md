@@ -27,6 +27,11 @@ not created in P0. The `routing` state row — the future routing generation —
 federation, seeded by that phase's own migration alongside `source_claim`. A standalone
 `routing_config` table is never created, in P0 or any later phase.
 
+`limits.resolved_document` and `limits.resolution_closure` are enforced during admission
+and dependent refresh. Both must be positive. Closure accounting is per document over the
+candidate overlay; the resolved-size budget applies to the canonical bytes of each effective
+artifact. Exceeding either refuses the candidate without committing partial state.
+
 32 tasks in 8 phases with 8 review checkpoints — 30 planned up front, plus T9a and T24a added
 out of the Checkpoint 1 review (P12/P13). Twenty-nine are S or M; three are **L** and say
 why in their own entry — T25 and T26 (consumer migration across twenty-plus gears) and T28

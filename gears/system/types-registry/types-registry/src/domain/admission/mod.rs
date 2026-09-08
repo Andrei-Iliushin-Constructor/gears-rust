@@ -13,6 +13,7 @@
 //! to have no database in scope at all.
 
 pub mod acceptance;
+mod bounds;
 mod drift;
 mod errors;
 pub mod fingerprint;

@@ -111,10 +111,11 @@ pub struct Limits {
     /// fingerprinted (`AcceptanceError::AuthoredDocumentTooLarge`).
     pub authored_document: ByteSize,
     /// Largest resolved document the registry will materialize (§3.2).
-    /// Not enforced in P0.
+    /// Enforced on the canonical bytes of each effective artifact at admission and refresh.
     pub resolved_document: ByteSize,
     /// Largest reference-resolution closure one candidate may need.
-    /// Not enforced in P0; unlike [`Self::activation_write_set`], this bounds reads.
+    /// Enforced before resolution, per candidate or refreshed schema, including its own document.
+    /// Distinct documents count once; unrelated documents in a shared store do not count.
     pub resolution_closure: usize,
     /// Largest number of candidates in one batch.
     ///
@@ -362,6 +363,16 @@ impl TypesRegistryConfig {
                 "limits.authored_document must be positive: 0 refuses every candidate".to_owned(),
             ));
         }
+        if self.limits.resolved_document.bytes() == 0 {
+            return Err(ConfigError::Limits(
+                "limits.resolved_document must be positive".to_owned(),
+            ));
+        }
+        if self.limits.resolution_closure == 0 {
+            return Err(ConfigError::Limits(
+                "limits.resolution_closure must be positive".to_owned(),
+            ));
+        }
         // Zero would reject every revision with dependents.
         if self.limits.activation_write_set == 0 {
             return Err(ConfigError::Limits(
@@ -387,12 +398,6 @@ impl TypesRegistryConfig {
         let limits = Limits::default();
         let worker = WorkerSettings::default();
         let mut keys = Vec::new();
-        if self.limits.resolved_document != limits.resolved_document {
-            keys.push("limits.resolved_document");
-        }
-        if self.limits.resolution_closure != limits.resolution_closure {
-            keys.push("limits.resolution_closure");
-        }
         if self.limits.page_size_default != limits.page_size_default {
             keys.push("limits.page_size_default");
         }

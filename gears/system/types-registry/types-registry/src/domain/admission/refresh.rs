@@ -7,9 +7,11 @@ use toolkit_db::DbTx;
 use toolkit_db::secure::AccessScope;
 use toolkit_macros::domain_model;
 
+use super::bounds::{check_closure, materialize_bounded};
 use super::errors::{ItemFailure, WorkerError};
 use super::vector::VectorDrift;
-use crate::domain::artifacts::{MaterializedArtifacts, materialize};
+use crate::config::Limits;
+use crate::domain::artifacts::MaterializedArtifacts;
 use crate::domain::enums::{EntityKind, LifecycleStatus};
 use crate::domain::gts_store::{UnitDocument, load_unit_store};
 use crate::domain::ports::{
@@ -32,11 +34,11 @@ pub async fn refresh_dependents(
     tx: &DbTx<'_>,
     scope: &AccessScope,
     roots: &[i64],
-    write_set_bound: usize,
+    limits: &Limits,
     now: OffsetDateTime,
 ) -> Result<Result<RefreshOutcome, ItemFailure>, WorkerError> {
     let dependents = match stores
-        .reverse_impact(tx, scope, roots, write_set_bound)
+        .reverse_impact(tx, scope, roots, limits.activation_write_set)
         .await?
     {
         ReverseImpact::Within(rows) => rows,
@@ -106,21 +108,26 @@ pub async fn refresh_dependents(
         .iter()
         .map(|row| (row.id, row.gts_id.clone()))
         .collect();
+    let limits = *limits;
     let recomputed = tokio::task::spawn_blocking(move || {
         let mut artifacts = Vec::with_capacity(blocking_subjects.len());
         for (entity_id, gts_id) in blocking_subjects {
+            check_closure(store.store_mut(), &gts_id, limits.resolution_closure)
+                .map_err(RefreshRefusal::Budget)?;
             let resolved = store.store_mut().validate_schema(&gts_id);
             let resolved = match resolved {
                 Ok(resolved) => resolved,
                 Err(error) => {
-                    return Err(DependentInvalid {
+                    return Err(RefreshRefusal::Invalid(DependentInvalid {
                         entity_id,
                         gts_id,
                         error: error.to_string(),
-                    });
+                    }));
                 }
             };
-            artifacts.push((entity_id, gts_id, materialize(&resolved)));
+            let materialized =
+                materialize_bounded(&resolved, &limits).map_err(RefreshRefusal::Budget)?;
+            artifacts.push((entity_id, gts_id, materialized));
         }
         Ok(artifacts)
     })
@@ -129,7 +136,8 @@ pub async fn refresh_dependents(
     let recomputed: Vec<(i64, String, MaterializedArtifacts)> = match recomputed {
         Ok(recomputed) => recomputed,
         // Committed content that no longer resolves against the new revision.
-        Err(refusal) => {
+        Err(RefreshRefusal::Budget(failure)) => return Ok(Err(failure)),
+        Err(RefreshRefusal::Invalid(refusal)) => {
             tracing::warn!(
                 gts_id = %refusal.gts_id,
                 entity_id = refusal.entity_id,
@@ -220,4 +228,10 @@ struct DependentInvalid {
     entity_id: i64,
     gts_id: String,
     error: String,
+}
+
+#[domain_model]
+enum RefreshRefusal {
+    Budget(ItemFailure),
+    Invalid(DependentInvalid),
 }

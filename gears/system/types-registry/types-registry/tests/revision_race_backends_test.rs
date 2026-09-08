@@ -1,8 +1,10 @@
-//! Commit exclusion on `PostgreSQL` and `MySQL`.
+//! Commit exclusion and rollback on `PostgreSQL` and `MySQL`.
 //!
 //! The first commit is paused after claiming `entity_write_order`; a second real
 //! connection must wait and then observe the first commit. SQLite cannot distinguish
 //! this lock from its own writer serialization, so only PostgreSQL and MySQL run it.
+//! A separate MySQL case exhausts the database recursion limit during the commit
+//! guard and proves that the claim rolls back without becoming a candidate refusal.
 //!
 //! Gated behind `--features integration` because it needs a Docker daemon:
 //!
@@ -19,8 +21,11 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
+use sea_orm::{EntityTrait, QueryOrder};
 use time::OffsetDateTime;
 use time::macros::datetime;
+use toolkit_canonical_errors::{CanonicalError, Problem};
+use toolkit_db::secure::{ScopeError, SecureEntityExt};
 use toolkit_db::{DBProvider, DbError};
 use toolkit_gts::gts_id;
 
@@ -34,10 +39,13 @@ use types_registry::domain::admission::unit::{
 use types_registry::domain::admission::vector::RevisionVector;
 use types_registry::domain::admission::worker::{ItemFailure, WorkerError};
 use types_registry::domain::artifacts::{MaterializedArtifacts, content_hash};
-use types_registry::domain::enums::{EntityKind, OwnershipScope};
+use types_registry::domain::enums::{DependencyKind, EntityKind, OwnershipScope};
 use types_registry::domain::family::family_key;
-use types_registry::domain::ports::{NewEntity, NewRevision, commit_write};
-use types_registry::infra::storage::repo::{EntityRepo, TypeSchemaRepo, VersionFamilyRepo};
+use types_registry::domain::ports::{NewEntity, NewRevision, ReverseImpact, commit_write};
+use types_registry::infra::storage::entity::{operation_item, type_schema, type_schema_revision};
+use types_registry::infra::storage::repo::{
+    CoordinationStateRepo, DependencyRepo, EntityRepo, TypeSchemaRepo, VersionFamilyRepo,
+};
 
 const NOW: OffsetDateTime = datetime!(2026-08-18 09:15:30 UTC);
 
@@ -182,7 +190,7 @@ async fn try_commit_through(
                     &allow_all(),
                     unit.as_ref(),
                     expected,
-                    common::limits().activation_write_set,
+                    &common::limits(),
                     NOW,
                     &common::metrics(),
                 )
@@ -230,7 +238,7 @@ async fn a_second_commit_waits_for_the_first(db: &Provider, backend: &str) {
                         &allow_all(),
                         unit.as_ref(),
                         1,
-                        common::limits().activation_write_set,
+                        &common::limits(),
                         NOW,
                         &common::metrics(),
                     )
@@ -337,4 +345,152 @@ async fn revision_races_behave_on_mysql() {
 
     let db = provider_for(&format!("mysql://root@{host}:{port}/test"), 8).await;
     assert_revision_races_behave(&db, "mysql").await;
+}
+
+/// A database capacity failure must unwind a real admission transaction. Setting
+/// the server default before the pool opens makes the low session limit apply to
+/// the connection that executes the guard, without a `SET SESSION` on a different
+/// pooled connection. The error assertion proves that the actual traversal hit it.
+#[tokio::test]
+async fn mysql_recursion_limit_aborts_the_commit_without_a_write_set_refusal() {
+    use testcontainers::ImageExt;
+    use testcontainers::runners::AsyncRunner;
+
+    let container = test_containers::mysql()
+        .with_cmd(["--cte-max-recursion-depth=2"])
+        .start()
+        .await
+        .expect("start mysql with a low recursion limit");
+    let port = container.get_host_port_ipv4(3306).await.expect("port");
+    let host = container.get_host().await.expect("host").to_string();
+    let db = provider_for(&format!("mysql://root@{host}:{port}/test"), 4).await;
+    let chain = [
+        gts_id!("acme.crm.depth0.type.v1~"),
+        gts_id!("acme.crm.depth1.type.v1~"),
+        gts_id!("acme.crm.depth2.type.v1~"),
+        gts_id!("acme.crm.depth3.type.v1~"),
+        gts_id!("acme.crm.depth4.type.v1~"),
+    ];
+    let mut ids = Vec::new();
+    for id in chain {
+        ids.push(seed_entity_at_revision_one(&db, id).await);
+    }
+    let conn = db.conn().expect("conn");
+    let scope = allow_all();
+    for pair in ids.windows(2) {
+        DependencyRepo::replace_outgoing(
+            &conn,
+            &scope,
+            pair[1],
+            &[(DependencyKind::SchemaRef, pair[0])],
+        )
+        .await
+        .expect("seed dependent -> predecessor");
+    }
+
+    // The same graph can produce an application refusal when the query completes.
+    // A depth cap of one reaches two dependents without exhausting MySQL's limit.
+    assert!(matches!(
+        DependencyRepo::reverse_impact(&conn, &scope, &[ids[0]], 1)
+            .await
+            .expect("the bounded query completes"),
+        ReverseImpact::OverBound { bound: 1, .. }
+    ));
+    let before_schemas = type_schema::Entity::find()
+        .order_by_asc(type_schema::Column::EntityId)
+        .secure()
+        .scope_with(&scope)
+        .all(&conn)
+        .await
+        .expect("current schemas before commit");
+    let before_sequence = CoordinationStateRepo::entity_write_sequence(&conn, &scope)
+        .await
+        .expect("sequence before commit");
+    let item_id = seed_pending_revision_item(&conn, chain[0], 1, NOW).await;
+    let candidate = Arc::new(unit(chain[0], BODY_B, item_id));
+    let provider: DBProvider<WorkerError> = DBProvider::new(db.db());
+
+    // Call the real commit boundary directly: the worker's evaluation would hit
+    // this limit before opening a write transaction. Here the guard fails AFTER
+    // the entity_write_order UPDATE, so unchanged state actually proves rollback.
+    let result = provider
+        .transaction_with_config(commit_write(&db.db()), move |tx| {
+            let candidate = Arc::clone(&candidate);
+            Box::pin(async move {
+                commit_revision(
+                    common::stores().as_ref(),
+                    tx,
+                    &allow_all(),
+                    &candidate,
+                    1,
+                    &common::limits(),
+                    NOW,
+                    &common::metrics(),
+                )
+                .await
+            })
+        })
+        .await;
+    let error = result.expect_err("the database abort must remain an infrastructure error");
+    assert!(
+        matches!(&error, WorkerError::Storage(ScopeError::Db(_))),
+        "expected a driver error, not an application refusal: {error:?}"
+    );
+    assert!(
+        error.to_string().contains("cte_max_recursion_depth"),
+        "the failure must be the MySQL recursion guard, not another SQL error: {error}"
+    );
+    let problem = Problem::from(CanonicalError::from(error));
+    assert_eq!(problem.status, Some(500));
+    assert_eq!(
+        problem.detail,
+        "An internal error occurred. Please retry later."
+    );
+
+    assert_eq!(
+        CoordinationStateRepo::entity_write_sequence(&conn, &scope)
+            .await
+            .expect("sequence after abort"),
+        before_sequence,
+        "the claim UPDATE must roll back with the failed guard"
+    );
+    assert_eq!(resource_version(&db, chain[0]).await, 1);
+    assert_eq!(
+        type_schema::Entity::find()
+            .order_by_asc(type_schema::Column::EntityId)
+            .secure()
+            .scope_with(&scope)
+            .all(&conn)
+            .await
+            .expect("current schemas after abort"),
+        before_schemas,
+        "neither the candidate nor a dependent may have new current artifacts"
+    );
+    assert!(
+        type_schema_revision::Entity::find_by_id((ids[0], 2))
+            .secure()
+            .scope_with(&scope)
+            .one(&conn)
+            .await
+            .expect("revision lookup")
+            .is_none(),
+        "an aborted commit must not retain revision 2"
+    );
+    let item = operation_item::Entity::find_by_id(item_id)
+        .secure()
+        .scope_with(&scope)
+        .one(&conn)
+        .await
+        .expect("item lookup")
+        .expect("accepted item remains");
+    assert_eq!(
+        item.status,
+        types_registry::infra::storage::entity::enums::OperationItemStatus::Pending
+    );
+    assert!(
+        item.error_payload.is_none(),
+        "no activation_write_set_exceeded outcome"
+    );
+    assert!(item.result_revision_no.is_none());
+    assert!(item.result_resource_version.is_none());
 }
