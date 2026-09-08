@@ -14,8 +14,8 @@ const MAX_SEGMENT: usize = 100;
 const MAX_SHA: usize = 64;
 
 /// GitHub owner and repository names are ASCII letters, digits, `.`, `_`
-/// and `-`. The path segments arrive percent-decoded, so anything else —
-/// a `?`, `#`, `/`, a quote — could re-shape the URL or GraphQL query the
+/// and `-`. The path segments arrive percent-decoded, so anything else -
+/// a `?`, `#`, `/`, a quote - could re-shape the URL or GraphQL query the
 /// mirror sends to GitHub with its own token; such values are rejected
 /// here, before any of them is used.
 ///
@@ -53,7 +53,7 @@ pub fn repo_full_name(owner: &str, name: &str) -> Result<String, DomainError> {
 /// A commit SHA is hex: abbreviated, 40 characters for SHA-1 or 64 for
 /// SHA-256. It reaches both the outbound GitHub path and a storage lookup,
 /// so it is bounded the same way the repository segments are. Any length up
-/// to the full hash is accepted — git itself abbreviates — the point is that
+/// to the full hash is accepted - git itself abbreviates - the point is that
 /// nothing but hex gets through.
 ///
 /// # Errors

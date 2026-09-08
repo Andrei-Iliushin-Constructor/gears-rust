@@ -58,7 +58,7 @@ pub enum Listing {
 /// Deletion reconciliation may only run against a listing that is provably
 /// complete: "absent from a truncated page" says nothing about existence. A
 /// listing counts as complete when the client followed `rel="next"` until it
-/// stopped appearing — not when the walk stopped because the page cap was
+/// stopped appearing - not when the walk stopped because the page cap was
 /// reached or the sync scope switched that family off.
 #[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -69,7 +69,7 @@ pub struct ListingCompleteness {
 }
 
 impl ListingCompleteness {
-    /// Nothing complete — the safe default, since it reconciles nothing.
+    /// Nothing complete - the safe default, since it reconciles nothing.
     #[must_use]
     pub fn none() -> Self {
         Self::default()
@@ -255,7 +255,7 @@ pub struct FetchedRepository {
 ///
 /// One method per sync task: the listings an Indexing task walks, and the
 /// per-entity detail a Refinement task fetches. A method for an object type
-/// the scope switched off returns an empty value without a GitHub call — the
+/// the scope switched off returns an empty value without a GitHub call - the
 /// point of the scope is the request budget, not the size of the result.
 #[async_trait]
 pub trait GithubPort: Send + Sync {

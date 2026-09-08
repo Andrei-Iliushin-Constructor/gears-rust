@@ -195,7 +195,7 @@ async fn mirrored(
         (
             "commits",
             service
-                .list_commits(ctx, OWNER, NAME, window)
+                .list_commits(ctx, OWNER, NAME, window, None)
                 .await
                 .expect("commits must list")
                 .0

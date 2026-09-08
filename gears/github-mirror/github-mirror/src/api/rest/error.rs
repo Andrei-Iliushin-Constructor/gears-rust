@@ -40,6 +40,75 @@ const fn db_error_kind(e: &toolkit_db::DbError) -> &'static str {
     }
 }
 
+/// The message with anything credential-shaped taken out.
+///
+/// Today these strings are the mirror's own - a GitHub path and a status,
+/// never an upstream response body - and this keeps that true if a later
+/// message quotes more than it should. Three shapes are removed: a `ghp_`,
+/// `gho_`, `ghu_` or `github_pat_` run; the word after an `Authorization`
+/// header name or a `Bearer`/`Basic`/`token` scheme, since a credential
+/// there carries no prefix of its own; and, in a URL, both the query string
+/// and any `user:password@` before the host.
+fn redacted(msg: &str) -> String {
+    const SECRET_PREFIXES: [&str; 4] = ["ghp_", "gho_", "ghu_", "github_pat_"];
+    const CREDENTIAL_INTRODUCERS: [&str; 5] =
+        ["Bearer", "bearer", "Basic", "token", "Authorization:"];
+
+    let mut out: Vec<String> = Vec::new();
+    let mut redact_next = false;
+    for word in msg.split_whitespace() {
+        let introduces = CREDENTIAL_INTRODUCERS
+            .iter()
+            .any(|introducer| word.trim_end_matches(':') == introducer.trim_end_matches(':'));
+        let secret = redact_next
+            || introduces
+            || SECRET_PREFIXES
+                .iter()
+                .any(|prefix| word.starts_with(prefix));
+
+        if secret {
+            // One `[REDACTED]` for the whole scheme-and-value run, so a
+            // reader cannot tell how long the credential was.
+            if out.last().map(String::as_str) != Some("[REDACTED]") {
+                out.push("[REDACTED]".to_owned());
+            }
+        } else {
+            out.push(redacted_word(word));
+        }
+        redact_next = introduces;
+    }
+    out.join(" ")
+}
+
+/// One word with its URL secrets removed: the query string, and the
+/// `user:password@` an upstream URL can carry before its host.
+fn redacted_word(word: &str) -> String {
+    let (head, query) = match word.split_once('?') {
+        Some((head, _)) => (head, "?[REDACTED]"),
+        None => (word, ""),
+    };
+
+    // `scheme://userinfo@host/path` - only the part before the first `/` of
+    // the path can hold userinfo, so a `@` later in the path is left alone.
+    let cleaned = match head.split_once("://") {
+        Some((scheme, rest)) => {
+            let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+            let separator = if path.is_empty() && !rest.contains('/') {
+                ""
+            } else {
+                "/"
+            };
+            match authority.rsplit_once('@') {
+                Some((_, host)) => format!("{scheme}://[REDACTED]@{host}{separator}{path}"),
+                None => head.to_owned(),
+            }
+        }
+        None => head.to_owned(),
+    };
+
+    format!("{cleaned}{query}")
+}
+
 impl From<DomainError> for CanonicalError {
     // Flat match on the domain enum is the whole point of this conversion;
     // the structured `tracing::*!` macros count toward cognitive complexity
@@ -54,7 +123,7 @@ impl From<DomainError> for CanonicalError {
                 .with_field_violation(field, message, "VALIDATION_ERROR")
                 .create(),
             DomainError::AccessLost(msg) => {
-                tracing::warn!(msg = %msg, "github-mirror upstream access lost");
+                tracing::warn!(msg = %redacted(&msg), "github-mirror upstream access lost");
                 RepositoryError::not_found("Repo not found or not accessible")
                     .with_resource("repository")
                     .create()
@@ -63,7 +132,7 @@ impl From<DomainError> for CanonicalError {
                 .with_resource("repository")
                 .create(),
             DomainError::Forbidden(msg) => {
-                tracing::warn!(msg = %msg, "github-mirror access forbidden");
+                tracing::warn!(msg = %redacted(&msg), "github-mirror access forbidden");
                 RepositoryError::not_found("Repo not found or not accessible")
                     .with_resource("repository")
                     .create()
@@ -74,7 +143,7 @@ impl From<DomainError> for CanonicalError {
             // private to one tenant should not be inferable from another
             // tenant's error body.
             DomainError::Internal(msg) => {
-                tracing::error!(msg = %msg, "github-mirror internal error");
+                tracing::error!(msg = %redacted(&msg), "github-mirror internal error");
                 CanonicalError::internal(INTERNAL_DETAIL).create()
             }
             DomainError::Database(db_err) => {
@@ -136,6 +205,64 @@ mod tests {
             ))),
             500
         );
+    }
+
+    #[test]
+    fn a_validation_error_carries_the_field_in_its_body() {
+        let body = body_of(DomainError::Validation {
+            field: "since".to_owned(),
+            message: "not an RFC3339 timestamp".to_owned(),
+        });
+        assert!(
+            body.contains("\"field\":\"since\""),
+            "the compat router turns this into GitHub's `errors[]`: {body}"
+        );
+    }
+
+    #[test]
+    fn a_logged_message_keeps_no_credential_and_no_query() {
+        assert_eq!(
+            redacted("GitHub answered 401 for /repos/acme/widget/issues?access_token=ghp_secret"),
+            "GitHub answered 401 for /repos/acme/widget/issues?[REDACTED]"
+        );
+        assert_eq!(
+            redacted("GitHub answered 403 for /repos/acme/widget"),
+            "GitHub answered 403 for /repos/acme/widget",
+            "an ordinary message must survive intact"
+        );
+    }
+
+    #[test]
+    fn a_scheme_takes_the_value_after_it_down_too() {
+        for (message, expected) in [
+            ("token ghp_abc123 was refused", "[REDACTED] was refused"),
+            (
+                "Bearer eyJhbGciOi.payload.sig rejected",
+                "[REDACTED] rejected",
+            ),
+            (
+                "sent Authorization: Bearer eyJhbGciOi to GitHub",
+                "sent [REDACTED] to GitHub",
+            ),
+            ("Basic dXNlcjpwYXNz denied", "[REDACTED] denied"),
+            (
+                "request https://user:s3cret@github.example/repos/x failed",
+                "request https://[REDACTED]@github.example/repos/x failed",
+            ),
+            (
+                "request https://user:s3cret@github.example?t=1 failed",
+                "request https://[REDACTED]@github.example?[REDACTED] failed",
+            ),
+        ] {
+            let out = redacted(message);
+            assert_eq!(out, expected, "{message:?}");
+            for secret in ["ghp_abc123", "eyJhbGciOi", "dXNlcjpwYXNz", "s3cret"] {
+                assert!(
+                    !out.contains(secret),
+                    "{secret} survived redaction of {message:?}: {out}"
+                );
+            }
+        }
     }
 
     #[test]

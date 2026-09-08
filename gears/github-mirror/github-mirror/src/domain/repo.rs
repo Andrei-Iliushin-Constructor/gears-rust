@@ -103,8 +103,8 @@ pub struct IssueRecord {
 /// read the 49 pages before it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageWindow {
-    pub limit: u64,
-    pub offset: u64,
+    limit: u64,
+    offset: u64,
 }
 
 impl PageWindow {
@@ -122,16 +122,37 @@ impl PageWindow {
     /// would upstream.
     pub const MAX_OFFSET: u64 = 9_900;
 
-    /// A window that skips no more rows than [`Self::MAX_OFFSET`].
+    /// Most rows a window may ask for at once.
+    ///
+    /// `offset` alone is not enough of a guard: the row count becomes SQL
+    /// `LIMIT`, so an unbounded one loads a whole table into memory. The
+    /// REST surface caps a page at 100; this is the ceiling for the wider
+    /// internal reads, such as the contributor merge.
+    pub const MAX_LIMIT: u64 = 10_000;
+
+    /// A window within [`Self::MAX_LIMIT`] and [`Self::MAX_OFFSET`], the
+    /// only way to build one that skips rows.
+    ///
+    /// This is the constructor for a caller-supplied page, so an out-of-range
+    /// value is refused rather than adjusted: a caller that asked for
+    /// something the mirror will not serve should be told, not handed a
+    /// different answer silently. [`Self::first`] clamps instead, because its
+    /// argument is a constant in this crate rather than a request.
     ///
     /// # Errors
-    /// `Validation` when `offset` is past the limit.
+    /// `Validation` when the row count or the offset is past its limit.
     pub fn bounded(limit: u64, offset: u64) -> Result<Self, DomainError> {
+        if limit > Self::MAX_LIMIT {
+            return Err(DomainError::Validation {
+                field: "per_page".to_owned(),
+                message: format!("a page may hold {} rows at most", Self::MAX_LIMIT),
+            });
+        }
         if offset > Self::MAX_OFFSET {
             return Err(DomainError::Validation {
                 field: "page".to_owned(),
                 message: format!(
-                    "Page-based pagination reaches row {} at most;                      narrow the listing with a filter or a smaller per_page",
+                    "page-based pagination reaches row {} at most; narrow the                      listing with a filter or ask for a smaller per_page",
                     Self::MAX_OFFSET
                 ),
             });
@@ -139,10 +160,84 @@ impl PageWindow {
         Ok(Self { limit, offset })
     }
 
-    /// The first `limit` rows.
+    /// The first `limit` rows, clamped to [`Self::MAX_LIMIT`].
+    ///
+    /// Clamped rather than refused because every caller passes a constant
+    /// from this crate, so an over-large value is a bug to cap rather than a
+    /// request to reject; [`Self::bounded`] is the one that answers a caller.
     #[must_use]
     pub const fn first(limit: u64) -> Self {
-        Self { limit, offset: 0 }
+        Self {
+            limit: if limit > Self::MAX_LIMIT {
+                Self::MAX_LIMIT
+            } else {
+                limit
+            },
+            offset: 0,
+        }
+    }
+
+    /// How many rows to read.
+    #[must_use]
+    pub const fn limit(self) -> u64 {
+        self.limit
+    }
+
+    /// How many rows to skip first.
+    #[must_use]
+    pub const fn offset(self) -> u64 {
+        self.offset
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
+mod page_window_tests {
+    use super::PageWindow;
+    use crate::domain::error::DomainError;
+
+    #[test]
+    fn an_ordinary_window_keeps_both_numbers() {
+        let window = PageWindow::bounded(30, 60).unwrap();
+        assert_eq!(window.limit(), 30);
+        assert_eq!(window.offset(), 60);
+    }
+
+    #[test]
+    fn the_limits_are_inclusive() {
+        let window = PageWindow::bounded(PageWindow::MAX_LIMIT, PageWindow::MAX_OFFSET).unwrap();
+        assert_eq!(window.limit(), PageWindow::MAX_LIMIT);
+        assert_eq!(window.offset(), PageWindow::MAX_OFFSET);
+    }
+
+    #[test]
+    fn a_caller_supplied_window_past_a_limit_is_refused() {
+        let too_many = PageWindow::bounded(PageWindow::MAX_LIMIT + 1, 0);
+        assert!(matches!(
+            too_many,
+            Err(DomainError::Validation { ref field, .. }) if field == "per_page"
+        ));
+
+        let too_far = PageWindow::bounded(30, PageWindow::MAX_OFFSET + 1);
+        assert!(matches!(
+            too_far,
+            Err(DomainError::Validation { ref field, .. }) if field == "page"
+        ));
+    }
+
+    #[test]
+    fn first_clamps_instead_of_refusing() {
+        assert_eq!(PageWindow::first(50).limit(), 50);
+        assert_eq!(PageWindow::first(50).offset(), 0);
+        assert_eq!(
+            PageWindow::first(PageWindow::MAX_LIMIT * 2).limit(),
+            PageWindow::MAX_LIMIT,
+            "its argument is a constant in this crate, so it is capped rather than refused"
+        );
     }
 }
 
@@ -404,8 +499,14 @@ pub struct CommitRecord {
 
 #[async_trait]
 pub trait CommitRepository: Send + Sync {
-    /// How many commits this repository has in total.
-    async fn count_by_repo(&self, scope: &AccessScope, repo_id: i64) -> Result<u64, DomainError>;
+    /// How many commits this repository has, counting only those committed
+    /// at or after `since` when one is given.
+    async fn count_by_repo(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<u64, DomainError>;
     async fn upsert(
         &self,
         scope: &AccessScope,
@@ -413,11 +514,14 @@ pub trait CommitRepository: Send + Sync {
         record: CommitRecord,
     ) -> Result<Commit, DomainError>;
 
+    /// Newest first, keeping only commits committed at or after `since`
+    /// when one is given - GitHub's own `?since=` on this listing.
     async fn list_by_repo(
         &self,
         scope: &AccessScope,
         repo_id: i64,
         window: PageWindow,
+        since: Option<DateTime<Utc>>,
     ) -> Result<Vec<Commit>, DomainError>;
 
     async fn find_by_sha(
