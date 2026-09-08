@@ -701,7 +701,7 @@ Introduces an abstraction layer behind the real Outbound API Gateway. The main g
 
 ### Event Broker
 
-Multi-consumer, partitioned, append-only event streaming for Cyber Ware modules.
+Multi-consumer, partitioned, append-only event streaming for Gears modules.
 Typed events, at-least-once delivery, idempotent producers (chained/monotonic/stateless),
 pluggable storage backends, consumer-group cursor tracking.
 
