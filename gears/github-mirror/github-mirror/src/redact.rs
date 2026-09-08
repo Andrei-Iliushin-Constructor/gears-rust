@@ -7,14 +7,17 @@
 ///
 /// Today these strings are the mirror's own - a GitHub path and a status,
 /// never an upstream response body - and this keeps that true if a later
-/// message quotes more than it should. Three shapes are removed: a `ghp_`,
-/// `gho_`, `ghu_` or `github_pat_` run; the word after an `Authorization`
+/// message quotes more than it should. Three shapes are removed: a token run
+/// (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` or `github_pat_`); the word after
+/// an `Authorization`
 /// header name or a `Bearer`/`Basic`/`token` scheme, since a credential
 /// there carries no prefix of its own; and, in a URL, both the query string
 /// and any `user:password@` before the host.
 #[must_use]
 pub fn redacted(msg: &str) -> String {
-    const SECRET_PREFIXES: [&str; 4] = ["ghp_", "gho_", "ghu_", "github_pat_"];
+    // GitHub's own token prefixes: personal, OAuth, user-to-server,
+    // server-to-server, refresh, and the fine-grained personal form.
+    const SECRET_PREFIXES: [&str; 6] = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"];
     const CREDENTIAL_INTRODUCERS: [&str; 5] =
         ["Bearer", "bearer", "Basic", "token", "Authorization:"];
 
@@ -97,6 +100,22 @@ mod tests {
             redacted("GitHub answered 401 for /repos/acme/widget/issues?access_token=ghp_secret"),
             "GitHub answered 401 for /repos/acme/widget/issues?[REDACTED]"
         );
+    }
+
+    #[test]
+    fn every_github_token_prefix_is_recognised() {
+        for token in [
+            "ghp_personal",
+            "gho_oauth",
+            "ghu_usertoserver",
+            "ghs_servertoserver",
+            "ghr_refresh",
+            "github_pat_finegrained",
+        ] {
+            let out = redacted(&format!("GitHub refused {token} for /repos/acme/widget"));
+            assert_eq!(out, "GitHub refused [REDACTED] for /repos/acme/widget");
+            assert!(!out.contains(token), "{token} survived: {out}");
+        }
     }
 
     #[test]
