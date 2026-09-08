@@ -1,13 +1,12 @@
 //! Admission failures shared by unit evaluation and worker orchestration.
 
-use std::borrow::Cow;
-
 use serde_json::json;
 use toolkit_db::DbError;
 use toolkit_db::secure::ScopeError;
 use toolkit_macros::domain_model;
 use uuid::Uuid;
 
+use super::AdmissionFailureReason;
 use super::drift::VectorDrift;
 use crate::domain::gts_store::StoreBuildError;
 
@@ -86,15 +85,8 @@ pub enum WorkerError {
 #[domain_model]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ItemFailure {
-    /// A stable machine reason, so T16 can count failures by kind and a client can
-    /// branch on them without parsing prose.
-    ///
-    /// `Cow`, not `&'static str`, for one case: a failure read back out of a stored
-    /// `error_payload` carries a reason that was a literal in some *earlier* process.
-    /// Owned-or-borrowed keeps [`Self::from_payload`] able to return the real reason
-    /// instead of a placeholder; every constructor at a failure site still passes a
-    /// `&'static str`.
-    pub reason: Cow<'static, str>,
+    /// A stable machine reason, preserving unknown codes read from storage.
+    pub reason: AdmissionFailureReason,
     pub message: String,
 }
 
@@ -107,18 +99,15 @@ impl std::fmt::Display for ItemFailure {
 
 impl ItemFailure {
     #[must_use]
-    pub fn new(reason: &'static str, message: String) -> Self {
-        Self {
-            reason: Cow::Borrowed(reason),
-            message,
-        }
+    pub fn new(reason: AdmissionFailureReason, message: String) -> Self {
+        Self { reason, message }
     }
 
     /// The stored `error_payload`: structured, so the reason survives the round
     /// trip as a field rather than as a substring.
     #[must_use]
     pub fn to_payload(&self) -> String {
-        json!({ "reason": self.reason, "message": self.message }).to_string()
+        json!({ "reason": self.reason.as_str(), "message": self.message }).to_string()
     }
 
     /// The inverse of [`Self::to_payload`], for an outcome read back off the row.
@@ -139,13 +128,19 @@ impl ItemFailure {
                 let message = value.get("message").and_then(serde_json::Value::as_str);
                 match (reason, message) {
                     (Some(reason), Some(message)) => Self {
-                        reason: Cow::Owned(reason.to_owned()),
+                        reason: AdmissionFailureReason::from_wire(reason),
                         message: message.to_owned(),
                     },
-                    _ => Self::new("unrecognized_payload", payload.to_owned()),
+                    _ => Self::new(
+                        AdmissionFailureReason::UnrecognizedPayload,
+                        payload.to_owned(),
+                    ),
                 }
             }
-            Err(_) => Self::new("unparsable_payload", payload.to_owned()),
+            Err(_) => Self::new(
+                AdmissionFailureReason::UnparsablePayload,
+                payload.to_owned(),
+            ),
         }
     }
 }

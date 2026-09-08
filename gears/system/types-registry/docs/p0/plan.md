@@ -669,12 +669,12 @@ and T20:
    a series would otherwise mix a rollback-only pass with a commit, and `kind` wherever it would
    mix a deletion with a registration. T20 does that sweep in one commit, across every instrument
    that exists by then, because it is the task that makes both distinctions real.
-3. **The admission reason vocabulary gets one home, and it is compile-enforced.** T17 moves
-   today's scattered literals onto `pub const`s of a `Reason` newtype in
-   `domain::admission::reasons` and makes `ItemFailure::new` take it, so a later refusal cannot
-   compile without naming a reason — the property acceptance already has. `ItemFailure::from_payload`
-   keeps its owned `Cow` fallback for a reason read back off a stored row, so T16's round trip is
-   untouched and the unbounded case still maps to the single `other` label.
+3. **The admission reason vocabulary has one home, and it is compile-enforced.**
+   `ItemFailure::new` takes `AdmissionFailureReason`, defined in `domain::admission::reasons`.
+   Each task adds its refusal variants there. Stored and API codes remain strings;
+   `ItemFailure::from_payload` restores known variants and preserves unfamiliar codes as
+   `Unknown(String)`. Known reasons keep their metric labels after reading from storage;
+   unknown codes map to the single `other` label.
 4. **The evidence bar is T16's**, because that is what makes a dashboard contract real: rendered
    names, label keys and label *values* asserted against an `InMemoryMetricExporter`; the
    emission asserted end to end through the real `accept` / `run_operation`; and a mutation check

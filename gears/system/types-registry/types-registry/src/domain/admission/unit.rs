@@ -30,6 +30,7 @@ use super::fingerprint::canonical_text;
 use super::refresh::refresh_dependents;
 use super::vector::{self, RevisionVector, VectorDrift};
 use crate::config::Limits;
+use crate::domain::admission::AdmissionFailureReason;
 use crate::domain::artifacts::{MaterializedArtifacts, content_hash};
 use crate::domain::dependency::{DependencyEdge, extract_edges};
 use crate::domain::enums::{DependencyKind, EntityKind, LifecycleStatus, OwnershipScope};
@@ -164,7 +165,7 @@ pub async fn evaluate(
         // means the stored row disagrees with the rules that admitted it.
         Err(e) => {
             return Ok(Err(ItemFailure::new(
-                "invalid_identifier",
+                AdmissionFailureReason::InvalidIdentifier,
                 format!("stored identifier '{gts_id}' does not parse: {e}"),
             )));
         }
@@ -173,7 +174,7 @@ pub async fn evaluate(
         Ok(content) => content,
         Err(e) => {
             return Ok(Err(ItemFailure::new(
-                "invalid_document",
+                AdmissionFailureReason::InvalidDocument,
                 format!("stored request payload is not valid JSON: {e}"),
             )));
         }
@@ -183,7 +184,10 @@ pub async fn evaluate(
     let edges = match extract_edges(&id, &content) {
         Ok(edges) => edges,
         Err(e) => {
-            return Ok(Err(ItemFailure::new("invalid_schema", e.to_string())));
+            return Ok(Err(ItemFailure::new(
+                AdmissionFailureReason::InvalidSchema,
+                e.to_string(),
+            )));
         }
     };
 
@@ -280,7 +284,10 @@ fn evaluate_loaded(
         let resolved = match store.store_mut().validate_schema(id.id()) {
             Ok(resolved) => resolved,
             Err(e) => {
-                return Ok(Err(ItemFailure::new("invalid_schema", e.to_string())));
+                return Ok(Err(ItemFailure::new(
+                    AdmissionFailureReason::InvalidSchema,
+                    e.to_string(),
+                )));
             }
         };
         let artifacts = match materialize_bounded(&resolved, limits) {
@@ -293,7 +300,7 @@ fn evaluate_loaded(
         // for a single segment, which `try_new` above already refused.
         let Some(type_id) = conforming_type else {
             return Ok(Err(ItemFailure::new(
-                "invalid_identifier",
+                AdmissionFailureReason::InvalidIdentifier,
                 format!("instance '{}' has no conforming type", id.id()),
             )));
         };
@@ -309,13 +316,21 @@ fn evaluate_loaded(
         // current resolution budget when it is used to validate an Instance.
         let resolved = match store.store_mut().validate_schema(&type_id) {
             Ok(resolved) => resolved,
-            Err(error) => return Ok(Err(ItemFailure::new("invalid_schema", error.to_string()))),
+            Err(error) => {
+                return Ok(Err(ItemFailure::new(
+                    AdmissionFailureReason::InvalidSchema,
+                    error.to_string(),
+                )));
+            }
         };
         if let Err(failure) = materialize_bounded(&resolved, limits) {
             return Ok(Err(failure));
         }
         if let Err(e) = store.store_mut().validate_instance(id.id()) {
-            return Ok(Err(ItemFailure::new("invalid_value", e.to_string())));
+            return Ok(Err(ItemFailure::new(
+                AdmissionFailureReason::InvalidValue,
+                e.to_string(),
+            )));
         }
         EvaluatedOutcome::Instance {
             type_schema_entity_id,
@@ -398,7 +413,7 @@ pub async fn commit_creation(
         .is_some()
     {
         return Ok(Err(ItemFailure::new(
-            "already_exists",
+            AdmissionFailureReason::AlreadyExists,
             format!(
                 "'{}' already exists; a creation requires the identifier to be absent",
                 unit.gts_id
@@ -444,7 +459,7 @@ pub async fn commit_creation(
         Ok(id) => id,
         Err(e) => {
             return Ok(Err(ItemFailure::new(
-                "invalid_identifier",
+                AdmissionFailureReason::InvalidIdentifier,
                 format!("stored identifier '{}' does not parse: {e}", unit.gts_id),
             )));
         }
@@ -488,7 +503,7 @@ pub async fn commit_creation(
     // stays usable (`repo::conflict_do_nothing`).
     let Some(entity) = inserted else {
         return Ok(Err(ItemFailure::new(
-            "already_exists",
+            AdmissionFailureReason::AlreadyExists,
             format!(
                 "'{}' was created concurrently; a creation requires the identifier to be absent",
                 unit.gts_id
@@ -764,7 +779,7 @@ pub async fn commit_revision(
     claim_entity_write_order(stores, tx, scope, now).await?;
     let Some(entity) = stores.find_by_gts_id(tx, scope, &unit.gts_id).await? else {
         return Ok(Err(ItemFailure::new(
-            "precondition_failed",
+            AdmissionFailureReason::PreconditionFailed,
             format!(
                 "'{}' does not exist; expected_resource_version {expected_resource_version} \
                  requires it to exist at that version",
@@ -780,7 +795,7 @@ pub async fn commit_revision(
     // cannot see.
     if entity.lifecycle_status == LifecycleStatus::Deleted {
         return Ok(Err(ItemFailure::new(
-            "entity_deleted",
+            AdmissionFailureReason::EntityDeleted,
             format!(
                 "'{}' is deleted; a revision cannot be admitted onto a withdrawn entity",
                 unit.gts_id
@@ -844,7 +859,7 @@ pub async fn commit_revision(
         .await?
     else {
         return Ok(Err(ItemFailure::new(
-            "precondition_failed",
+            AdmissionFailureReason::PreconditionFailed,
             format!(
                 "'{}' moved past resource_version {expected_resource_version}, or was deleted, \
                  while this revision was being admitted",
@@ -1020,7 +1035,7 @@ async fn refresh_reverse_impact(
 /// carry the same `reason`, so a client branching on it sees one outcome.
 fn stale_precondition(gts_id: &str, expected: i64, found: i64) -> ItemFailure {
     ItemFailure::new(
-        "precondition_failed",
+        AdmissionFailureReason::PreconditionFailed,
         format!(
             "'{gts_id}' is at resource_version {found}, not the expected {expected}; a revision \
              is never rebased onto the current version"

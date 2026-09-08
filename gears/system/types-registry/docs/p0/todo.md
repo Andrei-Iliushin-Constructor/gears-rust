@@ -1483,13 +1483,11 @@ rejected with its own reason, never collapsed into `Incompatible`.
 - [ ] The unit span records what the counter cannot: the baseline it selected
       (`baseline_gts_id`, `baseline_revision`), the verdict, and `gts_spec_version` /
       `gts_impl_version`. Identifiers are span fields, never labels
-- [ ] **The admission reason vocabulary gets one home, compile-enforced** (P16 rule 3): today's
-      scattered `ItemFailure::new("literal", …)` sites move onto `pub const`s of a `Reason`
-      newtype in `domain::admission::reasons`, `ItemFailure::new` takes it, and this task's own
-      reasons are added there — so a refusal a later task adds cannot compile without naming one,
-      which is the property `AcceptanceError::reason()` already has. `ItemFailure::from_payload`
-      keeps its owned `Cow` fallback, so a reason read back off a stored row still maps to the
-      single `other` label and T16's round trip is untouched
+- [x] **The admission reason vocabulary has one home, compile-enforced** (P16 rule 3):
+      `ItemFailure::new` takes `AdmissionFailureReason` from `domain::admission::reasons`.
+      Stored codes are unchanged; known codes restore typed variants and their metric labels,
+      while `Unknown(String)` preserves unfamiliar codes and maps them to `other` in metrics
+- [ ] Add this task's compatibility refusal variants to `AdmissionFailureReason`
 
 **Verification:**
 - [ ] Gear tests, all three backends (see [Commands](#commands))

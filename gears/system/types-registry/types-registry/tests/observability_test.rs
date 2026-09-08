@@ -25,6 +25,7 @@ use common::{
     PausePoint, PausingStores, TestDir, allow_all, stores, test_db, test_db_file, worker_settings,
 };
 use types_registry::config::{MetricsConfig, TypesRegistryConfig};
+use types_registry::domain::admission::AdmissionFailureReason;
 use types_registry::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
 use types_registry::domain::admission::worker::{
     ItemFailure, OperationOutcome, Tuning, WorkerError, reason_label, run_operation,
@@ -489,17 +490,17 @@ async fn two_acceptance_refusals_are_told_apart_by_their_reason() {
 }
 
 #[tokio::test]
-async fn a_read_back_failure_reason_counts_under_other_and_creates_no_new_series() {
+async fn an_unknown_stored_failure_reason_counts_under_other_and_creates_no_new_series() {
     let _serial = SERIAL.lock().await;
     recorder();
     reset_metrics();
 
     let failure = ItemFailure::from_payload(
-        r#"{"reason":"precondition_failed","message":"read back off a stored row"}"#,
+        r#"{"reason":"future_refusal_code","message":"read back off a stored row"}"#,
     );
     assert!(
-        matches!(failure.reason, std::borrow::Cow::Owned(_)),
-        "from_payload is the owned-reason producer the mapping exists for"
+        matches!(failure.reason, AdmissionFailureReason::Unknown(_)),
+        "unknown stored codes must be preserved"
     );
     metrics().refused(RefusalStage::Admission, reason_label(&failure.reason));
     flush();
@@ -514,10 +515,10 @@ async fn a_read_back_failure_reason_counts_under_other_and_creates_no_new_series
     assert_eq!(
         counter_sum_where(
             "types_registry_refusals_total",
-            &[("reason", "precondition_failed")],
+            &[("reason", "future_refusal_code")],
         ),
         0,
-        "the owned reason must count under `other`, not as its own series",
+        "an unknown reason must count under `other`, not as its own series",
     );
 }
 

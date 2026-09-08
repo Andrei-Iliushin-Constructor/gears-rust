@@ -6,6 +6,7 @@ use gts::{GtsId, GtsStore, ResolvedType};
 
 use super::errors::ItemFailure;
 use crate::config::Limits;
+use crate::domain::admission::AdmissionFailureReason;
 use crate::domain::artifacts::{MaterializedArtifacts, materialize};
 use crate::domain::dependency::extract_edges;
 
@@ -23,7 +24,7 @@ pub fn check_closure(store: &mut GtsStore, root: &str, bound: usize) -> Result<(
         }
         if seen.len() > bound {
             return Err(ItemFailure::new(
-                "resolution_closure_exceeded",
+                AdmissionFailureReason::ResolutionClosureExceeded,
                 format!("resolution requires more than {bound} documents; nothing was committed"),
             ));
         }
@@ -31,10 +32,12 @@ pub fn check_closure(store: &mut GtsStore, root: &str, bound: usize) -> Result<(
             // Validation owns missing-reference errors; no reader is installed.
             continue;
         };
-        let parsed = GtsId::try_new(&id)
-            .map_err(|error| ItemFailure::new("invalid_schema", error.to_string()))?;
-        let edges = extract_edges(&parsed, &document.content)
-            .map_err(|error| ItemFailure::new("invalid_schema", error.to_string()))?;
+        let parsed = GtsId::try_new(&id).map_err(|error| {
+            ItemFailure::new(AdmissionFailureReason::InvalidSchema, error.to_string())
+        })?;
+        let edges = extract_edges(&parsed, &document.content).map_err(|error| {
+            ItemFailure::new(AdmissionFailureReason::InvalidSchema, error.to_string())
+        })?;
         pending.extend(edges.into_iter().map(|edge| edge.target));
     }
     Ok(())
@@ -54,7 +57,7 @@ pub fn materialize_bounded(
     ] {
         if document.len() > bound {
             return Err(ItemFailure::new(
-                "resolved_document_too_large",
+                AdmissionFailureReason::ResolvedDocumentTooLarge,
                 format!("a resolved document exceeds {bound} bytes; nothing was committed"),
             ));
         }

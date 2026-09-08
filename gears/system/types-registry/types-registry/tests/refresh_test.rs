@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use common::{allow_all, stores, test_db};
 use types_registry::config::{Limits, TypesRegistryConfig, WorkerSettings};
+use types_registry::domain::admission::AdmissionFailureReason;
 use types_registry::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
 use types_registry::domain::admission::refresh::RefreshOutcome;
 use types_registry::domain::admission::worker::{
@@ -346,7 +347,10 @@ async fn an_over_bound_write_set_commits_nothing() {
         .failure
         .as_ref()
         .expect("a failed item names its reason");
-    assert_eq!(failure.reason, "activation_write_set_exceeded");
+    assert_eq!(
+        failure.reason,
+        AdmissionFailureReason::ActivationWriteSetExceeded
+    );
 
     assert_eq!(
         entity(&db, BASE).await.resource_version,
@@ -394,7 +398,7 @@ async fn an_incompatible_revision_refuses_on_dependent_invalid_and_commits_nothi
         .failure
         .as_ref()
         .expect("a failed item names its reason");
-    assert_eq!(failure.reason, "dependent_invalid");
+    assert_eq!(failure.reason, AdmissionFailureReason::DependentInvalid);
     assert!(
         !failure.message.contains(DERIVED),
         "the refusal must not disclose the dependent to the submitter: {}",

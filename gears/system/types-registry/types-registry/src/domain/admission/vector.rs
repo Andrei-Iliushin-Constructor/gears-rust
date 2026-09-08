@@ -6,6 +6,7 @@ use toolkit_db::DbTx;
 use toolkit_db::secure::AccessScope;
 
 use super::errors::{ItemFailure, WorkerError};
+use crate::domain::admission::AdmissionFailureReason;
 use crate::domain::enums::{EntityKind, LifecycleStatus};
 use crate::domain::ports::{EntityRow, ReverseImpact, Stores};
 
@@ -176,7 +177,7 @@ pub async fn derive_from(
         ReverseImpact::Within(rows) => rows,
         ReverseImpact::OverBound { at_least, bound } => {
             return Ok(Err(ItemFailure::new(
-                "activation_write_set_exceeded",
+                AdmissionFailureReason::ActivationWriteSetExceeded,
                 format!(
                     "this revision reaches at least {at_least} dependents, over the \
                      configured activation write set bound of {bound}; the bound is on the \

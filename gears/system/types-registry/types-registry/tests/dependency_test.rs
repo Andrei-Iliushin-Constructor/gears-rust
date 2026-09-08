@@ -14,6 +14,7 @@ use toolkit_gts::gts_id;
 use uuid::Uuid;
 
 use types_registry::config::TypesRegistryConfig;
+use types_registry::domain::admission::AdmissionFailureReason;
 use types_registry::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
 use types_registry::domain::admission::worker::{
     OperationOutcome, Tuning, WorkerError, run_operation,
@@ -421,8 +422,8 @@ async fn a_ref_naming_no_entity_fails_the_candidate() {
     let item = &outcome.items[0];
     assert_eq!(item.status, domain_enums::OperationItemStatus::Failed);
     assert_eq!(
-        item.failure.as_ref().map(|f| f.reason.as_ref()),
-        Some("invalid_schema"),
+        item.failure.as_ref().map(|f| f.reason.clone()),
+        Some(AdmissionFailureReason::InvalidSchema),
     );
 
     let provider = worker(&db);
@@ -474,7 +475,7 @@ async fn a_revision_that_would_close_a_ref_cycle_is_refused() {
         .failure
         .as_ref()
         .expect("a failed item names its reason");
-    assert_eq!(failure.reason, "invalid_schema");
+    assert_eq!(failure.reason, AdmissionFailureReason::InvalidSchema);
     assert!(
         failure.message.to_lowercase().contains("circular"),
         "the refusal must name the cycle, got {}",

@@ -29,6 +29,7 @@ use toolkit_gts::gts_id;
 use uuid::Uuid;
 
 use types_registry::config::{PolicyEntry, TypesRegistryConfig};
+use types_registry::domain::admission::AdmissionFailureReason;
 use types_registry::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
 use types_registry::domain::admission::worker::{
     OperationOutcome, Tuning, WorkerError, run_operation,
@@ -320,7 +321,7 @@ async fn a_stale_expected_resource_version_fails_terminally_and_writes_nothing()
     assert_eq!(item.status, domain_enums::OperationItemStatus::Failed);
     assert_eq!(
         item.failure.as_ref().expect("a recorded failure").reason,
-        "precondition_failed",
+        AdmissionFailureReason::PreconditionFailed,
     );
     assert_eq!(item.revision_no, None);
 
@@ -344,7 +345,7 @@ async fn a_precondition_on_an_absent_entity_is_refused_rather_than_created() {
     assert_eq!(item.status, domain_enums::OperationItemStatus::Failed);
     assert_eq!(
         item.failure.as_ref().expect("a recorded failure").reason,
-        "precondition_failed",
+        AdmissionFailureReason::PreconditionFailed,
     );
 
     let provider = worker(&db);
@@ -405,7 +406,7 @@ async fn a_revision_is_refused_on_a_tombstoned_entity() {
     assert_eq!(item.status, domain_enums::OperationItemStatus::Failed);
     assert_eq!(
         item.failure.as_ref().expect("a recorded failure").reason,
-        "entity_deleted",
+        AdmissionFailureReason::EntityDeleted,
         "a withdrawn entity is not a stale version, and must not be reported as one",
     );
     assert_eq!(item.revision_no, None);
@@ -499,7 +500,7 @@ async fn a_creation_of_existing_content_is_already_exists_and_never_unchanged() 
     assert_eq!(item.status, domain_enums::OperationItemStatus::Failed);
     assert_eq!(
         item.failure.as_ref().expect("a recorded failure").reason,
-        "already_exists",
+        AdmissionFailureReason::AlreadyExists,
     );
 }
 

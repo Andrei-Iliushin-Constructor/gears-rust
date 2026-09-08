@@ -19,6 +19,7 @@ use toolkit_gts::gts_id;
 use uuid::Uuid;
 
 use types_registry::config::TypesRegistryConfig;
+use types_registry::domain::admission::AdmissionFailureReason;
 use types_registry::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
 use types_registry::domain::admission::unit::{commit_creation, evaluate};
 use types_registry::domain::admission::worker::{Tuning, WorkerError, run_operation};
@@ -489,7 +490,7 @@ async fn a_redelivered_failure_reports_the_reason_the_first_pass_recorded() {
         replayed, first_pass,
         "the two passes report one fact one way"
     );
-    assert_eq!(replayed.reason, "already_exists");
+    assert_eq!(replayed.reason, AdmissionFailureReason::AlreadyExists);
     assert!(
         !replayed.message.contains("reason"),
         "the payload must be parsed, not carried whole in the message: {}",
@@ -542,7 +543,7 @@ async fn an_item_naming_a_version_fails_terminally_and_writes_nothing() {
     assert_eq!(item.status, domain_enums::OperationItemStatus::Failed);
     assert_eq!(
         item.failure.as_ref().expect("a recorded failure").reason,
-        "precondition_failed",
+        AdmissionFailureReason::PreconditionFailed,
     );
     assert_eq!(item.resource_version, None);
     assert_eq!(item.revision_no, None);
@@ -621,7 +622,7 @@ async fn a_creation_against_an_existing_identifier_fails_terminally_with_no_revi
     let item = &outcome.items[0];
     assert_eq!(item.status, domain_enums::OperationItemStatus::Failed);
     let failure = item.failure.as_ref().expect("a recorded failure");
-    assert_eq!(failure.reason, "already_exists");
+    assert_eq!(failure.reason, AdmissionFailureReason::AlreadyExists);
 
     let provider = worker_provider(&db);
     let conn = provider.conn().expect("conn");
@@ -671,7 +672,7 @@ async fn an_unresolvable_reference_is_an_item_failure_not_a_worker_error() {
     assert_eq!(item.status, domain_enums::OperationItemStatus::Failed);
     assert_eq!(
         item.failure.as_ref().expect("failure").reason,
-        "invalid_schema",
+        AdmissionFailureReason::InvalidSchema,
     );
 
     let provider = worker_provider(&db);

@@ -452,6 +452,7 @@ impl From<AcceptanceError> for CanonicalError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::admission::AdmissionFailureReason;
     use crate::domain::admission::acceptance::PolicyRefusalError;
     use crate::domain::admission::vector::{VectorDrift, VectorRole};
     use crate::domain::admission::worker::ItemFailure;
@@ -712,7 +713,7 @@ mod tests {
             }),
             // Cover the variants whose `Display` includes caller-visible content.
             worker_problem(WorkerError::RefusedAfterWrite(ItemFailure::new(
-                "reason-secret",
+                AdmissionFailureReason::Unknown("reason-secret".to_owned()),
                 "message-secret".to_owned(),
             ))),
             worker_problem(WorkerError::RevalidationRequired(VectorDrift::Moved {

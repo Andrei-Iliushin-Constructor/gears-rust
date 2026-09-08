@@ -5,13 +5,14 @@ use toolkit_db::secure::SecureEntityExt;
 
 use super::*;
 use types_registry::config::ByteSize;
+use types_registry::domain::admission::AdmissionFailureReason;
 use types_registry::domain::admission::fingerprint::canonical_text;
 use types_registry::infra::storage::entity::type_schema_revision;
 
-fn refused(outcome: &OperationOutcome, reason: &str) {
+fn refused(outcome: &OperationOutcome, reason: &AdmissionFailureReason) {
     let item = &outcome.items[0];
     assert_eq!(item.status, OperationItemStatus::Failed, "{item:?}");
-    assert_eq!(item.failure.as_ref().expect("reason").reason, reason);
+    assert_eq!(&item.failure.as_ref().expect("reason").reason, reason);
     assert!(item.resource_version.is_none());
     assert!(item.revision_no.is_none());
 }
@@ -54,7 +55,10 @@ async fn closure_counts_the_candidate_and_deduplicates_ref_and_derivation_target
         None,
     )
     .await;
-    refused(&rejected, "resolution_closure_exceeded");
+    refused(
+        &rejected,
+        &AdmissionFailureReason::ResolutionClosureExceeded,
+    );
     no_entity(&db, DERIVED).await;
     limits.resolution_closure = 2;
     let accepted = admit_with(
@@ -99,7 +103,10 @@ async fn closure_counts_transitive_documents_and_ignores_x_gts_ref() {
         None,
     )
     .await;
-    refused(&rejected, "resolution_closure_exceeded");
+    refused(
+        &rejected,
+        &AdmissionFailureReason::ResolutionClosureExceeded,
+    );
     no_entity(&db, SECOND).await;
     limits.resolution_closure = 3;
     let accepted = admit_with(
@@ -223,7 +230,7 @@ async fn a_dependent_closure_over_budget_rolls_back_the_candidate_revision() {
         Some(1),
     )
     .await;
-    refused(&outcome, "resolution_closure_exceeded");
+    refused(&outcome, &AdmissionFailureReason::ResolutionClosureExceeded);
     assert_revision_rolled_back(&db, before_base, before_referrer).await;
 }
 
@@ -247,7 +254,7 @@ async fn resolved_document_counts_utf8_bytes_and_accepts_the_exact_boundary() {
         None,
     )
     .await;
-    refused(&rejected, "resolved_document_too_large");
+    refused(&rejected, &AdmissionFailureReason::ResolvedDocumentTooLarge);
     no_entity(&db, BASE).await;
     limits.resolved_document = ByteSize::from_bytes(size);
     let accepted = admit_with(
@@ -298,7 +305,7 @@ async fn an_expanded_dependent_over_budget_rolls_back_the_candidate_revision() {
         Some(1),
     )
     .await;
-    refused(&outcome, "resolved_document_too_large");
+    refused(&outcome, &AdmissionFailureReason::ResolvedDocumentTooLarge);
     assert_revision_rolled_back(&db, before_base, before_referrer).await;
 }
 
@@ -314,7 +321,7 @@ async fn an_instance_counts_its_conforming_type_and_obeys_its_resolved_size_budg
                 resolution_closure: 1,
                 ..Limits::default()
             },
-            "resolution_closure_exceeded",
+            AdmissionFailureReason::ResolutionClosureExceeded,
         ),
         (
             "size",
@@ -322,7 +329,7 @@ async fn an_instance_counts_its_conforming_type_and_obeys_its_resolved_size_budg
                 resolved_document: ByteSize::from_bytes(size - 1),
                 ..Limits::default()
             },
-            "resolved_document_too_large",
+            AdmissionFailureReason::ResolvedDocumentTooLarge,
         ),
     ] {
         let outcome = admit_with(
@@ -335,7 +342,7 @@ async fn an_instance_counts_its_conforming_type_and_obeys_its_resolved_size_budg
             None,
         )
         .await;
-        refused(&outcome, reason);
+        refused(&outcome, &reason);
         no_entity(&db, INSTANCE).await;
     }
     let limits = Limits {

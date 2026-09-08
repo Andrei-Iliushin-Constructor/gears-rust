@@ -20,6 +20,7 @@ use common::{
     worker_settings,
 };
 use types_registry::config::{TypesRegistryConfig, WorkerSettings};
+use types_registry::domain::admission::AdmissionFailureReason;
 use types_registry::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
 use types_registry::domain::admission::unit::{
     EvaluatedUnit, RevisionCommit, commit_creation, commit_revision, evaluate,
@@ -1032,7 +1033,10 @@ async fn exhausting_the_revalidation_budget_terminalizes_the_item_as_failed() {
         "one attempt and one drift is exhaustion, got {item:?}"
     );
     let failure = item.failure.as_ref().expect("a recorded failure");
-    assert_eq!(failure.reason, "revalidation_exhausted");
+    assert_eq!(
+        failure.reason,
+        AdmissionFailureReason::RevalidationExhausted
+    );
     assert!(
         failure.message.contains(BASE),
         "the message names the last drift, got {}",

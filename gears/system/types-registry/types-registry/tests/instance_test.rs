@@ -17,6 +17,7 @@ use toolkit_gts::gts_id;
 use uuid::Uuid;
 
 use types_registry::config::TypesRegistryConfig;
+use types_registry::domain::admission::AdmissionFailureReason;
 use types_registry::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
 use types_registry::domain::admission::worker::{Tuning, WorkerError, run_operation};
 use types_registry::domain::admission::{Candidate, OperationDispatch, SubmitRequest};
@@ -218,8 +219,8 @@ async fn a_value_violating_its_schema_is_refused_on_its_merits() {
         "a value that does not satisfy its type must not commit",
     );
     assert_eq!(
-        item.failure.as_ref().map(|f| f.reason.as_ref()),
-        Some("invalid_value"),
+        item.failure.as_ref().map(|f| f.reason.clone()),
+        Some(AdmissionFailureReason::InvalidValue),
         "distinct from `invalid_schema`: the schema is fine, the value is not",
     );
 
@@ -343,8 +344,8 @@ async fn an_instance_may_not_join_a_type_schema_family() {
     let item = &outcome.items[0];
     assert_eq!(item.status, domain_enums::OperationItemStatus::Failed);
     assert_eq!(
-        item.failure.as_ref().map(|f| f.reason.as_ref()),
-        Some("family_kind_conflict"),
+        item.failure.as_ref().map(|f| f.reason.clone()),
+        Some(AdmissionFailureReason::FamilyKindConflict),
         "not `already_exists`: the identifier is free, the family is the conflict",
     );
 
@@ -406,8 +407,8 @@ async fn a_type_schema_may_not_join_an_instance_family() {
     let item = &schema_outcome.items[0];
     assert_eq!(item.status, domain_enums::OperationItemStatus::Failed);
     assert_eq!(
-        item.failure.as_ref().map(|f| f.reason.as_ref()),
-        Some("family_kind_conflict"),
+        item.failure.as_ref().map(|f| f.reason.clone()),
+        Some(AdmissionFailureReason::FamilyKindConflict),
     );
 }
 

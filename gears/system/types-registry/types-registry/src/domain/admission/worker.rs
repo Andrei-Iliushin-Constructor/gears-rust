@@ -44,6 +44,7 @@ use super::unit::{
 };
 use super::vector::VectorDrift;
 use crate::config::{Limits, WorkerSettings};
+use crate::domain::admission::AdmissionFailureReason;
 use crate::domain::admission::Precondition;
 use crate::domain::enums::{OperationItemStatus, OperationStatus};
 use crate::domain::ports::metrics::{AdmissionMetrics, RefusalStage, TerminalStatus};
@@ -395,7 +396,7 @@ async fn process_item(
         |drift| drift.to_string(),
     );
     let failure = ItemFailure::new(
-        "revalidation_exhausted",
+        AdmissionFailureReason::RevalidationExhausted,
         format!(
             "the state this candidate was validated against kept moving: {attempts} \
              revalidation attempts were exhausted, the last on {drift}"
@@ -477,13 +478,8 @@ fn committed_outcome(
 
 /// The `reason` label a refusal counts under.
 #[must_use]
-// Preserve `Cow`: owned values map to a bounded fallback label.
-#[allow(clippy::ptr_arg)]
-pub fn reason_label(reason: &std::borrow::Cow<'static, str>) -> &'static str {
-    match reason {
-        std::borrow::Cow::Borrowed(reason) => reason,
-        std::borrow::Cow::Owned(_) => "other",
-    }
+pub fn reason_label(reason: &AdmissionFailureReason) -> &'static str {
+    reason.metric_label()
 }
 
 /// Record a candidate-level failure and return the outcome to report for it.

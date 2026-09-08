@@ -16,11 +16,15 @@ pub mod acceptance;
 mod bounds;
 mod drift;
 mod errors;
+mod reasons;
+
 pub mod fingerprint;
 pub mod refresh;
 pub mod unit;
 pub mod vector;
 pub mod worker;
+
+pub use reasons::AdmissionFailureReason;
 
 use serde_json::Value;
 use toolkit_db::DbTx;

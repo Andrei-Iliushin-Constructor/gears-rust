@@ -11,6 +11,7 @@ use super::bounds::{check_closure, materialize_bounded};
 use super::errors::{ItemFailure, WorkerError};
 use super::vector::VectorDrift;
 use crate::config::Limits;
+use crate::domain::admission::AdmissionFailureReason;
 use crate::domain::artifacts::MaterializedArtifacts;
 use crate::domain::enums::{EntityKind, LifecycleStatus};
 use crate::domain::gts_store::{UnitDocument, load_unit_store};
@@ -45,7 +46,7 @@ pub async fn refresh_dependents(
         // The refusal carries both operator context and a stable machine reason.
         ReverseImpact::OverBound { at_least, bound } => {
             return Ok(Err(ItemFailure::new(
-                "activation_write_set_exceeded",
+                AdmissionFailureReason::ActivationWriteSetExceeded,
                 format!(
                     "this revision reaches at least {at_least} dependents, over the \
                      configured activation write set bound of {bound}; the bound is on the \
@@ -145,7 +146,7 @@ pub async fn refresh_dependents(
                 "types_registry dependent no longer validates against a new revision"
             );
             return Ok(Err(ItemFailure::new(
-                "dependent_invalid",
+                AdmissionFailureReason::DependentInvalid,
                 "a dependent of this candidate no longer validates against this \
                  revision; nothing was committed"
                     .to_owned(),
