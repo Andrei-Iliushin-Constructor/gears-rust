@@ -148,7 +148,12 @@ impl toolkit::contracts::RunnableCapability for Reservations {
         //    supply - so the number is pinned here rather than left to be
         //    rediscovered under load.
         if let Ok(cache) = resolved {
-            let outcome = tokio::time::timeout(Duration::from_secs(30), cache.get("seat/12")).await;
+            // A fail-fast backstop, not a measurement: the call itself is bounded
+            // by the connector's DNS failure plus backoff (~8s observed). One
+            // minute is generous room over that so a slow CI box cannot turn
+            // latency into an `Err(Elapsed)` the match below reads as a *wrong
+            // result*.
+            let outcome = tokio::time::timeout(Duration::from_mins(1), cache.get("seat/12")).await;
             match outcome {
                 Ok(Err(ClusterError::Provider { kind, .. })) => {
                     assert_eq!(
@@ -230,7 +235,11 @@ async fn a_consumer_resolving_in_start_finds_the_wired_remote_client() {
 
             // Wait for `start` to finish its observations, then cancel. Cancelling
             // first would return `Cancelled` from `run` before any phase executed.
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            // Strictly larger than the inner `cache.get` backstop (one minute)
+            // above: `START_COMPLETED` is set right after that call returns, so
+            // this outer wait must dominate it rather than race it to the deadline.
+            // The `is_finished` guard below still fails fast if the lifecycle returns.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
             while !START_COMPLETED.load(Ordering::SeqCst) {
                 assert!(
                     tokio::time::Instant::now() < deadline,

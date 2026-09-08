@@ -77,3 +77,27 @@ fn a_type_token_that_looks_like_a_version_is_not_stripped() {
         "gts.acme.crm.ns.v2thing"
     );
 }
+
+/// The lock order is total and deduplicated, which is the whole of what makes two
+/// batches touching the same families unable to deadlock. Sorted output for
+/// unsorted input, and one entry per distinct key however many times it is named.
+#[test]
+fn the_lock_order_is_sorted_and_deduplicated() {
+    let keys = [
+        family_key(&gts::GtsId::try_new(gts_id!("acme.crm.zeta.type.v1~")).expect("fixture")),
+        family_key(&gts::GtsId::try_new(gts_id!("acme.crm.alpha.type.v3~")).expect("fixture")),
+        // The same family as the first, spelled through another of its versions.
+        family_key(&gts::GtsId::try_new(gts_id!("acme.crm.zeta.type.v2.1~")).expect("fixture")),
+    ];
+    let ordered: Vec<String> = super::lock_order(&keys)
+        .into_iter()
+        .map(|k| k.to_string())
+        .collect();
+    assert_eq!(
+        ordered,
+        vec![
+            "gts.acme.crm.alpha.type".to_owned(),
+            "gts.acme.crm.zeta.type".to_owned(),
+        ],
+    );
+}

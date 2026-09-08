@@ -13,7 +13,7 @@
 //! |---|---|
 //! | 1 envelope and batch size | here |
 //! | 2 candidate identifiers | here |
-//! | 3 registration policy | here (via [`RegistrationPolicy`]) |
+//! | 3 registration policy | here (via [`RegistrationPolicy`]), for creations only |
 //! | 4 managed identifier profile | here |
 //! | 5 declared dialect | here |
 //! | 6 `force` | here |
@@ -102,17 +102,16 @@ pub enum AcceptanceError {
     ForceNotPermitted { gts_id: String },
     #[error("force on '{gts_id}' is refused: it has no cross-minor check to waive")]
     ForceHasNothingToWaive { gts_id: String },
+    #[error("force on '{gts_id}' is not accepted until T17 implements compatibility evaluation")]
+    ForceCompatibilityUnavailable { gts_id: String },
+    #[error("minor-bearing Type Schema '{gts_id}' is content-immutable")]
+    MinorTypeSchemaRevision { gts_id: String },
     #[error(
         "expected_resource_version 0 on '{gts_id}' is refused: omit the field to require absence"
     )]
     ZeroPrecondition { gts_id: String },
     #[error("expected_resource_version {version} on '{gts_id}' is negative")]
     NegativePrecondition { gts_id: String, version: i64 },
-    #[error(
-        "expected_resource_version {version} on '{gts_id}' is refused: \
-         content revisions arrive with T11"
-    )]
-    RevisionNotAccepted { gts_id: String, version: i64 },
     #[error("operation kind is not accepted yet: deletion arrives with T20")]
     UnsupportedOperationKind,
     #[error("dry_run is not accepted yet: rollback-only evaluation arrives with T20")]
@@ -239,33 +238,42 @@ pub fn validate(
                     version: v,
                 });
             }
-            // A positive precondition claims the candidate is a revision, and
-            // nothing in P0 can check the claim: `commit_creation` ignores the field,
-            // so it would commit as an ordinary creation at `resource_version = 1` —
-            // with step 3 skipped, because step 3 is skipped for revisions. Naming a
-            // version would then be enough to register inside a region the deployment
-            // closes. Refused loudly until T11, as deletion is until T20.
-            Some(v) => {
-                return Err(AcceptanceError::RevisionNotAccepted {
-                    gts_id: id.id().to_owned(),
-                    version: v,
-                });
-            }
+            // The claim is not taken on trust: the worker commits it through
+            // `commit_revision`, which refuses an absent identifier, so naming a
+            // version cannot register a new entity.
+            Some(v) => Precondition::Version(v),
         };
+        // ADR-0004: a minor-bearing Type Schema is content-immutable. During
+        // ceiling C9 this permanent refusal also bounds the implementation window.
+        if request.kind == OperationKind::Registration
+            && matches!(expected, Precondition::Version(_))
+            && is_minor_bearing_type_schema(&id)
+        {
+            return Err(AcceptanceError::MinorTypeSchemaRevision {
+                gts_id: id.id().to_owned(),
+            });
+        }
 
         // --- step 3: registration policy ---------------------------------
-        // Unconditional, because every candidate reaching this line is a declared
-        // creation: a positive `expected_resource_version` was refused above and
-        // deletion was refused with the envelope.
+        // **Creations only** (SPEC §8.1 step 3, DESIGN §3.2). The policy governs
+        // what may *appear* in a region; applying it to a revision would let closing
+        // a region freeze the entities already inside it, which is a different — and
+        // unasked-for — power.
         //
-        // TODO(T11): a revision — and at T20 a deletion — must bypass this gate
-        // again, so that closing a region cannot freeze the entities already in it
-        // (SPEC §8.1 step 3, DESIGN §3.2). Restore the condition *together with*
-        // the precondition check in the commit transaction: gating on the
-        // caller's declared kind alone is the bypass this refusal replaces.
-        ctx.policy
-            .admits(&id, OwnershipScope::Global)
-            .map_err(|refusal| AcceptanceError::PolicyRefused(PolicyRefusalError(refusal)))?;
+        // Safe only because the declared kind is enforced downstream: a revision
+        // naming a version for an identifier the registry does not hold is refused
+        // terminally by `commit_revision`, having created nothing. Without that, the
+        // bypass would be a way past the deployment allowlist.
+        //
+        // ponytail: ceiling C6 — the bypass leaves **no** authorization on the
+        // revision path. The right control is an owner or principal check, which P0
+        // has nothing to check against. The residual exposure is recorded on
+        // `unit::commit_revision`.
+        if expected == Precondition::MustNotExist {
+            ctx.policy
+                .admits(&id, OwnershipScope::Global)
+                .map_err(|refusal| AcceptanceError::PolicyRefused(PolicyRefusalError(refusal)))?;
+        }
 
         // --- step 4: managed identifier profile --------------------------
         if id
@@ -322,6 +330,14 @@ pub fn validate(
                     gts_id: id.id().to_owned(),
                 });
             }
+            // ponytail: ceiling C9 — T14/T17 close Checkpoints 3–4.
+            // T17 owns both the compatibility comparison and the durable
+            // `compat_forced` provenance bit. Accepting the flag before those two
+            // arrive would silently record `false` on a creation whose check was
+            // actually waived.
+            return Err(AcceptanceError::ForceCompatibilityUnavailable {
+                gts_id: id.id().to_owned(),
+            });
         }
 
         // TODO(T18): step 7, the ADR-0015 quarantine — refuse a stable candidate
@@ -581,6 +597,18 @@ fn has_cross_minor_check(id: &GtsId) -> bool {
         (Some(0) | None, _) | (_, None | Some(0)) => false,
         (Some(_), Some(_)) => true,
     }
+}
+
+/// ADR-0004 makes a minor-bearing Type Schema an immutable published contract.
+/// Its next minor is a new logical entity; only major-only Type Schemas and
+/// Instances have a content-revision path.
+fn is_minor_bearing_type_schema(id: &GtsId) -> bool {
+    id.is_type()
+        && id
+            .segments()
+            .last()
+            .and_then(GtsIdSegment::ver_minor)
+            .is_some()
 }
 
 /// The keyed read both replay paths make.

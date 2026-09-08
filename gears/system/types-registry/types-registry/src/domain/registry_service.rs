@@ -259,6 +259,7 @@ impl RegistryService {
                 &Self::scope(),
                 accepted.operation_id,
                 now,
+                self.config.worker,
             )
             .await?;
             // A pass that returns `Ok` leaves the operation `completed`, whether it

@@ -777,7 +777,7 @@ Turns the authenticated `SecurityContext` into query-level authorization. It is 
 
 ##### Responsibility scope
 
-Owns construction of the `PolicyEnforcer` (built once in module init from `ctx.client_hub().get::<dyn AuthZResolverClient>()`, Arc-cloned into each domain service), the per-resource `ResourceType` descriptors and action constants (§3.5.3), the PDP call surface (`access_scope` / `access_scope_with`), constraint→`AccessScope` compilation, and `EnforcerError`→`ChatEngineError` fail-closed mapping (§3.5.5). Also owns the `internal_write_scope()` wrapper and the bypass registry (§3.5.7).
+Owns construction of the `PolicyEnforcer` (built once in module init from `ctx.client_hub().get::<dyn AuthZResolverApi>()`, Arc-cloned into each domain service), the per-resource `ResourceType` descriptors and action constants (§3.5.3), the PDP call surface (`access_scope` / `access_scope_with`), constraint→`AccessScope` compilation, and `EnforcerError`→`ChatEngineError` fail-closed mapping (§3.5.5). Also owns the `internal_write_scope()` wrapper and the bypass registry (§3.5.7).
 
 ##### Responsibility boundaries
 
@@ -836,7 +836,7 @@ For complete endpoint definitions, request/response schemas, and examples, see t
 
 - [ ] `p1` - **ID**: `cpt-cf-chat-engine-interface-pep`
 
-**Interface**: `PolicyEnforcer` over `dyn AuthZResolverClient` (`authz-resolver-sdk`, `toolkit-security`). Consumed in-process; the `SecurityContext` is propagated on every call.
+**Interface**: `PolicyEnforcer` over `dyn AuthZResolverApi` (`authz-resolver-sdk`, `toolkit-security`). Consumed in-process; the `SecurityContext` is propagated on every call.
 
 **Call surface** (contract-level, not code):
 - `access_scope(ctx, resource_type, action, resource_id) -> Result<AccessScope, EnforcerError>` — constraints required (LIST and similar).
@@ -857,7 +857,7 @@ Chat Engine depends on the following internal gears at runtime.
 |-------------------|----------------|---------|
 | Plugin Registry | Internal registry | Resolve `ChatEngineBackendPlugin` implementations by `plugin_instance_id` at startup and on session type configuration |
 | Backend Plugin gears | `dyn ChatEngineBackendPlugin` (chat-engine-sdk) | Internal trait implementations that process messages, provide capabilities, and generate summaries |
-| AuthZ Resolver (`authz-resolver`) | `dyn AuthZResolverClient` via `PolicyEnforcer` (authz-resolver-sdk) | PDP for authorization decisions + query constraints; resolved from `ClientHub` at init, declared as `deps = ["authz-resolver"]` (`cpt-cf-chat-engine-component-policy-enforcer`) |
+| AuthZ Resolver (`authz-resolver`) | `dyn AuthZResolverApi` via `PolicyEnforcer` (authz-resolver-sdk) | PDP for authorization decisions + query constraints; resolved from `ClientHub` at init, declared as `deps = ["authz-resolver"]` (`cpt-cf-chat-engine-component-policy-enforcer`) |
 
 #### 3.3.5 External Dependencies
 
@@ -1684,7 +1684,7 @@ Chat Engine scoped resources are `session`, `message`, and `reaction`; each carr
 
 ### 3.5.2 PEP wiring
 
-`deps = ["authz-resolver"]` is declared on the `#[toolkit::gear]` attribute. During module initialization Chat Engine resolves `dyn AuthZResolverClient` from `ctx.client_hub()` and constructs a **single** `PolicyEnforcer`; it is Arc-cloned into every domain service as an `enforcer` field (mirrors the `users-info` reference gear — `cpt-cf-chat-engine-component-policy-enforcer`). No service constructs `AccessScope` manually in production; every scoped operation obtains its scope from the enforcer.
+`deps = ["authz-resolver"]` is declared on the `#[toolkit::gear]` attribute. During module initialization Chat Engine resolves `dyn AuthZResolverApi` from `ctx.client_hub()` and constructs a **single** `PolicyEnforcer`; it is Arc-cloned into every domain service as an `enforcer` field (mirrors the `users-info` reference gear — `cpt-cf-chat-engine-component-policy-enforcer`). No service constructs `AccessScope` manually in production; every scoped operation obtains its scope from the enforcer.
 
 ### 3.5.3 Public PEP call surface (per resource)
 

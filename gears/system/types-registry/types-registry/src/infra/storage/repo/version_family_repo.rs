@@ -60,8 +60,9 @@ impl VersionFamilyRepo {
     /// Postgres and `MySQL` — but `DBRunner` hides the raw executor and the secure
     /// builder exposes no lock clause, so a repository cannot take one. Serializing
     /// the *validation* window (family shape and contiguity) needs the toolkit
-    /// advisory lock, which lives on the `Db` handle and so belongs to the service
-    /// layer; [`Self::lock_order`] is its ordering half.
+    /// advisory lock, which lives on the `Db` handle and must be held **across**
+    /// this transaction, so it belongs to the caller. `admission::worker` takes it,
+    /// in `domain::family::lock_order`'s order.
     ///
     /// # Errors
     /// Propagates scope validation and database failures. Returns
@@ -114,19 +115,5 @@ impl VersionFamilyRepo {
                 "version family vanished between insert and re-read",
             ))?;
         Ok((family, created))
-    }
-
-    /// Canonical order for acquiring family locks: sorted and deduplicated.
-    ///
-    /// A batch admission touches several families, and two batches touching the
-    /// same two families in opposite orders would deadlock. Sorting is enough to
-    /// make that impossible, and byte order is the same total order the family key
-    /// column already uses.
-    #[must_use]
-    pub fn lock_order(family_keys: &[String]) -> Vec<String> {
-        let mut ordered: Vec<String> = family_keys.to_vec();
-        ordered.sort();
-        ordered.dedup();
-        ordered
     }
 }
