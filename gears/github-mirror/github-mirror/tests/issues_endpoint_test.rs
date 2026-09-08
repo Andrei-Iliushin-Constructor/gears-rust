@@ -357,6 +357,99 @@ async fn issues_carry_the_fields_a_github_client_renders() {
 }
 
 #[tokio::test]
+async fn every_link_relation_carries_the_filters_the_caller_sent() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let service = common::service("https://api.github.com").await;
+    service
+        .upsert_repo(&ctx, repo_record())
+        .await
+        .expect("repo seed must succeed");
+    for number in 1..=5 {
+        let mut issue = issue_record(number, number, "closed one");
+        issue.state = "closed".to_owned();
+        service
+            .upsert_issue(&ctx, "acme", "widget", issue)
+            .await
+            .expect("issue seed must succeed");
+    }
+
+    let router = router_for(service, ctx);
+
+    // Page 2 of 3, so all four relations are present at once.
+    let response = get(
+        router,
+        "/repos/acme/widget/issues?per_page=2&page=2&state=closed&sort=updated&direction=asc",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let links = response
+        .headers()
+        .get(axum::http::header::LINK)
+        .expect("a paginated listing must link")
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    for relation in ["next", "prev", "first", "last"] {
+        let rendered = format!(r#"rel="{relation}""#);
+        assert!(links.contains(&rendered), "{relation} is missing: {links}");
+    }
+    // One filter set per relation, and every relation carries all three.
+    assert_eq!(
+        links
+            .matches("&state=closed&sort=updated&direction=asc>")
+            .count(),
+        4,
+        "each of next, prev, first and last must keep the filters: {links}"
+    );
+}
+
+#[tokio::test]
+async fn the_last_reachable_page_offers_no_next_link() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let service = common::service("https://api.github.com").await;
+    service
+        .upsert_repo(&ctx, repo_record())
+        .await
+        .expect("repo seed must succeed");
+    service
+        .upsert_issue(&ctx, "acme", "widget", issue_record(1, 1, "only one"))
+        .await
+        .expect("issue seed must succeed");
+
+    let router = router_for(service, ctx);
+
+    // The furthest page the offset bound allows at this page size: with
+    // per_page=100 that is offset 9_900, exactly PageWindow::MAX_OFFSET.
+    let response = get(
+        router.clone(),
+        "/repos/acme/widget/issues?per_page=100&page=100&state=all",
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "page 100 at per_page=100 starts at row 9,900, the last allowed offset"
+    );
+    if let Some(links) = response.headers().get(axum::http::header::LINK) {
+        let links = links.to_str().unwrap();
+        assert!(
+            !links.contains(r#"rel="next""#),
+            "the last reachable page must not advertise a page the gear refuses: {links}"
+        );
+    }
+
+    // One page further is refused, which is what makes the missing `next`
+    // above the right answer rather than a coincidence.
+    let response = get(
+        router,
+        "/repos/acme/widget/issues?per_page=100&page=101&state=all",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn a_full_page_names_the_last_page_from_the_total() {
     let ctx = common::caller_in(Uuid::new_v4());
     let service = common::service("https://api.github.com").await;

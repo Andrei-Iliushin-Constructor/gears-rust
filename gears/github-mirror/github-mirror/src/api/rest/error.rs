@@ -44,14 +44,13 @@ const fn db_error_kind(e: &toolkit_db::DbError) -> &'static str {
 ///
 /// Today these strings are the mirror's own - a GitHub path and a status,
 /// never an upstream response body - and this keeps that true if a later
-/// message quotes more than it should. A `ghp_`, `gho_`, `ghu_` or
-/// `github_pat_` run is replaced; so is the word after an `Authorization`
+/// message quotes more than it should. Three shapes are removed: a `ghp_`,
+/// `gho_`, `ghu_` or `github_pat_` run; the word after an `Authorization`
 /// header name or a `Bearer`/`Basic`/`token` scheme, since a credential
-/// there carries no recognisable prefix of its own; and a URL keeps only
-/// its path.
+/// there carries no prefix of its own; and, in a URL, both the query string
+/// and any `user:password@` before the host.
 fn redacted(msg: &str) -> String {
     const SECRET_PREFIXES: [&str; 4] = ["ghp_", "gho_", "ghu_", "github_pat_"];
-    /// Words whose value is whatever follows them.
     const CREDENTIAL_INTRODUCERS: [&str; 5] =
         ["Bearer", "bearer", "Basic", "token", "Authorization:"];
 
@@ -73,14 +72,41 @@ fn redacted(msg: &str) -> String {
             if out.last().map(String::as_str) != Some("[REDACTED]") {
                 out.push("[REDACTED]".to_owned());
             }
-        } else if let Some((path, _)) = word.split_once('?') {
-            out.push(format!("{path}?[REDACTED]"));
         } else {
-            out.push(word.to_owned());
+            out.push(redacted_word(word));
         }
         redact_next = introduces;
     }
     out.join(" ")
+}
+
+/// One word with its URL secrets removed: the query string, and the
+/// `user:password@` an upstream URL can carry before its host.
+fn redacted_word(word: &str) -> String {
+    let (head, query) = match word.split_once('?') {
+        Some((head, _)) => (head, "?[REDACTED]"),
+        None => (word, ""),
+    };
+
+    // `scheme://userinfo@host/path` - only the part before the first `/` of
+    // the path can hold userinfo, so a `@` later in the path is left alone.
+    let cleaned = match head.split_once("://") {
+        Some((scheme, rest)) => {
+            let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+            let separator = if path.is_empty() && !rest.contains('/') {
+                ""
+            } else {
+                "/"
+            };
+            match authority.rsplit_once('@') {
+                Some((_, host)) => format!("{scheme}://[REDACTED]@{host}{separator}{path}"),
+                None => head.to_owned(),
+            }
+        }
+        None => head.to_owned(),
+    };
+
+    format!("{cleaned}{query}")
 }
 
 impl From<DomainError> for CanonicalError {
@@ -219,10 +245,18 @@ mod tests {
                 "sent [REDACTED] to GitHub",
             ),
             ("Basic dXNlcjpwYXNz denied", "[REDACTED] denied"),
+            (
+                "request https://user:s3cret@github.example/repos/x failed",
+                "request https://[REDACTED]@github.example/repos/x failed",
+            ),
+            (
+                "request https://user:s3cret@github.example?t=1 failed",
+                "request https://[REDACTED]@github.example?[REDACTED] failed",
+            ),
         ] {
             let out = redacted(message);
             assert_eq!(out, expected, "{message:?}");
-            for secret in ["ghp_abc123", "eyJhbGciOi", "dXNlcjpwYXNz"] {
+            for secret in ["ghp_abc123", "eyJhbGciOi", "dXNlcjpwYXNz", "s3cret"] {
                 assert!(
                     !out.contains(secret),
                     "{secret} survived redaction of {message:?}: {out}"

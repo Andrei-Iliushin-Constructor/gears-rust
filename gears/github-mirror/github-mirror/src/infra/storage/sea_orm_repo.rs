@@ -1803,6 +1803,9 @@ async fn repo_list_window_in<C: DBRunner>(
         .secure()
         .scope_with(scope)
         .order_by(repositories::Column::FullName, Order::Asc)
+        // Unique tie-break: two rows may share a full name, and equal sort
+        // keys must not shuffle between adjacent page windows.
+        .order_by(repositories::Column::Id, Order::Asc)
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
