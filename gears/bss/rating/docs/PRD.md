@@ -9,6 +9,9 @@ refs:
   - bss/prd/PRD-subscriptions-lifecycle-202604021200/PRD-subscriptions-lifecycle-202604021200.md
 ---
 
+Created:  2026-08-24 by Virtuozzo International GmbH
+Updated:  2026-08-24 by Virtuozzo International GmbH
+
 # PRD — Rating — Usage Rating & Commercial Pricing Logic
 
 <!-- toc -->
