@@ -7,12 +7,16 @@
 ///
 /// Today these strings are the mirror's own - a GitHub path and a status,
 /// never an upstream response body - and this keeps that true if a later
-/// message quotes more than it should. Three shapes are removed: a token run
-/// (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` or `github_pat_`); the word after
-/// an `Authorization`
-/// header name or a `Bearer`/`Basic`/`token` scheme, since a credential
-/// there carries no prefix of its own; and, in a URL, both the query string
-/// and any `user:password@` before the host.
+/// message quotes more than it should. Three shapes are removed:
+///
+/// - a token run: `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` or `github_pat_`;
+/// - whatever follows an `Authorization` header name or a
+///   `Bearer`/`Basic`/`token` scheme, since a credential there carries no
+///   prefix of its own. The scheme is looked for inside the word as well as
+///   next to it, so `Authorization:Bearer eyJ...` and
+///   `Authorization=Bearer%20eyJ...` are caught along with the spaced form;
+/// - in a URL, both the query string and any `user:password@` before the
+///   host.
 #[must_use]
 pub fn redacted(msg: &str) -> String {
     // GitHub's own token prefixes: personal, OAuth, user-to-server,
@@ -24,11 +28,28 @@ pub fn redacted(msg: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut redact_next = false;
     for word in msg.split_whitespace() {
-        let introduces = CREDENTIAL_INTRODUCERS
-            .iter()
-            .any(|introducer| word.trim_end_matches(':') == introducer.trim_end_matches(':'));
+        // A header or scheme can arrive with no space after it -
+        // `Authorization:Bearer eyJ...`, or url-encoded as
+        // `Authorization=Bearer%20eyJ...` - so the word is cut on the
+        // characters that join a name to its value before matching.
+        let parts: Vec<&str> = word
+            .split([':', '=', '?', '&'])
+            .filter(|part| !part.is_empty())
+            .collect();
+        let is_introducer = |part: &str| {
+            CREDENTIAL_INTRODUCERS
+                .iter()
+                .any(|introducer| part.eq_ignore_ascii_case(introducer.trim_end_matches(':')))
+        };
+        let names_a_credential = parts.iter().any(|part| is_introducer(part));
+        // Whether the value travels in this word or the next one: the last
+        // part being the scheme itself means the value is still to come
+        // (`Authorization:Bearer eyJ...`), while anything else means it is
+        // already here (`?Authorization=Bearer%20eyJ...`).
+        let carries_its_value =
+            names_a_credential && parts.last().is_some_and(|part| !is_introducer(part));
         let secret = redact_next
-            || introduces
+            || names_a_credential
             || SECRET_PREFIXES
                 .iter()
                 .any(|prefix| word.starts_with(prefix));
@@ -42,7 +63,9 @@ pub fn redacted(msg: &str) -> String {
         } else {
             out.push(redacted_word(word));
         }
-        redact_next = introduces;
+        // Only look at the next word when this one named a scheme without
+        // supplying the value.
+        redact_next = names_a_credential && !carries_its_value;
     }
     out.join(" ")
 }
@@ -140,6 +163,31 @@ mod tests {
                     "{secret} survived redaction of {message:?}: {out}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_scheme_joined_to_its_value_is_still_caught() {
+        for (message, expected) in [
+            (
+                "sent Authorization:Bearer eyJhbGciOi to GitHub",
+                "sent [REDACTED] to GitHub",
+            ),
+            (
+                "called /repos/acme/widget?Authorization=Bearer%20eyJhbGciOi twice",
+                "called [REDACTED] twice",
+            ),
+            (
+                "header authorization:bearer eyJhbGciOi rejected",
+                "header [REDACTED] rejected",
+            ),
+        ] {
+            let out = redacted(message);
+            assert_eq!(out, expected, "{message:?}");
+            assert!(
+                !out.contains("eyJhbGciOi"),
+                "the value survived redaction of {message:?}: {out}"
+            );
         }
     }
 

@@ -2830,9 +2830,13 @@ impl Service {
                 // check can steal a live one), so a marker left by a killed
                 // process keeps answering 409 until someone removes it. The
                 // key is what an operator needs to find it.
+                // The repository, not the composite key: the key carries the
+                // tenant id, which is an authorization identifier and not
+                // something every log consumer needs to see.
                 tracing::warn!(
-                    lock_key = %lock_key,
-                    "sync lock already held; a repeated 409 with no sync                      running means a stale marker for this key"
+                    owner,
+                    name,
+                    "sync lock already held; a repeated 409 with no sync                      running means a stale marker for this repository"
                 );
                 return Err(DomainError::Conflict(format!(
                     "a sync for {owner}/{name} is already running"
