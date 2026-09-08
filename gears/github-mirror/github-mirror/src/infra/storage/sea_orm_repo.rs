@@ -1978,6 +1978,7 @@ async fn issue_list_by_repo_in<C: DBRunner>(
         .order_by(sort_column, direction)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(issues::Column::Number, Order::Asc)
+        .order_by(issues::Column::Id, Order::Asc)
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -2179,6 +2180,7 @@ async fn pull_request_list_by_repo_in<C: DBRunner>(
         .order_by(sort_column, direction)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(pull_requests::Column::Number, Order::Asc)
+        .order_by(pull_requests::Column::Id, Order::Asc)
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -2716,6 +2718,7 @@ async fn label_list_by_repo_in<C: DBRunner>(
         .scope_with(scope)
         .filter(sea_orm::Condition::all().add(labels::Column::RepoId.eq(repo_id)))
         .order_by(labels::Column::Name, Order::Asc)
+        .order_by(labels::Column::Id, Order::Asc)
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -2816,6 +2819,7 @@ async fn milestone_list_by_repo_in<C: DBRunner>(
         .scope_with(scope)
         .filter(sea_orm::Condition::all().add(milestones::Column::RepoId.eq(repo_id)))
         .order_by(milestones::Column::Number, Order::Asc)
+        .order_by(milestones::Column::Id, Order::Asc)
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)

@@ -385,6 +385,15 @@ async fn a_concurrent_sync_for_the_same_repo_is_rejected_with_a_conflict() {
         "the second sync must be told a sync is already running, not race it"
     );
 
+    // The body is the intended public detail, pinned here so it cannot drift:
+    // the repository is the one the caller itself asked to sync, and it is
+    // told which of the two things went wrong rather than a bare "conflict".
+    let json = body_json(response).await;
+    assert_eq!(
+        json["detail"], "a sync for rust-lang/rust is already running",
+        "the caller must learn a sync is running, and for which repo: {json:?}"
+    );
+
     // A different repo is not blocked by this repo's lock.
     let other = post(
         router.clone(),

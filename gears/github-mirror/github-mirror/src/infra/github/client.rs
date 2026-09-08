@@ -13,6 +13,7 @@ use crate::domain::repo::{
     WorkflowRunRecord,
 };
 use crate::infra::github::pagination::parse_link_next;
+use crate::redact::redacted_word;
 
 const FIRST_PAGE_SIZE: u32 = 50;
 /// GitHub serves reviews and changed files only per pull request, so
@@ -159,7 +160,7 @@ impl GithubClient {
             if rate_limited && attempt < RATE_LIMIT_RETRIES {
                 let delay = retry_delay(response.headers(), attempt);
                 tracing::warn!(
-                    %url,
+                    url = %redacted_word(&url),
                     %status,
                     attempt,
                     delay_secs = delay.as_secs(),

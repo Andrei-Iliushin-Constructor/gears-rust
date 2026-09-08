@@ -2854,6 +2854,15 @@ impl Service {
         let sync_lock = match self.db.db().lock(GEAR_NAME, &lock_key).await {
             Ok(guard) => guard,
             Err(toolkit_db::DbError::Lock(toolkit_db::DbLockError::AlreadyHeld { .. })) => {
+                // Logged as well as returned: on the file-marker backend the
+                // library takes no lock back automatically (a TTL or a PID
+                // check can steal a live one), so a marker left by a killed
+                // process keeps answering 409 until someone removes it. The
+                // key is what an operator needs to find it.
+                tracing::warn!(
+                    lock_key = %lock_key,
+                    "sync lock already held; a repeated 409 with no sync                      running means a stale marker for this key"
+                );
                 return Err(DomainError::Conflict(format!(
                     "a sync for {owner}/{name} is already running"
                 )));
