@@ -12,10 +12,9 @@ Pipeline
      * ``github``            - org / project number / status field name
      * ``status_map``        - GitHub Status value  -> SVG legend status
      * ``svg_status_styles`` - SVG legend status     -> circle style
-     * ``gear_name_overrides`` - SVG label           -> GitHub issue title
-2. Fetch every project item (title + Status) from GitHub.
-3. Resolve, for each SVG gear label, its GitHub status (auto-normalized match
-   plus the explicit overrides).
+     * ``gear_mappings``       - SVG label           -> GitHub issue ID
+2. Fetch project statuses and repository issue URLs from GitHub.
+3. Resolve each SVG gear label through its configured GitHub issue ID.
 4. Copy the template SVG verbatim and, for every gear, locate the *nearest
    status circle to the left of the label* and restyle it to match the status.
 5. Write the result to ``docs/img/architecture.drawio.svg``.
@@ -84,7 +83,7 @@ query($org:String!, $number:Int!, $statusField:String!, $after:String) {
       items(first:100, after:$after) {
         pageInfo { hasNextPage endCursor }
         nodes {
-          content { ... on Issue { title } ... on PullRequest { title } }
+          content { ... on Issue { title url } ... on PullRequest { title url } }
           status: fieldValueByName(name:$statusField) {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
@@ -95,13 +94,24 @@ query($org:String!, $number:Int!, $statusField:String!, $after:String) {
 }
 """
 
+_REPO_ISSUES_QUERY = """
+query($org:String!, $repo:String!, $after:String) {
+  repository(owner:$org, name:$repo) {
+    issues(first:100, after:$after, states:[OPEN, CLOSED]) {
+      pageInfo { hasNextPage endCursor }
+      nodes { title url }
+    }
+  }
+}
+"""
+
 
 def fetch_gear_statuses(
     token: str, org: str, project_number: int, status_field: str
-) -> Dict[str, str]:
-    """Return {issue_title: status_value} for every board item with a status."""
+) -> Dict[str, Tuple[str, str]]:
+    """Return {issue_title: (status_value, issue_url)} for board items with a status."""
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    statuses: Dict[str, str] = {}
+    statuses: Dict[str, Tuple[str, str]] = {}
     after: Optional[str] = None
     while True:
         resp = requests.post(
@@ -139,9 +149,10 @@ def fetch_gear_statuses(
             content = node.get("content") or {}
             title = content.get("title")
             status = (node.get("status") or {}).get("name")
-            if title and status:
+            url = content.get("url")
+            if title and url:
                 # Keep the first status seen for a title (stable across pages).
-                statuses.setdefault(title, status)
+                statuses.setdefault(title, (status or "", url))
         page = items.get("pageInfo", {})
         if not page.get("hasNextPage"):
             break
@@ -149,6 +160,42 @@ def fetch_gear_statuses(
         if not after:
             break
     return statuses
+
+
+def fetch_repo_issue_urls(token: str, org: str, repo: str) -> Dict[str, str]:
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    issue_urls: Dict[str, str] = {}
+    after: Optional[str] = None
+    while True:
+        resp = requests.post(
+            "https://api.github.com/graphql",
+            json={
+                "query": _REPO_ISSUES_QUERY,
+                "variables": {"org": org, "repo": repo, "after": after},
+            },
+            headers=headers,
+            timeout=60,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        if payload.get("errors"):
+            raise UserFacingError(
+                f"GitHub GraphQL error while reading {org}/{repo}:\n"
+                + "\n".join(f"- {e.get('message', e)}" for e in payload["errors"])
+            )
+        issues = (((payload.get("data") or {}).get("repository") or {}).get("issues") or {})
+        for issue in issues.get("nodes", []):
+            title = issue.get("title")
+            url = issue.get("url")
+            if title and url:
+                issue_urls.setdefault(title, url)
+        page = issues.get("pageInfo", {})
+        if not page.get("hasNextPage"):
+            break
+        after = page.get("endCursor")
+        if not after:
+            break
+    return issue_urls
 
 
 # ---------------------------------------------------------------------------
@@ -180,26 +227,26 @@ def github_prefix(title: str) -> str:
 
 def build_svg_name_to_status(
     svg_names: List[str],
-    gh_statuses: Dict[str, str],
-    overrides: Dict[str, str],
-) -> Dict[str, Tuple[str, str]]:
-    """Map each matched SVG label -> (GitHub issue title, raw status value)."""
+    gh_statuses: Dict[str, Tuple[str, str]],
+    gh_issue_urls: Dict[str, str],
+    mappings: Dict[str, Dict[str, Any]],
+) -> Dict[str, Tuple[str, str, str]]:
+    """Map each matched SVG label -> (GitHub issue title, status, URL)."""
     # Index GitHub titles by normalized key (keep the title, not just status).
-    gh_by_norm: Dict[str, str] = {}
-    for title in gh_statuses:
-        gh_by_norm.setdefault(normalize_gear_name(title), title)
-
-    result: Dict[str, Tuple[str, str]] = {}
+    issues_by_id = {
+        int(url.rsplit("/", 1)[1]): (title, url) for title, url in gh_issue_urls.items()
+    }
+    statuses_by_url = {url: status for status, url in gh_statuses.values()}
+    result: Dict[str, Tuple[str, str, str]] = {}
     for label in svg_names:
-        # 1. explicit override (SVG label -> exact GitHub title)
-        override_title = overrides.get(label)
-        if override_title and override_title in gh_statuses:
-            result[label] = (override_title, gh_statuses[override_title])
+        mapping = mappings.get(label) or {}
+        issue_id = mapping.get("issue_id")
+        if issue_id is None:
             continue
-        # 2. auto-normalized match
-        title = gh_by_norm.get(normalize_gear_name(label))
-        if title is not None:
-            result[label] = (title, gh_statuses[title])
+        issue = issues_by_id.get(int(issue_id))
+        if issue:
+            title, url = issue
+            result[label] = (title, statuses_by_url.get(url, ""), url)
     return result
 
 
@@ -469,6 +516,7 @@ def render_aligned_labels(
     svg_text: str,
     assignments: List[Tuple[str, int]],
     circles: List["StatusCircle"],
+    issue_links: Dict[str, str],
 ) -> str:
     """Replace the flowed <foreignObject> gear-label lists with real SVG
     <text> anchored to each status circle.
@@ -495,10 +543,15 @@ def render_aligned_labels(
         c = circles[idx]
         x = c.cx + 9.0          # just right of the circle
         y = c.cy + 3.6          # baseline for an 11px glyph centered on cy
-        parts.append(
+        label = (
             f'<text x="{x:.2f}" y="{y:.2f}" fill="#000000" '
             f'font-family="Helvetica, Arial, sans-serif" font-size="11px" '
             f'pointer-events="all">{_xml_escape(name)}</text>'
+        )
+        link = issue_links.get(name)
+        parts.append(
+            f'<a xlink:href="{html.escape(link, quote=True)}" target="_blank">'
+            f'{label}</a>' if link else label
         )
     labels_svg = "\n        " + "\n        ".join(parts) + "\n    "
 
@@ -632,14 +685,14 @@ def _github_excluded(title: str, excl: Dict[str, Any]) -> bool:
 def render(
     config: Dict[str, Any],
     template_svg: str,
-    gh_statuses: Dict[str, str],
+    gh_statuses: Dict[str, Tuple[str, str]],
+    gh_issue_urls: Dict[str, str],
     verbose: bool = False,
 ) -> Tuple[str, Dict[str, int], Dict[str, List[str]], List[Dict[str, str]]]:
     status_map: Dict[str, str] = config.get("status_map") or {}
     styles: Dict[str, Dict[str, str]] = config.get("svg_status_styles") or {}
     mx_styles: Dict[str, str] = config.get("mx_status_styles") or {}
-    overrides: Dict[str, str] = config.get("gear_name_overrides") or {}
-    status_overrides: Dict[str, str] = config.get("status_overrides") or {}
+    gear_mappings: Dict[str, Dict[str, Any]] = config.get("gear_mappings") or {}
     section_map: Dict[str, str] = config.get("section_map") or {}
     excl = _compile_exclusions(config)
 
@@ -647,17 +700,26 @@ def render(
     sections = parse_sections(template_svg)
     all_names = [name for block in blocks for name in block.names]
     svg_names = sorted(set(all_names))
-    name_to_gh = build_svg_name_to_status(svg_names, gh_statuses, overrides)
+    name_to_gh = build_svg_name_to_status(
+        svg_names, gh_statuses, gh_issue_urls, gear_mappings
+    )
+    issue_links = {name: url for name, (_title, _status, url) in name_to_gh.items()}
+    github = config.get("github") or {}
+    issue_search_url = "https://github.com/{}/{}/issues?q=is%3Aissue+".format(
+        github["org"], github["repo"]
+    )
+    for name in svg_names:
+        issue_links.setdefault(name, issue_search_url + urllib.parse.quote(name))
 
     # SVG label -> resolved SVG legend status (used for both render layers).
     # Priority: explicit status_overrides win over the GitHub-derived status.
     name_to_svg_status: Dict[str, str] = {}
-    for name, (_title, gh_status) in name_to_gh.items():
+    for name, (_title, gh_status, _url) in name_to_gh.items():
         svg_status = status_map.get(gh_status)
         if svg_status:
             name_to_svg_status[name] = svg_status
     for name in svg_names:
-        forced = status_overrides.get(name)
+        forced = (gear_mappings.get(name) or {}).get("status_override")
         if forced:
             name_to_svg_status[name] = forced
 
@@ -672,6 +734,7 @@ def render(
         "only_in_svg": [],
         "only_in_github": [],
         "section_mismatch": [],
+        "missing_issue_link": [],
     }
     # Per-gear calculated status, in diagram reading order.
     report: List[Dict[str, str]] = []
@@ -679,7 +742,7 @@ def render(
         sec = section_for_point(block.x, block.y, sections) or "-"
         for name in block.names:
             entry = name_to_gh.get(name)
-            forced = status_overrides.get(name)
+            forced = (gear_mappings.get(name) or {}).get("status_override")
             if forced:
                 gh_title = entry[0] if entry else "(config override)"
                 gh_status = (entry[1] if entry else "-") + " [override]"
@@ -688,7 +751,7 @@ def render(
                 gh_title, gh_status = "(no GitHub match)", "-"
                 svg_status = "Not started (default)"
             else:
-                gh_title, gh_status = entry
+                gh_title, gh_status, _url = entry
                 svg_status = status_map.get(gh_status) or f"?? (unmapped: {gh_status})"
             report.append({
                 "section": sec,
@@ -702,13 +765,17 @@ def render(
     for name in svg_names:
         if (
             name not in name_to_gh
-            and name not in status_overrides
+            and not (gear_mappings.get(name) or {}).get("status_override")
             and name not in excl["svg_gears"]
         ):
             warnings["only_in_svg"].append(name)
 
+    for name in svg_names:
+        if name not in issue_links:
+            warnings["missing_issue_link"].append(name)
+
     # (2) GitHub gears (in a diagram section) not shown on the SVG diagram.
-    matched_titles = {title for title, _ in name_to_gh.values()}
+    matched_titles = {title for title, _status, _url in name_to_gh.values()}
     for title in sorted(gh_statuses):
         if title in matched_titles:
             continue
@@ -721,7 +788,7 @@ def render(
 
     # (3) Section mismatch: box the gear is drawn in vs its GitHub unit tag.
     seen_mismatch: set = set()
-    for name, (gh_title, _gh_status) in name_to_gh.items():
+    for name, (gh_title, _gh_status, _url) in name_to_gh.items():
         svg_section = name_section.get(name)
         gh_section = section_map.get(github_prefix(gh_title))
         if svg_section and gh_section and svg_section != gh_section and name not in seen_mismatch:
@@ -774,7 +841,7 @@ def render(
 
     # Replace flowed HTML gear labels with SVG text anchored to the circles so
     # icons and names stay aligned at any scale / in any renderer.
-    result = render_aligned_labels(result, assignments, circles)
+    result = render_aligned_labels(result, assignments, circles, issue_links)
 
     return result, stats, warnings, report
 
@@ -806,10 +873,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     config = yaml.safe_load(args.config.read_text(encoding="utf-8")) or {}
     gh_cfg = config.get("github") or {}
     org = args.org or gh_cfg.get("org")
+    repo = gh_cfg.get("repo")
     project_number = args.project or gh_cfg.get("project_number")
     status_field = gh_cfg.get("status_field", "Status")
-    if not org or not project_number:
-        raise UserFacingError("github.org and github.project_number are required.")
+    if not org or not repo or not project_number:
+        raise UserFacingError(
+            "github.org, github.repo, and github.project_number are required."
+        )
 
     token = resolve_github_token()
     if not token:
@@ -819,15 +889,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
     gh_statuses = fetch_gear_statuses(token, org, int(project_number), status_field)
+    gh_issue_urls = fetch_repo_issue_urls(token, org, repo)
     if args.verbose:
         print(f"[info] fetched {len(gh_statuses)} board items with a status",
               file=sys.stderr)
+        print(f"[info] fetched {len(gh_issue_urls)} repository issues", file=sys.stderr)
 
     template_svg = args.template.read_text(encoding="utf-8")
     result, stats, warnings, report = render(
-        config, template_svg, gh_statuses, verbose=args.verbose
+        config, template_svg, gh_statuses, gh_issue_urls, verbose=args.verbose
     )
-
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(result, encoding="utf-8")
 
@@ -867,7 +938,8 @@ def _report_warnings(warnings: Dict[str, List[str]]) -> None:
     only_svg = warnings["only_in_svg"]
     only_gh = warnings["only_in_github"]
     mismatch = warnings["section_mismatch"]
-    total = len(only_svg) + len(only_gh) + len(mismatch)
+    missing_issue_links = warnings["missing_issue_link"]
+    total = len(only_svg) + len(only_gh) + len(mismatch) + len(missing_issue_links)
     if total == 0:
         return
 
@@ -875,7 +947,7 @@ def _report_warnings(warnings: Dict[str, List[str]]) -> None:
     if only_svg:
         print(
             f"\n[warn] {len(only_svg)} SVG gear(s) with no GitHub board match "
-            "(add to gear_name_overrides or exclusions.svg_gears):",
+            "(add to gear_mappings or exclusions.svg_gears):",
             file=sys.stderr,
         )
         for name in only_svg:
@@ -889,6 +961,14 @@ def _report_warnings(warnings: Dict[str, List[str]]) -> None:
         )
         for title in only_gh:
             print(f"    - {title}", file=sys.stderr)
+    if missing_issue_links:
+        print(
+            f"\n[warn] {len(missing_issue_links)} SVG gear(s) without an "
+            "issue link (set gear_mappings.<gear>.issue_id):",
+            file=sys.stderr,
+        )
+        for name in missing_issue_links:
+            print(f"    - {name}", file=sys.stderr)
     if mismatch:
         print(
             f"\n[warn] {len(mismatch)} gear section mismatch(es) "

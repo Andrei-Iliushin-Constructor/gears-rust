@@ -14,9 +14,11 @@
 
 github:
   org: constructorfabric
+  repo: gears-rust
   project_number: 48
   # Name of the single-select project field that holds the gear status.
   status_field: Status
+
 
 # ---------------------------------------------------------------------------
 # GitHub unit tag (the "PREFIX - " in an issue title) -> SVG section box name
@@ -53,33 +55,6 @@ exclusions:
     - " [Pp]lugin"          # plugin sub-issues, not standalone gears
     - "Umbrella issue"      # umbrella/tracking issues
     - "\\(script test\\)"   # scaffolding / test issues
-
-# ---------------------------------------------------------------------------
-# Manual status overrides: force an SVG gear to a specific SVG legend status,
-# regardless of (or in the absence of) a GitHub board match. Highest priority
-# of all — wins over the GitHub-derived status. Keys are exact SVG labels;
-# values must be a key of `svg_status_styles`. Use this for toolkit/framework
-# gears that are not tracked as issues on the board, or to correct a status.
-# ---------------------------------------------------------------------------
-status_overrides:
-  # Core gears considered production-ready despite the board status.
-  "Tenant Resolver": "Mature"
-  # Toolkit primitives considered production-ready.
-  "Authorization": "Mature"
-  "Contracts": "Mature"
-  "Macros": "Mature"
-  "DB (secure ORM)": "Mature"
-  "Type System": "Mature"
-  "Outbox": "Mature"
-  "API gateway": "Mature"
-  "API (OData)": "Mature"
-  "Unit tests / e2e tests": "Mature"
-  # Toolkit primitives still in progress.
-  "HTTP middleware": "In development"
-  "gRPC": "In development"
-  "Architecture lints": "In development"
-  "Code coverage": "In development"
-  "Code & spec validators": "In development"
 
 # ---------------------------------------------------------------------------
 # GitHub Status (10 pipeline stages) -> SVG legend status (5 buckets).
@@ -148,42 +123,98 @@ mx_status_styles:
 # renames). Keys are the exact SVG label text; values are the exact GitHub
 # issue titles.
 # ---------------------------------------------------------------------------
-gear_name_overrides:
-  "AI agents": "GENAI - AI Agents Registry"
-  "Account Manager": "OSS - Reference Account Server"
-  "Admission Policy Engine": "CORE - Policy Engine for Admission Control"
-  "Analytics": "CORE - Analytics module"
-  "Async jobs": "TOOLKIT - Async Jobs Executor"
-  "Calendar": "OSS - Calendar Manager"
-  "Canonical errors": "TOOLKIT - Errors definition"
-  "Chat engine": "GENAI - Chat Egine (p1)"
-  "Construct": "OSS - Construct Service"
-  "Contracts mgmnt": "BSS - Contracts Management"
-  "Credential store": "CORE - Credentials Store (p1)"
-  "Declarartive workflows": "SERVERLESS - Serverless runtime for declarative serverless workflow"
-  "Emails storage": "CORE - Emails inbox storage"
-  "Graph storage": "CORE - Graph Objects Storage"
-  "Infrastructure manager": "OSS - Infrastructure Resource Manager"
-  "Infrastructure monitoring": "OSS - Monitoring"
-  "Lincense resolver": "CORE - License Resolver"
-  "Local Model controller": "GENAI - Model Provider Controller"
-  "Local Model runtimes": "GENAI - Model Runtime Controller"
-  "Local Model scheduler": "GENAI - Model Scheduler"
-  "Markeplace": "BSS - Marketplace"
-  "Orders mgmt": "BSS - Order Management"
-  "Orders workfflow": "BSS - Order Workflow"
-  "Outbox": "TOOLKIT - Outbox library"
-  "Plan management": "BSS - Plan Price (Plan Management)"
-  "Product & SKU": "BSS - Product & SKU Management"
-  "Python FaaS": "SERVERLESS - Serverless runtime for Python"
-  "RAG / Search index": "GENAI - Local Search Index"
-  "Resource groups": "CORE - Resource Groups Manager"
-  "SSL cert manager": "OSS - SSL Certificates Manager"
-  "Starlark FaaS": "SERVERLESS - Serverless Runtime for Starlark"
-  "Subscriptions": "BSS - Subscription Manager (p1)"
-  "Supabase storage": "SERVERLESS - Support Supabase with Deno edge-functions"
-  "Tarifs": "BSS - Tariffs (p1)"
-  "Ticketing": "BSS - Ticketing Service"
-  "Type System": "TOOLKIT - GTS libs finalization"
-  "User tasks": "OSS - User Tasks Manager"
-  "Web-search gw": "CORE - Web Search Gateway"
+gear_mappings:
+  "Access Policy manager": { issue_id: 4320 }
+  "Account Manager": { issue_id: 3048 }
+  "Admission control": { issue_id: 4286 }
+  "Admission Policy Engine": { issue_id: 4287 }
+  "Agents memory": { issue_id: 3347 }
+  "AI agents": { issue_id: 2888 }
+  "Alert manager": { issue_id: 4499 }
+  "Analytics": { issue_id: 2899 }
+  "API (OData)": { issue_id: null, status_override: "Mature" }
+  "API gateway": { issue_id: null, status_override: "Mature" }
+  "Application manager": { issue_id: 4316 }
+  "Architecture lints": { issue_id: null, status_override: "In development" }
+  "Async jobs": { issue_id: 2900 }
+  "Audit": { issue_id: 2903 }
+  "Auth resolver": { issue_id: 3103 }
+  "Authorization": { issue_id: null, status_override: "Mature" }
+  "Billing": { issue_id: 2871 }
+  "Billing ledger": { issue_id: 4116 }
+  "Calendar": { issue_id: 4342 }
+  "Canonical errors": { issue_id: 2882 }
+  "CEP collector": { issue_id: 4317 }
+  "Chat engine": { issue_id: 2887 }
+  "Code & spec validators": { issue_id: null, status_override: "In development" }
+  "Code coverage": { issue_id: null, status_override: "In development" }
+  "Construct": { issue_id: 4385 }
+  "Contracts": { issue_id: null, status_override: "Mature" }
+  "Contracts mgmnt": { issue_id: 4311 }
+  "Credential store": { issue_id: 2542 }
+  "DB (secure ORM)": { issue_id: null, status_override: "Mature" }
+  "Declarartive workflows": { issue_id: 2904 }
+  "DNS Manager": { issue_id: 4299 }
+  "Emails storage": { issue_id: 2873 }
+  "Events broker": { issue_id: 2890 }
+  "File downloader": { issue_id: 3343 }
+  "File parser": { issue_id: 2895 }
+  "File storage": { issue_id: 2893 }
+  "FX Rate provider": { issue_id: 4305 }
+  "Generic installer": { issue_id: 4207 }
+  "Graph storage": { issue_id: 4453 }
+  "gRPC": { issue_id: null, status_override: "In development" }
+  "HTTP middleware": { issue_id: null, status_override: "In development" }
+  "Infrastructure inventory": { issue_id: 4323 }
+  "Infrastructure manager": { issue_id: 4319 }
+  "Infrastructure monitoring": { issue_id: 4326 }
+  "Invoicing": { issue_id: 4308 }
+  "License enforcement": { issue_id: 4288 }
+  "License Manager": { issue_id: 3341 }
+  "Lincense resolver": { issue_id: 2907 }
+  "LLM gateway": { issue_id: 2892 }
+  "Local Model controller": { issue_id: 3099 }
+  "Local Model runtimes": { issue_id: 4330 }
+  "Local Model scheduler": { issue_id: 3100 }
+  "Location manager": { issue_id: 4324 }
+  "Macros": { issue_id: null, status_override: "Mature" }
+  "Markeplace": { issue_id: 4315 }
+  "MCP registry": { issue_id: 4329 }
+  "Models registry": { issue_id: 2894 }
+  "Models rounter": { issue_id: null }
+  "Notification service": { issue_id: 2874 }
+  "Orders mgmt": { issue_id: 4312 }
+  "Orders workfflow": { issue_id: 4313 }
+  "Outbound API gateway": { issue_id: 3104 }
+  "Outbox": { issue_id: 2868, status_override: "Mature" }
+  "Payments": { issue_id: 4309 }
+  "Plan management": { issue_id: 4304 }
+  "Product & SKU": { issue_id: 4314 }
+  "Prompts registry": { issue_id: 4328 }
+  "Python FaaS": { issue_id: 2897 }
+  "Quota Enforcer": { issue_id: 3305 }
+  "Quota Manager": { issue_id: 3306 }
+  "RAG / Search index": { issue_id: 4327 }
+  "Rating": { issue_id: 4302 }
+  "Resource groups": { issue_id: 2902 }
+  "Serverless Gateway": { issue_id: 2885 }
+  "Service catalog": { issue_id: 4298 }
+  "Settings service": { issue_id: 2898 }
+  "SSL cert manager": { issue_id: 4301 }
+  "Starlark FaaS": { issue_id: 2886 }
+  "Subscriptions": { issue_id: 2872 }
+  "Supabase storage": { issue_id: 3107 }
+  "Tarifs": { issue_id: 4303 }
+  "Task engine": { issue_id: 4501 }
+  "Tax Engine": { issue_id: 4307 }
+  "Tenant Resolver": { issue_id: 3102, status_override: "Mature" }
+  "Ticketing": { issue_id: 4318 }
+  "Translation engine": { issue_id: 4341 }
+  "Trigger manager": { issue_id: 4727 }
+  "Type System": { issue_id: 3426, status_override: "Mature" }
+  "Types Registry": { issue_id: 2891 }
+  "Unit tests / e2e tests": { issue_id: null, status_override: "Mature" }
+  "URL crawler": { issue_id: 2599 }
+  "Usage collector": { issue_id: 2889 }
+  "User tasks": { issue_id: 4296 }
+  "Web-search gw": { issue_id: 2896 }
