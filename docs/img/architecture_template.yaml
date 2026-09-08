@@ -1,0 +1,189 @@
+# Configuration for tools/scripts/architecture_status_svg.py
+#
+# This file defines the mapping used to render the live architecture diagram
+# (docs/arch/img/architecture.drawio.svg) from the template
+# (docs/img/architecture_template.drawio.svg) using gear status pulled from the
+# GitHub Projects v2 board.
+#
+# Three things are configured here:
+#   1. github            - which project/board to read the "Status" field from
+#   2. status_map        - GitHub "Status" single-select value -> SVG legend status
+#   3. svg_status_styles - SVG legend status -> status-icon (circle) style
+#   4. gear_name_overrides - explicit SVG-gear-name -> GitHub-issue-title mapping
+#                            for names that do not auto-normalize (typos, renames)
+
+github:
+  org: constructorfabric
+  project_number: 48
+  # Name of the single-select project field that holds the gear status.
+  status_field: Status
+
+# ---------------------------------------------------------------------------
+# GitHub unit tag (the "PREFIX - " in an issue title) -> SVG section box name
+# (the bold 16px box titles on the diagram). Used to (a) decide which GitHub
+# gears are expected on the diagram, and (b) flag section mismatches (a gear
+# drawn in the wrong box). Prefixes not listed here (DEVX, INSIGHT, STUDIO,
+# GEARS, TEST, ...) are treated as "not drawn on the diagram".
+# ---------------------------------------------------------------------------
+section_map:
+  CORE: "Core"
+  GENAI: "Gen AI"
+  SERVERLESS: "Serverless"
+  BSS: "BSS"
+  OSS: "OSS"
+  TOOLKIT: "Toolkit"
+
+# ---------------------------------------------------------------------------
+# Explicit exclusions to silence mapping warnings for known/intentional cases.
+#   svg_gears        - SVG labels that are toolkit/framework primitives with no
+#                      GitHub gear (won't warn as "only in SVG").
+#   github_titles    - exact GitHub issue titles to ignore ("only in GitHub").
+#   github_prefixes  - whole GitHub unit tags to ignore ("only in GitHub").
+#   github_patterns  - regexes matched against the full GitHub title to ignore
+#                      (e.g. plugins, umbrellas, script-test scaffolding).
+# ---------------------------------------------------------------------------
+exclusions:
+  # Toolkit/framework primitives are handled via status_overrides below, so
+  # they no longer need silencing here. Add any SVG label that should not warn
+  # as "only in SVG".
+  svg_gears: []
+  github_titles: []
+  github_prefixes: []
+  github_patterns:
+    - " [Pp]lugin"          # plugin sub-issues, not standalone gears
+    - "Umbrella issue"      # umbrella/tracking issues
+    - "\\(script test\\)"   # scaffolding / test issues
+
+# ---------------------------------------------------------------------------
+# Manual status overrides: force an SVG gear to a specific SVG legend status,
+# regardless of (or in the absence of) a GitHub board match. Highest priority
+# of all — wins over the GitHub-derived status. Keys are exact SVG labels;
+# values must be a key of `svg_status_styles`. Use this for toolkit/framework
+# gears that are not tracked as issues on the board, or to correct a status.
+# ---------------------------------------------------------------------------
+status_overrides:
+  # Core gears considered production-ready despite the board status.
+  "Tenant Resolver": "Mature"
+  # Toolkit primitives considered production-ready.
+  "Authorization": "Mature"
+  "Contracts": "Mature"
+  "Macros": "Mature"
+  "DB (secure ORM)": "Mature"
+  "Type System": "Mature"
+  "Outbox": "Mature"
+  "API gateway": "Mature"
+  "API (OData)": "Mature"
+  "Unit tests / e2e tests": "Mature"
+  # Toolkit primitives still in progress.
+  "HTTP middleware": "In development"
+  "gRPC": "In development"
+  "Architecture lints": "In development"
+  "Code coverage": "In development"
+  "Code & spec validators": "In development"
+
+# ---------------------------------------------------------------------------
+# GitHub Status (10 pipeline stages) -> SVG legend status (5 buckets).
+# Keys are the exact GitHub single-select option names.
+# Values must match a key in `svg_status_styles`.
+# ---------------------------------------------------------------------------
+status_map:
+  "Todo": "Not started"
+  "In Req": "In design"
+  "Req Done": "In design"
+  "In Design": "In design"
+  "Design Done": "Design ready"
+  "In Dev": "In development"
+  "Dev Done": "In development"
+  "In QA": "In development"
+  "QA Done": "In development"
+  "In Prod": "Mature"
+
+# ---------------------------------------------------------------------------
+# SVG legend status -> style applied to the gear's status circle (ellipse).
+# These values are lifted verbatim from the template legend swatches, so the
+# gradient `fill` references resolve against the template's <defs>.
+# `dasharray` is optional (only "Not started" uses a dashed outline).
+# ---------------------------------------------------------------------------
+svg_status_styles:
+  "Not started":
+    fill: "#eae7ee"
+    stroke: "#9e9e9e"
+    dasharray: "3 3"
+  "In design":
+    fill: "url(#mx-gradient-f5f5f5-1-b3b3b3-1-s-0)"
+    stroke: "#bababa"
+  "Design ready":
+    fill: "url(#mx-gradient-dae8fc-1-7ea6e0-1-s-0)"
+    stroke: "#98b9e7"
+  "In development":
+    fill: "url(#mx-gradient-ffcd28-1-ffa500-1-s-0)"
+    stroke: "#d79b00"
+  "Mature":
+    fill: "url(#mx-gradient-f0f0f0-1-00cc00-1-s-0)"
+    stroke: "#2e842e"
+
+# ---------------------------------------------------------------------------
+# Same statuses, expressed as the full drawio (mxCell) ellipse style string. A
+# `.drawio.svg` embeds its editable source in the <svg content="<mxfile>...">
+# attribute, and the drawio editor renders the circles from THAT, not from the
+# <ellipse> layer above. So the script recolours the embedded mxfile too, by
+# replacing each status circle's style with the matching string below. These
+# are copied verbatim from the template legend swatches.
+# ---------------------------------------------------------------------------
+mx_status_styles:
+  "Not started":   "ellipse;whiteSpace=wrap;html=1;aspect=fixed;dashed=1;fontSize=16;fontColor=#000000;fillColor=#eae7ee;strokeColor=#9e9e9e;"
+  "In design":     "ellipse;whiteSpace=wrap;html=1;aspect=fixed;fontSize=16;fillColor=#f5f5f5;strokeColor=#bababa;gradientColor=#b3b3b3;"
+  "Design ready":  "ellipse;whiteSpace=wrap;html=1;aspect=fixed;fontSize=16;fillColor=#dae8fc;strokeColor=#98b9e7;gradientColor=#7ea6e0;"
+  "In development": "ellipse;whiteSpace=wrap;html=1;aspect=fixed;fontSize=16;fillColor=#ffcd28;strokeColor=#d79b00;gradientColor=#ffa500;"
+  "Mature":        "ellipse;whiteSpace=wrap;html=1;aspect=fixed;fontSize=16;fillColor=#00CC00;strokeColor=#2e842e;fontColor=#ffffff;gradientColor=#F0F0F0;gradientDirection=north;"
+
+# ---------------------------------------------------------------------------
+# Gear name matching.
+#
+# By default the script normalizes each GitHub issue title (strips the
+# "PREFIX - " unit tag, drops parenthetical notes, lowercases and removes
+# non-alphanumerics) and matches it against the same normalization of each SVG
+# gear label. The overrides below cover SVG labels whose text differs from the
+# GitHub title beyond what normalization handles (typos, abbreviations,
+# renames). Keys are the exact SVG label text; values are the exact GitHub
+# issue titles.
+# ---------------------------------------------------------------------------
+gear_name_overrides:
+  "AI agents": "GENAI - AI Agents Registry"
+  "Account Manager": "OSS - Reference Account Server"
+  "Admission Policy Engine": "CORE - Policy Engine for Admission Control"
+  "Analytics": "CORE - Analytics module"
+  "Async jobs": "TOOLKIT - Async Jobs Executor"
+  "Calendar": "OSS - Calendar Manager"
+  "Canonical errors": "TOOLKIT - Errors definition"
+  "Chat engine": "GENAI - Chat Egine (p1)"
+  "Construct": "OSS - Construct Service"
+  "Contracts mgmnt": "BSS - Contracts Management"
+  "Credential store": "CORE - Credentials Store (p1)"
+  "Declarartive workflows": "SERVERLESS - Serverless runtime for declarative serverless workflow"
+  "Emails storage": "CORE - Emails inbox storage"
+  "Graph storage": "CORE - Graph Objects Storage"
+  "Infrastructure manager": "OSS - Infrastructure Resource Manager"
+  "Infrastructure monitoring": "OSS - Monitoring"
+  "Lincense resolver": "CORE - License Resolver"
+  "Local Model controller": "GENAI - Model Provider Controller"
+  "Local Model runtimes": "GENAI - Model Runtime Controller"
+  "Local Model scheduler": "GENAI - Model Scheduler"
+  "Markeplace": "BSS - Marketplace"
+  "Orders mgmt": "BSS - Order Management"
+  "Orders workfflow": "BSS - Order Workflow"
+  "Outbox": "TOOLKIT - Outbox library"
+  "Plan management": "BSS - Plan Price (Plan Management)"
+  "Product & SKU": "BSS - Product & SKU Management"
+  "Python FaaS": "SERVERLESS - Serverless runtime for Python"
+  "RAG / Search index": "GENAI - Local Search Index"
+  "Resource groups": "CORE - Resource Groups Manager"
+  "SSL cert manager": "OSS - SSL Certificates Manager"
+  "Starlark FaaS": "SERVERLESS - Serverless Runtime for Starlark"
+  "Subscriptions": "BSS - Subscription Manager (p1)"
+  "Supabase storage": "SERVERLESS - Support Supabase with Deno edge-functions"
+  "Tarifs": "BSS - Tariffs (p1)"
+  "Ticketing": "BSS - Ticketing Service"
+  "Type System": "TOOLKIT - GTS libs finalization"
+  "User tasks": "OSS - User Tasks Manager"
+  "Web-search gw": "CORE - Web Search Gateway"
