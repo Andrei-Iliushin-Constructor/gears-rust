@@ -506,7 +506,7 @@ cfs-validate-kit-local: cfs-repair
 
 # -------- API and docs --------
 
-.PHONY: openapi md-fabric slides web-docs-preview .example-server-build
+.PHONY: openapi md-fabric slides web-docs-preview .example-server-build arch_status_svg_update
 
 .example-server-build:
 	$(call print_target_banner)
@@ -570,6 +570,11 @@ slides:
 web-docs-preview:
 	$(call print_target_banner)
 	@bash tools/scripts/docs-preview.sh
+
+## Regenerate docs/img/architecture.drawio.svg with live gear status from the GitHub board
+arch_status_svg_update: py-env
+	$(call print_target_banner)
+	@$(PYTHON) tools/scripts/architecture_status_svg.py -v
 
 # -------- Development and auto fix --------
 
