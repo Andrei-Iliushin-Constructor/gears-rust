@@ -76,3 +76,33 @@ async fn insert_scoped_allows_any_row_under_unconstrained_scope() {
         .await
         .expect("unconstrained scope must not block the insert");
 }
+
+// A tenant-only scope — what the shipped policy plugins compile to, since
+// neither emits an `owner_id` predicate — does NOT isolate users: the row of a
+// same-tenant stranger is fully readable through it. This is why session
+// ownership is enforced in the gear by `owner_guard::ensure_session_owner`
+// rather than being left to the PDP-derived scope.
+// @cpt-cf-chat-engine-nfr-authentication
+#[tokio::test]
+async fn tenant_only_scope_does_not_isolate_users() {
+    let db = inmem_db().await;
+    let repo = session_repo(&db);
+
+    let tenant = Uuid::new_v4();
+    let scope = AccessScope::for_tenant(tenant);
+    let owner_row = repo
+        .insert_scoped(&scope, new_session(tenant, Uuid::new_v4()))
+        .await
+        .expect("seed session owned by one user");
+
+    // Same tenant, different subject: the scope is identical, so the read hits.
+    let seen = repo
+        .find_by_id_scoped(&scope, owner_row.session_id)
+        .await
+        .expect("read under tenant-only scope");
+    assert!(
+        seen.is_some(),
+        "a tenant-only scope admits another user's row; ownership must be \
+         enforced above the repo layer",
+    );
+}
