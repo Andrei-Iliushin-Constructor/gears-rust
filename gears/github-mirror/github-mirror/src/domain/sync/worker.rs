@@ -85,7 +85,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::domain::scheduler::task::{ExtractionTask, TaskPhase, TaskPriority, TaskStatus};
+    use crate::domain::sync::task::{ExtractionTask, TaskPhase, TaskPriority, TaskStatus};
 
     fn dummy_task(phase: TaskPhase, entity_type: &str) -> ExtractionTask {
         ExtractionTask {

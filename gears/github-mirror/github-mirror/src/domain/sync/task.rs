@@ -147,7 +147,7 @@ impl Default for TaskPriority {
     }
 }
 
-/// What [`crate::domain::scheduler::TaskQueue::enqueue_task`] inserts.
+/// What [`crate::domain::sync::TaskQueue::enqueue_task`] inserts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewTask {
     /// The sync session this task belongs to.

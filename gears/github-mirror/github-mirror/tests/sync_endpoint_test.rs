@@ -57,7 +57,7 @@ async fn sync_fills_all_twenty_six_tables_and_reads_serve_them() {
 
     let response = post(
         router.clone(),
-        "/github-mirror/v1/repos/rust-lang/rust/sync",
+        "/github-mirror/v1/repos/rust-lang/rust/sync?timeline_scope=all",
     )
     .await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
@@ -269,8 +269,14 @@ async fn sync_fills_all_twenty_six_tables_and_reads_serve_them() {
     assert_eq!(statuses[0]["context"], "ci/build");
     assert_eq!(statuses[0]["creator"]["login"], "judy");
 
-    let jobs =
-        body_json(get(router2.clone(), "/repos/rust-lang/rust/actions/runs/7/jobs").await).await;
+    let jobs = body_json(
+        get(
+            router2.clone(),
+            "/repos/rust-lang/rust/actions/runs/81/jobs",
+        )
+        .await,
+    )
+    .await;
     assert_eq!(jobs["total_count"], 1);
     let jobs = jobs["jobs"].as_array().expect("jobs");
     assert_eq!(jobs.len(), 1);
@@ -655,7 +661,12 @@ fn recon_fetched(issue_ids: &[i64], issues_complete: bool) -> FetchedRepository 
 
 /// Run one sync of acme/recon against the given upstream state, queued and
 /// pumped the way the background worker runs it.
-async fn sync_recon(db: toolkit_db::Db, ctx: &SecurityContext, upstream: FetchedRepository) {
+async fn sync_recon(
+    db: toolkit_db::Db,
+    ctx: &SecurityContext,
+    upstream: FetchedRepository,
+    force: bool,
+) {
     let service = common::service_with_github(
         db,
         "https://api.github.com",
@@ -665,7 +676,11 @@ async fn sync_recon(db: toolkit_db::Db, ctx: &SecurityContext, upstream: Fetched
     );
     let mut pump = common::SyncPump::take(&service).await;
     let router = router_for(service.clone(), ctx.clone());
-    let response = post(router, "/github-mirror/v1/repos/acme/recon/sync").await;
+    let response = post(
+        router,
+        &format!("/github-mirror/v1/repos/acme/recon/sync?timeline_scope=all&force={force}"),
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     assert_eq!(pump.drain(&service).await, 1, "the queued sync must run");
 }
@@ -691,13 +706,13 @@ async fn reconciliation_deletes_upstream_removals_but_only_from_complete_listing
     let db = common::inmem_db().await;
 
     // Sync 1: issues 11 and 12 exist upstream.
-    sync_recon(db.clone(), &ctx, recon_fetched(&[11, 12], true)).await;
+    sync_recon(db.clone(), &ctx, recon_fetched(&[11, 12], true), false).await;
     assert_eq!(recon_issue_ids(db.clone(), &ctx).await, vec![11, 12]);
 
     // Sync 2: issue 12 vanished upstream, but the listing was truncated —
     // absence proves nothing, so nothing may be deleted.
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    sync_recon(db.clone(), &ctx, recon_fetched(&[11], false)).await;
+    sync_recon(db.clone(), &ctx, recon_fetched(&[11], false), false).await;
     assert_eq!(
         recon_issue_ids(db.clone(), &ctx).await,
         vec![11, 12],
@@ -706,7 +721,7 @@ async fn reconciliation_deletes_upstream_removals_but_only_from_complete_listing
 
     // Sync 3: same upstream state, complete listing — now 12 goes.
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    sync_recon(db.clone(), &ctx, recon_fetched(&[11], true)).await;
+    sync_recon(db.clone(), &ctx, recon_fetched(&[11], true), false).await;
     assert_eq!(
         recon_issue_ids(db.clone(), &ctx).await,
         vec![11],
@@ -742,6 +757,7 @@ async fn derived_contributor_roles_accumulate_across_syncs() {
         db.clone(),
         &ctx,
         contributor_fetched(71, "alice", &["author"], "2026-05-01T00:00:00Z"),
+        false,
     )
     .await;
 
@@ -751,6 +767,7 @@ async fn derived_contributor_roles_accumulate_across_syncs() {
         db.clone(),
         &ctx,
         contributor_fetched(71, "alice", &["reviewer"], "2026-08-01T00:00:00Z"),
+        false,
     )
     .await;
 
@@ -806,6 +823,7 @@ async fn a_shorter_timeline_does_not_leave_the_previous_tail_behind() {
         db.clone(),
         &ctx,
         timeline_fetched(&["labeled", "commented", "assigned", "closed"]),
+        false,
     )
     .await;
 
@@ -815,6 +833,7 @@ async fn a_shorter_timeline_does_not_leave_the_previous_tail_behind() {
         db.clone(),
         &ctx,
         timeline_fetched(&["labeled", "assigned", "closed"]),
+        true,
     )
     .await;
 

@@ -4,7 +4,7 @@ mod common;
 
 use github_mirror::domain::ports::github::FetchOptions;
 use github_mirror::domain::repo::{ListingFilter, PageWindow, RepoRecord};
-use github_mirror::domain::scope::ScopeConfig;
+use github_mirror::domain::scope::{CollectionMode, ScopeConfig};
 use github_mirror::domain::service::SyncProgress;
 use toolkit_odata::ODataQuery;
 use uuid::Uuid;
@@ -14,7 +14,15 @@ const NAME: &str = "rust";
 const ISSUE_NUMBER: i64 = 11;
 const PULL_NUMBER: i64 = 12;
 const COMMIT_SHA: &str = "c1";
-const RUN_ID: i64 = 7;
+const RUN_ID: i64 = 81;
+
+fn collect_everything() -> ScopeConfig {
+    let mut scope = ScopeConfig::default();
+    scope.collection.actions = CollectionMode::All;
+    scope.collection.reactions = CollectionMode::All;
+    scope.collection.timeline = CollectionMode::All;
+    scope
+}
 
 fn repo(id: i64, name: &str) -> RepoRecord {
     RepoRecord {
@@ -182,7 +190,7 @@ async fn every_child_listing_of_a_shared_repository_stays_with_its_tenant() {
                 NAME,
                 &FetchOptions {
                     tenant_id: tenant.subject_tenant_id(),
-                    scope: ScopeConfig::default(),
+                    scope: collect_everything(),
                     force: false,
                     since: None,
                 },

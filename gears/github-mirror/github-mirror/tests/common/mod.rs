@@ -863,7 +863,7 @@ pub fn fetched_repository() -> FetchedRepository {
         workflow_jobs: vec![WorkflowJobRecord {
             id: 910,
             repo_id: 42,
-            run_id: 7,
+            run_id: 81,
             run_attempt: 1,
             name: "build".to_owned(),
             status: Some("completed".to_owned()),

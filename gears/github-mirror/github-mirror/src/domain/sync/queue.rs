@@ -268,7 +268,7 @@ impl TaskQueue {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::domain::scheduler::task::TaskPriority;
+    use crate::domain::sync::task::TaskPriority;
 
     fn all_phases() -> Vec<TaskPhase> {
         TaskPhase::iter().collect()

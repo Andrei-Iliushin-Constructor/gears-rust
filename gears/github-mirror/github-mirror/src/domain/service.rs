@@ -37,11 +37,11 @@ use super::repo::{
     SyncWriter, TagRecord, TagRepository, WorkflowJobRecord, WorkflowJobRepository,
     WorkflowRunRecord, WorkflowRunRepository,
 };
-use super::scheduler::{
+use super::scope::ScopeConfig;
+use super::sync::{
     ChangeGate, MirrorWorker, RepoPhaseRunner, RunState, SweepWatermark, TaskPhase, Worker,
     sweep_families,
 };
-use super::scope::ScopeConfig;
 use super::validate::{repo_full_name, validate_commit_sha};
 
 /// The gear's name, taken from the `#[toolkit::gear]` attribute so the
