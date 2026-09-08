@@ -201,7 +201,7 @@ pub async fn derive_from(
         .current_schema_projections(tx, scope, &artifact_bearing)
         .await?
         .into_iter()
-        .map(|row| (row.entity_id, row.resolution_fingerprint))
+        .map(|row| (row.entity_id, row.cas.resolution_fingerprint))
         .collect();
 
     for row in &dependents {

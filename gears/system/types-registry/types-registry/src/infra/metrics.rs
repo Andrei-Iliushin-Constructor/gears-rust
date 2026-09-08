@@ -34,6 +34,8 @@ const fn drift_label(drift: &VectorDrift) -> &'static str {
 /// The OpenTelemetry rendering of [`AdmissionMetrics`].
 #[derive(Debug)]
 pub struct AdmissionMetricsMeter {
+    /// Initial unchanged probes, by hit or miss.
+    unchanged_probes: Counter<u64>,
     /// Candidates terminalized by this pass, by status.
     candidates: Counter<u64>,
     /// `types_registry_refusals_total{stage,reason}`.
@@ -51,6 +53,10 @@ impl AdmissionMetricsMeter {
     #[must_use]
     pub fn new(meter: &Meter, prefix: &str) -> Self {
         Self {
+            unchanged_probes: meter
+                .u64_counter(format!("{prefix}_unchanged_probes_total"))
+                .with_description("Initial unchanged probes, by hit or miss")
+                .build(),
             candidates: meter
                 .u64_counter(format!("{prefix}_candidates_total"))
                 .with_description(
@@ -87,6 +93,10 @@ impl AdmissionMetricsMeter {
 }
 
 impl AdmissionMetrics for AdmissionMetricsMeter {
+    fn unchanged_probe(&self, hit: bool) {
+        self.unchanged_probes.add(1, &[KeyValue::new("hit", hit)]);
+    }
+
     fn candidate_terminalized(&self, status: TerminalStatus) {
         self.candidates
             .add(1, &[KeyValue::new("status", status.label())]);

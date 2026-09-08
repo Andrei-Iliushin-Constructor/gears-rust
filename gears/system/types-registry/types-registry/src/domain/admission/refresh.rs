@@ -179,8 +179,7 @@ pub async fn refresh_dependents(
                 entity_id,
             });
         };
-        let moved = expected.revision_no != current.revision_no
-            || expected.resolution_fingerprint != current.resolution_fingerprint;
+        let moved = expected != current.cas;
         if moved {
             return Err(WorkerError::RevalidationRequired(
                 VectorDrift::CurrentProjectionMoved {
@@ -188,7 +187,7 @@ pub async fn refresh_dependents(
                 },
             ));
         }
-        if current.resolution_fingerprint == artifacts.resolution_fingerprint {
+        if current.cas.resolution_fingerprint == artifacts.resolution_fingerprint {
             continue;
         }
 
@@ -199,7 +198,7 @@ pub async fn refresh_dependents(
                 scope,
                 NewCurrentTypeSchema {
                     entity_id,
-                    revision_no: current.revision_no,
+                    revision_no: current.cas.revision_no,
                     resolved_schema: artifacts.resolved_schema,
                     effective_traits: artifacts.effective_traits,
                     effective_traits_schema: artifacts.effective_traits_schema,

@@ -39,9 +39,9 @@ use tracing::{Instrument, Span};
 use uuid::Uuid;
 
 pub use super::errors::{ItemFailure, WorkerError};
-use super::unit::{
-    CommittedUnit, EvaluatedUnit, RevisionCommit, commit_creation, commit_revision, evaluate,
-};
+use super::revision::{CommittedUnit, RevisionCommit};
+use super::unchanged;
+use super::unit::{PreparedUnit, commit_creation, commit_revision, evaluate};
 use super::vector::VectorDrift;
 use crate::config::{Limits, WorkerSettings};
 use crate::domain::admission::AdmissionFailureReason;
@@ -180,10 +180,37 @@ const fn retryable_db_err(e: &WorkerError) -> Option<&sea_orm::DbErr> {
     }
 }
 
+async fn prepare(
+    stores: &Arc<dyn Stores>,
+    db: &DBProvider<WorkerError>,
+    scope: &AccessScope,
+    item: &OperationItemRow,
+    payload: &str,
+    tuning: Tuning<'_>,
+) -> Result<Result<PreparedUnit, ItemFailure>, WorkerError> {
+    let prepared = evaluate(
+        stores,
+        db,
+        scope,
+        &item.gts_id,
+        payload,
+        item.id,
+        tuning.limits,
+        Some(item),
+    )
+    .await?;
+    let hit = matches!(&prepared, Ok(PreparedUnit::Unchanged(_)));
+    tuning.metrics.unchanged_probe(hit);
+    if hit {
+        tracing::debug!(operation_item_id = item.id, gts_id = %item.gts_id, "types_registry unchanged probe hit");
+    }
+    Ok(prepared)
+}
+
 /// Groups the per-item commit inputs so the transaction boundary stays readable
 /// without crossing Clippy's argument-count threshold.
 struct CommitRequest<'a> {
-    evaluated: &'a Arc<EvaluatedUnit>,
+    prepared: &'a PreparedUnit,
     item: &'a OperationItemRow,
     now: OffsetDateTime,
     limits: Limits,
@@ -193,14 +220,14 @@ struct CommitRequest<'a> {
 /// Run the serialized commit transaction (SPEC step 4b).
 ///
 /// Its first statement claims `entity_write_order`, replacing the former family locks.
-async fn commit_evaluated(
+async fn commit_prepared(
     db: &DBProvider<WorkerError>,
     stores: &Arc<dyn Stores>,
     scope: &AccessScope,
     request: CommitRequest<'_>,
 ) -> Result<Result<RevisionCommit, ItemFailure>, WorkerError> {
     let CommitRequest {
-        evaluated,
+        prepared,
         item,
         now,
         limits,
@@ -228,28 +255,36 @@ async fn commit_evaluated(
     let tx_limits = limits;
     db.db()
         .transaction_with_retry(commit_write(&db.db()), retryable_db_err, |tx| {
-            let unit = Arc::clone(evaluated);
+            let prepared = prepared.clone();
             let tx_scope = tx_scope.clone();
             let tx_stores = Arc::clone(&tx_stores);
             let tx_metrics = Arc::clone(&tx_metrics);
             Box::pin(async move {
+                let unit = match &prepared {
+                    PreparedUnit::Unchanged(candidate) => {
+                        return unchanged::commit(
+                            tx_stores.as_ref(),
+                            tx,
+                            &tx_scope,
+                            candidate,
+                            now,
+                        )
+                        .await;
+                    }
+                    PreparedUnit::Evaluated(unit) => unit,
+                };
                 match precondition {
-                    Precondition::MustNotExist => commit_creation(
-                        tx_stores.as_ref(),
-                        tx,
-                        &tx_scope,
-                        unit.as_ref(),
-                        &tx_limits,
-                        now,
-                    )
-                    .await
-                    .map(|r| r.map(RevisionCommit::Admitted)),
+                    Precondition::MustNotExist => {
+                        commit_creation(tx_stores.as_ref(), tx, &tx_scope, unit, &tx_limits, now)
+                            .await
+                            .map(|r| r.map(RevisionCommit::Admitted))
+                    }
                     Precondition::Version(expected) => {
                         commit_revision(
                             tx_stores.as_ref(),
                             tx,
                             &tx_scope,
-                            unit.as_ref(),
+                            unit,
                             expected,
                             &tx_limits,
                             now,
@@ -285,21 +320,33 @@ async fn process_item(
 
     let attempts = tuning.worker.max_revalidation_attempts;
     let mut last_drift: Option<VectorDrift> = None;
+    // Probe once in the initial evaluation snapshot. A miss stays on ordinary
+    // evaluation even if a concurrent write makes the authored content identical.
+    let mut initial = if attempts > 0 {
+        Some(prepare(stores, db, scope, item, payload, tuning).await?)
+    } else {
+        None
+    };
     // Log attempts using one-based numbering.
     for attempt in 1..=attempts {
-        // Step 3: evaluation releases its snapshot before CPU-heavy validation.
-        let evaluated = match evaluate(
-            stores,
-            db,
-            scope,
-            &item.gts_id,
-            payload,
-            item.id,
-            tuning.limits,
-        )
-        .await?
-        {
-            Ok(evaluated) => Arc::new(evaluated),
+        let prepared = match initial.take() {
+            Some(prepared) => prepared,
+            None => {
+                evaluate(
+                    stores,
+                    db,
+                    scope,
+                    &item.gts_id,
+                    payload,
+                    item.id,
+                    tuning.limits,
+                    None,
+                )
+                .await?
+            }
+        };
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
             Err(failure) => {
                 return record_failure(
                     stores,
@@ -315,12 +362,12 @@ async fn process_item(
             }
         };
 
-        let committed = match commit_evaluated(
+        let committed = match commit_prepared(
             db,
             stores,
             scope,
             CommitRequest {
-                evaluated: &evaluated,
+                prepared: &prepared,
                 item,
                 now,
                 limits: *tuning.limits,

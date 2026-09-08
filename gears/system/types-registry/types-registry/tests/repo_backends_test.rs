@@ -454,12 +454,22 @@ async fn current_documents_reads_the_current_revision_only(
         revised_doc.raw_schema, second,
         "a document past any varchar bound must round-trip byte-identically on {backend}"
     );
+    assert_eq!(
+        revised_doc.content_hash,
+        vec![2],
+        "revision 2 digest on {backend}"
+    );
     assert!(revised_doc.raw_schema.len() > 60_000);
     let single_doc = docs
         .iter()
         .find(|d| d.entity_id == single.id)
         .expect("the single-revision entity's document");
     assert_eq!(single_doc.raw_schema, only);
+    assert_eq!(
+        single_doc.content_hash,
+        vec![1],
+        "revision 1 digest on {backend}"
+    );
 }
 
 async fn current_projections_read_every_named_entity_that_has_one(
@@ -503,7 +513,7 @@ async fn current_projections_read_every_named_entity_that_has_one(
     );
     for row in &states {
         assert_eq!(
-            row.resolution_fingerprint,
+            row.cas.resolution_fingerprint,
             vec![0x11],
             "the fingerprint must round-trip byte-identically on {backend}: the \
              guard compares it for equality and nothing else"

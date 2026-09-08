@@ -104,8 +104,8 @@ async fn admission_reads_select_revision_identity_and_authored_content_without_a
         .await
         .unwrap();
     assert_eq!(projections.len(), 1);
-    assert_eq!(projections[0].revision_no, 2);
-    assert_eq!(projections[0].resolution_fingerprint, vec![0x11]);
+    assert_eq!(projections[0].cas.revision_no, 2);
+    assert_eq!(projections[0].cas.resolution_fingerprint, vec![0x11]);
 
     let documents = db
         .transaction_with_config(snapshot_read(&db.db()), move |tx| {

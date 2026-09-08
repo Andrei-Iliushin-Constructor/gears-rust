@@ -271,8 +271,7 @@ pub struct CurrentTypeSchemaRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentSchemaProjection {
     pub entity_id: i64,
-    pub revision_no: i32,
-    pub resolution_fingerprint: Vec<u8>,
+    pub cas: CurrentSchemaCas,
 }
 
 /// The current authored document of one entity.
@@ -362,7 +361,7 @@ pub struct NewRevision {
 
 /// The revision and fingerprint a current-schema write expects to replace.
 #[domain_model]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentSchemaCas {
     pub revision_no: i32,
     pub resolution_fingerprint: Vec<u8>,

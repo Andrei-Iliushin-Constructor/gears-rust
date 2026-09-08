@@ -89,7 +89,7 @@ impl TypeSchemaRepo {
         let pointers = Self::current_projections(runner, scope, entity_ids).await?;
         let projections: HashMap<i64, Vec<u8>> = pointers
             .iter()
-            .map(|row| (row.entity_id, row.resolution_fingerprint.clone()))
+            .map(|row| (row.entity_id, row.cas.resolution_fingerprint.clone()))
             .collect();
 
         let mut out = Vec::with_capacity(pointers.len());
@@ -99,7 +99,7 @@ impl TypeSchemaRepo {
                 pairs = pairs.add(
                     Condition::all()
                         .add(type_schema_revision::Column::EntityId.eq(row.entity_id))
-                        .add(type_schema_revision::Column::RevisionNo.eq(row.revision_no)),
+                        .add(type_schema_revision::Column::RevisionNo.eq(row.cas.revision_no)),
                 );
             }
             let rows = type_schema_revision::Entity::find()
@@ -180,8 +180,10 @@ impl TypeSchemaRepo {
                 .await?;
             out.extend(rows.into_iter().map(|row| CurrentSchemaProjection {
                 entity_id: row.entity_id,
-                revision_no: row.revision_no,
-                resolution_fingerprint: row.resolution_fingerprint,
+                cas: CurrentSchemaCas {
+                    revision_no: row.revision_no,
+                    resolution_fingerprint: row.resolution_fingerprint,
+                },
             }));
         }
         // Sorted here rather than left to the chunk order, so a caller comparing two reads of the
