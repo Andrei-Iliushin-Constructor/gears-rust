@@ -347,19 +347,18 @@ impl ListingDirection {
 
 #[async_trait]
 pub trait IssueRepository: Send + Sync {
-    /// How many issues match `filter` in total, for the `Link` header's
-    /// `rel="last"` — it spans every page, so it cannot be read off one.
+    /// One page and the total that describes it.
     ///
-    /// Counted by its own query, so a write that lands between the count and
-    /// the page it accompanies leaves the two describing different instants:
-    /// the count may be one or two rows off the listing a caller is reading.
-    /// GitHub's own totals are eventually consistent in the same way.
-    async fn count_by_repo(
+    /// The total spans every page, so it cannot be read off one, and both
+    /// statements run on one transaction: the `Link` header's `rel="last"`
+    /// cannot be computed from a table state the returned rows never saw.
+    async fn page_by_repo(
         &self,
         scope: &AccessScope,
         repo_id: i64,
+        window: PageWindow,
         filter: ListingFilter,
-    ) -> Result<u64, DomainError>;
+    ) -> Result<(Vec<Issue>, u64), DomainError>;
     async fn upsert(
         &self,
         scope: &AccessScope,
@@ -437,13 +436,14 @@ pub struct PullRequestRecord {
 
 #[async_trait]
 pub trait PullRequestRepository: Send + Sync {
-    /// How many pull requests match `filter` in total.
-    async fn count_by_repo(
+    /// One page and the total that describes it, read on one transaction.
+    async fn page_by_repo(
         &self,
         scope: &AccessScope,
         repo_id: i64,
+        window: PageWindow,
         filter: ListingFilter,
-    ) -> Result<u64, DomainError>;
+    ) -> Result<(Vec<PullRequest>, u64), DomainError>;
     async fn upsert(
         &self,
         scope: &AccessScope,
@@ -496,14 +496,14 @@ pub struct CommitRecord {
 
 #[async_trait]
 pub trait CommitRepository: Send + Sync {
-    /// How many commits this repository has, counting only those committed
-    /// at or after `since` when one is given.
-    async fn count_by_repo(
+    /// One page and the total that describes it, read on one transaction.
+    async fn page_by_repo(
         &self,
         scope: &AccessScope,
         repo_id: i64,
+        window: PageWindow,
         since: Option<DateTime<Utc>>,
-    ) -> Result<u64, DomainError>;
+    ) -> Result<(Vec<Commit>, u64), DomainError>;
     async fn upsert(
         &self,
         scope: &AccessScope,
@@ -908,7 +908,13 @@ pub struct WorkflowRunRecord {
 pub trait WorkflowRunRepository: Send + Sync {
     /// How many runs this repository has in total, for GitHub's
     /// `total_count`, which spans every page rather than the current one.
-    async fn count_by_repo(&self, scope: &AccessScope, repo_id: i64) -> Result<u64, DomainError>;
+    /// One page and the total that describes it, read on one transaction.
+    async fn page_by_repo(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        window: PageWindow,
+    ) -> Result<(Vec<WorkflowRun>, u64), DomainError>;
     async fn upsert(
         &self,
         scope: &AccessScope,
@@ -1251,12 +1257,14 @@ pub struct WorkflowJobRecord {
 #[async_trait]
 pub trait WorkflowJobRepository: Send + Sync {
     /// How many jobs this run has in total, for GitHub's `total_count`.
-    async fn count_by_run(
+    /// One page and the total that describes it, read on one transaction.
+    async fn page_by_run(
         &self,
         scope: &AccessScope,
         repo_id: i64,
         run_id: i64,
-    ) -> Result<u64, DomainError>;
+        window: PageWindow,
+    ) -> Result<(Vec<WorkflowJob>, u64), DomainError>;
     async fn upsert(
         &self,
         scope: &AccessScope,
@@ -1329,12 +1337,14 @@ pub struct CheckRunRecord {
 pub trait CheckRunRepository: Send + Sync {
     /// How many check runs this commit has in total, for GitHub's
     /// `total_count`.
-    async fn count_by_commit(
+    /// One page and the total that describes it, read on one transaction.
+    async fn page_by_commit(
         &self,
         scope: &AccessScope,
         repo_id: i64,
         head_sha: &str,
-    ) -> Result<u64, DomainError>;
+        window: PageWindow,
+    ) -> Result<(Vec<CheckRun>, u64), DomainError>;
     async fn upsert(
         &self,
         scope: &AccessScope,
