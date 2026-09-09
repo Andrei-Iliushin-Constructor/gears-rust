@@ -261,7 +261,7 @@ impl GithubClient {
             if rate_limited && attempt < RATE_LIMIT_RETRIES {
                 let delay = retry_delay(response.headers(), attempt);
                 tracing::warn!(
-                    url = %redacted_word(&url),
+                    url = %redacted_word(url),
                     %status,
                     attempt,
                     delay_secs = delay.as_secs(),

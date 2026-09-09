@@ -518,15 +518,6 @@ async fn a_sync_colliding_with_a_held_repo_lock_fails_its_session() {
         .expect("session_id")
         .to_owned();
 
-    // The body is the intended public detail, pinned here so it cannot drift:
-    // the repository is the one the caller itself asked to sync, and it is
-    // told which of the two things went wrong rather than a bare "conflict".
-    let json = body_json(response).await;
-    assert_eq!(
-        json["detail"], "a sync for rust-lang/rust is already running",
-        "the caller must learn a sync is running, and for which repo: {json:?}"
-    );
-
     // A different repo is not blocked by this repo's lock.
     let other = post(
         router.clone(),

@@ -9,6 +9,7 @@
 //! slice 6 step 5).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -35,6 +36,31 @@ const STREAMED_PHASES: [TaskPhase; 3] = [
 ];
 
 const VERIFICATION_PHASES: [TaskPhase; 1] = [TaskPhase::Verification];
+
+/// Progress bands in permille, so the whole estimate stays integer.
+///
+/// DESIGN gives Discovery 2, Indexing 10, `ChangeDetection` 3, Refinement 80
+/// and Verification 5. `ChangeDetection` never gets a task of its own here:
+/// the change gate runs inline while a listing page is being indexed, so its
+/// three points join the listing band instead of sitting in a band that can
+/// never move.
+const DISCOVERY_SPAN: u64 = 20;
+const LISTING_BASE: u64 = DISCOVERY_SPAN;
+const LISTING_SPAN: u64 = 130;
+const REFINE_BASE: u64 = LISTING_BASE + LISTING_SPAN;
+const REFINE_SPAN: u64 = 800;
+const VERIFY_BASE: u64 = REFINE_BASE + REFINE_SPAN;
+const VERIFY_SPAN: u64 = 50;
+
+/// The finished fraction of `total` mapped onto `span` permille, where
+/// `remaining` is what is still pending or running.
+fn ramp(span: u64, total: u64, remaining: u64) -> u64 {
+    if total == 0 {
+        return 0;
+    }
+    span.saturating_mul(total.saturating_sub(remaining))
+        .div_euclid(total)
+}
 
 /// How one run went, in tasks.
 #[derive(Debug, Default)]
@@ -83,6 +109,7 @@ pub struct RepoPhaseRunner {
     tenant_id: Uuid,
     max_concurrent_tasks: usize,
     cancel: CancellationToken,
+    progress: Arc<AtomicU8>,
 }
 
 impl RepoPhaseRunner {
@@ -93,6 +120,7 @@ impl RepoPhaseRunner {
         tenant_id: Uuid,
         max_concurrent_tasks: usize,
         cancel: CancellationToken,
+        progress: Arc<AtomicU8>,
     ) -> Self {
         let mut dispatcher = WorkerDispatcher::new();
         for worker in workers {
@@ -105,7 +133,63 @@ impl RepoPhaseRunner {
             tenant_id,
             max_concurrent_tasks: max_concurrent_tasks.max(1),
             cancel,
+            progress,
         }
+    }
+
+    /// Work out the current percentage and publish it, keeping the published
+    /// value monotonically non-decreasing (PRD `cpt-cf-github-mirror-fr-progress`).
+    fn publish_progress(&self) {
+        let percent = u8::try_from(self.estimate_permille().div_euclid(10).min(100)).unwrap_or(100);
+        self.progress.fetch_max(percent, Ordering::Relaxed);
+    }
+
+    /// Where the run is, in permille, from the live queue counts.
+    ///
+    /// A band is only credited once its own count is final, so the estimate
+    /// never over-reports:
+    ///
+    /// - Discovery `[0, 20]` ramps on the one discovery task.
+    /// - Listing `[20, 150]` covers Indexing and `ChangeDetection` together.
+    ///   While it drains, Refinement is still being seeded page by page, so its
+    ///   total is not yet known and nothing above the listing band is credited.
+    /// - Refinement `[150, 950]` starts only once listing has drained and the
+    ///   seeded total is final. That total is exact for a first sync and for an
+    ///   incremental one, where the change gate seeds only what changed.
+    /// - Verification `[950, 1000]` follows.
+    ///
+    /// A phase with no task in this run takes no share: a repeat sync of an
+    /// unchanged repository seeds nothing to refine, so the estimate steps from
+    /// the listing band to the verification band the moment listing drains,
+    /// which is the first instant that emptiness can be known.
+    fn estimate_permille(&self) -> u64 {
+        let phase_counts = |phase| {
+            (
+                self.queue.count_for_phase(self.session_id, phase),
+                self.queue.remaining_count_for_phase(self.session_id, phase),
+            )
+        };
+
+        let (discovery_total, discovery_remaining) = phase_counts(TaskPhase::Discovery);
+        if discovery_total == 0 || discovery_remaining > 0 {
+            return ramp(DISCOVERY_SPAN, discovery_total, discovery_remaining);
+        }
+
+        let (indexing_total, indexing_remaining) = phase_counts(TaskPhase::Indexing);
+        let (gate_total, gate_remaining) = phase_counts(TaskPhase::ChangeDetection);
+        let listing_total = indexing_total + gate_total;
+        let listing_remaining = indexing_remaining + gate_remaining;
+        if listing_total == 0 || listing_remaining > 0 {
+            return LISTING_BASE + ramp(LISTING_SPAN, listing_total, listing_remaining);
+        }
+
+        let (refine_total, refine_remaining) = phase_counts(TaskPhase::Refinement);
+        if refine_remaining > 0 {
+            return REFINE_BASE + ramp(REFINE_SPAN, refine_total, refine_remaining);
+        }
+
+        let (verify_total, verify_remaining) = phase_counts(TaskPhase::Verification);
+        VERIFY_BASE + ramp(VERIFY_SPAN, verify_total, verify_remaining)
     }
 
     /// Seed the Discovery task and drain every phase in order.
@@ -154,6 +238,7 @@ impl RepoPhaseRunner {
             while let Some(outcome) = in_flight.try_join_next() {
                 Self::account(outcome, report);
             }
+            self.publish_progress();
 
             let saturated = in_flight.len() >= self.max_concurrent_tasks
                 || (self.queue.pending_count(self.session_id) >= BACKPRESSURE_HIGH
@@ -180,6 +265,7 @@ impl RepoPhaseRunner {
         while let Some(outcome) = in_flight.join_next().await {
             Self::account(outcome, report);
         }
+        self.publish_progress();
     }
 
     /// Take one task, starting from the lane after the last one served, so a

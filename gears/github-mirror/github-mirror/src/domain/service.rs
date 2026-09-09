@@ -222,10 +222,6 @@ pub(crate) mod session_states {
     pub const INTERRUPTED: &str = "interrupted";
 }
 
-/// Progress reached once the GitHub fetch has returned. The fetch is the
-/// whole network leg of a sync, so it carries most of the wall-clock time
-/// but reports nothing while it runs.
-const PROGRESS_FETCHED: u8 = 20;
 /// Progress once every mirrored table has been written.
 const PROGRESS_STORED: u8 = 95;
 /// How often the run persists its progress while it is working.
@@ -238,11 +234,9 @@ const RESUME_LIMIT: u64 = 500;
 /// heartbeat can read it without touching the running fetch (DESIGN §4
 /// "Progress"). Values are clamped monotonically non-decreasing.
 ///
-/// The milestones are coarse — queued, fetched, stored, done — because
-/// today's sync has two stages and the fetch, which dominates the wall
-/// clock, reports nothing while it runs. DESIGN's phase-weighted split
-/// (Discovery 2 / Indexing 10 / `ChangeDetection` 3 / Refinement 80 /
-/// Verification 5) arrives with the 5-phase runner in #4632 slice 6.
+/// While the phases run, `RepoPhaseRunner` publishes the phase-weighted
+/// estimate into this atomic after every task it finishes; the milestones
+/// below only cover what happens after the runner returns.
 #[derive(Debug)]
 pub struct SyncProgress {
     percent: Arc<AtomicU8>,
@@ -275,11 +269,6 @@ impl SyncProgress {
 
     fn raise_to(&self, value: u8) {
         self.percent.fetch_max(value, Ordering::Relaxed);
-    }
-
-    /// The GitHub fetch has returned; storage is about to begin.
-    pub(crate) fn fetched(&self) {
-        self.raise_to(PROGRESS_FETCHED);
     }
 
     /// Every mirrored table has been written.
@@ -3638,6 +3627,7 @@ impl Service {
             run.tenant_id,
             self.config.max_concurrent_tasks,
             cancel.child_token(),
+            progress.handle(),
         );
         let mut report = tokio::time::timeout(SYNC_FETCH_BUDGET, runner.run())
             .await
@@ -3649,8 +3639,6 @@ impl Service {
                     SYNC_FETCH_BUDGET.as_secs()
                 ))
             })?;
-        progress.fetched();
-
         // Discovery failing is the repository failing: GitHub's own answer
         // (404, 403 ...) is the sync's outcome, not a task statistic.
         if let Some(discovery) = report
