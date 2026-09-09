@@ -80,6 +80,51 @@ fn non_uuid_owner_fails_closed() {
     assert!(matches!(err, ChatEngineError::NotFound { .. }));
 }
 
+/// A denial is deliberately indistinguishable from "no such session" on the
+/// wire (404, ADR-0021), so the WARN is the only signal an operator has that a
+/// caller was refused someone else's session. Pin that it carries the session
+/// and the rejected subject.
+#[test]
+#[tracing_test::traced_test]
+fn ownership_denial_is_logged_for_operators() {
+    let tenant = Uuid::new_v4();
+    let row = session(tenant, Uuid::new_v4());
+    let caller = ctx(Uuid::new_v4(), tenant);
+
+    ensure_session_owner(&caller, &row).expect_err("a stranger must be refused");
+
+    assert!(
+        logs_contain("session ownership check failed"),
+        "the denial must be logged",
+    );
+    assert!(
+        logs_contain(&format!("session_id={}", row.session_id)),
+        "the log must name the session that was refused",
+    );
+    assert!(
+        logs_contain(&format!("subject_id={}", caller.subject_id())),
+        "the log must name the rejected subject",
+    );
+    assert!(
+        logs_contain(&format!("subject_tenant_id={tenant}")),
+        "the log must name the rejected subject's tenant",
+    );
+}
+
+/// The owner's path must stay silent — a WARN per successful read would be
+/// noise, and would bury the real denials.
+#[test]
+#[tracing_test::traced_test]
+fn an_authorized_read_logs_nothing() {
+    let tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+    ensure_session_owner(&ctx(user, tenant), &session(tenant, user)).expect("owner passes");
+    assert!(
+        !logs_contain("session ownership check failed"),
+        "an authorized read must not log a denial",
+    );
+}
+
 // --------------------------------------------------------------------------
 // caller_scope
 // --------------------------------------------------------------------------

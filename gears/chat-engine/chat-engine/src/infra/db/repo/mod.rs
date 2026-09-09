@@ -52,3 +52,7 @@ pub(crate) fn parse_owner_uuid(
         ))
     })
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod mod_tests;

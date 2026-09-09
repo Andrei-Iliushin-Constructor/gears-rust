@@ -45,15 +45,20 @@ use crate::domain::session::Session;
 pub fn ensure_session_owner(ctx: &SecurityContext, session: &Session) -> Result<()> {
     let owner_id = Uuid::parse_str(session.user_id.as_str()).ok();
     let owner_tenant_id = Uuid::parse_str(session.tenant_id.as_str()).ok();
+    // Bound once and reused by both the comparison and the denial log: a
+    // method call inside `warn!` is also evaluated in a macro branch that a
+    // normal subscriber never takes, which reads as dead code to coverage.
+    let subject_id = ctx.subject_id();
+    let subject_tenant_id = ctx.subject_tenant_id();
 
-    if owner_id == Some(ctx.subject_id()) && owner_tenant_id == Some(ctx.subject_tenant_id()) {
+    if owner_id == Some(subject_id) && owner_tenant_id == Some(subject_tenant_id) {
         return Ok(());
     }
 
     warn!(
         session_id = %session.session_id,
-        subject_id = %ctx.subject_id(),
-        subject_tenant_id = %ctx.subject_tenant_id(),
+        %subject_id,
+        %subject_tenant_id,
         "session ownership check failed - responding 404 (anti-enumeration)",
     );
     Err(ChatEngineError::not_found("session", session.session_id))
