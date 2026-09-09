@@ -405,7 +405,7 @@ async fn every_link_relation_carries_the_filters_the_caller_sent() {
 }
 
 #[tokio::test]
-async fn the_last_reachable_page_offers_no_next_link() {
+async fn the_offset_bound_and_its_links_agree_at_every_page_size() {
     let ctx = common::caller_in(Uuid::new_v4());
     let service = common::service("https://api.github.com").await;
     service
@@ -419,34 +419,101 @@ async fn the_last_reachable_page_offers_no_next_link() {
 
     let router = router_for(service, ctx);
 
-    // The furthest page the offset bound allows at this page size: with
-    // per_page=100 that is offset 9_900, exactly PageWindow::MAX_OFFSET.
-    let response = get(
-        router.clone(),
-        "/repos/acme/widget/issues?per_page=100&page=100&state=all",
-    )
-    .await;
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "page 100 at per_page=100 starts at row 9,900, the last allowed offset"
-    );
-    if let Some(links) = response.headers().get(axum::http::header::LINK) {
-        let links = links.to_str().unwrap();
+    // 9_900 divides by 30 and 100 but not by 33, so the last reachable page
+    // is one further where the division leaves a remainder: the bound is on
+    // the offset, not on the last row.
+    for (per_page, last_page) in [(30_u64, 331_u64), (33, 301), (100, 100)] {
         assert!(
-            !links.contains(r#"rel="next""#),
-            "the last reachable page must not advertise a page the gear refuses: {links}"
+            (last_page - 1) * per_page <= 9_900,
+            "per_page={per_page}: page {last_page} must start at or before row 9,900"
+        );
+        assert!(
+            last_page * per_page > 9_900,
+            "per_page={per_page}: page {} must start past it",
+            last_page + 1
+        );
+
+        let ok = get(
+            router.clone(),
+            &format!("/repos/acme/widget/issues?per_page={per_page}&page={last_page}&state=all"),
+        )
+        .await;
+        assert_eq!(
+            ok.status(),
+            StatusCode::OK,
+            "per_page={per_page}: page {last_page} is the last reachable one"
+        );
+        if let Some(links) = ok.headers().get(axum::http::header::LINK) {
+            let links = links.to_str().unwrap();
+            assert!(
+                !links.contains(r#"rel="next""#),
+                "per_page={per_page}: the last reachable page must not link past itself: {links}"
+            );
+        }
+
+        let refused = get(
+            router.clone(),
+            &format!(
+                "/repos/acme/widget/issues?per_page={per_page}&page={}&state=all",
+                last_page + 1
+            ),
+        )
+        .await;
+        assert_eq!(
+            refused.status(),
+            StatusCode::BAD_REQUEST,
+            "per_page={per_page}: page {} starts past the offset bound",
+            last_page + 1
         );
     }
+}
 
-    // One page further is refused, which is what makes the missing `next`
-    // above the right answer rather than a coincidence.
+#[tokio::test]
+async fn a_since_filter_round_trips_through_every_link_relation() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let service = common::service("https://api.github.com").await;
+    service
+        .upsert_repo(&ctx, repo_record())
+        .await
+        .expect("repo seed must succeed");
+    for number in 1..=5 {
+        service
+            .upsert_issue(
+                &ctx,
+                "acme",
+                "widget",
+                issue_record(number, number, "open one"),
+            )
+            .await
+            .expect("issue seed must succeed");
+    }
+
+    let router = router_for(service, ctx);
+
+    // Page 2 of 3 again, this time with a `since` whose encoded form (the
+    // `:` become `%3A`) has to survive the round trip.
     let response = get(
         router,
-        "/repos/acme/widget/issues?per_page=100&page=101&state=all",
+        "/repos/acme/widget/issues?per_page=2&page=2&since=2020-01-01T00:00:00Z",
     )
     .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
+    let links = response
+        .headers()
+        .get(axum::http::header::LINK)
+        .expect("a paginated listing must link")
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    for relation in ["next", "prev", "first", "last"] {
+        assert!(links.contains(&format!(r#"rel="{relation}""#)), "{links}");
+    }
+    assert_eq!(
+        links.matches("&since=2020-01-01T00%3A00%3A00Z>").count(),
+        4,
+        "every relation must carry the same encoded since: {links}"
+    );
 }
 
 #[tokio::test]

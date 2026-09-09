@@ -21,6 +21,7 @@ use crate::domain::repo::{
 };
 use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache, NoCache};
 use crate::infra::github::pagination::parse_link_next;
+use crate::redact::redacted_word;
 
 /// Items asked for per request. GitHub's maximum, so a listing of a given
 /// size costs the fewest requests.
@@ -260,7 +261,7 @@ impl GithubClient {
             if rate_limited && attempt < RATE_LIMIT_RETRIES {
                 let delay = retry_delay(response.headers(), attempt);
                 tracing::warn!(
-                    %url,
+                    url = %redacted_word(&url),
                     %status,
                     attempt,
                     delay_secs = delay.as_secs(),

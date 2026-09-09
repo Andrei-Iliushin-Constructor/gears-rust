@@ -150,6 +150,10 @@ fn map_scope_error(e: ScopeError) -> DomainError {
         ScopeError::TenantNotInScope { tenant_id } => {
             DomainError::forbidden(format!("tenant {tenant_id} not in scope"))
         }
+        // `ScopeError` is `#[non_exhaustive]`: variants this gear has no
+        // specific answer for (today the graph-query refusals, which it can
+        // never trigger) map to an internal error, like `Invalid`.
+        other => DomainError::internal(format!("scope invalid: {other}")),
     }
 }
 
@@ -250,14 +254,24 @@ fn issue_active_model(tenant_id: Uuid, r: &IssueRecord) -> issues::ActiveModel {
 
 #[async_trait]
 impl IssueRepository for SeaOrmIssueRepository {
-    async fn count_by_repo(
+    async fn page_by_repo(
         &self,
         scope: &AccessScope,
         repo_id: i64,
+        window: PageWindow,
         filter: ListingFilter,
-    ) -> Result<u64, DomainError> {
-        let conn = self.db.conn()?;
-        issue_count_by_repo_in(&conn, scope, repo_id, filter).await
+    ) -> Result<(Vec<Issue>, u64), DomainError> {
+        let scope = scope.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    let items = issue_list_by_repo_in(tx, &scope, repo_id, window, filter).await?;
+                    let total = issue_count_by_repo_in(tx, &scope, repo_id, filter).await?;
+                    Ok((items, total))
+                })
+            })
+            .await
     }
 
     async fn delete_stale(
@@ -348,14 +362,25 @@ fn pull_request_active_model(tenant_id: Uuid, r: &PullRequestRecord) -> pull_req
 
 #[async_trait]
 impl PullRequestRepository for SeaOrmPullRequestRepository {
-    async fn count_by_repo(
+    async fn page_by_repo(
         &self,
         scope: &AccessScope,
         repo_id: i64,
+        window: PageWindow,
         filter: ListingFilter,
-    ) -> Result<u64, DomainError> {
-        let conn = self.db.conn()?;
-        pull_request_count_by_repo_in(&conn, scope, repo_id, filter).await
+    ) -> Result<(Vec<PullRequest>, u64), DomainError> {
+        let scope = scope.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    let items =
+                        pull_request_list_by_repo_in(tx, &scope, repo_id, window, filter).await?;
+                    let total = pull_request_count_by_repo_in(tx, &scope, repo_id, filter).await?;
+                    Ok((items, total))
+                })
+            })
+            .await
     }
 
     async fn delete_stale(
@@ -428,14 +453,24 @@ fn commit_active_model(tenant_id: Uuid, r: &CommitRecord) -> commits::ActiveMode
 
 #[async_trait]
 impl CommitRepository for SeaOrmCommitRepository {
-    async fn count_by_repo(
+    async fn page_by_repo(
         &self,
         scope: &AccessScope,
         repo_id: i64,
+        window: PageWindow,
         since: Option<DateTimeUtc>,
-    ) -> Result<u64, DomainError> {
-        let conn = self.db.conn()?;
-        commit_count_by_repo_in(&conn, scope, repo_id, since).await
+    ) -> Result<(Vec<Commit>, u64), DomainError> {
+        let scope = scope.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    let items = commit_list_by_repo_in(tx, &scope, repo_id, window, since).await?;
+                    let total = commit_count_by_repo_in(tx, &scope, repo_id, since).await?;
+                    Ok((items, total))
+                })
+            })
+            .await
     }
 
     async fn delete_stale(
@@ -994,9 +1029,23 @@ fn workflow_run_active_model(tenant_id: Uuid, r: &WorkflowRunRecord) -> workflow
 
 #[async_trait]
 impl WorkflowRunRepository for SeaOrmWorkflowRunRepository {
-    async fn count_by_repo(&self, scope: &AccessScope, repo_id: i64) -> Result<u64, DomainError> {
-        let conn = self.db.conn()?;
-        workflow_run_count_by_repo_in(&conn, scope, repo_id).await
+    async fn page_by_repo(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        window: PageWindow,
+    ) -> Result<(Vec<WorkflowRun>, u64), DomainError> {
+        let scope = scope.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    let items = workflow_run_list_by_repo_in(tx, &scope, repo_id, window).await?;
+                    let total = workflow_run_count_by_repo_in(tx, &scope, repo_id).await?;
+                    Ok((items, total))
+                })
+            })
+            .await
     }
 
     async fn upsert(
@@ -1533,14 +1582,25 @@ fn workflow_job_active_model(tenant_id: Uuid, r: &WorkflowJobRecord) -> workflow
 
 #[async_trait]
 impl WorkflowJobRepository for SeaOrmWorkflowJobRepository {
-    async fn count_by_run(
+    async fn page_by_run(
         &self,
         scope: &AccessScope,
         repo_id: i64,
         run_id: i64,
-    ) -> Result<u64, DomainError> {
-        let conn = self.db.conn()?;
-        workflow_job_count_by_run_in(&conn, scope, repo_id, run_id).await
+        window: PageWindow,
+    ) -> Result<(Vec<WorkflowJob>, u64), DomainError> {
+        let scope = scope.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    let items =
+                        workflow_job_list_by_run_in(tx, &scope, repo_id, run_id, window).await?;
+                    let total = workflow_job_count_by_run_in(tx, &scope, repo_id, run_id).await?;
+                    Ok((items, total))
+                })
+            })
+            .await
     }
 
     async fn upsert(
@@ -1652,14 +1712,27 @@ fn check_run_active_model(tenant_id: Uuid, r: &CheckRunRecord) -> check_runs::Ac
 
 #[async_trait]
 impl CheckRunRepository for SeaOrmCheckRunRepository {
-    async fn count_by_commit(
+    async fn page_by_commit(
         &self,
         scope: &AccessScope,
         repo_id: i64,
         head_sha: &str,
-    ) -> Result<u64, DomainError> {
-        let conn = self.db.conn()?;
-        check_run_count_by_commit_in(&conn, scope, repo_id, head_sha).await
+        window: PageWindow,
+    ) -> Result<(Vec<CheckRun>, u64), DomainError> {
+        let scope = scope.clone();
+        let head_sha = head_sha.to_owned();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    let items =
+                        check_run_list_by_commit_in(tx, &scope, repo_id, &head_sha, window).await?;
+                    let total =
+                        check_run_count_by_commit_in(tx, &scope, repo_id, &head_sha).await?;
+                    Ok((items, total))
+                })
+            })
+            .await
     }
 
     async fn upsert(
@@ -1999,6 +2072,7 @@ async fn issue_list_by_repo_in<C: DBRunner>(
         .order_by(sort_column, direction)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(issues::Column::Number, Order::Asc)
+        .order_by(issues::Column::Id, Order::Asc)
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -2200,6 +2274,7 @@ async fn pull_request_list_by_repo_in<C: DBRunner>(
         .order_by(sort_column, direction)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(pull_requests::Column::Number, Order::Asc)
+        .order_by(pull_requests::Column::Id, Order::Asc)
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -2737,6 +2812,7 @@ async fn label_list_by_repo_in<C: DBRunner>(
         .scope_with(scope)
         .filter(sea_orm::Condition::all().add(labels::Column::RepoId.eq(repo_id)))
         .order_by(labels::Column::Name, Order::Asc)
+        .order_by(labels::Column::Id, Order::Asc)
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -2837,6 +2913,7 @@ async fn milestone_list_by_repo_in<C: DBRunner>(
         .scope_with(scope)
         .filter(sea_orm::Condition::all().add(milestones::Column::RepoId.eq(repo_id)))
         .order_by(milestones::Column::Number, Order::Asc)
+        .order_by(milestones::Column::Id, Order::Asc)
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)

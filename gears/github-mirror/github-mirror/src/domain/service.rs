@@ -803,18 +803,14 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let items = self
+        let (items, total) = self
             .issues
-            .list_by_repo(&scope, repository.id, window, filter)
+            .page_by_repo(&scope, repository.id, window, filter)
             .await?;
 
         // Counted on the scope and repository already resolved above: the
         // GitHub-compatible listings report a total, and doing it here saves
         // a second policy evaluation and repository lookup per request.
-        let total = self
-            .issues
-            .count_by_repo(&scope, repository.id, filter)
-            .await?;
 
         Ok((
             Page::new(
@@ -906,18 +902,14 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let items = self
+        let (items, total) = self
             .pull_requests
-            .list_by_repo(&scope, repository.id, window, filter)
+            .page_by_repo(&scope, repository.id, window, filter)
             .await?;
 
         // Counted on the scope and repository already resolved above: the
         // GitHub-compatible listings report a total, and doing it here saves
         // a second policy evaluation and repository lookup per request.
-        let total = self
-            .pull_requests
-            .count_by_repo(&scope, repository.id, filter)
-            .await?;
 
         Ok((
             Page::new(
@@ -1005,18 +997,14 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let items = self
+        let (items, total) = self
             .commits
-            .list_by_repo(&scope, repository.id, window, since)
+            .page_by_repo(&scope, repository.id, window, since)
             .await?;
 
         // Counted on the scope and repository already resolved above: the
         // GitHub-compatible listings report a total, and doing it here saves
         // a second policy evaluation and repository lookup per request.
-        let total = self
-            .commits
-            .count_by_repo(&scope, repository.id, since)
-            .await?;
 
         Ok((
             Page::new(
@@ -1792,17 +1780,12 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let items = self
+        // Both statements run on one transaction, and on the scope and
+        // repository already resolved above: the total describes the page it
+        // is returned with, and one policy evaluation covers both.
+        let (items, total) = self
             .workflow_runs
-            .list_by_repo(&scope, repository.id, window)
-            .await?;
-
-        // Counted on the scope and repository already resolved above: the
-        // GitHub-compatible listings report a total, and doing it here saves
-        // a second policy evaluation and repository lookup per request.
-        let total = self
-            .workflow_runs
-            .count_by_repo(&scope, repository.id)
+            .page_by_repo(&scope, repository.id, window)
             .await?;
 
         Ok((
@@ -2658,17 +2641,11 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let items = self
+        // Both statements run on one transaction, and on the scope and
+        // repository already resolved above.
+        let (items, total) = self
             .workflow_jobs
-            .list_by_run(&scope, repository.id, run_id, window)
-            .await?;
-
-        // Counted on the scope and repository already resolved above: the
-        // GitHub-compatible listings report a total, and doing it here saves
-        // a second policy evaluation and repository lookup per request.
-        let total = self
-            .workflow_jobs
-            .count_by_run(&scope, repository.id, run_id)
+            .page_by_run(&scope, repository.id, run_id, window)
             .await?;
 
         Ok((
@@ -2842,17 +2819,11 @@ impl Service {
             .await?
             .ok_or(DomainError::NotFound)?;
 
-        let items = self
+        // Both statements run on one transaction, and on the scope and
+        // repository already resolved above.
+        let (items, total) = self
             .check_runs
-            .list_by_commit(&scope, repository.id, head_sha, window)
-            .await?;
-
-        // Counted on the scope and repository already resolved above: the
-        // GitHub-compatible listings report a total, and doing it here saves
-        // a second policy evaluation and repository lookup per request.
-        let total = self
-            .check_runs
-            .count_by_commit(&scope, repository.id, head_sha)
+            .page_by_commit(&scope, repository.id, head_sha, window)
             .await?;
 
         Ok((
@@ -3605,6 +3576,19 @@ impl Service {
         let sync_lock = match self.db.db().lock(GEAR_NAME, &lock_key).await {
             Ok(guard) => guard,
             Err(toolkit_db::DbError::Lock(toolkit_db::DbLockError::AlreadyHeld { .. })) => {
+                // Logged as well as returned: on the file-marker backend the
+                // library takes no lock back automatically (a TTL or a PID
+                // check can steal a live one), so a marker left by a killed
+                // process keeps answering 409 until someone removes it. The
+                // key is what an operator needs to find it.
+                // The repository, not the composite key: the key carries the
+                // tenant id, which is an authorization identifier and not
+                // something every log consumer needs to see.
+                tracing::warn!(
+                    owner,
+                    name,
+                    "sync lock already held; a repeated 409 with no sync                      running means a stale marker for this repository"
+                );
                 return Err(DomainError::Conflict(format!(
                     "a sync for {owner}/{name} is already running"
                 )));
