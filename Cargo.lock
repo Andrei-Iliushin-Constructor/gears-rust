@@ -1615,6 +1615,7 @@ dependencies = [
  "tokio-util",
  "tower",
  "tracing",
+ "tracing-test",
  "url",
  "utoipa",
  "uuid",
