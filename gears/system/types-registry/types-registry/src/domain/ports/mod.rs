@@ -265,6 +265,15 @@ pub struct CurrentTypeSchemaRow {
     pub updated_at: OffsetDateTime,
 }
 
+/// Current revision and artifact identity, without the materialized documents.
+/// Used by admission guards and refresh to compare state without loading artifacts.
+#[domain_model]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CurrentSchemaProjection {
+    pub entity_id: i64,
+    pub cas: CurrentSchemaCas,
+}
+
 /// The current authored document of one entity.
 ///
 /// This is the *authored* document on the revision, never the materialized
@@ -352,7 +361,7 @@ pub struct NewRevision {
 
 /// The revision and fingerprint a current-schema write expects to replace.
 #[domain_model]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentSchemaCas {
     pub revision_no: i32,
     pub resolution_fingerprint: Vec<u8>,
@@ -595,13 +604,14 @@ pub trait TypeSchemaStore: Send + Sync {
         entity_id: i64,
     ) -> Result<Option<CurrentTypeSchemaRow>, ScopeError>;
 
-    /// The current-state rows of many entities in one read, `entity_id`-sorted.
-    async fn current_schemas(
+    /// Current revision numbers and fingerprints, `entity_id`-sorted, without artifacts.
+    /// Entities with no current row are simply absent.
+    async fn current_schema_projections(
         &self,
         tx: &DbTx<'_>,
         scope: &AccessScope,
         entity_ids: &[i64],
-    ) -> Result<Vec<CurrentTypeSchemaRow>, ScopeError>;
+    ) -> Result<Vec<CurrentSchemaProjection>, ScopeError>;
 
     async fn insert_schema_revision(
         &self,

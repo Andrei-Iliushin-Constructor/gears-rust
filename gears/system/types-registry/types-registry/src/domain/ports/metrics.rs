@@ -62,6 +62,9 @@ impl TryFrom<OperationItemStatus> for TerminalStatus {
 
 /// The admission path's instrument set.
 pub trait AdmissionMetrics: std::fmt::Debug + Send + Sync {
+    /// Count initial unchanged probes by hit or miss.
+    fn unchanged_probe(&self, hit: bool);
+
     /// Count candidates terminalized by this pass, by status.
     fn candidate_terminalized(&self, status: TerminalStatus);
 
@@ -84,6 +87,8 @@ pub trait AdmissionMetrics: std::fmt::Debug + Send + Sync {
 pub struct NoopMetrics;
 
 impl AdmissionMetrics for NoopMetrics {
+    fn unchanged_probe(&self, _hit: bool) {}
+
     fn candidate_terminalized(&self, _status: TerminalStatus) {}
 
     fn refused(&self, _stage: RefusalStage, _reason: &'static str) {}

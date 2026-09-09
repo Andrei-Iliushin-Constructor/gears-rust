@@ -17,9 +17,11 @@ mod bounds;
 mod drift;
 mod errors;
 mod reasons;
+mod unchanged;
 
 pub mod fingerprint;
 pub mod refresh;
+pub mod revision;
 pub mod unit;
 pub mod vector;
 pub mod worker;

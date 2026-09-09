@@ -336,10 +336,15 @@ async fn a_pass_that_loses_the_item_cas_writes_nothing_at_all() {
         &payload,
         item.id,
         &common::limits(),
+        None,
     )
     .await
     .expect("evaluation")
     .expect("the candidate is valid");
+    let types_registry::domain::admission::unit::PreparedUnit::Evaluated(evaluated) = evaluated
+    else {
+        panic!("the probe was disabled");
+    };
 
     // Meanwhile the other pass terminalizes the item.
     let recorded = provider

@@ -22,8 +22,9 @@ use common::{
 use types_registry::config::{TypesRegistryConfig, WorkerSettings};
 use types_registry::domain::admission::AdmissionFailureReason;
 use types_registry::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
+use types_registry::domain::admission::revision::RevisionCommit;
 use types_registry::domain::admission::unit::{
-    EvaluatedUnit, RevisionCommit, commit_creation, commit_revision, evaluate,
+    EvaluatedUnit, commit_creation, commit_revision, evaluate,
 };
 use types_registry::domain::admission::vector::{VectorDrift, VectorRole};
 use types_registry::domain::admission::worker::{
@@ -212,10 +213,15 @@ async fn submitted(
         &payload,
         item.id,
         &common::limits(),
+        None,
     )
     .await
     .expect("evaluation must not fail on infrastructure")
     .expect("the candidate is valid");
+    let types_registry::domain::admission::unit::PreparedUnit::Evaluated(unit) = unit else {
+        panic!("the probe was disabled");
+    };
+    let unit = Arc::unwrap_or_clone(unit);
     (operation_id, unit)
 }
 
@@ -578,6 +584,166 @@ where
     pass.await
         .expect("the pass task must not panic")
         .expect("the worker must not fail on infrastructure")
+}
+
+#[tokio::test]
+async fn unchanged_probe_cannot_hide_a_concurrent_content_revision() {
+    let dir = TestDir::new("types-registry-unchanged-race");
+    let db = test_db_file(&dir.path().join("registry.db")).await;
+    admit(&db, "base", BASE, base_schema("name"), None).await;
+    let operation_id = submit(&db, "same", BASE, base_schema("name"), Some(1))
+        .await
+        .expect("acceptance");
+    let mutating = Arc::clone(&db);
+    let outcome = admit_with_a_mutation_in_the_gap(
+        &db,
+        worker_settings(),
+        operation_id,
+        move || async move {
+            admit(&mutating, "changed", BASE, base_schema("label"), Some(1)).await;
+        },
+    )
+    .await;
+    let item = &outcome.items[0];
+    assert_eq!(item.status, OperationItemStatus::Failed);
+    assert_eq!(
+        item.failure.as_ref().expect("refusal").reason,
+        AdmissionFailureReason::PreconditionFailed
+    );
+    assert_eq!(item.revision_no, None);
+    assert_eq!(entity(&db, BASE).await.resource_version, 2);
+    assert_eq!(current(&db, BASE).await.revision_no, 2);
+    assert!(current(&db, BASE).await.resolved_schema.contains("label"));
+}
+
+#[tokio::test]
+async fn unchanged_probe_refuses_an_entity_replaced_at_the_same_version() {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use toolkit_db::secure::SecureDeleteExt;
+    use types_registry::infra::storage::entity::entity as entity_row;
+
+    let dir = TestDir::new("types-registry-unchanged-replaced");
+    let db = test_db_file(&dir.path().join("registry.db")).await;
+    admit(&db, "base", BASE, base_schema("name"), None).await;
+    let before = entity(&db, BASE).await;
+    let operation_id = submit(&db, "same", BASE, base_schema("name"), Some(1))
+        .await
+        .expect("acceptance");
+    let mutating = Arc::clone(&db);
+    let outcome = admit_with_a_mutation_in_the_gap(
+        &db,
+        worker_settings(),
+        operation_id,
+        move || async move {
+            // Simulate purge and re-registration while the proof holds no lock.
+            worker(&mutating)
+                .transaction(move |tx| {
+                    Box::pin(async move {
+                        CoordinationStateRepo::claim_entity_write_order(tx, &allow_all(), LATER)
+                            .await?;
+                        let deleted = entity_row::Entity::delete_many()
+                            .filter(entity_row::Column::Id.eq(before.id))
+                            .secure()
+                            .scope_with(&allow_all())
+                            .exec(tx)
+                            .await?;
+                        assert_eq!(deleted.rows_affected, 1);
+                        Ok(())
+                    })
+                })
+                .await
+                .expect("purge");
+            let replacement =
+                admit(&mutating, "replacement", BASE, base_schema("label"), None).await;
+            assert_eq!(replacement.items[0].status, OperationItemStatus::Succeeded);
+            let after = entity(&mutating, BASE).await;
+            assert_ne!(after.id, before.id);
+            assert_eq!(after.resource_version, before.resource_version);
+        },
+    )
+    .await;
+    let item = &outcome.items[0];
+    assert_eq!(item.status, OperationItemStatus::Failed);
+    assert_eq!(
+        item.failure.as_ref().expect("refusal").reason,
+        AdmissionFailureReason::PreconditionFailed
+    );
+    assert_eq!(item.revision_no, None);
+    assert_eq!(entity(&db, BASE).await.resource_version, 1);
+    assert_eq!(current(&db, BASE).await.revision_no, 1);
+    assert!(current(&db, BASE).await.resolved_schema.contains("label"));
+}
+
+#[tokio::test]
+async fn unchanged_probe_survives_a_concurrent_dependency_refresh() {
+    let dir = TestDir::new("types-registry-unchanged-refresh");
+    let db = test_db_file(&dir.path().join("registry.db")).await;
+    seed_base_and_dependents(&db).await;
+    let operation_id = submit(&db, "same", REFERRER, referencing_schema("note"), Some(1))
+        .await
+        .expect("acceptance");
+    let before = current(&db, REFERRER).await;
+    let mutating = Arc::clone(&db);
+    let outcome = admit_with_a_mutation_in_the_gap(
+        &db,
+        worker_settings(),
+        operation_id,
+        move || async move {
+            admit(&mutating, "changed", BASE, base_schema("label"), Some(1)).await;
+        },
+    )
+    .await;
+    let item = &outcome.items[0];
+    assert_eq!(item.status, OperationItemStatus::Unchanged);
+    assert_eq!(item.resource_version, Some(1));
+    assert_eq!(item.revision_no, None);
+    let after = current(&db, REFERRER).await;
+    assert_eq!(after.revision_no, before.revision_no);
+    assert_ne!(after.resolution_fingerprint, before.resolution_fingerprint);
+    assert!(after.resolved_schema.contains("label"));
+}
+
+#[tokio::test]
+async fn unchanged_probe_cannot_hide_a_concurrent_deletion() {
+    let dir = TestDir::new("types-registry-unchanged-deleted");
+    let db = test_db_file(&dir.path().join("registry.db")).await;
+    admit(&db, "base", BASE, base_schema("name"), None).await;
+    let operation_id = submit(&db, "same", BASE, base_schema("name"), Some(1))
+        .await
+        .expect("acceptance");
+    let mutating = Arc::clone(&db);
+    let outcome = admit_with_a_mutation_in_the_gap(
+        &db,
+        worker_settings(),
+        operation_id,
+        move || async move {
+            let id = entity(&mutating, BASE).await.id;
+            let ports = stores();
+            worker(&mutating)
+                .transaction(move |tx| {
+                    Box::pin(async move {
+                        ports
+                            .claim_entity_write_order(tx, &allow_all(), LATER)
+                            .await?;
+                        assert_eq!(
+                            EntityRepo::mark_deleted(tx, &allow_all(), id, 1, LATER).await?,
+                            Some(2)
+                        );
+                        Ok(())
+                    })
+                })
+                .await
+                .expect("delete");
+        },
+    )
+    .await;
+    assert_eq!(outcome.items[0].status, OperationItemStatus::Failed);
+    assert_eq!(
+        outcome.items[0].failure.as_ref().expect("refusal").reason,
+        AdmissionFailureReason::EntityDeleted
+    );
+    assert_eq!(entity(&db, BASE).await.resource_version, 2);
+    assert_eq!(current(&db, BASE).await.revision_no, 1);
 }
 
 #[tokio::test]

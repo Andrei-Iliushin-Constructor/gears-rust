@@ -757,7 +757,7 @@ the first row lands in that state.
 - [x] The compare-and-swap returns `Some(next_resource_version)` from the repository and `None` on a lost race. The repository computes `next` with `checked_add` and writes that exact value; the domain never reconstructs the database result or saturates at the numeric ceiling
 - [x] A positive precondition on a minor-bearing Type Schema is refused during acceptance: ADR-0004 makes that published contract content-immutable, so a change is registered as the next minor rather than appended as a revision
 - [x] Equal authored content yields `unchanged`, creating no revision and not advancing `resource_version`. Both kinds: the rule is shared, the tables are not
-- [x] `unchanged` is impossible for a create or a delete, enforced in code as well as by the CHECK. In code it is **structural**: `commit_creation` returns `CommittedUnit` and only `commit_revision` returns `RevisionCommit`, whose `Unchanged` variant is the sole way to reach `mark_item_unchanged`. A creation of existing content is `already_exists`, whatever the content
+- [x] `unchanged` is impossible for a create or a delete, enforced in code as well as by the CHECK. In code it is **structural**: `commit_creation` returns `CommittedUnit` and both revision commit paths return `RevisionCommit`; the early `unchanged` proof is constructed only for `Precondition::Version`. A creation of existing content is `already_exists`, whatever the content
 - [x] Content hash is a prefilter only; effective artifacts are excluded from equality. `CurrentDocument` and `CurrentInstanceValue` gained `content_hash` so the digest and the bytes travel together, and the decision is `hash == hash && bytes == bytes` — the digest alone would let a collision swallow a real edit
 
 **The concurrency shape, because it is not the obvious one.** The commit transaction runs at
@@ -1135,7 +1135,7 @@ have had.
 
 **The `unchanged` branch is not guarded, and that is the decision, not an oversight.** It
 writes no revision, moves no version and refreshes no dependent, and the one thing it
-decides is decided from rows read inside its own transaction. Guarding it could only turn a
+decides concerns the current authored document. Guarding it could only turn a
 genuine no-op re-submission into a revalidation because a *neighbour* moved, and after
 `max_revalidation_attempts` of those, into a failure.
 
@@ -1145,7 +1145,25 @@ fresh snapshot, a fresh transient store, fresh validation. Re-running the same t
 would compare the same stale vector and drift identically, which is why
 `RevalidationRequired` reads as `None` to `retryable_db_err`.
 
-**`limits.activation_write_set` is now asked twice**, because the vector's reverse-impact
+**Early `unchanged` check.** Before evaluation, revision submissions compare the current
+canonical authored bytes and content hash in a short read-only snapshot. A match produces
+an internal proof carrying the entity ID and expected `resource_version`, without loading
+the dependency closure, deriving a vector, validating, or materializing artifacts. Its
+commit still claims `entity_write_order` as the first SQL statement, then checks that the
+same entity exists, is live, and has the recorded version before CAS-terminalizing the item.
+Every authored-content write advances that version; dependency refreshes do not change the
+bytes, so their fingerprints need no guard here. A concurrent edit fails the precondition;
+a concurrent deletion reports `entity_deleted`. The proof cannot be constructed for a
+creation. A probe miss releases its snapshot and runs the ordinary evaluation/commit path;
+this adds one small read-only transaction to genuine revisions.
+
+This fixes the case where an identical submission was refused during evaluation because
+its dependents exceeded `activation_write_set`. No-op submissions also bypass resolution
+and materialization budgets, since they perform neither operation. Real edits retain all
+those bounds. Tests cover bounded no-ops, a changed conforming type for an unchanged instance,
+and concurrent edits, deletion, and dependency refresh between the probe and commit.
+
+**`limits.activation_write_set` is asked twice for evaluated edits**, because the vector's reverse-impact
 read is the refresh's read. An over-bound candidate is refused at *evaluation* under the
 same `activation_write_set_exceeded` reason — earlier, cheaper, and invisible to a client;
 T14's refusal stays as the backstop for a set that grew in between.
@@ -1222,16 +1240,19 @@ rollback_and_one_retry`. "One rollback" is read off the versions (revision 2, no
 
 **Added:** `TR/src/domain/admission/vector.rs` + `vector_tests.rs` (10 tests over the pure
 comparison), `TR/tests/revalidation_test.rs` (9 tests),
-`current_schemas_reads_every_named_entity_that_has_one` in `repo_backends_test.rs`,
+`current_projections_read_every_named_entity_that_has_one` in `repo_backends_test.rs`,
 `a_zero_revalidation_budget_fails_startup` in `config_test.rs`,
 `PausePoint::RevisionEntityRead` in `tests/common/mod.rs`.
 
-**One new port, `current_schemas`** — the batched sibling of `find_current_schema`. T14
-declined to add it because *"the alternative is a second batched port whose only caller is
-this loop"*; T15 is the second caller, twice over, and both of its reads run inside a
-transaction. `refresh_dependents` keeps its per-dependent read: moving it would reorder
-reads and writes in tested code for no criterion of this task, and the comment there now
-names T15 as the caller that gave the port its reason.
+**Batched state checks use `current_schema_projections`.** The port returns only
+`entity_id`, `revision_no`, and `resolution_fingerprint`; vector derivation and refresh
+do not load the three materialized documents merely to compare state. Instance evaluation
+uses the same projection to record its conforming type's revision. `current_documents`
+uses this narrow SQL projection for its pointer read and selects only identity, authored
+text, and content hash from the revision table. `find_current_schema` retains the full
+artifacts for entity reads. Transaction boundaries and CAS checks remain unchanged.
+`schema_projection_test.rs` checks the executed SQL excludes unused payload columns;
+the repository backend suite verifies projection values on PostgreSQL and MySQL.
 
 **Clippy-driven extractions, worth naming because they are also better shapes.**
 `process_item` passed the cognitive-complexity bound once the revalidation loop went in, so

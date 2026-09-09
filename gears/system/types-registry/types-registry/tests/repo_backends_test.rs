@@ -454,15 +454,25 @@ async fn current_documents_reads_the_current_revision_only(
         revised_doc.raw_schema, second,
         "a document past any varchar bound must round-trip byte-identically on {backend}"
     );
+    assert_eq!(
+        revised_doc.content_hash,
+        vec![2],
+        "revision 2 digest on {backend}"
+    );
     assert!(revised_doc.raw_schema.len() > 60_000);
     let single_doc = docs
         .iter()
         .find(|d| d.entity_id == single.id)
         .expect("the single-revision entity's document");
     assert_eq!(single_doc.raw_schema, only);
+    assert_eq!(
+        single_doc.content_hash,
+        vec![1],
+        "revision 1 digest on {backend}"
+    );
 }
 
-async fn current_schemas_reads_every_named_entity_that_has_one(
+async fn current_projections_read_every_named_entity_that_has_one(
     db: &Provider,
     family_id: i64,
     backend: &str,
@@ -491,7 +501,7 @@ async fn current_schemas_reads_every_named_entity_that_has_one(
     }
 
     let ids: Vec<i64> = inserted.iter().map(|row| row.id).collect();
-    let states = TypeSchemaRepo::current_states(&conn, &scope, &ids)
+    let states = TypeSchemaRepo::current_projections(&conn, &scope, &ids)
         .await
         .expect("current states");
 
@@ -503,7 +513,7 @@ async fn current_schemas_reads_every_named_entity_that_has_one(
     );
     for row in &states {
         assert_eq!(
-            row.resolution_fingerprint,
+            row.cas.resolution_fingerprint,
             vec![0x11],
             "the fingerprint must round-trip byte-identically on {backend}: the \
              guard compares it for equality and nothing else"
@@ -511,7 +521,7 @@ async fn current_schemas_reads_every_named_entity_that_has_one(
     }
 
     assert!(
-        TypeSchemaRepo::current_states(&conn, &scope, &[])
+        TypeSchemaRepo::current_projections(&conn, &scope, &[])
             .await
             .expect("empty read")
             .is_empty(),
@@ -898,7 +908,7 @@ async fn assert_repo_primitives_behave(db: &Provider, backend: &str) {
     closure_walks_a_chain(db, family.id, backend).await;
     reverse_impact_walks_back_up_a_chain(db, family.id, backend).await;
     current_documents_reads_the_current_revision_only(db, family.id, backend).await;
-    current_schemas_reads_every_named_entity_that_has_one(db, family.id, backend).await;
+    current_projections_read_every_named_entity_that_has_one(db, family.id, backend).await;
     a_revision_moves_the_pointer_and_can_report_unchanged(db, family.id, backend).await;
     snapshot_read_does_not_see_a_mid_read_commit(db, family.id, backend).await;
 

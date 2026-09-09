@@ -136,6 +136,33 @@ fn histogram_count(exporter: &InMemoryMetricExporter, name: &str) -> u64 {
 }
 
 #[test]
+fn unchanged_probes_are_counted_separately_by_hit_and_miss() {
+    let (provider, exporter, metrics) = recorder();
+    metrics.unchanged_probe(true);
+    metrics.unchanged_probe(false);
+    metrics.unchanged_probe(false);
+    provider.force_flush().unwrap();
+
+    assert_eq!(
+        counter_sum_where(
+            &exporter,
+            "types_registry_unchanged_probes_total",
+            &[("hit", "true")]
+        ),
+        1
+    );
+    assert_eq!(
+        counter_sum_where(
+            &exporter,
+            "types_registry_unchanged_probes_total",
+            &[("hit", "false")]
+        ),
+        2
+    );
+    assert_eq!(counter_sum(&exporter, "types_registry_candidates_total"), 0);
+}
+
+#[test]
 fn candidates_are_counted_by_their_terminal_status() {
     let (provider, exporter, metrics) = recorder();
 

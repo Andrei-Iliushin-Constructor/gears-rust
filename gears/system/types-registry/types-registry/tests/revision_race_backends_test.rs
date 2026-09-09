@@ -1,9 +1,9 @@
 //! Commit exclusion and rollback on `PostgreSQL` and `MySQL`.
 //!
 //! The first commit is paused after claiming `entity_write_order`; a second real
-//! connection must wait and then observe the first commit. SQLite cannot distinguish
-//! this lock from its own writer serialization, so only PostgreSQL and MySQL run it.
-//! A separate MySQL case exhausts the database recursion limit during the commit
+//! connection must wait and then observe the first commit. `SQLite` cannot distinguish
+//! this lock from its own writer serialization, so only `PostgreSQL` and `MySQL` run it.
+//! A separate `MySQL` case exhausts the database recursion limit during the commit
 //! guard and proves that the claim rolls back without becoming a candidate refusal.
 //!
 //! Gated behind `--features integration` because it needs a Docker daemon:
@@ -33,9 +33,8 @@ use common::{
     ClaimSignallingStores, PausePoint, PausingStores, allow_all, provider_for,
     seed_current_type_schema, seed_operation_item, seed_pending_revision_item,
 };
-use types_registry::domain::admission::unit::{
-    EvaluatedOutcome, EvaluatedUnit, RevisionCommit, commit_revision,
-};
+use types_registry::domain::admission::revision::RevisionCommit;
+use types_registry::domain::admission::unit::{EvaluatedOutcome, EvaluatedUnit, commit_revision};
 use types_registry::domain::admission::vector::RevisionVector;
 use types_registry::domain::admission::worker::{ItemFailure, WorkerError};
 use types_registry::domain::artifacts::{MaterializedArtifacts, content_hash};

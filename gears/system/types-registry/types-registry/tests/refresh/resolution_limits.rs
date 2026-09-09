@@ -27,6 +27,78 @@ async fn no_entity(db: &Provider, id: &str) {
 }
 
 #[tokio::test]
+async fn unchanged_does_not_spend_the_activation_write_set_budget() {
+    let db = test_db().await;
+    seed_base_and_dependents(&db).await;
+    let before_base = current(&db, BASE).await;
+    let before_derived = current(&db, DERIVED).await;
+    let before_referrer = current(&db, REFERRER).await;
+    let before_entity = entity(&db, BASE).await;
+    let limits = Limits {
+        activation_write_set: 1,
+        ..Limits::default()
+    };
+
+    let outcome = admit_with(
+        &db,
+        &limits,
+        &common::worker_settings(),
+        "same",
+        BASE,
+        base_schema("name"),
+        Some(1),
+    )
+    .await;
+    let item = &outcome.items[0];
+    assert_eq!(item.status, OperationItemStatus::Unchanged, "{item:?}");
+    assert_eq!(item.resource_version, Some(1));
+    assert_eq!(item.revision_no, None);
+    assert_eq!(entity(&db, BASE).await, before_entity);
+    assert_eq!(current(&db, DERIVED).await, before_derived);
+    assert_revision_rolled_back(&db, before_base, before_referrer).await;
+
+    // A real edit with the same dependents must still obey the bound.
+    let changed = admit_with(
+        &db,
+        &limits,
+        &common::worker_settings(),
+        "changed",
+        BASE,
+        base_schema("label"),
+        Some(1),
+    )
+    .await;
+    refused(
+        &changed,
+        &AdmissionFailureReason::ActivationWriteSetExceeded,
+    );
+}
+
+#[tokio::test]
+async fn unchanged_schema_does_not_resolve_or_materialize_again() {
+    let db = test_db().await;
+    seed_base_and_dependents(&db).await;
+    let before = current(&db, DERIVED).await;
+    let limits = Limits {
+        resolution_closure: 1,
+        resolved_document: ByteSize::from_bytes(1),
+        ..Limits::default()
+    };
+    let outcome = admit_with(
+        &db,
+        &limits,
+        &common::worker_settings(),
+        "same-derived",
+        DERIVED,
+        derived_schema(),
+        Some(1),
+    )
+    .await;
+    assert_eq!(outcome.items[0].status, OperationItemStatus::Unchanged);
+    assert_eq!(current(&db, DERIVED).await, before);
+}
+
+#[tokio::test]
 async fn closure_counts_the_candidate_and_deduplicates_ref_and_derivation_targets() {
     let db = test_db().await;
     let mut limits = Limits {

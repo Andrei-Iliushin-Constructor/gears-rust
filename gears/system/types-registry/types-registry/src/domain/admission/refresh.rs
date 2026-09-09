@@ -16,7 +16,8 @@ use crate::domain::artifacts::MaterializedArtifacts;
 use crate::domain::enums::{EntityKind, LifecycleStatus};
 use crate::domain::gts_store::{UnitDocument, load_unit_store};
 use crate::domain::ports::{
-    CurrentSchemaCas, CurrentTypeSchemaRow, EntityRow, NewCurrentTypeSchema, ReverseImpact, Stores,
+    CurrentSchemaCas, CurrentSchemaProjection, EntityRow, NewCurrentTypeSchema, ReverseImpact,
+    Stores,
 };
 
 /// What one refresh wrote.
@@ -154,9 +155,9 @@ pub async fn refresh_dependents(
         }
     };
 
-    // Batch the read to minimize time holding the candidate and family locks.
-    let mut current: HashMap<i64, CurrentTypeSchemaRow> = stores
-        .current_schemas(tx, scope, &subject_ids)
+    // Read only revision numbers and fingerprints while holding the write-order claim.
+    let mut current: HashMap<i64, CurrentSchemaProjection> = stores
+        .current_schema_projections(tx, scope, &subject_ids)
         .await?
         .into_iter()
         .map(|row| (row.entity_id, row))
@@ -178,8 +179,7 @@ pub async fn refresh_dependents(
                 entity_id,
             });
         };
-        let moved = expected.revision_no != current.revision_no
-            || expected.resolution_fingerprint != current.resolution_fingerprint;
+        let moved = expected != current.cas;
         if moved {
             return Err(WorkerError::RevalidationRequired(
                 VectorDrift::CurrentProjectionMoved {
@@ -187,7 +187,7 @@ pub async fn refresh_dependents(
                 },
             ));
         }
-        if current.resolution_fingerprint == artifacts.resolution_fingerprint {
+        if current.cas.resolution_fingerprint == artifacts.resolution_fingerprint {
             continue;
         }
 
@@ -198,7 +198,7 @@ pub async fn refresh_dependents(
                 scope,
                 NewCurrentTypeSchema {
                     entity_id,
-                    revision_no: current.revision_no,
+                    revision_no: current.cas.revision_no,
                     resolved_schema: artifacts.resolved_schema,
                     effective_traits: artifacts.effective_traits,
                     effective_traits_schema: artifacts.effective_traits_schema,

@@ -377,6 +377,14 @@ async fn a_redundant_resubmission_counts_an_unchanged_candidate() {
 
     assert_eq!(outcome.items[0].status, OperationItemStatus::Unchanged);
     assert_eq!(
+        counter_sum_where("types_registry_unchanged_probes_total", &[("hit", "true")]),
+        1
+    );
+    assert_eq!(
+        counter_sum_where("types_registry_unchanged_probes_total", &[("hit", "false")]),
+        0
+    );
+    assert_eq!(
         counter_sum_where(
             "types_registry_candidates_total",
             &[("status", "unchanged")],
@@ -733,6 +741,11 @@ async fn a_revalidation_retry_is_counted_by_its_drift_shape() {
         counter_sum_where("types_registry_revalidations_total", &[("drift", "moved")]),
         1,
         "one rollback, counted under the drift that caused it",
+    );
+    assert_eq!(
+        counter_sum_where("types_registry_unchanged_probes_total", &[("hit", "false")]),
+        2,
+        "one miss for each operation, with no extra probe on revalidation"
     );
 }
 

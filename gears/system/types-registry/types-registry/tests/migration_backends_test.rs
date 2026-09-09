@@ -1,6 +1,6 @@
 //! Real up/down of the P0 initial migration on `PostgreSQL` and `MySQL`.
 //!
-//! Covers backend-specific schema behavior unavailable in SQLite, including an
+//! Covers backend-specific schema behavior unavailable in `SQLite`, including an
 //! idempotent coordination-state seed, then rolls the migration back.
 //!
 //! `constraint-multi-backend` makes this a correctness requirement: the CHECK
