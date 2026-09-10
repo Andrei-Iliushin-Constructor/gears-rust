@@ -132,6 +132,7 @@ impl GithubPort for FakeGithub {
         _name: &str,
         _repo_id: i64,
         _since: Option<chrono::DateTime<chrono::Utc>>,
+        _page1_etag: Option<&str>,
         _options: &FetchOptions,
     ) -> Result<IssueListing, DomainError> {
         let f = self.fixture()?;
@@ -141,6 +142,8 @@ impl GithubPort for FakeGithub {
             comments: f.comments.clone(),
             issue_events: f.issue_events.clone(),
             contributors: f.contributors.clone(),
+            page1_etag: None,
+            unchanged: false,
         })
     }
 

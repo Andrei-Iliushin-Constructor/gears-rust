@@ -42,6 +42,15 @@ pub fn high_water(seen: &[&str], threshold: Option<DateTime<Utc>>) -> Option<Dat
         .max(threshold)
 }
 
+/// What a sweep needs before it walks: the instant below which an entity is
+/// too old to be worth looking at, and the validator page one carried last
+/// time so an unchanged listing can stop before page two.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SweepStart {
+    pub since: Option<DateTime<Utc>>,
+    pub page1_etag: Option<String>,
+}
+
 pub struct SweepWatermark {
     watermark_store: Arc<dyn SyncWatermarkRepository>,
 }
@@ -60,9 +69,16 @@ impl SweepWatermark {
         repo_id: i64,
         family: &str,
         force: bool,
-    ) -> Result<Option<DateTime<Utc>>, DomainError> {
+    ) -> Result<SweepStart, DomainError> {
         let stored = self.watermark_store.find(scope, repo_id, family).await?;
-        Ok(stop_threshold(stored.as_ref(), force))
+        Ok(SweepStart {
+            since: stop_threshold(stored.as_ref(), force),
+            page1_etag: if force {
+                None
+            } else {
+                stored.and_then(|w| w.page1_etag)
+            },
+        })
     }
 
     /// # Errors
@@ -74,6 +90,7 @@ impl SweepWatermark {
         repo_id: i64,
         family: &str,
         candidate: Option<DateTime<Utc>>,
+        page1_etag: Option<String>,
     ) -> Result<(), DomainError> {
         let stored = self.watermark_store.find(scope, repo_id, family).await?;
         let candidate = candidate.map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
@@ -87,7 +104,7 @@ impl SweepWatermark {
                     last_seen_updated_at: stored
                         .as_ref()
                         .and_then(|w| w.last_seen_updated_at.clone()),
-                    page1_etag: stored.and_then(|w| w.page1_etag),
+                    page1_etag: page1_etag.or_else(|| stored.and_then(|w| w.page1_etag)),
                     sweep_in_progress: true,
                     candidate_high_water: candidate,
                 },

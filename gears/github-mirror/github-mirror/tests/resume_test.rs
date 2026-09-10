@@ -43,11 +43,12 @@ impl GithubPort for StopsAfterDiscovery {
         name: &str,
         repo_id: i64,
         since: Option<DateTime<Utc>>,
+        page1_etag: Option<&str>,
         options: &FetchOptions,
     ) -> Result<IssueListing, DomainError> {
         self.cancel.cancel();
         self.inner
-            .list_issues(owner, name, repo_id, since, options)
+            .list_issues(owner, name, repo_id, since, page1_etag, options)
             .await
     }
 

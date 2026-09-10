@@ -2,7 +2,7 @@
 
 use github_mirror::domain::error::DomainError;
 use github_mirror::domain::ports::github::{
-    FetchOptions, FetchedRepository, GithubPort, IssueDetailWants, ListingCompleteness,
+    FetchOptions, FetchedRepository, GithubPort, IssueDetailWants, Listing, ListingCompleteness,
 };
 use github_mirror::domain::repo::ContributorRecord;
 use github_mirror::domain::scope::{CollectionMode, ScopeConfig};
@@ -479,7 +479,7 @@ async fn fetch_repository(
     let collection = options.scope.collection;
 
     let issues = client
-        .list_issues(owner, name, repo_id, None, options)
+        .list_issues(owner, name, repo_id, None, None, options)
         .await?;
     let pulls = client
         .list_pull_requests(owner, name, repo_id, options)
@@ -1403,5 +1403,100 @@ async fn a_rate_limited_response_is_retried_before_giving_up() {
     assert!(
         limited.calls_async().await > 1,
         "the client must retry a rate-limited response rather than give up on the first"
+    );
+}
+
+#[tokio::test]
+async fn an_unchanged_first_page_stops_the_issue_sweep_before_page_two() {
+    let server = MockServer::start_async().await;
+    let page_two = format!("{}/repos/rust-lang/rust/issues?page=2", server.base_url());
+    let first_page = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/issues")
+                .query_param("sort", "updated")
+                .query_param("direction", "desc")
+                .query_param_exists("per_page");
+            then.status(200)
+                .header("etag", "W/\"issues-page-one\"")
+                .header("link", format!("<{page_two}>; rel=\"next\""))
+                .json_body(gh_issues_json());
+        })
+        .await;
+    let second_page = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/issues")
+                .query_param("page", "2");
+            then.status(200).json_body(json!([{
+                "id": 4, "number": 14, "title": "from page two", "state": "open",
+                "created_at": "2026-08-19T00:00:00Z",
+                "updated_at": "2026-08-19T00:00:00Z"
+            }]));
+        })
+        .await;
+    let comments = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/issues/comments");
+            then.status(200).json_body(json!([]));
+        })
+        .await;
+    let events = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/issues/events");
+            then.status(200).json_body(json!([]));
+        })
+        .await;
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let options = opts(ScopeConfig::default());
+
+    let walked = client
+        .list_issues("rust-lang", "rust", 42, None, None, &options)
+        .await
+        .expect("the first sweep must walk");
+
+    assert!(!walked.unchanged);
+    assert_eq!(
+        walked.page1_etag.as_deref(),
+        Some("W/\"issues-page-one\""),
+        "the sweep must carry page one's validator back for next time"
+    );
+    assert!(
+        walked.issues.iter().any(|i| i.number == 14),
+        "the walk must reach page two"
+    );
+    second_page.assert_calls_async(1).await;
+    comments.assert_calls_async(1).await;
+
+    let skipped = client
+        .list_issues(
+            "rust-lang",
+            "rust",
+            42,
+            None,
+            Some("W/\"issues-page-one\""),
+            &options,
+        )
+        .await
+        .expect("the second sweep must succeed");
+
+    assert!(skipped.unchanged, "page one's validator did not change");
+    assert!(skipped.issues.is_empty());
+    assert_eq!(
+        first_page.calls_async().await,
+        2,
+        "page one is still asked for; it is what the validator is read from"
+    );
+    second_page.assert_calls_async(1).await;
+    comments.assert_calls_async(1).await;
+    events.assert_calls_async(1).await;
+
+    assert!(
+        !skipped.complete.is_complete(Listing::Issues),
+        "an unwalked listing must never count as complete, or reconciliation \
+         would delete every issue it did not re-stamp"
     );
 }

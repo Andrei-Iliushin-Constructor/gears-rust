@@ -115,6 +115,12 @@ pub struct IssueListing {
     pub comments: Vec<CommentRecord>,
     pub issue_events: Vec<IssueEventRecord>,
     pub contributors: Vec<ContributorRecord>,
+    /// The validator page one of the issues listing carried, for the next
+    /// sweep to compare against.
+    pub page1_etag: Option<String>,
+    /// Page one matched the validator the caller passed, so no page was
+    /// walked and every vector above is empty.
+    pub unchanged: bool,
 }
 
 /// Which per-issue sub-resources a refinement should fetch, decided by the
@@ -273,6 +279,7 @@ pub trait GithubPort: Send + Sync {
         name: &str,
         repo_id: i64,
         since: Option<DateTime<Utc>>,
+        page1_etag: Option<&str>,
         options: &FetchOptions,
     ) -> Result<IssueListing, DomainError>;
 

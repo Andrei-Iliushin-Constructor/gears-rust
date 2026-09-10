@@ -54,6 +54,24 @@ fn since_param(since: Option<DateTime<Utc>>) -> String {
     })
 }
 
+/// One fetched page: the decoded body, the `rel="next"` link if the listing
+/// continues, and the response's `ETag`.
+struct FetchedPage<T> {
+    parsed: T,
+    next: Option<String>,
+    etag: Option<String>,
+}
+
+/// One walked listing: every page concatenated, whether the walk reached the
+/// end, page one's `ETag` for the next sweep to compare against, and whether
+/// that comparison stopped this walk before page two.
+struct ListingWalk<T> {
+    items: Vec<T>,
+    complete: bool,
+    page1_etag: Option<String>,
+    unchanged: bool,
+}
+
 const USER_AGENT: &str = concat!("cf-gears-github-mirror/", env!("CARGO_PKG_VERSION"));
 
 /// The REST API version every request pins (DESIGN 3.5). Without it the
@@ -238,7 +256,7 @@ impl GithubClient {
         &self,
         url: &str,
         options: &FetchOptions,
-    ) -> Result<(T, Option<String>), DomainError> {
+    ) -> Result<FetchedPage<T>, DomainError> {
         let key = CacheKey::compute("GET", url, ACCEPT_JSON);
         let cached = self.cached_entry(options, url, &key).await;
 
@@ -317,8 +335,9 @@ impl GithubClient {
         let parsed = serde_json::from_str(&entry.body)
             .map_err(|e| DomainError::internal(format!("GitHub response decode failed: {e}")))?;
         let next = entry.next_page.clone();
+        let etag = entry.etag.clone();
         self.remember(options, url, &key, entry).await;
-        Ok((parsed, next))
+        Ok(FetchedPage { parsed, next, etag })
     }
 
     /// Serve a `304` from the stored entry.
@@ -330,7 +349,7 @@ impl GithubClient {
         url: &str,
         cached: Option<&CachedResponse>,
         headers: &reqwest::header::HeaderMap,
-    ) -> Result<(T, Option<String>), DomainError> {
+    ) -> Result<FetchedPage<T>, DomainError> {
         let entry = cached.ok_or_else(|| {
             DomainError::internal(format!("GitHub answered 304 for {url} with nothing cached"))
         })?;
@@ -342,7 +361,8 @@ impl GithubClient {
             ))
         })?;
         let next = next_link(headers).or_else(|| entry.next_page.clone());
-        Ok((parsed, next))
+        let etag = header_string(headers, "etag").or_else(|| entry.etag.clone());
+        Ok(FetchedPage { parsed, next, etag })
     }
 
     /// GET `path`, revalidating against the cache when possible.
@@ -356,8 +376,8 @@ impl GithubClient {
         options: &FetchOptions,
     ) -> Result<T, DomainError> {
         let url = format!("{}{path}", self.api_base_url.trim_end_matches('/'));
-        let (parsed, _) = self.get_page(&url, options).await?;
-        Ok(parsed)
+        let fetched = self.get_page(&url, options).await?;
+        Ok(fetched.parsed)
     }
 
     /// GET `path` and every page after it, concatenated, plus whether the
@@ -374,15 +394,53 @@ impl GithubClient {
         path: &str,
         options: &FetchOptions,
     ) -> Result<(Vec<T>, bool), DomainError> {
+        let walk = self.walk_pages(path, options, None).await?;
+        Ok((walk.items, walk.complete))
+    }
+
+    /// The paging walk behind [`Self::get_json_all`], with the sweep's
+    /// short-circuit (`ALGORITHMS` §6.2).
+    ///
+    /// When `page1_etag` is the validator this listing carried last time and
+    /// page one comes back with the same one, nothing in the listing has
+    /// changed and the remaining pages are not fetched. The walk is reported
+    /// as incomplete in that case: no row had its `extracted_at` refreshed, so
+    /// letting reconciliation run against it would delete the whole family.
+    async fn walk_pages<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        options: &FetchOptions,
+        page1_etag: Option<&str>,
+    ) -> Result<ListingWalk<T>, DomainError> {
         let mut url = format!("{}{path}", self.api_base_url.trim_end_matches('/'));
         let mut items: Vec<T> = Vec::new();
+        let mut observed: Option<String> = None;
 
         for page in 1..=MAX_PAGES {
-            let (mut batch, next): (Vec<T>, _) = self.get_page(&url, options).await?;
+            let fetched: FetchedPage<Vec<T>> = self.get_page(&url, options).await?;
+            if page == 1 {
+                observed.clone_from(&fetched.etag);
+                if page1_etag.is_some() && fetched.etag.as_deref() == page1_etag {
+                    tracing::debug!(%url, "page one is unchanged; the sweep stops here");
+                    return Ok(ListingWalk {
+                        items,
+                        complete: false,
+                        page1_etag: observed,
+                        unchanged: true,
+                    });
+                }
+            }
+
+            let mut batch = fetched.parsed;
             items.append(&mut batch);
 
-            let Some(next) = next else {
-                return Ok((items, true));
+            let Some(next) = fetched.next else {
+                return Ok(ListingWalk {
+                    items,
+                    complete: true,
+                    page1_etag: observed,
+                    unchanged: false,
+                });
             };
             if page == MAX_PAGES {
                 tracing::warn!(
@@ -390,12 +448,17 @@ impl GithubClient {
                     pages = MAX_PAGES,
                     "page cap reached; the listing is truncated"
                 );
-                return Ok((items, false));
+                break;
             }
             url = next;
         }
 
-        Ok((items, false))
+        Ok(ListingWalk {
+            items,
+            complete: false,
+            page1_etag: observed,
+            unchanged: false,
+        })
     }
 
     /// Store a fresh response so the next request can revalidate it.
@@ -1769,6 +1832,7 @@ impl GithubPort for GithubClient {
         name: &str,
         repo_id: i64,
         since: Option<DateTime<Utc>>,
+        page1_etag: Option<&str>,
         options: &FetchOptions,
     ) -> Result<IssueListing, DomainError> {
         if !options.scope.objects.issues {
@@ -1776,14 +1840,24 @@ impl GithubPort for GithubClient {
         }
         let bound = since_param(since);
 
-        let (issues, issues_complete): (Vec<GhIssue>, bool) = self
-            .get_json_all(
+        let walk: ListingWalk<GhIssue> = self
+            .walk_pages(
                 &format!(
-                    "/repos/{owner}/{name}/issues?state=all&per_page={FIRST_PAGE_SIZE}{bound}"
+                    "/repos/{owner}/{name}/issues?state=all&sort=updated&direction=desc&per_page={FIRST_PAGE_SIZE}{bound}"
                 ),
                 options,
+                page1_etag,
             )
             .await?;
+        if walk.unchanged {
+            return Ok(IssueListing {
+                page1_etag: walk.page1_etag,
+                unchanged: true,
+                ..IssueListing::default()
+            });
+        }
+        let walk_etag = walk.page1_etag;
+        let (issues, issues_complete) = (walk.items, walk.complete);
         let (comments, comments_complete): (Vec<GhComment>, bool) = self
             .get_json_all(
                 &format!("/repos/{owner}/{name}/issues/comments?per_page={FIRST_PAGE_SIZE}{bound}"),
@@ -1821,6 +1895,8 @@ impl GithubPort for GithubClient {
                 .map(|e| issue_event_record(repo_id, e))
                 .collect(),
             contributors,
+            page1_etag: walk_etag,
+            unchanged: false,
         })
     }
 

@@ -287,7 +287,7 @@ impl MirrorWorker {
     async fn index_issues(&self, ctx: &WorkerContext) -> Result<(), DomainError> {
         let run = &self.run;
         let repo_id = run.repo_id()?;
-        let since = self
+        let start = self
             .watermark
             .start_sweep(
                 &run.scope,
@@ -296,9 +296,17 @@ impl MirrorWorker {
                 run.options.force,
             )
             .await?;
+        let since = start.since;
         let listing = self
             .github
-            .list_issues(&run.owner, &run.name, repo_id, since, &run.options)
+            .list_issues(
+                &run.owner,
+                &run.name,
+                repo_id,
+                since,
+                start.page1_etag.as_deref(),
+                &run.options,
+            )
             .await?;
         run.mark_complete(&listing.complete);
         let seen: Vec<&str> = listing
@@ -313,8 +321,12 @@ impl MirrorWorker {
                 repo_id,
                 sweep_families::ISSUES,
                 high_water(&seen, since),
+                listing.page1_etag.clone(),
             )
             .await?;
+        if listing.unchanged {
+            return Ok(());
+        }
 
         let collection = run.options.scope.collection;
         let mut swept: HashSet<i64> = HashSet::new();
@@ -525,7 +537,8 @@ impl MirrorWorker {
                 sweep_families::COMMITS,
                 run.options.force,
             )
-            .await?;
+            .await?
+            .since;
         let listing = self
             .github
             .list_commits(&run.owner, &run.name, repo_id, since, &run.options)
@@ -543,6 +556,7 @@ impl MirrorWorker {
                 repo_id,
                 sweep_families::COMMITS,
                 high_water(&seen, since),
+                None,
             )
             .await?;
 
