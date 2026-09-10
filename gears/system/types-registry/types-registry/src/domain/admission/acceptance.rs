@@ -17,8 +17,12 @@
 //! | 4 managed identifier profile | here |
 //! | 5 declared dialect | here |
 //! | 6 `force` | here |
-//! | 7 ADR-0015 major-0 quarantine | **T18** — it needs the reference extractor |
+//! | 7 ADR-0015 major-0 quarantine | **the worker** — see below |
 //! | 8 canonicalize, fingerprint, idempotency | here |
+//!
+//! Step 7 runs in the worker over the dependency edges extracted by
+//! [`unit::evaluate`](super::unit), keeping malformed references and quarantine
+//! refusals in the admission-stage vocabulary (P16).
 //!
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -37,7 +41,7 @@ use super::fingerprint::{
 };
 use super::{Accepted, OperationDispatch, Precondition, SubmitRequest};
 use crate::config::TypesRegistryConfig;
-use crate::domain::compat::select_baseline;
+use crate::domain::compat::{normalize_dialect, select_baseline};
 use crate::domain::enums::{OperationKind, OwnershipScope, Plane};
 use crate::domain::policy::{PolicyRefusal, RegistrationPolicy};
 use crate::domain::ports::metrics::{AdmissionMetrics, RefusalStage};
@@ -45,16 +49,6 @@ use crate::domain::ports::{NewOperation, NewOperationItem, OperationRow, Stores}
 
 /// Largest `Idempotency-Key` the column accepts (`varchar(255)`).
 pub(crate) const MAX_IDEMPOTENCY_KEY: usize = 255;
-
-/// The canonical Draft-07 dialect, and the closed set that normalizes onto it
-/// (ADR-0014, SPEC §8.1 step 5).
-const DRAFT_07: &str = "http://json-schema.org/draft-07/schema#";
-const DRAFT_07_SPELLINGS: [&str; 4] = [
-    "http://json-schema.org/draft-07/schema#",
-    "http://json-schema.org/draft-07/schema",
-    "https://json-schema.org/draft-07/schema#",
-    "https://json-schema.org/draft-07/schema",
-];
 
 /// Why a request is refused before it becomes an operation.
 ///
@@ -99,6 +93,9 @@ pub enum AcceptanceError {
     ForceNotPermitted { gts_id: String },
     #[error("force on '{gts_id}' is refused: it has no cross-minor check to waive")]
     ForceHasNothingToWaive { gts_id: String },
+    /// The last segment has no readable major, so baseline selection fails.
+    #[error("'{gts_id}' names no readable major, so no compatibility baseline exists")]
+    UnreadableVersion { gts_id: String },
     #[error("minor-bearing Type Schema '{gts_id}' is content-immutable")]
     MinorTypeSchemaRevision { gts_id: String },
     #[error(
@@ -145,6 +142,7 @@ impl AcceptanceError {
             Self::AuthoredDocumentTooLarge { .. } => "authored_document_too_large",
             Self::ForceNotPermitted { .. } => "force_not_permitted",
             Self::ForceHasNothingToWaive { .. } => "force_has_nothing_to_waive",
+            Self::UnreadableVersion { .. } => "unreadable_version",
             Self::MinorTypeSchemaRevision { .. } => "minor_type_schema_revision",
             Self::ZeroPrecondition { .. } => "zero_precondition",
             Self::NegativePrecondition { .. } => "negative_precondition",
@@ -350,30 +348,33 @@ pub fn validate(
         }
 
         // --- step 6: force ------------------------------------------------
-        // Both halves are request-static, which is what makes them acceptance's:
-        // the deployment flag, and whether this candidate *has* the one waivable
-        // check. Whether the waived comparison would in fact have failed is a
-        // worker decision inside the commit transaction.
+        // Check the deployment flag and baseline eligibility here; the worker
+        // evaluates compatibility and re-authorizes the waiver.
         if candidate.force {
             if !ctx.config.allow_compatibility_force {
                 return Err(AcceptanceError::ForceNotPermitted {
                     gts_id: id.id().to_owned(),
                 });
             }
-            // Asked of `compat`, not of a local predicate over versions. ADR-0004
-            // permits waiving exactly the cross-minor edge, so "is there something
-            // to waive" and "which baseline is this" are one question, and two
-            // implementations of it would drift — most damagingly in the direction
-            // of accepting a waiver against the intra-entity edge, which nothing may
-            // waive.
-            if !select_baseline(&id, expected).waivable() {
-                return Err(AcceptanceError::ForceHasNothingToWaive {
-                    gts_id: id.id().to_owned(),
-                });
+            // Use baseline selection so acceptance and evaluation agree on waiver eligibility.
+            match select_baseline(&id, expected) {
+                Ok(baseline) if baseline.waivable() => {}
+                Ok(_) => {
+                    return Err(AcceptanceError::ForceHasNothingToWaive {
+                        gts_id: id.id().to_owned(),
+                    });
+                }
+                // No baseline exists to waive, which is not the same refusal as a
+                // baseline that nothing may waive.
+                Err(unreadable) => {
+                    return Err(AcceptanceError::UnreadableVersion {
+                        gts_id: unreadable.gts_id,
+                    });
+                }
             }
         }
 
-        // TODO(T18): enforce ADR-0015 quarantine for major-0 bases and `$ref` targets.
+        // Step 7 runs in the worker over the extracted dependency edges.
 
         // --- step 8: canonicalize ----------------------------------------
         let canonical = canonical_text(content);
@@ -603,10 +604,6 @@ fn check_dialect(gts_id: &str, content: &Value) -> Result<(), AcceptanceError> {
         });
     }
     Ok(())
-}
-
-fn normalize_dialect(declared: &str) -> Option<&'static str> {
-    DRAFT_07_SPELLINGS.contains(&declared).then_some(DRAFT_07)
 }
 
 /// The path of the first `$schema` below the root that does not normalize onto

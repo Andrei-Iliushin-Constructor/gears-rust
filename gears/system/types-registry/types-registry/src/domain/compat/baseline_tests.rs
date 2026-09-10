@@ -1,22 +1,24 @@
-//! Which definition each candidate shape is compared against. Pure: no database,
-//! no clock.
-//!
-//! `tests/compat_test.rs` drives the verdicts through the worker against real
-//! rows; this file pins the selection underneath, where naming the wrong
-//! identifier would compare a candidate against a definition nobody published —
-//! or, worse, silently pick the waivable edge for a check nothing may waive.
+//! Pure baseline selection and verdict tests. Worker coverage is in
+//! `tests/compat_test.rs`.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use super::{Baseline, Exemption, backward_comparison, refusal, select_baseline};
+use super::{
+    Baseline, Exemption, UnreadableVersion, backward_comparison, refusal, select_baseline,
+};
 use crate::domain::admission::{AdmissionFailureReason, Precondition};
+use crate::domain::compat::{BaselineDoc, CandidateDoc};
 use gts::{CompatibilityVerdict, GtsStore};
 use serde_json::json;
 use toolkit_gts::gts_id;
 
-fn baseline(id: &str, precondition: Precondition) -> Baseline {
+fn select(id: &str, precondition: Precondition) -> Result<Baseline, UnreadableVersion> {
     let parsed = gts::GtsId::try_new(id).unwrap_or_else(|e| panic!("{id}: {e}"));
     select_baseline(&parsed, precondition)
+}
+
+fn baseline(id: &str, precondition: Precondition) -> Baseline {
+    select(id, precondition).unwrap_or_else(|e| panic!("{id}: {e}"))
 }
 
 fn creation(id: &str) -> Baseline {
@@ -114,9 +116,7 @@ fn a_later_minor_is_compared_against_its_preceding_minor() {
     );
 }
 
-/// The predecessor is `n - 1` in the **same** major, and the identifier is spelled
-/// exactly as `entity.gts_id` holds it — a `~` included, or the lookup probes an
-/// Instance identifier that can never exist.
+/// Use `n - 1` in the same major and retain the Type Schema's trailing `~`.
 #[test]
 fn the_preceding_minor_stays_within_the_candidates_own_major() {
     assert_eq!(
@@ -127,9 +127,7 @@ fn the_preceding_minor_stays_within_the_candidates_own_major() {
     );
 }
 
-/// A minor in a *preceding* segment names which base was derived from; it is part
-/// of this entity's identity, not its own version, so it survives verbatim into the
-/// baseline identifier.
+/// A preceding segment's version belongs to the base and must remain unchanged.
 #[test]
 fn a_minor_in_a_preceding_segment_is_not_the_one_that_decrements() {
     assert_eq!(
@@ -142,9 +140,7 @@ fn a_minor_in_a_preceding_segment_is_not_the_one_that_decrements() {
     );
 }
 
-/// A revision of a minor-bearing Type Schema is permanently inadmissible
-/// (ADR-0004) and acceptance refuses it first. Should a path ever reach here, it
-/// gets the strict edge rather than the waivable one.
+/// Acceptance rejects minor-bearing revisions; selection must still use the strict edge.
 #[test]
 fn an_unreachable_minor_bearing_revision_gets_the_non_waivable_edge() {
     let selected = revision(gts_id!("cf.core.example.thing.v2.3~"));
@@ -164,9 +160,7 @@ fn a_compatible_verdict_admits_whether_or_not_force_was_sent() {
     assert_eq!(refusal(CompatibilityVerdict::Compatible, true), None);
 }
 
-/// `principle-fail-closed`, and the reason ADR-0003 insists the two verdicts stay
-/// apart: an incompatible candidate and an undecidable one are different operator
-/// actions, so they must never arrive under one code.
+/// Fail closed with distinct reasons for incompatible and undecidable verdicts.
 #[test]
 fn incompatible_and_unknown_refuse_under_distinct_reasons() {
     assert_eq!(
@@ -183,9 +177,7 @@ fn incompatible_and_unknown_refuse_under_distinct_reasons() {
     );
 }
 
-/// ADR-0004's `force` waives *the check*, so it covers both adverse verdicts. The
-/// caller has already established that this candidate's baseline is the cross-minor
-/// one and that the deployment permits the waiver.
+/// An authorized `force` waives either adverse cross-minor verdict (ADR-0004).
 #[test]
 fn force_waives_both_adverse_verdicts() {
     assert_eq!(refusal(CompatibilityVerdict::Incompatible, true), None);
@@ -196,43 +188,47 @@ fn force_waives_both_adverse_verdicts() {
 // The comparison entry point
 // ---------------------------------------------------------------------------
 
-/// Argument order is the thing this test exists to pin: the **baseline** is the old
-/// side. An optional property added at a closed level is backward compatible one
-/// way round and incompatible the other, so a transposed call would report a
-/// verdict that is wrong rather than merely imprecise.
+/// Swapping document roles changes the verdict; distinct side types protect
+/// this asymmetric comparison.
 #[test]
-fn the_baseline_is_the_old_side_of_the_comparison() {
+fn the_verdict_depends_on_which_side_is_the_baseline() {
     let store = GtsStore::new();
     let closed = |props: serde_json::Value| json!({ "type": "object", "additionalProperties": false, "properties": props });
-    let baseline = closed(json!({ "a": { "type": "string" } }));
-    let candidate = closed(json!({ "a": { "type": "string" }, "b": { "type": "string" } }));
+    let fewer = closed(json!({ "a": { "type": "string" } }));
+    let more = closed(json!({ "a": { "type": "string" }, "b": { "type": "string" } }));
 
-    let forward = backward_comparison(&store, &baseline, &candidate)
+    let widening = backward_comparison(&store, BaselineDoc::new(&fewer), CandidateDoc::new(&more))
         .expect("self-contained documents resolve");
     assert_eq!(
-        forward.backward_compatibility(),
+        widening.backward_compatibility(),
         CompatibilityVerdict::Compatible,
+        "adding an optional property to a closed level is backward compatible",
     );
 
-    let transposed = backward_comparison(&store, &candidate, &baseline)
+    let narrowing = backward_comparison(&store, BaselineDoc::new(&more), CandidateDoc::new(&fewer))
         .expect("self-contained documents resolve");
     assert_eq!(
-        transposed.backward_compatibility(),
+        narrowing.backward_compatibility(),
         CompatibilityVerdict::Incompatible,
         "dropping a property from a closed level is not backward compatible",
     );
 }
 
-/// An unresolvable reference fails the comparison rather than being compared
-/// unresolved — SPEC §7 prerequisite 6, and the reason `is_minor_compatible` is
-/// unusable.
+/// Unresolvable references fail comparison (SPEC §7 prerequisite 6).
 #[test]
 fn a_reference_the_store_cannot_resolve_fails_the_comparison() {
     let store = GtsStore::new();
     let baseline = json!({ "$ref": "gts.cf.core.example.absent.v1~" });
     let candidate = json!({ "type": "object" });
 
-    assert!(backward_comparison(&store, &baseline, &candidate).is_err());
+    assert!(
+        backward_comparison(
+            &store,
+            BaselineDoc::new(&baseline),
+            CandidateDoc::new(&candidate)
+        )
+        .is_err()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -253,7 +249,6 @@ fn every_baseline_selection_labels_itself_distinguishably() {
             gts_id: gts_id!("cf.core.example.thing.v1.0~").to_owned(),
         }
         .label(),
-        Baseline::Unreadable.label(),
     ];
     let mut unique = labels.to_vec();
     unique.sort_unstable();

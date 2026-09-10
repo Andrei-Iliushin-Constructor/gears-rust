@@ -188,9 +188,9 @@ async fn an_accepted_request_writes_one_operation_its_items_and_one_dispatch() {
     assert_eq!(recorder.calls(), vec![accepted.operation_id]);
 }
 
-/// The configured maximum batch crosses the 70-row SQLite-safe insert chunk.
+/// The configured maximum batch crosses the 66-row SQLite-safe insert chunk.
 /// Persisting all 100 items proves acceptance splits the multi-row INSERT rather
-/// than binding all 1,400 operation-item values in one statement.
+/// than binding all 1,500 operation-item values in one statement.
 #[tokio::test]
 async fn maximum_batch_is_inserted_across_sqlite_bind_chunks() {
     let db = test_db().await;

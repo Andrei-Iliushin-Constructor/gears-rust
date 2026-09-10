@@ -272,11 +272,8 @@ async fn assert_revision_rolled_back(
 #[tokio::test]
 async fn a_dependent_closure_over_budget_rolls_back_the_candidate_revision() {
     let db = test_db().await;
-    // Closed, so that the revision below — which *adds* a property — is backward
-    // compatible with it and the dependent-closure budget is what refuses the
-    // candidate (T17). At an open level the addition would be refused for
-    // incompatibility first, and this test would stop proving anything about the
-    // budget.
+    // Use a closed level so the addition is compatible and the closure budget
+    // is what refuses this candidate.
     let mut closed_base = base_schema("name");
     closed_base["additionalProperties"] = json!(false);
     admit(&db, "base", BASE, closed_base.clone(), None).await;

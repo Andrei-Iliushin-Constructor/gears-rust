@@ -19,7 +19,7 @@
 //! already final. So the two travel in different positions: `Err(WorkerError)`
 //! versus `Ok(_)` with a failed item.
 //!
-//! # Current admission scope (through T16)
+//! # Current admission scope (through T18)
 //!
 //! Each item is its own unit, processed in `item_no` order. References resolve
 //! against committed dependencies plus this candidate; `gts-rust` validation
@@ -51,12 +51,21 @@ use crate::domain::ports::metrics::{AdmissionMetrics, RefusalStage, TerminalStat
 use crate::domain::ports::{OperationItemRow, OperationRow, Stores, commit_write, snapshot_read};
 use crate::observability;
 
-/// The two configuration sections one admission pass obeys, carried together.
+/// The configuration one admission pass obeys, carried together.
 #[derive(Clone, Copy)]
 pub struct Tuning<'a> {
     pub limits: &'a Limits,
     pub worker: &'a WorkerSettings,
     pub metrics: &'a Arc<dyn AdmissionMetrics>,
+    /// Deployment waiver setting for this pass, including retries and revalidation.
+    /// See [`effective_force`].
+    pub allow_compatibility_force: bool,
+}
+
+/// Clear a stored waiver when the deployment disables it. The candidate then
+/// receives the ordinary verdict, and provenance records the cleared flag.
+const fn effective_force(item_forced: bool, tuning: &Tuning<'_>) -> bool {
+    item_forced && tuning.allow_compatibility_force
 }
 
 /// What one pass over an operation produced.
@@ -197,7 +206,7 @@ async fn prepare(
             canonical_body: payload,
             operation_item_id: item.id,
             precondition: item.precondition,
-            force: item.compat_forced,
+            force: effective_force(item.compat_forced, &tuning),
         },
         tuning.limits,
         tuning.metrics,
@@ -347,7 +356,7 @@ async fn process_item(
                         canonical_body: payload,
                         operation_item_id: item.id,
                         precondition: item.precondition,
-                        force: item.compat_forced,
+                        force: effective_force(item.compat_forced, &tuning),
                     },
                     tuning.limits,
                     tuning.metrics,

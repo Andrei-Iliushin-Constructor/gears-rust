@@ -55,15 +55,8 @@ fn worker(db: &Provider) -> DBProvider<WorkerError> {
     DBProvider::new(db.db())
 }
 
-/// The base, varied by an **annotation** rather than by its properties.
-///
-/// `title` changes the document — so the content hash, the revision, and every
-/// dependent's resolved artifacts move, which is what these tests are about — while
-/// leaving the accepted-instance set untouched, so the revision is backward
-/// compatible with its own current revision (T17). Varying a *property* instead is
-/// permanently inadmissible: adding one is incompatible at an open level and
-/// removing one is incompatible at a closed level, so a swap fails either way
-/// (ADR-0003 §*The comparison baseline*).
+/// Vary `title` to move the content hash, revision, and dependent artifacts
+/// without changing the accepted-instance set.
 fn base_schema(marker: &str) -> Value {
     json!({
         "$id": format!("gts://{BASE}"),
@@ -152,6 +145,7 @@ async fn admit_with(
             limits,
             worker: worker_settings,
             metrics: &common::metrics(),
+            allow_compatibility_force: false,
         },
         operation_id,
         LATER,

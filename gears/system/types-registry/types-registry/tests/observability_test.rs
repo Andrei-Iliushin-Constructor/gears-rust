@@ -48,6 +48,12 @@ const ABSENT: &str = gts_id!("cf.core.obsv.absent.v1~");
 /// A minor-bearing family, for the cross-minor verdicts and the waived one.
 const M2_0: &str = gts_id!("cf.core.obsv.minor.v2.0~");
 const M2_1: &str = gts_id!("cf.core.obsv.minor.v2.1~");
+/// T18's fixtures: an unstable entity, a stable type derived from it, a stable
+/// Instance of it, and a stable entity whose revision restates the dialect.
+const UNSTABLE: &str = gts_id!("cf.core.obsv.draft.v0~");
+const DERIVED_FROM_UNSTABLE: &str = gts_id!("cf.core.obsv.draft.v0~cf.core.obsv.leaf.v1~");
+const INSTANCE_OF_UNSTABLE: &str = gts_id!("cf.core.obsv.draft.v0~cf.core.obsv.first.v1");
+const RESTATED: &str = gts_id!("cf.core.obsv.restated.v1~");
 
 type Provider = Arc<DBProvider<DbError>>;
 
@@ -149,6 +155,32 @@ fn counter_sum_where(name: &str, labels: &[(&str, &str)]) -> u64 {
     total
 }
 
+/// Sorted distinct label values, for vocabulary assertions independent of counts.
+fn label_values_of(name: &str, key: &str) -> Vec<String> {
+    let metrics = recorder().1.get_finished_metrics().unwrap();
+    let mut values = Vec::new();
+    for rm in &metrics {
+        for sm in rm.scope_metrics() {
+            for metric in sm.metrics() {
+                if metric.name() == name
+                    && let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data()
+                {
+                    for dp in sum.data_points() {
+                        for kv in dp.attributes() {
+                            if kv.key.as_str() == key {
+                                values.push(kv.value.as_str().into_owned());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    values.sort();
+    values.dedup();
+    values
+}
+
 fn histogram_count(name: &str) -> u64 {
     let metrics = recorder().1.get_finished_metrics().unwrap();
     let mut total = 0;
@@ -212,9 +244,7 @@ fn worker(db: &Provider) -> DBProvider<WorkerError> {
     DBProvider::new(db.db())
 }
 
-/// Varied by an **annotation**, so a revision is backward compatible with its own
-/// current revision (T17) while still moving the document. A varied *property*
-/// would be refused: a swap is incompatible in both content models (ADR-0003).
+/// Vary an annotation to change the document while preserving compatibility.
 fn subject_schema(marker: &str) -> Value {
     json!({
         "$id": format!("gts://{SUBJECT}"),
@@ -303,9 +333,7 @@ async fn submit_via(
     .map(|accepted| accepted.operation_id)
 }
 
-/// `submit`, with the deployment permitting ADR-0004's waiver and the candidate
-/// asking for it. Its own function rather than a flag on `submit`, because the two
-/// halves must agree — acceptance refuses a waiver the deployment has not enabled.
+/// Submit with both the deployment waiver setting and candidate request enabled.
 async fn submit_forced(
     db: &Provider,
     key: &str,
@@ -346,9 +374,7 @@ async fn submit_forced(
     .map(|accepted| accepted.operation_id)
 }
 
-/// The content model of the one object level these documents carry — the variable
-/// that decides the verdict. `compat_test.rs` owns the semantics; here the three
-/// shapes exist only to make each verdict *emit*.
+/// Object-level models that produce each verdict; semantics are covered in `compat_test.rs`.
 #[derive(Clone, Copy)]
 enum Level {
     Closed,
@@ -409,6 +435,7 @@ async fn admit(
             limits: &common::limits(),
             worker: &worker_settings(),
             metrics: metrics(),
+            allow_compatibility_force: false,
         },
         operation_id,
         LATER,
@@ -785,6 +812,7 @@ async fn a_revalidation_retry_is_counted_by_its_drift_shape() {
                 limits: &common::limits(),
                 worker: &worker_settings(),
                 metrics: metrics(),
+                allow_compatibility_force: false,
             },
             operation_id,
             LATER,
@@ -898,6 +926,7 @@ async fn a_redelivered_pass_still_carries_the_operation_facts() {
             limits: &common::limits(),
             worker: &worker_settings(),
             metrics: metrics(),
+            allow_compatibility_force: false,
         },
         operation_id,
         LATER,
@@ -917,6 +946,7 @@ async fn a_redelivered_pass_still_carries_the_operation_facts() {
             limits: &common::limits(),
             worker: &worker_settings(),
             metrics: metrics(),
+            allow_compatibility_force: false,
         },
         operation_id,
         LATER,
@@ -959,10 +989,7 @@ async fn a_redelivered_pass_still_carries_the_operation_facts() {
 // Compatibility verdicts, emitted end to end through `run_operation` (T17, P16)
 // ---------------------------------------------------------------------------
 
-/// A compatible revision is counted. This is the verdict that has nowhere else to
-/// go: it is not a refusal, so `refusals_total` never sees it, and without this
-/// instrument an operator cannot tell "every comparison passed" from "no comparison
-/// ran".
+/// Compatible revisions increment the verdict counter despite producing no refusal.
 #[tokio::test]
 async fn a_compatible_verdict_is_counted_at_forced_false() {
     let _serial = SERIAL.lock().await;
@@ -1049,9 +1076,7 @@ async fn an_incompatible_verdict_is_counted_and_also_refused() {
     );
 }
 
-/// The undecided verdict lands under `unknown`, not under `incompatible` — the
-/// distinction SPEC §16.12 asks for, made observable in the metrics rather than only
-/// in the refusal reason.
+/// Undecidable verdicts emit `unknown`, distinct from `incompatible` (SPEC §16.12).
 #[tokio::test]
 async fn an_undecidable_verdict_is_counted_apart_from_an_incompatible_one() {
     let _serial = SERIAL.lock().await;
@@ -1095,9 +1120,7 @@ async fn an_undecidable_verdict_is_counted_apart_from_an_incompatible_one() {
     );
 }
 
-/// A waived cross-minor check is its own series. `compat_forced` on the row is
-/// visible only to whoever queries the row; a policy escape needs to be visible
-/// without a database.
+/// Waived cross-minor verdicts emit a separate series.
 #[tokio::test]
 async fn a_waived_verdict_is_counted_at_forced_true() {
     let _serial = SERIAL.lock().await;
@@ -1117,6 +1140,8 @@ async fn a_waived_verdict_is_counted_at_forced_true() {
             limits: &common::limits(),
             worker: &worker_settings(),
             metrics: metrics(),
+            // Keep the waiver enabled on the worker pass that emits this verdict.
+            allow_compatibility_force: true,
         },
         operation_id,
         LATER,
@@ -1149,9 +1174,7 @@ async fn a_waived_verdict_is_counted_at_forced_true() {
     );
 }
 
-/// **A candidate owed no comparison emits nothing.** A first admission has no
-/// baseline, so there is no verdict — and a fourth label value for "none" would make
-/// an exemption indistinguishable from a judgement.
+/// A candidate with no baseline emits no verdict.
 #[tokio::test]
 async fn a_candidate_with_no_baseline_emits_no_verdict_at_all() {
     let _serial = SERIAL.lock().await;
@@ -1177,9 +1200,7 @@ async fn a_candidate_with_no_baseline_emits_no_verdict_at_all() {
     );
 }
 
-/// The unit span carries what the counter cannot: **which** definition produced the
-/// verdict. An identifier is unbounded, so it is a per-event field and never a label
-/// (SPEC §8.6).
+/// Baseline identity belongs in the span, not a metric label (SPEC §8.6).
 #[tokio::test]
 async fn the_unit_span_names_the_baseline_it_selected() {
     let _serial = SERIAL.lock().await;
@@ -1228,4 +1249,83 @@ async fn an_exempt_candidate_names_its_exemption_and_no_verdict() {
         lines.iter().all(|line| !line.contains("compat_verdict=")),
         "an exemption has no verdict to record: {lines:#?}",
     );
+}
+
+/// Assert the four quarantine/dialect reason labels as a set; counts alone
+/// would miss a reason collapsed into `invalid_schema` (P16).
+#[tokio::test]
+async fn the_quarantine_and_dialect_refusals_each_carry_their_own_reason_label() {
+    let _serial = SERIAL.lock().await;
+    recorder();
+    let db = test_db().await;
+    // Admit both baselines before opening the measurement window.
+    admit(&db, "t18-v0", UNSTABLE, plain(UNSTABLE), None).await;
+    admit(&db, "t18-restated", RESTATED, plain(RESTATED), None).await;
+    common::restate_stored_dialect(
+        &db,
+        RESTATED,
+        "https://json-schema.org/draft/2020-12/schema",
+    )
+    .await;
+    reset_metrics();
+
+    admit(
+        &db,
+        "t18-derived",
+        DERIVED_FROM_UNSTABLE,
+        plain(DERIVED_FROM_UNSTABLE),
+        None,
+    )
+    .await;
+    admit(
+        &db,
+        "t18-referrer",
+        REFERRER,
+        referencing_target(REFERRER, UNSTABLE),
+        None,
+    )
+    .await;
+    admit(
+        &db,
+        "t18-instance",
+        INSTANCE_OF_UNSTABLE,
+        json!({ "name": "anything" }),
+        None,
+    )
+    .await;
+    admit(&db, "t18-dialect", RESTATED, plain(RESTATED), Some(1)).await;
+    flush();
+
+    assert_eq!(
+        label_values_of("types_registry_refusals_total", "reason"),
+        vec![
+            reason_label(&AdmissionFailureReason::DialectChanged),
+            reason_label(&AdmissionFailureReason::InstanceOfMajorZero),
+            reason_label(&AdmissionFailureReason::StableDerivesFromMajorZero),
+            reason_label(&AdmissionFailureReason::StableRefsMajorZero),
+        ],
+        "the four refusals must appear under their own label values and no other",
+    );
+    assert_eq!(
+        label_values_of("types_registry_refusals_total", "stage"),
+        vec!["admission"],
+        "all four are per-candidate refusals recorded on an operation item",
+    );
+}
+
+/// A plain open object schema: valid on its own, as a derivation base, and as an
+/// Instance's conforming type.
+fn plain(gts_id: &str) -> Value {
+    json!({
+        "$id": format!("gts://{gts_id}"),
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": { "name": { "type": "string" } },
+    })
+}
+
+fn referencing_target(gts_id: &str, target: &str) -> Value {
+    let mut doc = plain(gts_id);
+    doc["properties"] = json!({ "target": { "$ref": format!("gts://{target}") } });
+    doc
 }

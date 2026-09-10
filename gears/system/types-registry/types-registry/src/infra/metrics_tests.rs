@@ -451,11 +451,7 @@ fn the_verdict_counter_renders_under_its_prefixed_total_name() {
     );
 }
 
-/// **The whole point of this instrument.** A refusal is already counted by
-/// `refusals_total`, so `incompatible` and `unknown` would be observable without
-/// it — but `compatible` is not a refusal and has nowhere else to go, and
-/// SPEC §16.12's "rejected with its own reason" is unobservable when it is one
-/// `reason` label among a dozen. All three verdicts, each its own series.
+/// All three verdicts have separate series, including non-refused compatible results.
 #[test]
 fn all_three_verdicts_are_counted_under_their_own_label_value() {
     let (provider, exporter, metrics) = recorder();
@@ -483,9 +479,7 @@ fn all_three_verdicts_are_counted_under_their_own_label_value() {
     );
 }
 
-/// A waived cross-minor check is countable on its own. `compat_forced` on the row
-/// is visible only to whoever queries the row; a `force` is a deployment-enabled
-/// policy escape, and an operator needs to see one without a database.
+/// Forced verdicts have a separate series.
 #[test]
 fn a_waived_verdict_is_its_own_series_under_forced_true() {
     let (provider, exporter, metrics) = recorder();

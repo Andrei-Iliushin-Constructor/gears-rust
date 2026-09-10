@@ -72,23 +72,10 @@ pub trait AdmissionMetrics: std::fmt::Debug + Send + Sync {
     /// `types_registry_refusals_total{stage,reason}` — one increment per refusal.
     fn refused(&self, stage: RefusalStage, reason: &'static str);
 
-    /// `types_registry_compat_verdicts_total{verdict,forced}` — one increment per
-    /// verdict that was actually computed (T17, ADR-0003).
-    ///
-    /// **Not redundant with [`Self::refused`].** A refusal already counts itself
-    /// there, so `incompatible` and `unknown` would be visible without this
-    /// instrument — but `compatible` is not a refusal and has nowhere else to go,
-    /// and SPEC §16.12's *"rejected with its own reason"* is unobservable while it
-    /// is one `reason` label among a dozen.
-    ///
-    /// A candidate owed no comparison — a first admission, a `vM.0~`, a major 0, an
-    /// Instance — emits **nothing** here: there was no verdict, and inventing a
-    /// fourth label value would make "no baseline" indistinguishable from a
-    /// judgement. The unit span carries that case instead.
-    ///
-    /// `forced` is ADR-0004's accepted waiver, its own label rather than a separate
-    /// instrument, so a dashboard reads the waived and unwaived halves of one
-    /// verdict side by side.
+    /// Count each computed verdict in `types_registry_compat_verdicts_total{verdict,forced}`.
+    /// Includes compatible verdicts, which do not increment [`Self::refused`].
+    /// Exempt candidates emit nothing; their baseline is recorded on the unit span.
+    /// `forced` records the effective ADR-0004 waiver.
     fn compat_verdict(&self, verdict: CompatibilityVerdict, forced: bool);
 
     /// Count revalidation retries by drift.

@@ -1,23 +1,11 @@
-//! The admission reason vocabulary, asserted rather than grepped (P16 rule 3).
+//! Admission reason vocabulary checks (P16 rule 3).
 //!
-//! # What is compile-enforced, and what this file adds
-//!
-//! Production code already makes part of it compile-enforced: `metric_label` and
-//! `from_wire` are exhaustive matches, so a new variant cannot compile without a
-//! stored code and a metric label. What that does *not* catch is a code that
-//! collides with another, a code that round-trips to the wrong variant, or a label
-//! an operator cannot read.
-//!
-//! Those properties are asserted below over [`known`] — and **[`known`] is checked
-//! against the module's own source**, because nothing else can. Rust has no
-//! enumeration over an enum's variants without a derive, and the one available here
-//! (`strum::EnumIter`, re-exported by `sea_orm`) would put a storage dependency in
-//! a pure domain module. An exhaustive `match` in a test is not a substitute: it
-//! forces a new variant to be *named*, but a variant named in every match and
-//! omitted from the list is invisible to every assertion that only ever reads the
-//! list. That gap was real here until [`the_listed_vocabulary_matches_the_enum`]
-//! closed it by parsing the enum block out of `include_str!`.
+//! Exhaustive production matches require codes and labels. These tests check
+//! uniqueness, round-trips, and bounded labels. [`known`] is checked against
+//! the enum source so an omitted variant cannot escape those assertions.
+//! Using `sea_orm`'s `EnumIter` would add a storage dependency to the domain.
 
+// Malformed test fixtures and source guards must fail the test immediately.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::AdmissionFailureReason as Reason;
@@ -31,10 +19,12 @@ fn known() -> Vec<Reason> {
         Reason::BaselineUnresolvable,
         Reason::CompatibilityUndecidable,
         Reason::DependentInvalid,
+        Reason::DialectChanged,
         Reason::EntityDeleted,
         Reason::FamilyKindConflict,
         Reason::FamilyShapeConflict,
         Reason::IncompatibleWithBaseline,
+        Reason::InstanceOfMajorZero,
         Reason::InvalidDocument,
         Reason::InvalidIdentifier,
         Reason::InvalidSchema,
@@ -44,6 +34,8 @@ fn known() -> Vec<Reason> {
         Reason::ResolutionClosureExceeded,
         Reason::ResolvedDocumentTooLarge,
         Reason::RevalidationExhausted,
+        Reason::StableDerivesFromMajorZero,
+        Reason::StableRefsMajorZero,
         Reason::UnparsablePayload,
         Reason::UnreadableVersion,
         Reason::UnrecognizedPayload,
@@ -52,15 +44,10 @@ fn known() -> Vec<Reason> {
 
 /// The count [`known`] must have. Bumped deliberately, which is the point: a
 /// variant added without a thought about the dashboards reading it fails here.
-const KNOWN_VARIANTS: usize = 21;
+const KNOWN_VARIANTS: usize = 25;
 
-/// The enum's variant names, read out of this module's own source.
-///
-/// Ugly, and the only thing that actually works: see the module header. The parse
-/// is deliberately narrow — the `pub enum` line, then indented identifiers up to the
-/// closing brace — and every step fails loudly rather than silently returning a
-/// short list, because a parser that quietly finds nothing would turn this guard
-/// into a test that always passes.
+/// Read variant names from the enum source, failing on unexpected syntax
+/// rather than returning an incomplete vocabulary.
 fn variant_names_in_source() -> Vec<String> {
     const SOURCE: &str = include_str!("reasons.rs");
 
@@ -93,9 +80,7 @@ fn variant_names_in_source() -> Vec<String> {
     names
 }
 
-/// **The completeness guard.** Every variant the enum declares is in [`known`], and
-/// every entry of [`known`] is a variant — so a reason cannot enter the vocabulary
-/// without entering the assertions below, and a removed one cannot linger.
+/// Check that [`known`] covers every declared reason exactly once.
 #[test]
 fn the_listed_vocabulary_matches_the_enum() {
     let mut declared = variant_names_in_source();
@@ -105,10 +90,12 @@ fn the_listed_vocabulary_matches_the_enum() {
     let mut listed: Vec<String> = known().iter().map(|r| variant_name(r).to_owned()).collect();
     listed.sort_unstable();
 
+    // Sorted equality also rejects duplicates and the `Unknown` escape hatch.
     assert_eq!(
         listed, declared,
         "`known()` and the enum disagree: a variant was added or removed without \
-         updating the list this file asserts over",
+         updating the list this file asserts over, was listed twice, or `Unknown` \
+         was listed as a vocabulary member",
     );
     assert_eq!(
         declared.len(),
@@ -117,9 +104,7 @@ fn the_listed_vocabulary_matches_the_enum() {
     );
 }
 
-/// One arm per variant: adding a variant to the enum stops this file compiling
-/// until it is named here too. On its own that only forces the *name* to exist,
-/// which is why [`the_listed_vocabulary_matches_the_enum`] exists.
+/// Exhaustive naming; the source-based test separately checks list completeness.
 fn variant_name(reason: &Reason) -> &'static str {
     {
         match reason {
@@ -128,10 +113,12 @@ fn variant_name(reason: &Reason) -> &'static str {
             Reason::BaselineUnresolvable => "BaselineUnresolvable",
             Reason::CompatibilityUndecidable => "CompatibilityUndecidable",
             Reason::DependentInvalid => "DependentInvalid",
+            Reason::DialectChanged => "DialectChanged",
             Reason::EntityDeleted => "EntityDeleted",
             Reason::FamilyKindConflict => "FamilyKindConflict",
             Reason::FamilyShapeConflict => "FamilyShapeConflict",
             Reason::IncompatibleWithBaseline => "IncompatibleWithBaseline",
+            Reason::InstanceOfMajorZero => "InstanceOfMajorZero",
             Reason::InvalidDocument => "InvalidDocument",
             Reason::InvalidIdentifier => "InvalidIdentifier",
             Reason::InvalidSchema => "InvalidSchema",
@@ -141,32 +128,14 @@ fn variant_name(reason: &Reason) -> &'static str {
             Reason::ResolutionClosureExceeded => "ResolutionClosureExceeded",
             Reason::ResolvedDocumentTooLarge => "ResolvedDocumentTooLarge",
             Reason::RevalidationExhausted => "RevalidationExhausted",
+            Reason::StableDerivesFromMajorZero => "StableDerivesFromMajorZero",
+            Reason::StableRefsMajorZero => "StableRefsMajorZero",
             Reason::UnparsablePayload => "UnparsablePayload",
             Reason::UnreadableVersion => "UnreadableVersion",
             Reason::UnrecognizedPayload => "UnrecognizedPayload",
             Reason::Unknown(_) => "Unknown",
         }
     }
-}
-
-/// No entry appears twice, or one of them would be silently untested.
-#[test]
-fn no_variant_is_listed_twice() {
-    let mut names: Vec<&str> = known().iter().map(variant_name).collect();
-    let total = names.len();
-    names.sort_unstable();
-    names.dedup();
-    assert_eq!(names.len(), total, "duplicate entry in `known()`");
-}
-
-/// `Unknown` is the escape hatch for a code this build cannot read, not a member of
-/// the vocabulary, so it must never be listed as one.
-#[test]
-fn the_unknown_escape_hatch_is_not_part_of_the_vocabulary() {
-    assert!(
-        known().iter().all(|r| variant_name(r) != "Unknown"),
-        "Unknown is listed as a vocabulary member",
-    );
 }
 
 /// Every stored code restores its own variant. A code that round-trips to the
@@ -183,9 +152,7 @@ fn every_code_round_trips_to_the_variant_that_wrote_it() {
     }
 }
 
-/// The stored code and the metric label are the same string for a known reason —
-/// which is what lets an operator move between a stored `error_payload` and a
-/// dashboard without a translation table.
+/// Known reasons use the same code in stored errors and metric labels.
 #[test]
 fn a_known_reasons_stored_code_is_its_metric_label() {
     for reason in known() {
@@ -222,10 +189,8 @@ fn every_code_is_stable_snake_case() {
     }
 }
 
-/// An unfamiliar code is **preserved** as a stored code and **bounded** as a metric
-/// label. Both halves matter: a rolling deployment reads rows another version wrote,
-/// and a metric whose label set is whatever those rows contain has unbounded
-/// cardinality.
+/// Preserve unfamiliar stored codes across versions; map their metric label
+/// to `other` to bound cardinality.
 #[test]
 fn an_unfamiliar_code_is_preserved_in_storage_and_bounded_in_metrics() {
     let restored = Reason::from_wire("something_a_later_version_wrote");
@@ -255,20 +220,24 @@ fn no_known_reason_claims_the_unknown_bucket() {
     );
 }
 
-/// This task's own additions are in the vocabulary, each under its own code. The
-/// two compatibility refusals in particular must never collapse into one
-/// (SPEC 16.12).
+/// Quarantine and dialect refusals must not use `invalid_schema`.
+/// Whole-vocabulary tests already cover distinctness and round-trips.
 #[test]
-fn t17s_compatibility_reasons_are_three_distinct_codes() {
+fn t18s_quarantine_and_dialect_reasons_are_four_distinct_codes() {
     let codes = [
-        Reason::IncompatibleWithBaseline.metric_label(),
-        Reason::CompatibilityUndecidable.metric_label(),
-        Reason::BaselineUnresolvable.metric_label(),
+        Reason::StableDerivesFromMajorZero.metric_label(),
+        Reason::StableRefsMajorZero.metric_label(),
+        Reason::InstanceOfMajorZero.metric_label(),
+        Reason::DialectChanged.metric_label(),
     ];
     let mut unique = codes.to_vec();
     unique.sort_unstable();
     unique.dedup();
-    assert_eq!(unique.len(), 3, "{codes:?}");
+    assert_eq!(unique.len(), 4, "{codes:?}");
+    assert!(
+        !codes.contains(&Reason::InvalidSchema.metric_label()),
+        "a rule refusal is wearing the malformed-document code",
+    );
     for code in codes {
         assert_eq!(Reason::from_wire(code).metric_label(), code);
     }

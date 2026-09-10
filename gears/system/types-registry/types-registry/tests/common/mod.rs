@@ -226,6 +226,21 @@ pub async fn seed_pending_revision_item(
     expected_resource_version: i64,
     now: OffsetDateTime,
 ) -> i64 {
+    seed_pending_revision_item_with(runner, gts_id, expected_resource_version, "{}", false, now)
+        .await
+        .1
+}
+
+/// Seed an item with a chosen payload and stored waiver. Direct writes allow
+/// non-waivable baselines that acceptance would reject, testing worker re-authorization.
+pub async fn seed_pending_revision_item_with(
+    runner: &impl DBRunner,
+    gts_id: &str,
+    expected_resource_version: i64,
+    request_payload: &str,
+    compat_forced: bool,
+    now: OffsetDateTime,
+) -> (Uuid, i64) {
     let scope = allow_all();
     let op_id = Uuid::new_v4();
     secure_insert::<operation::Entity>(
@@ -237,8 +252,9 @@ pub async fn seed_pending_revision_item(
             tenant_id: Set(None),
             principal_id: Set(Uuid::from_u128(0xB1)),
             idempotency_key: Set(format!("idem-{op_id}")),
-            idempotency_scope_hash: Set(vec![0x01]),
-            request_fingerprint: Set(vec![0x02]),
+            // `read_operation` requires both digests to be 32 bytes.
+            idempotency_scope_hash: Set(vec![0x01; 32]),
+            request_fingerprint: Set(vec![0x02; 32]),
             status: Set(OperationStatus::Running),
             created_at: Set(now),
             started_at: Set(Some(now)),
@@ -258,8 +274,9 @@ pub async fn seed_pending_revision_item(
             dry_run: Set(false),
             kind: Set(OperationKind::Registration),
             expected_resource_version: Set(expected_resource_version),
+            compat_forced: Set(compat_forced),
             status: Set(OperationItemStatus::Pending),
-            request_payload: Set(Some("{}".to_owned())),
+            request_payload: Set(Some(request_payload.to_owned())),
             result_revision_no: Set(None),
             result_resource_version: Set(None),
             error_payload: Set(None),
@@ -273,7 +290,7 @@ pub async fn seed_pending_revision_item(
     )
     .await
     .expect("insert pending operation item");
-    item.id
+    (op_id, item.id)
 }
 
 /// One immutable authored revision.
@@ -331,4 +348,75 @@ pub async fn seed_current_type_schema(
     )
     .await
     .expect("insert current type schema");
+}
+
+/// Rewrite stored dialects to test baselines from a different admissible set.
+/// P0 acceptance permits only Draft-07, so normal submission cannot create them.
+pub async fn restate_stored_dialect(db: &Arc<DBProvider<DbError>>, gts_id: &str, dialect: &str) {
+    restate_stored_revision(db, gts_id, |document| {
+        document["$schema"] = serde_json::json!(dialect);
+    })
+    .await;
+}
+
+/// Graft a dangling `$ref` onto stored revisions to test `baseline_unresolvable`.
+/// Normal admission rejects such documents.
+pub async fn graft_stored_ref(db: &Arc<DBProvider<DbError>>, gts_id: &str, target: &str) {
+    let reference = format!("gts://{target}");
+    restate_stored_revision(db, gts_id, |document| {
+        document["properties"]["grafted"] = serde_json::json!({ "$ref": reference });
+    })
+    .await;
+}
+
+/// Rewrite every stored revision of `gts_id` through `edit`.
+async fn restate_stored_revision(
+    db: &Arc<DBProvider<DbError>>,
+    gts_id: &str,
+    edit: impl Fn(&mut serde_json::Value),
+) {
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter};
+    use toolkit_db::secure::{SecureEntityExt, SecureUpdateExt};
+
+    let scope = allow_all();
+    let conn = db.conn().expect("conn");
+    let own_id = format!("gts://{gts_id}");
+    let rows = type_schema_revision::Entity::find()
+        .secure()
+        .scope_with(&scope)
+        .all(&conn)
+        .await
+        .expect("stored revisions");
+    let mut rewritten = 0;
+    for row in rows {
+        let mut document: serde_json::Value =
+            serde_json::from_str(&row.raw_schema).expect("a stored revision is valid JSON");
+        if document["$id"].as_str() != Some(own_id.as_str()) {
+            continue;
+        }
+        edit(&mut document);
+        let result = type_schema_revision::Entity::update_many()
+            .secure()
+            .col_expr(
+                type_schema_revision::Column::RawSchema,
+                Expr::value(document.to_string()),
+            )
+            .filter(
+                Condition::all()
+                    .add(type_schema_revision::Column::EntityId.eq(row.entity_id))
+                    .add(type_schema_revision::Column::RevisionNo.eq(row.revision_no)),
+            )
+            .scope_with(&scope)
+            .exec(&conn)
+            .await
+            .expect("rewrite the stored revision");
+        assert_eq!(result.rows_affected, 1);
+        rewritten += 1;
+    }
+    assert!(
+        rewritten > 0,
+        "no stored revision of '{gts_id}' was found to restate; the fixture would \
+         otherwise assert over a baseline it never changed",
+    );
 }

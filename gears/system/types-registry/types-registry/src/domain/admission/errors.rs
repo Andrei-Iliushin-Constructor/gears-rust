@@ -57,12 +57,7 @@ pub enum WorkerError {
     /// projection is missing behind an entity that is still there.
     #[error("entity '{gts_id}' (id {entity_id}) vanished mid-transaction")]
     EntityVanished { gts_id: String, entity_id: i64 },
-    /// A stored baseline document is not valid JSON.
-    ///
-    /// Corruption rather than a race: the document was canonicalized before it was
-    /// stored and an admitted revision is immutable afterwards. Infrastructure, not
-    /// a statement about the candidate — the candidate is not the document that
-    /// failed to parse.
+    /// Invalid JSON in a stored baseline indicates corruption, not a candidate refusal.
     #[error("the stored baseline document for '{gts_id}' is not valid JSON: {source}")]
     BaselineUnparsable {
         gts_id: String,

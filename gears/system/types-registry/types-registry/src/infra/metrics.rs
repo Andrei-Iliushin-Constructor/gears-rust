@@ -21,12 +21,7 @@ pub const ACTIVATION_WRITE_SET_BUCKETS: [f64; 10] =
 pub const OPERATION_DURATION_BUCKETS_SECONDS: [f64; 10] =
     [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0];
 
-/// The verdict's label value, over a closed set of three.
-///
-/// Mapped here with an exhaustive `match` rather than through
-/// `CompatibilityVerdict::as_str()`: the strings agree today, and doing it this way
-/// is what makes a fourth variant in `gts-rust` a compile error here instead of a
-/// new series appearing in a dashboard nobody changed (P16 rule 3).
+/// Exhaustive metric-label mapping; new verdict variants require an explicit label.
 const fn verdict_label(verdict: CompatibilityVerdict) -> &'static str {
     match verdict {
         CompatibilityVerdict::Compatible => "compatible",

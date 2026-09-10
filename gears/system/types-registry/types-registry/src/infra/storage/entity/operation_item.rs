@@ -12,10 +12,9 @@
 //! means *must not exist*; `>= 1` is the version to match. On the wire an absent
 //! field means must-not-exist and a literal 0 is rejected.
 //!
-//! `compat_forced` is the accepted ADR-0004 `force`, added by
-//! `m20260908_000003_operation_item_compat_forced`. It is the only route by which a
-//! per-candidate request flag reaches the admission worker, and it is spelled the
-//! way `type_schema_revision` spells it — `force` is a MySQL reserved word.
+//! `compat_forced` persists the ADR-0004 waiver request for the worker.
+//! Added by `m20260908_000003_operation_item_compat_forced`; the name avoids
+//! `MySQL`'s reserved `force`.
 //!
 //! `request_payload` is dropped at terminality. Failed and dry-run receipts keep
 //! the structured outcome but not the submitted content, because keeping it would
@@ -48,12 +47,9 @@ pub struct Model {
     pub kind: OperationKind,
     /// 0 means the candidate must not exist; otherwise the version to match.
     pub expected_resource_version: i64,
-    /// ADR-0004's accepted `force`: this candidate waives its one cross-minor
-    /// compatibility check. Request-static and write-once — acceptance establishes
-    /// that the deployment permits the waiver and that there is a check to waive,
-    /// and the worker reads it here because after T21 the outbox payload carries
-    /// nothing but the operation UUID. Copied verbatim onto
-    /// `type_schema_revision.compat_forced`, which is why it shares that name.
+    /// Accepted, write-once ADR-0004 waiver request. The worker re-authorizes it;
+    /// `type_schema_revision.compat_forced` records the effective waiver and may
+    /// be false when this field is true.
     pub compat_forced: bool,
     pub status: OperationItemStatus,
     /// Dropped at terminality — NULL for every terminal status.

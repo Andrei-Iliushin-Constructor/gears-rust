@@ -18,10 +18,10 @@ use crate::domain::ports::{NewOperation, NewOperationItem, OperationItemRow, Ope
 use crate::infra::storage::entity::enums::{OperationItemStatus, OperationStatus};
 use crate::infra::storage::entity::{operation, operation_item};
 
-/// The multi-row insert budget for `operation_item`, where every row binds 14
+/// The multi-row insert budget for `operation_item`, where every row binds 15
 /// columns rather than the one parameter per row that `IN_CHUNK`'s
-/// `SQLITE_MAX_VARIABLE_NUMBER = 999` reasoning budgets for: 70 × 14 = 980.
-const ITEM_INSERT_CHUNK: usize = 70;
+/// `SQLITE_MAX_VARIABLE_NUMBER = 999` reasoning budgets for: 66 × 15 = 990.
+const ITEM_INSERT_CHUNK: usize = 66;
 
 /// One stored operation as the domain names it. See `entity_repo::row` for why the
 /// mapper sits beside the repository rather than on the entity.

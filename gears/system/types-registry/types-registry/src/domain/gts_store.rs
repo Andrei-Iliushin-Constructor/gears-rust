@@ -73,6 +73,15 @@ pub struct UnitStore {
     closure: Vec<EntityRow>,
     missing_candidates: Vec<String>,
     missing_references: Vec<String>,
+    committed_schemas: HashMap<String, CommittedSchema>,
+}
+
+/// Committed Type Schema content retained for baseline comparison in the same
+/// snapshot. Only `extra_roots` are retained, avoiding copies of the full closure.
+#[derive(Clone, Debug)]
+pub struct CommittedSchema {
+    pub revision_no: i32,
+    pub content: Value,
 }
 
 /// `GtsStore` is not `Debug`, and `finish_non_exhaustive` is the honest way to
@@ -88,6 +97,13 @@ impl std::fmt::Debug for UnitStore {
 }
 
 impl UnitStore {
+    /// Retained committed document by identifier; `None` for overlay candidates
+    /// and entities absent from the closure.
+    #[must_use]
+    pub fn committed_schema(&self, gts_id: &str) -> Option<&CommittedSchema> {
+        self.committed_schemas.get(gts_id)
+    }
+
     /// The identifiers as they were registered, in order.
     ///
     /// This exists because registration leaves no trace of its order in the
@@ -276,25 +292,18 @@ pub fn build_store(mut documents: Vec<UnitDocument>) -> Result<UnitStore, StoreB
         closure: Vec::new(),
         missing_candidates: Vec::new(),
         missing_references: Vec::new(),
+        committed_schemas: HashMap::new(),
     })
 }
 
-/// Build the store one admission unit needs: the candidates, plus the transitive
-/// closure of what they consume, read from the database.
+/// Load the candidates and their dependency closure from one snapshot, with
+/// candidate documents overriding committed versions.
 ///
-/// Load a snapshot store with candidate documents overriding committed versions.
-///
-/// `extra_roots` are identifiers the unit needs resolvable that no candidate names.
-/// T17's compatibility baseline is the case: `vM.n~` is compared against
-/// `vM.(n-1)~`, an entity no candidate references, whose own bases and `$ref`
-/// targets must nevertheless resolve or the comparison would run against an
-/// unresolved document. Passing the identifier is enough — `Stores::closure` seeds
-/// every root's `chain_ids()` and then follows its **stored** outgoing edges, so a
-/// committed document's references come along without being re-extracted here.
+/// `extra_roots` adds unreferenced inputs such as the preceding minor. Closure
+/// loading includes their bases and stored outgoing edges for resolved comparison.
 ///
 /// # Errors
-/// Propagates the closure and document reads, and every [`StoreBuildError`] the
-/// row set can produce.
+/// Propagates closure/document read failures and [`StoreBuildError`].
 pub async fn load_unit_store(
     stores: &dyn Stores,
     tx: &DbTx<'_>,
@@ -330,11 +339,12 @@ pub async fn load_unit_store(
     }
 
     let schema_ids: Vec<i64> = schemas.iter().map(|(id, _)| *id).collect();
-    let mut raw_schemas: HashMap<i64, String> = stores
+    // Retain the loaded revision number for baseline tracing.
+    let mut raw_schemas: HashMap<i64, (i32, String)> = stores
         .current_documents(tx, scope, &schema_ids)
         .await?
         .into_iter()
-        .map(|d| (d.entity_id, d.raw_schema))
+        .map(|d| (d.entity_id, (d.revision_no, d.raw_schema)))
         .collect();
 
     let instance_ids: Vec<i64> = instances.iter().map(|(id, _)| *id).collect();
@@ -347,14 +357,28 @@ pub async fn load_unit_store(
 
     let mut documents = candidates;
     documents.reserve(schemas.len() + instances.len());
+    // Only what an extra root asked for: see `CommittedSchema`.
+    let retain: HashSet<&str> = extra_roots.iter().map(String::as_str).collect();
+    let mut committed_schemas: HashMap<String, CommittedSchema> =
+        HashMap::with_capacity(retain.len());
     for (entity_id, gts_id) in schemas {
-        let Some(text) = raw_schemas.remove(&entity_id) else {
+        let Some((revision_no, text)) = raw_schemas.remove(&entity_id) else {
             return Err(StoreBuildError::MissingDocument { gts_id });
         };
-        let content = serde_json::from_str(&text).map_err(|source| StoreBuildError::Content {
-            gts_id: gts_id.clone(),
-            source,
-        })?;
+        let content: Value =
+            serde_json::from_str(&text).map_err(|source| StoreBuildError::Content {
+                gts_id: gts_id.clone(),
+                source,
+            })?;
+        if retain.contains(gts_id.as_str()) {
+            committed_schemas.insert(
+                gts_id.clone(),
+                CommittedSchema {
+                    revision_no,
+                    content: content.clone(),
+                },
+            );
+        }
         documents.push(UnitDocument { gts_id, content });
     }
     for (entity_id, gts_id) in instances {
@@ -371,6 +395,7 @@ pub async fn load_unit_store(
     let mut unit = build_store(documents)?;
     unit.roots = roots;
     unit.closure = closure_entities;
+    unit.committed_schemas = committed_schemas;
     // One read, split by which root it was.
     let (missing_candidates, missing_references): (Vec<String>, Vec<String>) = closure
         .missing_roots

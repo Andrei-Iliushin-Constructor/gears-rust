@@ -334,22 +334,30 @@ out of scope):
    A minor on a Type Schema identifier is admissible under any prefix.
 5. Declared dialect, Type Schema candidates — top-level `$schema` present and in the
    closed Draft-07 spelling set; any `$schema` below the root must not differ (ADR-0014).
-6. `force` per candidate — refuse where `allow_compatibility_force` is off, or where the
-   candidate has no cross-minor check to waive. "Has a check to waive" is asked of
-   baseline selection itself (`compat::select_baseline(..).waivable()`), so the
-   identifier and the accepted precondition decide it together: a *revision* is
-   compared against its own current revision, which nothing may waive. An accepted
-   waiver is stored on `operation_item.compat_forced` and copied verbatim onto the
-   revision's own `compat_forced` (`force` is a MySQL reserved word, so the column
-   takes its destination's name).
-7. ADR-0015 quarantine — refuse a stable candidate whose immediate base or `$ref` targets
-   include a major-0 identifier. `x-gts-ref` is outside the quarantine.
+6. `force` per candidate — require `allow_compatibility_force` and a waivable
+   cross-minor baseline from `compat::select_baseline`. Intra-entity revisions are
+   never waivable. Store the request on `operation_item.compat_forced`; each worker
+   pass rechecks the deployment setting and baseline eligibility. The revision's
+   `compat_forced` records the effective waiver.
+7. ADR-0015 quarantine — the worker refuses stable candidates whose immediate base,
+   `$ref` target, or conforming type is major 0. `x-gts-ref` is exempt. See below.
 8. Canonicalize through `gts-rust`, compute the request fingerprint, resolve the
    mandatory `Idempotency-Key`.
 
 Ordering invariant that must not be reordered: step 3 precedes any existence lookup, so
 a refusal cannot probe the namespace. Steps 4 and 6 are request-static; family shape and
 whether a waived comparison would fail remain worker decisions inside the commit transaction.
+
+**Worker checks.** Step 7 uses the outgoing edges already extracted in
+`unit::evaluate` for the dependency graph. This keeps quarantine and stored edges
+consistent, preserves worker-side `invalid_schema` refusals for malformed `$ref`s,
+and records quarantine failures as admission-stage `AdmissionFailureReason` values
+(P16). It reads only the request and runs before loading stored rows.
+
+The ADR-0014 dialect pin also runs in the worker: step 5 checks admissibility,
+while the pin needs the baseline document. It runs immediately before comparison
+and reports `dialect_changed`, distinct from `compatibility_undecidable`
+(§16.12, `principle-fail-closed`).
 
 Replay of a matching fingerprint under the same key returns the stored operation —
 `202` while active, `200` when terminal. A different fingerprint under the same key
@@ -984,6 +992,20 @@ it. What the write path emits is therefore part of the contract, not a by-produc
   a decided-against one in the metrics, not only in the refusal reason — which is what makes
   §16.12 observable in a deployment.
 
+Refusals persist `{reason, message}`, returned unchanged by operation reads. `reason`
+is the stable machine-readable refusal category; `message` is for humans and is not
+a parsing contract. There is no separate `diagnostics` field (PRD, ADR-0003).
+
+For `incompatible_with_baseline` and `compatibility_undecidable`, this build renders
+up to 20 backward findings as `finding at path`, in engine order, and counts omitted
+findings in the message. Each path retains at most 200 UTF-8 bytes, cut at a character
+boundary and followed by `...(truncated)` when shortened. Paths use GTS notation
+(`$`, `$.payload`, etc.); the engine's unbounded human `detail` is not copied.
+Refusals before comparison, such as `dialect_changed` and `baseline_unresolvable`,
+explain their cause without inventing comparison findings. Clients branch on `reason`
+and display `message` without depending on its wording or these implementation limits.
+Successful admissions carry no compatibility diagnostics.
+
 ## 9. Database
 
 `database.sql` is the normative target. P0 creates **10 of its 11 tables**, omitting only
@@ -1054,7 +1076,7 @@ because other documents cite the numbers.
 | C6 | **No PDP.** Reads and writes are authenticated but not authorized, deviating from `06`'s *"every sensitive DB access MUST be covered by a PDP decision"*. Entities are `#[secure(unrestricted)]`, so a tenant-scoped query fails closed rather than leaking. **The sharpest edge is the revision path**: §8.1 step 3 asks the registration policy of creations only — correctly, since the policy governs which regions gain members — and nothing takes its place for an edit, so a caller that reaches the submit route can replace the authored content of any entity the registry holds, a platform-seeded `cf.core.*` schema included, in a region the deployment has closed. Bounded in P0 by transport rather than by policy: the mutation routes are internal-only (C8) | Tracked as C6 in the P1 epic #4628 — prerequisite 1 (the deferred identity-to-permission binding), then an owner/principal check before `unit::commit_revision`, and `tenant_col` + `PolicyEnforcer` (§12) |
 | C7 | **The validator has no tenant or projection dimensions.** P0's validator digests `resource_version`, `resolution_fingerprint` and a fixed default-projection marker (§8.5); the SDK cache key likewise carries visibility context and projection as constants. Correct while every read is platform-plane and no `$select` exists, and wrong the moment either arrives | The wire form is a **versioned** JSON object, so P1 adds the chain versions and the real projection digest under a new version and refuses to honour a P0 token |
 | C8 | **Platform-plane mutations are internal-only.** Every P0 operation is platform-plane (`plane = 1`), but an in-process gear has no inbound platform-identity validator, api-gateway has no platform listener, and `OperationBuilder` cannot mark a route platform-only (§8.4). Registration and deletion therefore keep `exposed = false`; internal and non-mutating calls retain authentication, because `.anonymous()` without a platform identity would be a regression | A platform listener with `X-ToolKit-Internal-Token` / `PlatformIdentity`, a declarative platform-plane route marker, and a platform-principal/PDP decision before mutation dispatch. Only then may mutation routes be exposed. This is toolkit/api-gateway work outside this gear, and ADR-0006/0008 already ask for the listener |
-| C9 | **Implementation sequencing only.** T11 makes revisions executable before T14 refreshes reverse impact and T17 compares compatibility. Content revisions **of** minor-bearing Type Schemas remain permanently refused by ADR-0004 — creating one is admissible (§8.1 step 4), editing it is not; C8 keeps the database mutation path internal. **The temporary `force` refusal is gone** — T17 evaluates the comparison and persists `compat_forced`, so a waiver is accepted where the deployment enabled it and the candidate's baseline is the cross-minor one | T14 and T17 close the two gaps at Checkpoints 3 and 4, before T24 exposes any consumer. Strike this row when both checkpoints are complete; striking it removes nothing further, since the ADR-0004 invariant is permanent |
+| C9 | **Implementation sequencing.** T14 adds reverse-impact refresh; T17 adds compatibility checks and effective waiver provenance, replacing the temporary `force` refusal. ADR-0004 still permanently forbids content revisions of minor-bearing Type Schemas; creation is admissible (§8.1 step 4). C8 keeps mutations internal | Remove this row when Checkpoints 3 and 4 are complete, before T24 exposes consumers. The ADR-0004 restriction remains |
 
 
 Each ceiling gets a `ponytail:`-style source comment naming the bound and the upgrade

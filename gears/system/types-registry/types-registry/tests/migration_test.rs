@@ -176,14 +176,8 @@ async fn an_existing_schema_gains_the_coordination_state_table_and_seed() {
     );
 }
 
-/// An installation that already holds operation items gains `compat_forced` on
-/// every one of them, reading `false`.
-///
-/// This is the case a fresh-install test cannot reach, and the only one where
-/// `ADD COLUMN` can fail: without `NOT NULL DEFAULT false` the statement has no
-/// value for the rows already there. `false` is also the *true* value for them —
-/// every item a deployment holds was accepted while acceptance refused every
-/// effective `force` (ceiling C9), so nothing is being back-filled with a guess.
+/// Upgrade a non-empty installation: existing items receive `compat_forced = false`,
+/// consistent with the previous refusal of effective `force`.
 #[tokio::test]
 async fn an_existing_operation_item_gains_compat_forced_reading_false() {
     let db = Database::connect("sqlite::memory:")
@@ -233,9 +227,7 @@ async fn an_existing_operation_item_gains_compat_forced_reading_false() {
     );
 }
 
-/// SQLite lowers the boolean to an INTEGER, so the migration carries the same 0/1
-/// `CHECK` every other lowered boolean in this schema does — without it SQLite
-/// would accept a `7` that Postgres and MySQL refuse.
+/// SQLite's INTEGER boolean needs an explicit 0/1 check.
 #[tokio::test]
 async fn the_lowered_compat_forced_boolean_refuses_a_value_outside_zero_and_one() {
     let db = migrated_db().await;

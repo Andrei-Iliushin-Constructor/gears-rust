@@ -1,8 +1,10 @@
 //! Admission tracing spans.
 
+use gts::CompatibilityVerdict;
 use tracing::{Span, field};
 use uuid::Uuid;
 
+use crate::domain::compat::Baseline;
 use crate::domain::enums::OperationKind;
 
 /// The label an operation's kind carries.
@@ -30,13 +32,8 @@ pub fn record_operation_facts(span: &Span, kind: OperationKind, dry_run: bool) {
     span.record("dry_run", dry_run);
 }
 
-/// The span covering one admission unit — one candidate, one operation item.
-///
-/// The two GTS versions are recorded at creation because they are constants of the
-/// running binary: a verdict means whatever the checker that produced it meant, and
-/// a checker upgrade can change the verdict for an unchanged pair of schemas
-/// (ADR-0003). The compatibility fields are left empty for
-/// [`record_compat_facts`] — they are what the evaluation *learns*.
+/// Span for one candidate. Record binary GTS versions now (ADR-0003);
+/// [`record_compat_facts`] fills fields learned during evaluation.
 #[must_use]
 pub fn unit_span(
     operation_id: Uuid,
@@ -61,32 +58,24 @@ pub fn unit_span(
     )
 }
 
-/// What the compatibility check learned about one candidate.
-///
-/// **Identifiers are span fields, never metric labels** (SPEC §8.6): a baseline
-/// identifier is unbounded, so a per-event field is the only place it can go. The
-/// metric carries the bounded half — the verdict and the waiver — and this carries
-/// the half that says *which definition* produced it.
+/// Compatibility facts for the unit span. Domain types keep token mapping here.
+/// Unbounded baseline identifiers belong in spans, never metric labels (SPEC §8.6).
 #[derive(Clone, Copy, Debug)]
 pub struct CompatFacts<'a> {
-    /// Which selection this was, as a stable token: `current_revision`,
-    /// `preceding_minor`, or one of the `exempt_*` cases.
-    pub baseline: &'static str,
+    /// Selection token: `current_revision`, `preceding_minor`, or `exempt_*`.
+    pub baseline: &'a Baseline,
     /// The baseline's identifier, absent where no comparison was owed.
     pub gts_id: Option<&'a str>,
     /// The baseline's revision number, absent for the same reason.
     pub revision: Option<i32>,
     /// The verdict, absent where no comparison ran. An absent verdict beside a
     /// present `baseline` token is exactly how an exemption reads.
-    pub verdict: Option<&'static str>,
+    pub verdict: Option<CompatibilityVerdict>,
 }
 
-/// Fill in the compatibility fields [`unit_span`] left empty.
-///
-/// Called for a refused candidate as well as an admitted one: a refusal is the case
-/// where knowing the baseline matters most.
+/// Fill compatibility fields for admitted and refused candidates.
 pub fn record_compat_facts(span: &Span, facts: CompatFacts<'_>) {
-    span.record("baseline", facts.baseline);
+    span.record("baseline", facts.baseline.label());
     if let Some(gts_id) = facts.gts_id {
         span.record("baseline_gts_id", gts_id);
     }
@@ -94,7 +83,7 @@ pub fn record_compat_facts(span: &Span, facts: CompatFacts<'_>) {
         span.record("baseline_revision", revision);
     }
     if let Some(verdict) = facts.verdict {
-        span.record("compat_verdict", verdict);
+        span.record("compat_verdict", verdict.as_str());
     }
 }
 

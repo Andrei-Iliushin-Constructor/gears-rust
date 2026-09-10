@@ -128,6 +128,7 @@ async fn admit(
             limits: &common::limits(),
             worker: &common::worker_settings(),
             metrics: &common::metrics(),
+            allow_compatibility_force: false,
         },
         op,
         LATER,
@@ -161,6 +162,7 @@ async fn try_admit(
             limits: &common::limits(),
             worker: &common::worker_settings(),
             metrics: &common::metrics(),
+            allow_compatibility_force: false,
         },
         op,
         LATER,
@@ -270,12 +272,8 @@ async fn a_revision_removes_the_edge_it_dropped_and_adds_the_one_it_gained() {
     let db = test_db().await;
     admit(&db, "shape", SHAPE, schema(SHAPE), None).await;
     admit(&db, "invoice", INVOICE, schema(INVOICE), None).await;
-    // One property whose target moves, rather than one property swapped for
-    // another: adding or removing a property changes what the schema accepts, and
-    // T17 refuses a revision that is not backward compatible with its own current
-    // revision. `SHAPE` and `INVOICE` are structurally identical, so moving the
-    // reference between them is compatible — and it is the edge replacement this
-    // test is about, with the property name held still.
+    // Keep the property name and retarget it between structurally identical schemas.
+    // The edit stays compatible while testing dependency replacement.
     admit(
         &db,
         "first",
@@ -418,6 +416,7 @@ async fn a_ref_naming_no_entity_fails_the_candidate() {
             limits: &common::limits(),
             worker: &common::worker_settings(),
             metrics: &common::metrics(),
+            allow_compatibility_force: false,
         },
         op,
         LATER,

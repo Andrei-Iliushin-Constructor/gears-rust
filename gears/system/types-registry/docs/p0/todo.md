@@ -345,7 +345,7 @@ operation, its items and the outbox message. Reads no entity state.
 Outcome and evidence: the criteria below. The per-task report was folded into these and deleted.
 
 **Acceptance criteria:**
-- [x] Checks run in SPEC §8.1 order; policy precedes any existence lookup so a refusal cannot probe the namespace. Kept **structurally**, not by review: `validate` takes the request and the config and has no runner, provider or repository in its signature, so mid-validation existence checking would require changing that signature. Steps 1–6 and 8 are here; **step 7 (the ADR-0015 quarantine) is T18's** — it needs T13's reference extractor — and a `TODO(T18)` marks its position between steps 6 and 8 so it lands as an insertion rather than a reordering. Step 6 fail-closes every otherwise-applicable `force` until T17 can compare and persist its provenance
+- [x] SPEC §8.1 ordering: `validate` has no database access, so policy precedes existence checks. Acceptance handles steps 1–6 and 8; T18 implements step 7 in the worker using its extracted dependency edges (see SPEC §8.1). T17 replaces the temporary `force` refusal with compatibility checks and provenance.
 - [x] Policy gates **every accepted candidate**, because P0 accepts only declared creations: a positive `expected_resource_version` is refused (`AcceptanceError::RevisionNotAccepted`) and deletion is refused with the envelope. SPEC §8.1's revision/deletion bypass is deliberately *not* implemented yet — gating on the caller's declared kind while nothing verified the claim let a request name a version and skip the gate outright (found at the Checkpoint 1 review). The bypass returns at T11, together with the commit-side precondition that makes the claim checkable. A refusal names the region and the parameter
 - [x] Fingerprint covers canonical body, operation kind, owner, preconditions and each `force` flag — plus dry-run mode, plane, tenant and principal, as one table-driven test over all nine inputs. Every field is **length-prefixed**, so a digest cannot confuse `("ab", "c")` with `("a", "bc")`, and the digest carries a version tag so a future change to its coverage cannot read as a matching replay
 - [x] Replay with a matching fingerprint returns the stored operation (`202` non-terminal, `200` terminal); a different fingerprint under the same key returns `409`. The replay test submits a deliberately **reordered** body, because canonicalization is the thing that makes a replay a replay
@@ -723,7 +723,7 @@ flat is how the root reaches 25 files.
 |---|---|---|
 | `family/` | **T10 + T12** | `key.rs` (today's `family_key`), `rules.rs` (kind at T10, shape and contiguity at T12), tests |
 | `dependency/` | ~~T13 + T14~~ | **Not taken.** The traversal turned out to be SQL, so there was no second file to put beside `extraction.rs`: `domain/dependency.rs` stays one pure file and T14's admission step went to `domain/admission/refresh.rs`. See T14's *Not `TR/src/domain/dependency/`* |
-| `compat/` | **T17 + T18** | `baseline.rs` (selection + resolved comparison), `derivation.rs` (chain + major-0 quarantine), tests |
+| `compat/` | **T17 + T18** | `baseline.rs` (selection + resolved comparison), `derivation.rs` (major-0 quarantine + the ADR-0014 dialect pin), tests |
 
 Staying flat: `policy.rs`, `artifacts.rs`, `validator.rs`, `gts_store.rs`, `enums.rs`,
 `error.rs`, `ports.rs`, `registry_service.rs`, `seeding.rs` — one concept each, the way
@@ -1429,12 +1429,11 @@ reads as scope rather than as silence.
   pre-existing and not this phase's to clear
 - [x] Gear tests at the checkpoint: **617 passed** on SQLite; **6 passed** on the PostgreSQL and
   MySQL container suites, `revision_race_backends_test` included
-- [x] **Exclusion verified through backend lock waits.** `a_second_commit_waits_for_the_first`
-  observes `types_registry__coordination_state` waits from a separate connection:
-  `pg_blocking_pids` / `pg_stat_activity` on Postgres, `data_lock_waits` / `data_locks` on MySQL.
-  One container per test with no other writer identifies the waiting claim. `ClaimHooks` verifies
-  it stays pending while the row is held and returns after release; a timeout alone was insufficient.
-  Both backends fail the mutation checks: querying another table or signalling return before the call
+- [x] **Backend lock exclusion:** `a_second_commit_waits_for_the_first` observes
+  `types_registry__coordination_state` waits through Postgres `pg_blocking_pids` /
+  `pg_stat_activity` and MySQL `data_lock_waits` / `data_locks`. An isolated container
+  identifies the writer; `ClaimHooks` verifies pending-before-release and progress
+  afterwards. Both backends detect wrong-table and premature-return mutations.
 - [x] **`make test-types-registry-db` did not run `revision_race_backends_test`, and now does.**
   The suite that proves the `entity_write_order` claim on a backend with real row locking was
   reachable only by hand, so `make ci` never ran it — the container test the last commit added to
@@ -1464,13 +1463,9 @@ reads as scope rather than as silence.
    merely early"*. Both read as instructions T20 and the ADR-0013 purge can follow literally.
    The mechanism is right too: an `UPDATE … SET state_seq = state_seq + 1` holds an exclusive row
    lock to commit, and `#[secure(unrestricted)]` matches every other P0 table.
-3. **Store decorator duplication removed.** `TestStores<H>` in `tests/common/test_stores.rs`
-   implements the seven port traits once. `PauseHooks`, `ClaimHooks`, and `CasMissHooks` supply
-   test-specific behavior through `StoreHooks`, whose methods have no-op defaults.
-   Plain Rust forwarding keeps the signatures directly readable without a delegation macro.
-
-   For T19/T20, interception points are shared: add a `PausePoint` and call site for timing,
-   or a `StoreHooks` method to inspect arguments/results or override a result.
+3. **Store decorator duplication removed.** `TestStores<H>` forwards all seven port
+   traits once. `PauseHooks`, `ClaimHooks`, and `CasMissHooks` customize `StoreHooks`.
+   For T19/T20, add a `PausePoint` for timing or a hook for inspection/overrides.
 4. **No stale text survives.** No "wait budget" wording anywhere in the gear. Every remaining
    mention of redelivery either carries the "until T21 … after it" caveat (SPEC lines 528, 594;
    `errors.rs`'s `ConformingTypeAbsent`) or describes ADR-0012's target design, which is where it
@@ -1491,23 +1486,15 @@ rejected with its own reason, never collapsed into `Incompatible`.
 - [x] `compare_documents` is the only comparison entry point; `is_minor_compatible` is not used
 - [x] `CompatibilityVerdict::Unknown` fails the candidate with a reason distinct from `Incompatible` (`principle-fail-closed`)
 - [x] Every admitted revision records `gts_spec_version`, `gts_impl_version` and `compat_forced`
-- [x] `force` waives exactly one cross-minor check, only where the deployment enabled it and the candidate has such a check to waive; this removes `ForceCompatibilityUnavailable` and carries the accepted flag into `compat_forced`
+- [x] `force` waives one eligible cross-minor check when the deployment permits it. `ForceCompatibilityUnavailable` is removed; revision `compat_forced` records the effective waiver
 - [x] Major-0 candidates get no baseline and no verdict
 
 **Observability (`plan.md` P16 — this task instruments what it adds):**
-- [x] Every verdict is counted, and `Unknown` is distinguishable from `Incompatible` in the
-      metrics and not only in the refusal reason: a new instrument
-      `types_registry_compat_verdicts_total{verdict,forced}` over the closed set
-      `compatible | incompatible | unknown`. A refusal still increments `refusals_total`; the
-      verdict counter exists because `compatible` is not a refusal and has nowhere else to go,
-      and because SPEC §16.12's *"rejected with its own reason"* is unobservable when it is one
-      `reason` label among a dozen
-- [x] A waived cross-minor check is countable on its own — `forced="true"` on the recorded
-      verdict. A `force` is a deployment-enabled policy escape, and `compat_forced` on the row is
-      visible only to whoever queries the row
-- [x] The unit span records what the counter cannot: the baseline it selected
-      (`baseline_gts_id`, `baseline_revision`), the verdict, and `gts_spec_version` /
-      `gts_impl_version`. Identifiers are span fields, never labels
+- [x] `types_registry_compat_verdicts_total{verdict,forced}` counts
+      `compatible | incompatible | unknown`; refusals also increment `refusals_total`
+- [x] `forced="true"` identifies waived cross-minor verdicts
+- [x] Unit spans record `baseline_gts_id`, `baseline_revision`, verdict,
+      `gts_spec_version`, and `gts_impl_version`. Identifiers never become metric labels
 - [x] **The admission reason vocabulary has one home, compile-enforced** (P16 rule 3):
       `ItemFailure::new` takes `AdmissionFailureReason` from `domain::admission::reasons`.
       Stored codes are unchanged; known codes restore typed variants and their metric labels,
@@ -1515,15 +1502,14 @@ rejected with its own reason, never collapsed into `Incompatible`.
 - [x] Add this task's compatibility refusal variants to `AdmissionFailureReason`
 
 **Verification:**
-- [x] Gear tests, all three backends (see [Commands](#commands))
+- [~] Gear tests, all three backends (see [Commands](#commands)) — 739/739 SQLite tests pass.
+      `compat_backends_test` now runs the T17/T18 matrix on PostgreSQL and MySQL and is selected
+      by `make test-types-registry-db`; its Docker execution remains to be recorded
 - [x] Compatibility matrix: optional property added at a `Closed` level (compatible), at `Open` (incompatible), at `Partial` (`Unknown`)
 - [x] Test: provenance columns match `GTS_SPECIFICATION_VERSION` and the crate version
-- [~] Test: `force` refused when `allow_compatibility_force` is off — done
-      (`force_is_refused_while_the_deployment_disallows_it`). **The Dry Run half is
-      unreachable in P0**: acceptance refuses `dry_run` for the whole request before
-      step 6 is asked, so there is no forced dry run to refuse. Pinned as ordering by
-      `a_forced_dry_run_is_refused_for_being_a_dry_run_before_force_is_considered`,
-      which fails naming `force` on the day T20 makes a dry run acceptable
+- [x] Disabled `force` is refused (`force_is_refused_while_the_deployment_disallows_it`).
+      Before T20, Dry Run is synchronously rejected before the force gate; the ordering is asserted
+      by `a_forced_dry_run_is_refused_for_being_a_dry_run_before_force_is_considered`
 - [x] Test: the verdict instrument's rendered name, label keys and both label vocabularies
       against an `InMemoryMetricExporter` — T16's bar, and the only thing that catches a dropped
       `_total` or a renamed label value
@@ -1536,27 +1522,16 @@ rejected with its own reason, never collapsed into `Incompatible`.
 **Dependencies:** Checkpoint 3
 **Files likely touched:** `TR/src/domain/compat.rs` (baseline selection; T18's derivation chain joins it and the pair takes `TR/src/domain/compat/` — trigger table above), `TR/src/domain/admission/unit.rs`, `TR/src/domain/error.rs`, `TR/src/domain/admission/reasons.rs` (NEW — the vocabulary), `TR/src/domain/ports/metrics.rs`, `TR/src/infra/metrics.rs`, `TR/src/observability.rs`, `TR/tests/compat_test.rs`
 
-**One file this list missed, and it is a migration.** `force` is a per-candidate request
-input: it cannot be recomputed from the identifier, and the request fingerprint that
-already covers it is a digest. Admission reads the item row — after T21 that is *all* it
-reads — so an accepted waiver that is not a column is one the worker never sees, and
-`compat_forced` would record `false` on a revision whose check was waived. Added as
-`m20260908_000003_operation_item_compat_forced` (append-only, like `000002` before it),
-plus the `operation_item` entity, `NewOperationItem`, `OperationItemRow` and
-`database.sql`.
+**Storage:** `m20260908_000003_operation_item_compat_forced` persists the per-candidate
+waiver request for the worker; the fingerprint cannot recover it. The entity, port
+rows, and `database.sql` include the column. `compat_forced` avoids MySQL's reserved
+`FORCE`; `no_backend_names_the_column_with_a_reserved_word` guards the name.
 
-**The column is not called `force`, and the MySQL container suite is what said so.**
-`FORCE` is a MySQL reserved word: `ADD COLUMN force` is error 1064 there, which the
-SQLite suite cannot see. Back-quoting would work and would leave every future raw
-statement one omission away from the same failure, so the column takes the name its
-value already has on `type_schema_revision` — `compat_forced`, copied verbatim. The wire
-and the domain keep ADR-0004's word; acceptance is the single place the two names meet.
-Pinned by `no_backend_names_the_column_with_a_reserved_word`
 **Scope:** M
 
 ---
 
-### - [ ] T18: Derivation chain and major-0 quarantine
+### - [x] T18: Derivation chain and major-0 quarantine
 
 **Description:** Identifier-derived chain validation against every managed base, the
 Draft-07 dialect pin across a major, and the ADR-0015 quarantine: a stable candidate may not
@@ -1571,24 +1546,47 @@ but not the check. A dev database can be exactly that between T10 and T18; delet
 reasoning about it.
 
 **Acceptance criteria:**
-- [ ] Chain bases are reconstructed with `chain_ids()`, not stored or re-derived locally
-- [ ] A stable candidate whose immediate base or `$ref` targets include a major-0 identifier is refused. The base comes from `chain_ids()` and `$ref` targets come from `dependency::extract_edges`; no target document is needed to read its major
-- [ ] A registered Instance conforming to a major-0 schema is refused, even though the marker is in a preceding segment
-- [ ] Dialect is pinned at initial admission and cannot change across revisions of a major
+- [x] Reuse `dependency::extract_edges`, which calls `chain_ids()`, for chain bases and quarantine. `x-gts-ref` produces no edge
+- [x] A stable candidate whose immediate base or `$ref` targets include a major-0 identifier is refused. The base comes from `chain_ids()` and `$ref` targets come from `dependency::extract_edges`; no target document is needed to read its major
+- [x] Refuse Instances conforming to major 0 via the `instance_of` edge from `get_type_id()`
+- [x] Pin the dialect across intra-entity revisions and new minors, using the preceding minor's current definition
 
 **Observability (P16):**
-- [ ] Each quarantine and dialect refusal carries **its own** `Reason` const from T17's
+- [x] Each quarantine and dialect refusal carries **its own** `Reason` const from T17's
       vocabulary — `stable_derives_from_major_zero`, `stable_refs_major_zero`,
       `instance_of_major_zero`, `dialect_changed` — never collapsed into `invalid_schema`. An
       ADR-0015 refusal and a malformed document are different operator actions, and a shared
       reason makes them one number
 
 **Verification:**
-- [ ] Gear tests, all three backends (see [Commands](#commands))
-- [ ] Tests: each quarantine path — a stable candidate deriving from a v0 base and one `$ref`-ing a v0 target; plus stable candidates whose `x-gts-ref` names a v0 entity exactly or through a pattern, which must be admitted because the keyword is outside quarantine
-- [ ] Test: dialect change across revisions is refused
-- [ ] Test: the four refusals appear in `refusals_total{stage="admission"}` under those exact
-      label values — asserted as label values, not as counts
+- [~] Gear tests, all three backends (see [Commands](#commands)) — 739/739 SQLite tests pass.
+      The target now selects 10 tests across four backend binaries, including the new T17/T18
+      PostgreSQL/MySQL scenarios; their Docker execution remains to be recorded
+- [x] Tests: each quarantine path — a stable candidate deriving from a v0 base and one `$ref`-ing a v0 target; plus stable candidates whose `x-gts-ref` names a v0 entity exactly or through a pattern, which must be admitted because the keyword is outside quarantine. Refusal tests register the v0 target first and assert that no entity row was written
+- [x] Test: dialect change across revisions is refused — both edges, the intra-entity one and the cross-minor one
+- [x] Test: the four refusals appear in `refusals_total{stage="admission"}` under those exact
+      label values — asserted as label values, not as counts:
+      `label_values_of("types_registry_refusals_total", "reason")` compared as a set
+
+**Implementation:** Quarantine runs in the worker over the dependency graph's
+extracted edges, before storage reads. The dialect pin runs before comparison
+because it needs the baseline. See SPEC §8.1 for placement and refusal semantics.
+Removing the pin makes both dialect tests fail with `compatibility_undecidable`.
+
+**Known gap:** [gts-rust#120](https://github.com/GlobalTypeSystem/gts-rust/issues/120).
+`compare_documents` compares `$schema` verbatim and rejects equivalent Draft-07
+spellings (`…/schema#` vs `…/schema`) as `Unknown`, although the pin accepts them.
+`a_respelled_dialect_is_refused_downstream_and_not_by_the_pin` records this behavior.
+Wait for a library fix: normalizing at acceptance would rewrite retained content
+and its request fingerprint. Revisit after the workspace adopts the fixed release.
+
+**Added:** `compat/derivation.rs` and tests; four admission reasons;
+`DependencyKind::quarantine_verb`; dialect fixtures, quarantine integration tests,
+and refusal-label assertions. `baseline` moved into `compat/`; acceptance shares
+its Draft-07 spelling set with `derivation`. `compat_backends_test` executes the
+compatibility matrix, force provenance, quarantine paths, dialect pin, and revision
+provenance on PostgreSQL and MySQL. The operation-item migration now constrains
+MySQL's integer boolean, and the SQLite insert chunk accounts for all 15 columns.
 
 **Dependencies:** T17
 **Files likely touched:** `TR/src/domain/derivation.rs` — **second file for the concept, so take `TR/src/domain/compat/`**: `baseline.rs` from T17 plus `derivation.rs` here. Also `TR/src/domain/admission/acceptance.rs`, `TR/tests/quarantine_test.rs`
@@ -1597,16 +1595,18 @@ reasoning about it.
 ---
 
 ### Checkpoint 4
-- [ ] Compatibility matrix passes including the `Unknown` tier
-- [ ] Provenance persisted on every revision
-- [ ] Quarantine and dialect rules hold, including admission of stable schemas whose `x-gts-ref` names a major-0 entity (no preflight — O4)
-- [ ] Every verdict is counted, with `Unknown` and a forced waiver each distinguishable in the
+- [x] Compatibility matrix passes including the `Unknown` tier
+- [x] Provenance persisted on every revision
+- [x] Quarantine and dialect rules hold, including admission of stable schemas whose `x-gts-ref` names a major-0 entity (no preflight — O4)
+- [x] Every verdict is counted, with `Unknown` and a forced waiver each distinguishable in the
       metrics and not only in a refusal reason (T17, P16)
-- [ ] Quarantine and dialect refusals each carry their own counted reason, none collapsed into
-      `invalid_schema` (T18, P16)
-- [ ] Admission reasons live in one compile-enforced vocabulary: a new refusal cannot compile
+- [x] Quarantine and dialect refusals each carry their own counted reason, none collapsed into
+      `invalid_schema` (T18, P16) — four label values, asserted as a set
+- [x] Admission reasons live in one compile-enforced vocabulary: a new refusal cannot compile
       without naming one (T17, P16)
-- [ ] `make dylint` — full workspace, once for the phase (P13)
+- [~] `make dylint` — the local run is blocked before project linting by stable/nightly artifacts
+      being mixed in Dylint's target directory (`E0514`); the gear's all-target/all-feature Clippy
+      run with `--no-deps -D warnings` is clean
 - [ ] Human review
 
 ---

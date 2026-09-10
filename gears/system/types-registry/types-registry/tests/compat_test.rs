@@ -1,24 +1,15 @@
-//! Compatibility against one baseline, end to end through the admission worker
-//! (T17, ADR-0003).
+//! Compatibility and provenance through direct admission-worker calls (T17, ADR-0003).
+//! Baseline selection is covered in `src/domain/compat/baseline_tests.rs`.
 //!
-//! Every test calls the worker directly: no `sleep`, no timer, no polling
-//! (SPEC §13). `src/domain/compat_tests.rs` pins the baseline selection and the
-//! verdict reading underneath; this file proves that a real admission refuses and
-//! admits accordingly, and that the reason it records is the one an operator acts
-//! on.
-//!
-//! # The matrix is a property of the *level*, not of the document
-//!
-//! Adding an optional property is backward compatible at a closed level,
-//! incompatible at an open one, and undecidable at a partially open one — GTS 0.13
-//! §4.5, and the reason `gts-rust` classifies per level rather than per document.
-//! The three cases below are the same edit against three baselines.
+//! The matrix adds the same optional property at three object levels: closed
+//! (compatible), open (incompatible), and partial (unknown), per GTS 0.13 §4.5.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use sea_orm::EntityTrait;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::macros::datetime;
@@ -29,6 +20,7 @@ use uuid::Uuid;
 
 use types_registry::config::TypesRegistryConfig;
 use types_registry::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
+use types_registry::domain::admission::fingerprint::canonical_text;
 use types_registry::domain::admission::worker::{
     OperationOutcome, Tuning, WorkerError, run_operation,
 };
@@ -37,7 +29,9 @@ use types_registry::domain::admission::{
 };
 use types_registry::domain::enums as domain_enums;
 use types_registry::domain::policy::RegistrationPolicy;
-use types_registry::infra::storage::entity::{instance_revision, type_schema_revision};
+use types_registry::infra::storage::entity::{
+    entity, instance_revision, operation_item, type_schema_revision,
+};
 
 mod common;
 use common::{allow_all, stores, test_db};
@@ -61,20 +55,14 @@ impl OperationDispatch for NoDispatch {
     }
 }
 
-/// The content model of the one object level these documents have.
-///
-/// Named rather than spelled inline at each call site, because the model **is** the
-/// matrix's independent variable, and each keyword set is the exact shape
-/// `gts::schema_evolution::classify_object_levels` reports as that model.
+/// Object-level content model: the compatibility matrix's independent variable.
 #[derive(Clone, Copy)]
 enum Level {
     /// `$=Closed`: every unnamed property was already refused.
     Closed,
     /// `$=Open`: every unnamed property was already accepted, under any value.
     Open,
-    /// `$=Partial`: a pattern decides some unnamed names and `false` decides the
-    /// rest, so whether a newly named property was already accepted is not
-    /// provable — `gts-rust` answers `NotProvable` with exactly that wording.
+    /// `$=Partial`: pattern-constrained names make the addition unprovable.
     Partial,
 }
 
@@ -124,9 +112,7 @@ fn two(gts_id: &str, level: Level) -> Value {
     )
 }
 
-/// One candidate's `force` flag and the deployment setting that permits it. The two
-/// travel together because acceptance refuses a waiver the deployment has not
-/// enabled, so a test that sets one without the other tests nothing.
+/// Candidate waiver request and deployment authorization used by acceptance.
 #[derive(Clone, Copy, Default)]
 struct Waiver {
     requested: bool,
@@ -234,10 +220,19 @@ async fn admit_forced(
     )
     .await
     .expect("a later minor with force permitted is accepted");
-    run(db, op).await
+    // Keep the acceptance-time deployment setting for this worker pass.
+    run_with(db, op, Waiver::GRANTED.permitted).await
 }
 
 async fn run(db: &Arc<DBProvider<DbError>>, op: Uuid) -> OperationOutcome {
+    run_with(db, op, Waiver::NONE.permitted).await
+}
+
+async fn run_with(
+    db: &Arc<DBProvider<DbError>>,
+    op: Uuid,
+    allow_compatibility_force: bool,
+) -> OperationOutcome {
     run_operation(
         &stores(),
         &DBProvider::<WorkerError>::new(db.db()),
@@ -246,6 +241,7 @@ async fn run(db: &Arc<DBProvider<DbError>>, op: Uuid) -> OperationOutcome {
             limits: &common::limits(),
             worker: &common::worker_settings(),
             metrics: &common::metrics(),
+            allow_compatibility_force,
         },
         op,
         LATER,
@@ -254,18 +250,33 @@ async fn run(db: &Arc<DBProvider<DbError>>, op: Uuid) -> OperationOutcome {
     .expect("the worker itself must not fail")
 }
 
-/// Every stored revision's `(gts_id, revision_no, compat_forced)`, ordered as the
-/// rows come back — the provenance ADR-0003 requires on each admitted revision.
-async fn revisions(db: &Arc<DBProvider<DbError>>) -> Vec<(i32, bool)> {
+/// Stored `(gts_id, revision_no, compat_forced)` tuples, sorted by identifier.
+/// Include identity so a waiver on the wrong revision cannot satisfy the assertion.
+async fn revisions(db: &Arc<DBProvider<DbError>>) -> Vec<(String, i32, bool)> {
     let conn = db.conn().expect("conn");
-    let mut rows: Vec<(i32, bool)> = type_schema_revision::Entity::find()
+    let entities: HashMap<i64, String> = entity::Entity::find()
+        .secure()
+        .scope_with(&allow_all())
+        .all(&conn)
+        .await
+        .expect("entities")
+        .into_iter()
+        .map(|e| (e.id, e.gts_id))
+        .collect();
+    let mut rows: Vec<(String, i32, bool)> = type_schema_revision::Entity::find()
         .secure()
         .scope_with(&allow_all())
         .all(&conn)
         .await
         .expect("revisions")
         .into_iter()
-        .map(|r| (r.revision_no, r.compat_forced))
+        .map(|r| {
+            let gts_id = entities
+                .get(&r.entity_id)
+                .unwrap_or_else(|| panic!("revision {} has no entity row", r.entity_id))
+                .clone();
+            (gts_id, r.revision_no, r.compat_forced)
+        })
         .collect();
     rows.sort_unstable();
     rows
@@ -319,9 +330,72 @@ async fn an_optional_property_added_at_a_closed_level_is_compatible() {
 async fn the_same_addition_at_an_open_level_is_incompatible() {
     let db = test_db().await;
     succeeded(&admit(&db, "one", SUBJECT, one(SUBJECT, Level::Open), None).await);
-    refused_with(
-        &admit(&db, "two", SUBJECT, two(SUBJECT, Level::Open), Some(1)).await,
-        AdmissionFailureReason::IncompatibleWithBaseline,
+    let op = submit(&db, "two", SUBJECT, two(SUBJECT, Level::Open), Some(1)).await;
+    let outcome = run(&db, op).await;
+    refused_with(&outcome, AdmissionFailureReason::IncompatibleWithBaseline);
+    let failure = outcome.items[0].failure.as_ref().unwrap();
+    assert!(failure.message.contains("PropertyAdded at $"));
+
+    let conn = db.conn().expect("conn");
+    let stored = operation_item::Entity::find()
+        .filter(operation_item::Column::OperationId.eq(op))
+        .secure()
+        .scope_with(&allow_all())
+        .one(&conn)
+        .await
+        .unwrap()
+        .unwrap();
+    let payload: Value = serde_json::from_str(stored.error_payload.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        payload,
+        json!({
+            "reason": "incompatible_with_baseline",
+            "message": failure.message,
+        })
+    );
+    assert_eq!(
+        run(&db, op).await.items[0].failure,
+        outcome.items[0].failure
+    );
+}
+
+/// Restating a baseline must change all of its retained revisions, while a
+/// different schema referring to it keeps its exact authored JSON.
+#[tokio::test]
+async fn restating_stored_revisions_does_not_rewrite_referrers() {
+    let db = test_db().await;
+    let mut first = one(SUBJECT, Level::Closed);
+    let mut second = two(SUBJECT, Level::Closed);
+    succeeded(&admit(&db, "one", SUBJECT, first.clone(), None).await);
+    succeeded(&admit(&db, "two", SUBJECT, second.clone(), Some(1)).await);
+    let referring = document(
+        V2_0,
+        Level::Closed,
+        &json!({
+            "a": { "$ref": format!("gts://{SUBJECT}") },
+        }),
+    );
+    succeeded(&admit(&db, "referring", V2_0, referring.clone(), None).await);
+    let dialect = "https://json-schema.org/draft/2020-12/schema";
+    common::restate_stored_dialect(&db, SUBJECT, dialect).await;
+    let conn = db.conn().expect("conn");
+    let stored: Vec<Value> = type_schema_revision::Entity::find()
+        .secure()
+        .scope_with(&allow_all())
+        .all(&conn)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| serde_json::from_str(&row.raw_schema).unwrap())
+        .collect();
+    first["$schema"] = json!(dialect);
+    second["$schema"] = json!(dialect);
+    assert_eq!(stored.len(), 3);
+    assert!(stored.contains(&first));
+    assert!(stored.contains(&second));
+    assert!(
+        stored.contains(&referring),
+        "the referring schema must not change"
     );
 }
 
@@ -332,9 +406,15 @@ async fn the_same_addition_at_an_open_level_is_incompatible() {
 async fn the_same_addition_at_a_partial_level_is_undecidable_and_refused_separately() {
     let db = test_db().await;
     succeeded(&admit(&db, "one", SUBJECT, one(SUBJECT, Level::Partial), None).await);
-    refused_with(
-        &admit(&db, "two", SUBJECT, two(SUBJECT, Level::Partial), Some(1)).await,
-        AdmissionFailureReason::CompatibilityUndecidable,
+    let outcome = admit(&db, "two", SUBJECT, two(SUBJECT, Level::Partial), Some(1)).await;
+    refused_with(&outcome, AdmissionFailureReason::CompatibilityUndecidable);
+    assert!(
+        outcome.items[0]
+            .failure
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("NotProvable at $")
     );
 }
 
@@ -435,19 +515,18 @@ async fn force_waives_the_cross_minor_check_and_is_recorded_on_the_revision() {
 
     assert_eq!(
         revisions(&db).await,
-        vec![(1, false), (1, false), (1, true)],
+        vec![
+            (V2_0.to_owned(), 1, false),
+            (V2_1.to_owned(), 1, false),
+            (V2_2.to_owned(), 1, true),
+        ],
         "only the forced candidate's revision carries the waiver; the two unforced \
          ones must not be tainted by it",
     );
 }
 
-/// `compat_forced` reads the **request**, not "the waiver turned out to be
-/// necessary": a caller who sent `force` against a candidate that was compatible
-/// anyway still gets `true`.
-///
-/// The direction is deliberate. ADR-0003's whole-history statement is withdrawn
-/// from a major containing a forced step, and withdrawing a guarantee that in fact
-/// holds is the safe error; asserting one that does not is the unsafe one.
+/// An authorized waiver remains recorded even for a compatible verdict.
+/// ADR-0003 withdraws the whole-history guarantee for any forced step.
 #[tokio::test]
 async fn a_forced_candidate_that_needed_no_waiver_still_records_the_flag() {
     let db = test_db().await;
@@ -458,13 +537,15 @@ async fn a_forced_candidate_that_needed_no_waiver_still_records_the_flag() {
 
     assert_eq!(
         revisions(&db).await,
-        vec![(1, false), (1, false), (1, true)]
+        vec![
+            (V2_0.to_owned(), 1, false),
+            (V2_1.to_owned(), 1, false),
+            (V2_2.to_owned(), 1, true),
+        ],
     );
 }
 
-/// An undecidable cross-minor verdict is waivable too: ADR-0004 permits waiving
-/// *the check*, and `principle-fail-closed` governs the absence of an operator
-/// decision rather than the presence of one.
+/// An authorized cross-minor waiver also covers `Unknown` (ADR-0004).
 #[tokio::test]
 async fn force_waives_an_undecidable_cross_minor_verdict() {
     let db = test_db().await;
@@ -481,13 +562,110 @@ async fn force_waives_an_undecidable_cross_minor_verdict() {
     succeeded(&admit_forced(&db2, "m2", V2_2, two(V2_2, Level::Partial), None).await);
     assert_eq!(
         revisions(&db2).await,
-        vec![(1, false), (1, false), (1, true)]
+        vec![
+            (V2_0.to_owned(), 1, false),
+            (V2_1.to_owned(), 1, false),
+            (V2_2.to_owned(), 1, true),
+        ],
     );
 }
 
-/// The deployment gate, at the acceptance boundary: without
-/// `allow_compatibility_force` the submission never becomes an operation, so there
-/// is no revision and no `compat_forced` to inspect.
+/// Disabling the deployment flag after acceptance clears the stored waiver.
+/// The worker then refuses this candidate under its ordinary incompatible verdict.
+#[tokio::test]
+async fn a_stored_waiver_stops_waiving_once_the_deployment_switch_is_off() {
+    let db = test_db().await;
+    succeeded(&admit(&db, "m0", V2_0, one(V2_0, Level::Open), None).await);
+    succeeded(&admit(&db, "m1", V2_1, one(V2_1, Level::Open), None).await);
+
+    // Accepted while the deployment permitted the waiver.
+    let op = submit_with(
+        &db,
+        "m2",
+        V2_2,
+        two(V2_2, Level::Open),
+        None,
+        Waiver::GRANTED,
+    )
+    .await
+    .expect("force is accepted while the deployment permits it");
+    // Run with it off, as a pass after the operator flipped the switch would.
+    refused_with(
+        &run_with(&db, op, false).await,
+        AdmissionFailureReason::IncompatibleWithBaseline,
+    );
+    assert_eq!(
+        revisions(&db).await,
+        vec![(V2_0.to_owned(), 1, false), (V2_1.to_owned(), 1, false)],
+        "the un-waived candidate wrote no revision",
+    );
+}
+
+/// Inject a dangling baseline `$ref` to test `baseline_unresolvable`.
+/// Normal admission cannot create this state; it produces no verdict.
+#[tokio::test]
+async fn an_unresolvable_baseline_is_refused_rather_than_admitted() {
+    let db = test_db().await;
+    succeeded(&admit(&db, "m0", V2_0, one(V2_0, Level::Closed), None).await);
+    succeeded(&admit(&db, "m1", V2_1, one(V2_1, Level::Closed), None).await);
+    // The predecessor now points at an entity that was never registered.
+    common::graft_stored_ref(&db, V2_1, gts_id!("cf.core.compat.absent.v1~")).await;
+
+    refused_with(
+        &admit(&db, "m2", V2_2, two(V2_2, Level::Closed), None).await,
+        AdmissionFailureReason::BaselineUnresolvable,
+    );
+    assert_eq!(
+        revisions(&db).await,
+        vec![(V2_0.to_owned(), 1, false), (V2_1.to_owned(), 1, false)],
+        "a candidate whose baseline could not be resolved wrote nothing",
+    );
+}
+
+/// Only the predecessor references the extra closure target. The candidate
+/// is deliberately incompatible, so dropping the baseline root would wrongly
+/// admit it and fail the assertion.
+#[tokio::test]
+async fn a_baseline_carrying_a_ref_the_candidate_drops_is_compared_not_skipped() {
+    let db = test_db().await;
+    let leaf = gts_id!("cf.core.compat.leaf.v1~");
+    succeeded(&admit(&db, "leaf", leaf, one(leaf, Level::Closed), None).await);
+
+    // `v2.0~` and `v2.1~` share the referencing shape, so each is admissible against
+    // the one before it.
+    let referencing = |gts_id: &str| {
+        document(
+            gts_id,
+            Level::Open,
+            &json!({ "a": { "$ref": format!("gts://{leaf}") } }),
+        )
+    };
+    succeeded(&admit(&db, "m0", V2_0, referencing(V2_0), None).await);
+    succeeded(&admit(&db, "m1", V2_1, referencing(V2_1), None).await);
+
+    // The candidate names no reference of its own, and names a new property at an
+    // open level — which the baseline had already accepted under any value.
+    let widened = document(
+        V2_2,
+        Level::Open,
+        &json!({ "a": { "type": "object" }, "b": { "type": "string" } }),
+    );
+    refused_with(
+        &admit(&db, "m2", V2_2, widened, None).await,
+        AdmissionFailureReason::IncompatibleWithBaseline,
+    );
+    assert_eq!(
+        revisions(&db).await,
+        vec![
+            (leaf.to_owned(), 1, false),
+            (V2_0.to_owned(), 1, false),
+            (V2_1.to_owned(), 1, false),
+        ],
+        "the refused candidate wrote no revision",
+    );
+}
+
+/// The disabled deployment gate refuses submission before any operation is created.
 #[tokio::test]
 async fn force_the_deployment_has_not_enabled_is_refused_before_any_operation_exists() {
     let db = test_db().await;
@@ -512,14 +690,39 @@ async fn force_the_deployment_has_not_enabled_is_refused_before_any_operation_ex
     );
     assert_eq!(
         revisions(&db).await,
-        vec![(1, false), (1, false)],
+        vec![(V2_0.to_owned(), 1, false), (V2_1.to_owned(), 1, false)],
         "the refused submission wrote nothing",
     );
 }
 
-/// The intra-entity edge stays unwaivable end to end: a *revision* carrying
-/// `force` is refused at acceptance even with the deployment flag on, so an
-/// incompatible revision cannot be forced through under any configuration.
+/// Seed an intra-entity waiver that acceptance would reject. The worker must
+/// clear it despite the enabled deployment flag, including in metrics and provenance.
+#[tokio::test]
+async fn a_stored_waiver_cannot_reach_the_intra_entity_edge() {
+    let db = test_db().await;
+    succeeded(&admit(&db, "v1", SUBJECT, one(SUBJECT, Level::Open), None).await);
+
+    // A revision of the same identifier — baseline `CurrentRevision`, never waivable
+    // — carrying `force` and an edit that is incompatible at an open level.
+    let payload = canonical_text(&two(SUBJECT, Level::Open));
+    let (operation_id, _item) = {
+        let conn = db.conn().expect("conn");
+        common::seed_pending_revision_item_with(&conn, SUBJECT, 1, &payload, true, NOW).await
+    };
+
+    // The switch is *on*, so the only thing that can refuse this is the baseline.
+    refused_with(
+        &run_with(&db, operation_id, true).await,
+        AdmissionFailureReason::IncompatibleWithBaseline,
+    );
+    assert_eq!(
+        revisions(&db).await,
+        vec![(SUBJECT.to_owned(), 1, false)],
+        "no second revision, and the first is not retroactively marked waived",
+    );
+}
+
+/// Acceptance refuses forced revisions even when the deployment permits waivers.
 #[tokio::test]
 async fn force_cannot_push_an_incompatible_revision_through() {
     let db = test_db().await;
@@ -550,7 +753,7 @@ async fn force_cannot_push_an_incompatible_revision_through() {
         .await,
         AdmissionFailureReason::IncompatibleWithBaseline,
     );
-    assert_eq!(revisions(&db).await, vec![(1, false)]);
+    assert_eq!(revisions(&db).await, vec![(SUBJECT.to_owned(), 1, false)]);
 }
 
 // ---------------------------------------------------------------------------
@@ -579,10 +782,7 @@ fn engine() -> (String, String) {
     )
 }
 
-/// **A revision records the engine, not just a first admission.**
-/// `admission_worker_test` pins the creation path; this is the other writer, and a
-/// checker upgrade can change the verdict for an unchanged pair of schemas, so a
-/// revision without provenance is a verdict nobody can attribute.
+/// Content revisions record engine provenance, as initial admissions do (ADR-0003).
 #[tokio::test]
 async fn a_revision_records_the_engine_that_admitted_it() {
     let db = test_db().await;
@@ -596,9 +796,7 @@ async fn a_revision_records_the_engine_that_admitted_it() {
     );
 }
 
-/// A cross-minor admission is the case where a comparison **did** happen, so its
-/// provenance is the record of the rules that produced an actual verdict rather than
-/// engine identity beside no verdict at all (ADR-0003 draws that distinction).
+/// Cross-minor provenance identifies the engine that produced the comparison verdict.
 #[tokio::test]
 async fn a_compared_candidate_records_the_rules_that_judged_it() {
     let db = test_db().await;
@@ -614,10 +812,7 @@ async fn a_compared_candidate_records_the_rules_that_judged_it() {
     );
 }
 
-/// An Instance revision carries the same two columns. It has no `compat_forced`
-/// counterpart — a value is valid against its schema revision or refused, so `force`
-/// has nothing to waive — but the engine that validated it is still the thing that
-/// cannot be reconstructed later.
+/// Instance revisions record the validating engine; `force` does not apply.
 #[tokio::test]
 async fn an_instance_revision_records_the_engine_too() {
     let db = test_db().await;
@@ -637,10 +832,7 @@ async fn an_instance_revision_records_the_engine_too() {
     assert_eq!(rows, vec![engine()]);
 }
 
-/// A major-0 admission compared nothing, and still records the engine: the columns
-/// are admission-engine provenance there, asserting nothing about a verdict because
-/// there was none (ADR-0003). Recording them only where a comparison happened would
-/// leave no way to tell an unjudged revision from an unrecorded one.
+/// Major-0 revisions record admission-engine provenance without implying a comparison.
 #[tokio::test]
 async fn a_candidate_that_compared_nothing_still_records_the_engine() {
     let db = test_db().await;

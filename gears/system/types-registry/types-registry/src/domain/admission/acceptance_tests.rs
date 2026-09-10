@@ -567,12 +567,7 @@ fn force_is_refused_while_the_deployment_disallows_it() {
     ));
 }
 
-/// The deployment flag is not the whole gate: with `force` permitted, the
-/// candidate must still *have* the cross-minor check to waive.
-///
-/// The list is exactly the set for which `compat::select_baseline` selects
-/// something other than [`Baseline::PrecedingMinor`], which is why acceptance asks
-/// that function rather than carrying a second predicate over versions.
+/// Even with the deployment flag enabled, only a cross-minor baseline is waivable.
 #[test]
 fn force_needs_a_cross_minor_check_to_waive() {
     let (policy, mut config) = closed();
@@ -601,9 +596,7 @@ fn force_needs_a_cross_minor_check_to_waive() {
     }
 }
 
-/// A later minor at a stable major is the one waivable case, and the accepted flag
-/// travels to the worker on the item — the worker is what decides whether the
-/// waived comparison would in fact have failed, and what records `compat_forced`.
+/// Acceptance persists the cross-minor waiver request for the worker.
 #[test]
 fn force_on_a_later_minor_is_accepted_and_travels_on_the_item() {
     let (policy, mut config) = closed();
@@ -624,10 +617,7 @@ fn force_on_a_later_minor_is_accepted_and_travels_on_the_item() {
     );
 }
 
-/// The intra-entity edge is not waivable, and the precondition is what says which
-/// edge this is. A *revision* of a major-only Type Schema is compared against its
-/// own current revision — a floating `$ref` carries a consumer onto it — so `force`
-/// has nothing to waive there even though the identifier alone looks stable.
+/// The precondition selects an intra-entity revision, which `force` cannot waive.
 #[test]
 fn force_cannot_waive_the_intra_entity_edge_of_a_revision() {
     let (policy, mut config) = closed();
@@ -648,14 +638,8 @@ fn force_cannot_waive_the_intra_entity_edge_of_a_revision() {
     }
 }
 
-/// A forced Dry Run cannot reach the force gate in P0: `dry_run` is refused for
-/// the whole request first, because rollback-only evaluation arrives with T20.
-///
-/// Pinned as **ordering**, not as a force refusal. T17's verification asks for
-/// "`force` refused when `allow_compatibility_force` is off, including on Dry Run";
-/// the Dry Run half is unreachable until T20 accepts a dry run at all, and this
-/// test is what will fail — loudly, naming force — on the day it becomes
-/// reachable and the force gate has not been extended to it.
+/// P0 refuses `dry_run` before reaching the force gate. Revisit this ordering
+/// when T20 enables Dry Run.
 #[test]
 fn a_forced_dry_run_is_refused_for_being_a_dry_run_before_force_is_considered() {
     let pair = closed();

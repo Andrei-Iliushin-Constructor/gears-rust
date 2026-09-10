@@ -1,13 +1,9 @@
-//! Test hooks over the real persistence adapter, with shared port forwarding.
+//! Test hooks over real persistence with shared port forwarding.
+//! [`PauseHooks`] pauses calls, [`ClaimHooks`] signals claim entry/return, and
+//! [`CasMissHooks`] refuses a CAS. Extend [`PausePoint`] for timing or
+//! [`StoreHooks`] for inspection and overrides.
 //!
-//! [`TestStores<H>`] uses [`PauseHooks`] to pause a call, [`ClaimHooks`] to signal
-//! claim entry and return, or [`CasMissHooks`] to refuse a compare-and-swap.
-//!
-//! Interception points are shared: add a [`PausePoint`] and call site for timing,
-//! or a [`StoreHooks`] method to inspect arguments/results or override a result.
-//!
-//! `async_trait` boxes each executed `at` call, including no-op hooks, unless
-//! optimized away. The no-op does not yield; allocation overhead is unmeasured.
+//! `async_trait` may allocate for no-op hooks, though they do not yield.
 
 use std::sync::Arc;
 

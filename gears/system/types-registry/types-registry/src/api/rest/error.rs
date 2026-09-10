@@ -382,6 +382,14 @@ impl From<AcceptanceError> for CanonicalError {
                 format!("force on '{gts_id}' has no cross-minor compatibility check to waive"),
                 field::VALIDATION_FAILED,
             ),
+            // The identifier is at fault, not the flag, so the violation points at
+            // the identifier field rather than at `force`.
+            AcceptanceError::UnreadableVersion { gts_id } => invalid_candidate(
+                gts_id,
+                field::GTS_ID_FIELD,
+                format!("'{gts_id}' names no readable major in its last segment"),
+                field::INVALID_GTS_ID,
+            ),
             AcceptanceError::MinorTypeSchemaRevision { gts_id } => invalid_candidate(
                 gts_id,
                 vf::EXPECTED_RESOURCE_VERSION,
@@ -599,6 +607,11 @@ mod tests {
                 field::VALIDATION_FAILED,
             ),
             (
+                AcceptanceError::UnreadableVersion { gts_id: id.clone() },
+                field::GTS_ID_FIELD,
+                field::INVALID_GTS_ID,
+            ),
+            (
                 AcceptanceError::MinorTypeSchemaRevision { gts_id: id.clone() },
                 violation_field::EXPECTED_RESOURCE_VERSION,
                 field::VALIDATION_FAILED,
@@ -715,6 +728,13 @@ mod tests {
                 recorded: 1,
                 found: 2,
             })),
+            // The `source` is a real serde error, since the variant interpolates both
+            // it and the identifier into its `Display`.
+            worker_problem(WorkerError::BaselineUnparsable {
+                gts_id: "baseline-secret".to_owned(),
+                source: serde_json::from_str::<serde_json::Value>("{not-secret-json")
+                    .expect_err("the fixture must not parse"),
+            }),
             worker_problem(WorkerError::Storage(ScopeError::Invalid("storage-secret"))),
             worker_problem(WorkerError::Db(DbError::InvalidConfig(
                 "database-secret".to_owned(),

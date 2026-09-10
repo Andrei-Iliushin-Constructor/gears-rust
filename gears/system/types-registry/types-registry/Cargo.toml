@@ -69,10 +69,10 @@ toolkit-utils = { workspace = true }
 heck = { workspace = true }
 
 [features]
-# Gates the container-backed PostgreSQL / MySQL migration tests
-# (`tests/migration_backends_test.rs`). Off by default because they need a
-# Docker daemon; enable with `--features integration`. The SQLite half of the
-# suite always runs.
+# Gates the container-backed PostgreSQL / MySQL migration, repository,
+# concurrency, compatibility, and quarantine tests. Off by default because they
+# need a Docker daemon; enable with `--features integration`. SQLite coverage
+# remains in the default suite.
 integration = ["toolkit-db/pg", "toolkit-db/mysql"]
 
 [dev-dependencies]
