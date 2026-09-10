@@ -68,14 +68,6 @@ async fn release_sync_lock(lock: toolkit_db::DbLockGuard, lock_key: &str) {
     }
 }
 
-/// Longest a single repository's fetch may run before the sync gives up.
-///
-/// The fetch is one long sequence of GitHub calls with their own per-request
-/// timeouts and rate-limit back-offs; this is the only bound on the whole of
-/// it, and it is what stops a slow upstream from holding the per-repo
-/// advisory lock indefinitely.
-const SYNC_FETCH_BUDGET: std::time::Duration = std::time::Duration::from_mins(30);
-
 pub(crate) type DbProvider = toolkit_db::DBProvider<toolkit_db::DbError>;
 
 pub(crate) const REPO_RESOURCE: ResourceType = ResourceType::from_static(
@@ -3634,16 +3626,7 @@ impl Service {
             cancel.child_token(),
             progress.handle(),
         );
-        let mut report = tokio::time::timeout(SYNC_FETCH_BUDGET, runner.run())
-            .await
-            .map_err(|_elapsed| {
-                DomainError::internal(format!(
-                    "the sync of {}/{} ran past its {} second budget",
-                    run.owner,
-                    run.name,
-                    SYNC_FETCH_BUDGET.as_secs()
-                ))
-            })?;
+        let mut report = runner.run().await;
         // Discovery failing is the repository failing: GitHub's own answer
         // (404, 403 ...) is the sync's outcome, not a task statistic.
         if let Some(discovery) = report
@@ -3677,7 +3660,13 @@ impl Service {
         ] {
             if run.is_swept(family) {
                 self.sweep_watermark
-                    .promote(&run.scope, run.tenant_id, run.repo_id()?, family)
+                    .promote(
+                        &run.scope,
+                        run.tenant_id,
+                        run.repo_id()?,
+                        family,
+                        run.swept_page1_etag(family),
+                    )
                     .await?;
             }
         }

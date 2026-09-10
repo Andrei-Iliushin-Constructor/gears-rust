@@ -8,7 +8,7 @@
 //! entity's detail, in its own transaction, so a run interrupted anywhere
 //! leaves nothing half-written.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use async_trait::async_trait;
@@ -55,7 +55,7 @@ pub struct RunState {
     pub options: FetchOptions,
     repo_id: OnceLock<i64>,
     complete: Mutex<ListingCompleteness>,
-    swept: Mutex<HashSet<&'static str>>,
+    swept: Mutex<HashMap<&'static str, Option<String>>>,
     summary: Mutex<SyncSummary>,
     drift: Mutex<Vec<CountDrift>>,
 }
@@ -79,7 +79,7 @@ impl RunState {
             options,
             repo_id: OnceLock::new(),
             complete: Mutex::new(ListingCompleteness::none()),
-            swept: Mutex::new(HashSet::new()),
+            swept: Mutex::new(HashMap::new()),
             summary: Mutex::new(SyncSummary {
                 repository: format!("{owner}/{name}"),
                 ..SyncSummary::default()
@@ -129,11 +129,11 @@ impl RunState {
     /// may be promoted. Independent of [`Self::completeness`]: a walk bounded
     /// by `updated_after` saw everything it asked for without seeing everything there
     /// is, so it may advance the watermark but not drive reconciliation.
-    fn mark_swept(&self, family: &'static str) {
+    fn mark_swept(&self, family: &'static str, page1_etag: Option<String>) {
         self.swept
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(family);
+            .insert(family, page1_etag);
     }
 
     #[must_use]
@@ -141,7 +141,17 @@ impl RunState {
         self.swept
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .contains(family)
+            .contains_key(family)
+    }
+
+    #[must_use]
+    pub fn swept_page1_etag(&self, family: &str) -> Option<String> {
+        self.swept
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(family)
+            .cloned()
+            .flatten()
     }
 
     pub fn accept_drift(&self, drift: CountDrift) {
@@ -338,11 +348,11 @@ impl MirrorWorker {
                 )
                 .await?;
             run.mark_complete(&listing.complete);
-            if listing.swept_to_end {
-                run.mark_swept(sweep_families::ISSUES);
-            }
             if page1_etag.is_none() {
                 page1_etag.clone_from(&listing.page1_etag);
+            }
+            if listing.swept_to_end {
+                run.mark_swept(sweep_families::ISSUES, page1_etag.clone());
             }
             let seen: Vec<&str> = listing
                 .issues
@@ -412,7 +422,6 @@ impl MirrorWorker {
                 repo_id,
                 sweep_families::ISSUES,
                 high,
-                page1_etag,
             )
             .await?;
         Ok(())
@@ -475,11 +484,11 @@ impl MirrorWorker {
                 )
                 .await?;
             run.mark_complete(&listing.complete);
-            if listing.swept_to_end {
-                run.mark_swept(sweep_families::PULL_REQUESTS);
-            }
             if page1_etag.is_none() {
                 page1_etag.clone_from(&listing.page1_etag);
+            }
+            if listing.swept_to_end {
+                run.mark_swept(sweep_families::PULL_REQUESTS, page1_etag.clone());
             }
             let seen: Vec<&str> = listing
                 .pull_requests
@@ -543,7 +552,6 @@ impl MirrorWorker {
                 repo_id,
                 sweep_families::PULL_REQUESTS,
                 high,
-                page1_etag,
             )
             .await?;
         Ok(())
@@ -664,11 +672,11 @@ impl MirrorWorker {
                 )
                 .await?;
             run.mark_complete(&listing.complete);
-            if listing.swept_to_end {
-                run.mark_swept(sweep_families::COMMITS);
-            }
             if page1_etag.is_none() {
                 page1_etag.clone_from(&listing.page1_etag);
+            }
+            if listing.swept_to_end {
+                run.mark_swept(sweep_families::COMMITS, page1_etag.clone());
             }
             let seen: Vec<&str> = listing
                 .commits
@@ -732,7 +740,6 @@ impl MirrorWorker {
                 repo_id,
                 sweep_families::COMMITS,
                 high,
-                page1_etag,
             )
             .await?;
         Ok(())

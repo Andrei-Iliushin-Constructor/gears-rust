@@ -91,7 +91,6 @@ impl SweepWatermark {
         repo_id: i64,
         family: &str,
         candidate: Option<DateTime<Utc>>,
-        page1_etag: Option<String>,
     ) -> Result<(), DomainError> {
         let stored = self.watermark_store.find(scope, repo_id, family).await?;
         let candidate = candidate.map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
@@ -105,7 +104,7 @@ impl SweepWatermark {
                     last_seen_updated_at: stored
                         .as_ref()
                         .and_then(|w| w.last_seen_updated_at.clone()),
-                    page1_etag: page1_etag.or_else(|| stored.and_then(|w| w.page1_etag)),
+                    page1_etag: stored.and_then(|w| w.page1_etag),
                     sweep_in_progress: true,
                     candidate_high_water: candidate,
                 },
@@ -114,6 +113,12 @@ impl SweepWatermark {
         Ok(())
     }
 
+    /// Move the staged candidate into `last_seen_updated_at` and record page
+    /// one's validator. Both happen only here, at the family-complete point
+    /// (ALGORITHMS §6.4): a run that stopped before its refinements finished
+    /// leaves neither behind, so the next run walks the listing in full and
+    /// the gate re-seeds whatever was left `pending`.
+    ///
     /// # Errors
     /// `Database`/`Internal` when the watermark row cannot be read or written.
     pub async fn promote(
@@ -122,6 +127,7 @@ impl SweepWatermark {
         tenant_id: Uuid,
         repo_id: i64,
         family: &str,
+        page1_etag: Option<String>,
     ) -> Result<(), DomainError> {
         let Some(stored) = self.watermark_store.find(scope, repo_id, family).await? else {
             return Ok(());
@@ -135,6 +141,7 @@ impl SweepWatermark {
                 tenant_id,
                 SyncWatermarkRecord {
                     last_seen_updated_at: Some(candidate),
+                    page1_etag: page1_etag.or_else(|| stored.page1_etag.clone()),
                     sweep_in_progress: false,
                     candidate_high_water: None,
                     ..stored
