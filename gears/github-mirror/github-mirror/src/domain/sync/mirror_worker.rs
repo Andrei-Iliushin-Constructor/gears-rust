@@ -285,7 +285,7 @@ impl MirrorWorker {
                 TaskPriority::OPEN_PR,
             ),
             (families::ISSUES, objects.issues, TaskPriority::OPEN_ISSUE),
-            (families::COMMITS, objects.commits, TaskPriority::OPEN_PR),
+            (families::COMMITS, objects.commits, TaskPriority::GLOBAL),
             (
                 families::METADATA,
                 objects.labels || objects.milestones || objects.releases || objects.branches,

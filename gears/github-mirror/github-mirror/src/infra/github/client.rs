@@ -1941,7 +1941,7 @@ impl GithubPort for GithubClient {
             Stage {
                 tail: "/pulls",
                 first: self.absolute(&format!(
-                    "/repos/{owner}/{name}/pulls?state=all&per_page={FIRST_PAGE_SIZE}"
+                    "/repos/{owner}/{name}/pulls?state=all&sort=updated&direction=desc&per_page={FIRST_PAGE_SIZE}"
                 )),
             },
             Stage {
