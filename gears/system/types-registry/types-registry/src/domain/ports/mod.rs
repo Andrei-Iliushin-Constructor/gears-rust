@@ -789,6 +789,15 @@ pub trait OperationStore: Send + Sync {
 /// Dependency edges.
 #[async_trait]
 pub trait DependencyStore: Send + Sync {
+    /// Whether a live Instance conforms directly to this Type Schema.
+    /// Deleted Instances and Instances of derived types do not count.
+    async fn has_live_direct_instances(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        type_schema_entity_id: i64,
+    ) -> Result<bool, ScopeError>;
+
     /// The roots plus everything they transitively consume.
     async fn closure(
         &self,

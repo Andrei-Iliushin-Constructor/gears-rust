@@ -40,7 +40,7 @@ use crate::domain::admission::{AdmissionFailureReason, Precondition};
 use crate::domain::artifacts::{MaterializedArtifacts, content_hash};
 use crate::domain::compat::{self, Baseline};
 use crate::domain::dependency::{DependencyEdge, extract_edges};
-use crate::domain::enums::{DependencyKind, EntityKind, OwnershipScope};
+use crate::domain::enums::{DependencyKind, EntityKind, LifecycleStatus, OwnershipScope};
 use crate::domain::family::{FamilyKey, admits_new_member, family_key};
 use crate::domain::gts_store::{CommittedSchema, UnitDocument, UnitStore, load_unit_store};
 use crate::domain::ports::metrics::AdmissionMetrics;
@@ -65,7 +65,11 @@ pub const P0_OWNING_GEAR: &str = "types-registry";
 pub enum EvaluatedOutcome {
     /// D3's artifacts, materialized at admission so the read path recomputes
     /// nothing.
-    TypeSchema { artifacts: MaterializedArtifacts },
+    TypeSchema {
+        artifacts: MaterializedArtifacts,
+        /// GTS's root modifier, carried to the commit-time live-Instance guard.
+        is_abstract: bool,
+    },
     /// The Type Schema revision this value was validated against. Recorded rather
     /// than re-derived: the schema's current revision may move afterwards, and this
     /// is the record of which rules the value passed.
@@ -128,15 +132,14 @@ enum BaselineDocument {
     /// The absent predecessor remains in the revision vector: if it appears before
     /// commit, `VectorDrift::Appeared` triggers rollback and a fresh comparison.
     PredecessorAbsent,
-    /// The candidate's own entity is gone, so a revision has nothing to revise.
-    /// `commit_revision` refuses the same case under the same reason.
-    EntityAbsent { gts_id: String },
 }
 
 /// Read the baseline from the comparison store's snapshot (SPEC §8.1 step 3).
 ///
 /// Cross-minor content is already in `loaded`; only `CurrentRevision` needs
 /// a query because the candidate overlay replaced its committed document.
+/// Its observed version must match the accepted precondition: the commit CAS
+/// then protects the same baseline that evaluation compared against.
 /// Take `loaded` by value: `UnitStore` is not `Sync` and cannot be borrowed
 /// across awaits.
 async fn read_baseline(
@@ -144,33 +147,54 @@ async fn read_baseline(
     tx: &DbTx<'_>,
     scope: &AccessScope,
     candidate_id: &str,
+    precondition: Precondition,
     choice: &Baseline,
     loaded: Option<CommittedSchema>,
-) -> Result<BaselineDocument, WorkerError> {
+) -> Result<Result<BaselineDocument, ItemFailure>, WorkerError> {
     let gts_id = match choice {
-        Baseline::Exempt(_) => return Ok(BaselineDocument::Exempt),
+        Baseline::Exempt(_) => return Ok(Ok(BaselineDocument::Exempt)),
         Baseline::PrecedingMinor { gts_id } => {
             // Absent from the loaded closure is absent from the database: the
             // identifier was passed as a root, so a row would have been read.
-            return Ok(match loaded {
+            return Ok(Ok(match loaded {
                 Some(committed) => BaselineDocument::Present {
                     gts_id: gts_id.clone(),
                     revision_no: committed.revision_no,
                     content: committed.content,
                 },
                 None => BaselineDocument::PredecessorAbsent,
-            });
+            }));
         }
         Baseline::CurrentRevision => candidate_id,
     };
-    let absent = BaselineDocument::EntityAbsent {
-        gts_id: candidate_id.to_owned(),
-    };
-
-    // Deleted definitions remain valid baselines (ADR-0003, ADR-0008).
+    // Match revision_entity's refusal order in the evaluation snapshot. Deleted
+    // predecessors remain valid baselines; that creation arm returned above.
     let Some(entity) = stores.find_by_gts_id(tx, scope, gts_id).await? else {
-        return Ok(absent);
+        return Ok(Err(ItemFailure::new(
+            AdmissionFailureReason::PreconditionFailed,
+            format!("'{gts_id}' does not exist, so a revision has no baseline to compare against"),
+        )));
     };
+    if entity.lifecycle_status == LifecycleStatus::Deleted {
+        return Ok(Err(ItemFailure::new(
+            AdmissionFailureReason::EntityDeleted,
+            format!("'{gts_id}' is deleted; a revision cannot be admitted onto a withdrawn entity"),
+        )));
+    }
+    // A future precondition must not become valid after comparison against an
+    // older baseline. The candidate itself is excluded from the revision vector.
+    if let Precondition::Version(expected) = precondition
+        && entity.resource_version != expected
+    {
+        return Ok(Err(ItemFailure::new(
+            AdmissionFailureReason::PreconditionFailed,
+            format!(
+                "'{gts_id}' has resource_version {}, not expected {expected}, \
+                 in the evaluation snapshot",
+                entity.resource_version
+            ),
+        )));
+    }
     let current = stores
         .current_documents(tx, scope, &[entity.id])
         .await?
@@ -185,11 +209,11 @@ async fn read_baseline(
             source,
         }
     })?;
-    Ok(BaselineDocument::Present {
+    Ok(Ok(BaselineDocument::Present {
         gts_id: gts_id.to_owned(),
         revision_no: current.revision_no,
         content,
-    })
+    }))
 }
 
 /// Claim the write order as the first statement of every commit transaction.
@@ -368,15 +392,20 @@ pub async fn evaluate(
                     Baseline::PrecedingMinor { gts_id } => store.committed_schema(gts_id).cloned(),
                     _ => None,
                 };
-                let baseline = read_baseline(
+                let baseline = match read_baseline(
                     stores.as_ref(),
                     tx,
                     &scope,
                     &baseline_id,
+                    precondition,
                     &baseline_choice,
                     loaded,
                 )
-                .await?;
+                .await?
+                {
+                    Ok(baseline) => baseline,
+                    Err(failure) => return Ok(Err(failure)),
+                };
                 let pair = match conforming_type {
                     Some(type_id) => {
                         let entity = stores.find_by_gts_id(tx, &scope, &type_id).await?;
@@ -494,7 +523,10 @@ fn evaluate_loaded(
             Ok(artifacts) => artifacts,
             Err(failure) => return Ok(Err(failure)),
         };
-        EvaluatedOutcome::TypeSchema { artifacts }
+        EvaluatedOutcome::TypeSchema {
+            artifacts,
+            is_abstract: resolved.is_abstract,
+        }
     } else {
         // `Some` for every parsed Instance identifier: `get_type_id()` is `None` only
         // for a single segment, which `try_new` above already refused.
@@ -632,15 +664,6 @@ fn check_compatibility(
         BaselineDocument::Exempt | BaselineDocument::PredecessorAbsent => {
             reporting.record(None, None, None);
             return Ok(());
-        }
-        BaselineDocument::EntityAbsent { gts_id } => {
-            reporting.record(Some(gts_id), None, None);
-            return Err(ItemFailure::new(
-                AdmissionFailureReason::PreconditionFailed,
-                format!(
-                    "'{gts_id}' does not exist, so a revision has no baseline to compare against"
-                ),
-            ));
         }
         BaselineDocument::Present {
             gts_id,
@@ -926,7 +949,7 @@ pub async fn commit_creation(
 
     let revision_no = 1;
     match &unit.outcome {
-        EvaluatedOutcome::TypeSchema { artifacts } => {
+        EvaluatedOutcome::TypeSchema { artifacts, .. } => {
             stores
                 .insert_schema_revision(
                     tx,
@@ -1133,6 +1156,29 @@ pub async fn commit_revision(
         return Ok(Err(failure));
     }
 
+    // JSON Schema compatibility does not enforce GTS's abstract modifier. This
+    // read shares the write-order claim with Instance creation, so an Instance
+    // cannot appear between the check and this revision becoming current.
+    if matches!(
+        unit.outcome,
+        EvaluatedOutcome::TypeSchema {
+            is_abstract: true,
+            ..
+        }
+    ) && stores
+        .has_live_direct_instances(tx, scope, entity.id)
+        .await?
+    {
+        return Ok(Err(ItemFailure::new(
+            AdmissionFailureReason::DependentInvalid,
+            format!(
+                "'{}' cannot become abstract while it has live direct Instances; \
+                 nothing was committed",
+                unit.gts_id
+            ),
+        )));
+    }
+
     // One statement carrying the precondition, so there is no window between
     // checking the version and moving it. `None` is the lost race — the version
     // moved, or the entity was deleted, both of which the statement's `WHERE`
@@ -1157,7 +1203,7 @@ pub async fn commit_revision(
     })?;
 
     match &unit.outcome {
-        EvaluatedOutcome::TypeSchema { artifacts } => {
+        EvaluatedOutcome::TypeSchema { artifacts, .. } => {
             let CurrentContent::TypeSchema { cas, .. } = &current else {
                 // A mismatched variant means the stored kind-specific rows disagree.
                 return Err(WorkerError::CurrentStateMissing {

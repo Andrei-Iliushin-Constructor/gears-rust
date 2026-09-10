@@ -423,6 +423,17 @@ the exception both ways: types-registry accepts and admits it itself, inline, wi
    rather than merely re-reading the same rows. The vector's reads run in the **same**
    transaction as the store build, so the state it records is the state the documents
    being validated came from; only the validation itself is outside a transaction.
+   For an intra-entity compatibility baseline, require its snapshot
+   `entity.resource_version` to equal the accepted `expected_resource_version` before
+   comparison; a mismatch is terminal `precondition_failed`. The commit's precondition
+   then protects the version actually compared. Checking only at commit would let a
+   future expected version become valid after evaluation against an older baseline.
+   Once the dependency store has loaded, this baseline read refuses an absent entity
+   with `precondition_failed`, and a tombstone with `entity_deleted` **before** checking
+   its version. These refusals and a version mismatch precede candidate schema
+   validation and compatibility comparison; a tombstone must never suggest retrying
+   the revision with a newer version. Deleted cross-minor predecessors remain valid
+   comparison baselines.
 4. Commit transaction:
    1. **claim the `entity_write_order` row.** This is the transaction's first statement and
       nothing may precede it, reads included: every step below is an answer about
@@ -443,7 +454,14 @@ the exception both ways: types-registry accepts and admits it itself, inline, wi
       revalidates from scratch, bounded by `worker.max_revalidation_attempts`;
       exhaustion terminalizes the item as `failed` with reason
       `revalidation_exhausted`;
-   4. re-test predecessor existence for each minor-bearing candidate;
+   4. re-test predecessor existence for each minor-bearing candidate. Before revising
+      a Type Schema whose own document declares `x-gts-abstract: true`, require no
+      active direct `InstanceOf` dependant; otherwise refuse with `dependent_invalid`.
+      Deleted Instances and Instances of concrete derived types do not block this
+      revision. The presence check runs under the same `entity_write_order` claim as
+      Instance creation, before writing any revision or moving any version. If the
+      abstract revision commits first, the Instance's vector guard instead forces
+      revalidation against the abstract type, which refuses the Instance;
    5. insert the immutable revision, replace the current-state projection, replace the
       entity's outgoing dependency edges;
    6. refresh affected current effective schemas (bounded by `limits.activation_write_set`);
@@ -1629,6 +1647,7 @@ identifier profile refusals, topological order, baseline selection.
 | Same key, different fingerprint | `409`, original operation untouched |
 | Concurrent acceptance on one key | one winner, loser returns the winner after fingerprint verification |
 | Update with stale `expected_resource_version` | terminal item `precondition_failed`, no silent rebase |
+| Future `expected_resource_version` reached by another admission after evaluation | terminal `precondition_failed`; never commit a candidate compared against an older baseline |
 | Create when identifier exists | terminal item failure, no revision |
 | Concurrent first registration of one family | exactly one succeeds; family ownership is single |
 | Minor admitted while `vM~` exists | refused on shape |
@@ -1637,6 +1656,10 @@ identifier profile refusals, topological order, baseline selection.
 | Batch with one failing dependency | dependent `failed` with `blocked_by_dependency`, independent branches commit |
 | Circular `$ref`, in one batch or closed by a revision | refused as `invalid_schema`; no cyclic edge is ever stored |
 | Revision of a base with N dependents | every dependent's `resolved_schema` and `resolution_fingerprint` refreshed in the same transaction |
+| Revise a concrete Type Schema to abstract while it has a live direct Instance | terminal `dependent_invalid`; schema revision, artifacts, version and Instance value stay unchanged |
+| Revise a base Type Schema to final while it has a live derived Type Schema | refresh refuses with `dependent_invalid`; the base revision is rolled back and both schemas' versions and artifacts stay unchanged |
+| Abstract transition with only deleted direct Instances, or Instances of concrete derived or unrelated types | succeeds; those Instances do not prevent abstraction |
+| Concurrent abstract transition and direct Instance creation, in either commit order | With one competing commit: Instance first refuses the abstract revision with `dependent_invalid`; abstract revision first makes the Instance revalidate and refuse with `invalid_value`. Further drift is subject to the usual `revalidation_exhausted` bound. Both orders asserted on SQLite, PostgreSQL and MySQL |
 | Refresh yielding identical artifacts | fingerprint unchanged, nothing written, `resource_version` not moved |
 | Activation set over the bound | candidate fails, no partial refresh committed |
 | Duplicate worker invocation on one operation | second invocation is a no-op |

@@ -90,6 +90,7 @@ fn unit(gts_id: &str, body: &str, operation_item_id: i64) -> EvaluatedUnit {
         canonical_body: body.to_owned(),
         content_hash: content_hash(body),
         outcome: EvaluatedOutcome::TypeSchema {
+            is_abstract: false,
             artifacts: MaterializedArtifacts {
                 resolved_schema: body.to_owned(),
                 effective_traits: "{}".to_owned(),

@@ -528,6 +528,17 @@ impl<H: StoreHooks> OperationStore for TestStores<H> {
 
 #[async_trait]
 impl<H: StoreHooks> DependencyStore for TestStores<H> {
+    async fn has_live_direct_instances(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        type_schema_entity_id: i64,
+    ) -> Result<bool, ScopeError> {
+        self.inner
+            .has_live_direct_instances(tx, scope, type_schema_entity_id)
+            .await
+    }
+
     async fn closure(
         &self,
         tx: &DbTx<'_>,

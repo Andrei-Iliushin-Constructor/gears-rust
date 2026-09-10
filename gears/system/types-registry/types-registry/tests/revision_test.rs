@@ -395,25 +395,27 @@ async fn a_revision_is_refused_on_a_tombstoned_entity() {
     );
     let after_delete = resource_version_of(&db, CF_TYPE).await;
 
-    // The precondition names the version the deletion left behind, so nothing but
-    // the lifecycle can refuse this.
-    let outcome = admit(
-        &db,
-        "k2",
-        CF_TYPE,
-        schema(CF_TYPE, "second"),
-        Some(after_delete),
-    )
-    .await;
+    // Both an old GET's version and the tombstone's current version must identify
+    // withdrawal, rather than advising the caller to retry with a newer version.
+    for expected in [entity.resource_version, after_delete] {
+        let outcome = admit(
+            &db,
+            &format!("revision-{expected}"),
+            CF_TYPE,
+            schema(CF_TYPE, "second"),
+            Some(expected),
+        )
+        .await;
 
-    let item = &outcome.items[0];
-    assert_eq!(item.status, domain_enums::OperationItemStatus::Failed);
-    assert_eq!(
-        item.failure.as_ref().expect("a recorded failure").reason,
-        AdmissionFailureReason::EntityDeleted,
-        "a withdrawn entity is not a stale version, and must not be reported as one",
-    );
-    assert_eq!(item.revision_no, None);
+        let item = &outcome.items[0];
+        assert_eq!(item.status, domain_enums::OperationItemStatus::Failed);
+        assert_eq!(
+            item.failure.as_ref().expect("a recorded failure").reason,
+            AdmissionFailureReason::EntityDeleted,
+            "a withdrawn entity is not a stale version, and must not be reported as one",
+        );
+        assert_eq!(item.revision_no, None);
+    }
 
     let entity_id = entity_id_of(&db, CF_TYPE).await;
     assert_eq!(
