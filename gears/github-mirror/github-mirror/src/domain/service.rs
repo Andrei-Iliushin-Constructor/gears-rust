@@ -3332,11 +3332,11 @@ impl Service {
         let outcome = self
             .sync_with_heartbeat(job, &progress, &session, cancel)
             .await;
-        progress.finished();
 
         let completed = outcome.is_ok();
         match outcome {
             Ok(summary) => {
+                progress.finished();
                 session_states::COMPLETE.clone_into(&mut session.status);
                 session.summary_json = serde_json::to_string(&summary).ok();
             }
