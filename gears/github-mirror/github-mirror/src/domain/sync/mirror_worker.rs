@@ -55,6 +55,7 @@ pub struct RunState {
     pub options: FetchOptions,
     repo_id: OnceLock<i64>,
     complete: Mutex<ListingCompleteness>,
+    swept: Mutex<HashSet<&'static str>>,
     summary: Mutex<SyncSummary>,
     drift: Mutex<Vec<CountGap>>,
 }
@@ -78,6 +79,7 @@ impl RunState {
             options,
             repo_id: OnceLock::new(),
             complete: Mutex::new(ListingCompleteness::none()),
+            swept: Mutex::new(HashSet::new()),
             summary: Mutex::new(SyncSummary {
                 repository: format!("{owner}/{name}"),
                 ..SyncSummary::default()
@@ -121,6 +123,25 @@ impl RunState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .absorb(complete);
+    }
+
+    /// Record that `family`'s sweep reached its last page, so its watermark
+    /// may be promoted. Independent of [`Self::completeness`]: a walk bounded
+    /// by `updated_after` saw everything it asked for without seeing everything there
+    /// is, so it may advance the watermark but not drive reconciliation.
+    fn mark_swept(&self, family: &'static str) {
+        self.swept
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(family);
+    }
+
+    #[must_use]
+    pub fn is_swept(&self, family: &str) -> bool {
+        self.swept
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(family)
     }
 
     pub fn accept_drift(&self, gap: CountGap) {
@@ -296,19 +317,22 @@ impl MirrorWorker {
                 run.options.force,
             )
             .await?;
-        let since = start.since;
+        let updated_after = start.updated_after;
         let listing = self
             .github
             .list_issues(
                 &run.owner,
                 &run.name,
                 repo_id,
-                since,
+                updated_after,
                 start.page1_etag.as_deref(),
                 &run.options,
             )
             .await?;
         run.mark_complete(&listing.complete);
+        if listing.swept_to_end {
+            run.mark_swept(sweep_families::ISSUES);
+        }
         let seen: Vec<&str> = listing
             .issues
             .iter()
@@ -320,7 +344,7 @@ impl MirrorWorker {
                 run.tenant_id,
                 repo_id,
                 sweep_families::ISSUES,
-                high_water(&seen, since),
+                high_water(&seen, updated_after),
                 listing.page1_etag.clone(),
             )
             .await?;
@@ -331,7 +355,7 @@ impl MirrorWorker {
         let collection = run.options.scope.collection;
         let mut swept: HashSet<i64> = HashSet::new();
         for issue in &listing.issues {
-            if !swept.insert(issue.number) || is_stale(Some(&issue.updated_at), since) {
+            if !swept.insert(issue.number) || is_stale(Some(&issue.updated_at), updated_after) {
                 continue;
             }
             let open = issue.state == "open";
@@ -529,7 +553,7 @@ impl MirrorWorker {
     async fn index_commits(&self, ctx: &WorkerContext) -> Result<(), DomainError> {
         let run = &self.run;
         let repo_id = run.repo_id()?;
-        let since = self
+        let updated_after = self
             .watermark
             .start_sweep(
                 &run.scope,
@@ -538,12 +562,15 @@ impl MirrorWorker {
                 run.options.force,
             )
             .await?
-            .since;
+            .updated_after;
         let listing = self
             .github
-            .list_commits(&run.owner, &run.name, repo_id, since, &run.options)
+            .list_commits(&run.owner, &run.name, repo_id, updated_after, &run.options)
             .await?;
         run.mark_complete(&listing.complete);
+        if listing.swept_to_end {
+            run.mark_swept(sweep_families::COMMITS);
+        }
         let seen: Vec<&str> = listing
             .commits
             .iter()
@@ -555,7 +582,7 @@ impl MirrorWorker {
                 run.tenant_id,
                 repo_id,
                 sweep_families::COMMITS,
-                high_water(&seen, since),
+                high_water(&seen, updated_after),
                 None,
             )
             .await?;
@@ -563,7 +590,8 @@ impl MirrorWorker {
         let with_ci = run.options.scope.collection.actions != CollectionMode::None;
         let mut swept: HashSet<&str> = HashSet::new();
         for commit in &listing.commits {
-            if !swept.insert(commit.sha.as_str()) || is_stale(commit.committed_at.as_deref(), since)
+            if !swept.insert(commit.sha.as_str())
+                || is_stale(commit.committed_at.as_deref(), updated_after)
             {
                 continue;
             }

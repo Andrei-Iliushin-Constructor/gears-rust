@@ -666,7 +666,7 @@ async fn sync_recon(
     ctx: &SecurityContext,
     upstream: FetchedRepository,
     force: bool,
-) {
+) -> String {
     let service = common::service_with_github(
         db,
         "https://api.github.com",
@@ -682,7 +682,72 @@ async fn sync_recon(
     )
     .await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let session_id = body_json(response).await["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_owned();
     assert_eq!(pump.drain(&service).await, 1, "the queued sync must run");
+    session_id
+}
+
+/// `recon_fetched`, with each issue's `updated_at` set by hand so a watermark
+/// from one sync can leave some of them outside the next sync's walk.
+fn recon_fetched_stamped(issues: &[(i64, &str)]) -> FetchedRepository {
+    let ids: Vec<i64> = issues.iter().map(|(id, _)| *id).collect();
+    let mut result = recon_fetched(&ids, true);
+    for (issue, (_, updated_at)) in result.issues.iter_mut().zip(issues) {
+        (*updated_at).clone_into(&mut issue.updated_at);
+    }
+    result
+}
+
+async fn recon_issues_synced(db: toolkit_db::Db, ctx: &SecurityContext, session_id: &str) -> u64 {
+    let service = common::service_with_github(
+        db,
+        "https://api.github.com",
+        Arc::new(common::FakeGithub { result: None }),
+    );
+    let router = router_for(service, ctx.clone());
+    let session =
+        body_json(get(router, &format!("/github-mirror/v1/sessions/{session_id}")).await).await;
+    session["summary"]["issues_synced"]
+        .as_u64()
+        .expect("issues_synced")
+}
+
+#[tokio::test]
+async fn an_incremental_sync_keeps_the_rows_it_did_not_have_to_look_at() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let db = common::inmem_db().await;
+
+    let first = sync_recon(
+        db.clone(),
+        &ctx,
+        recon_fetched_stamped(&[(11, "2026-08-20T00:00:00Z"), (12, "2026-08-10T00:00:00Z")]),
+        false,
+    )
+    .await;
+    assert_eq!(recon_issues_synced(db.clone(), &ctx, &first).await, 2);
+
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let second = sync_recon(
+        db.clone(),
+        &ctx,
+        recon_fetched_stamped(&[(11, "2026-08-21T00:00:00Z"), (12, "2026-08-10T00:00:00Z")]),
+        false,
+    )
+    .await;
+
+    assert_eq!(
+        recon_issues_synced(db.clone(), &ctx, &second).await,
+        1,
+        "the first sync's watermark must bound the second, so only the edited issue is listed"
+    );
+    assert_eq!(
+        recon_issue_ids(db.clone(), &ctx).await,
+        vec![11, 12],
+        "issue 12 was outside the bounded walk, which says nothing about whether it still exists"
+    );
 }
 
 async fn recon_issue_ids(db: toolkit_db::Db, ctx: &SecurityContext) -> Vec<i64> {
@@ -719,13 +784,14 @@ async fn reconciliation_deletes_upstream_removals_but_only_from_complete_listing
         "a truncated listing must not reconcile deletions"
     );
 
-    // Sync 3: same upstream state, complete listing — now 12 goes.
+    // Sync 3: same upstream state, forced so the watermark does not bound the
+    // walk — now 12 goes.
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    sync_recon(db.clone(), &ctx, recon_fetched(&[11], true), false).await;
+    sync_recon(db.clone(), &ctx, recon_fetched(&[11], true), true).await;
     assert_eq!(
         recon_issue_ids(db.clone(), &ctx).await,
         vec![11],
-        "a complete listing reconciles the upstream deletion"
+        "an unbounded, complete listing reconciles the upstream deletion"
     );
 }
 

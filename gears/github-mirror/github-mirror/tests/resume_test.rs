@@ -42,13 +42,13 @@ impl GithubPort for StopsAfterDiscovery {
         owner: &str,
         name: &str,
         repo_id: i64,
-        since: Option<DateTime<Utc>>,
+        updated_after: Option<DateTime<Utc>>,
         page1_etag: Option<&str>,
         options: &FetchOptions,
     ) -> Result<IssueListing, DomainError> {
         self.cancel.cancel();
         self.inner
-            .list_issues(owner, name, repo_id, since, page1_etag, options)
+            .list_issues(owner, name, repo_id, updated_after, page1_etag, options)
             .await
     }
 
@@ -96,11 +96,11 @@ impl GithubPort for StopsAfterDiscovery {
         owner: &str,
         name: &str,
         repo_id: i64,
-        since: Option<DateTime<Utc>>,
+        updated_after: Option<DateTime<Utc>>,
         options: &FetchOptions,
     ) -> Result<CommitListing, DomainError> {
         self.inner
-            .list_commits(owner, name, repo_id, since, options)
+            .list_commits(owner, name, repo_id, updated_after, options)
             .await
     }
 

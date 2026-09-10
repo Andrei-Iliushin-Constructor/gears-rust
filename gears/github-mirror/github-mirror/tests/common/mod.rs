@@ -11,8 +11,8 @@ use authz_resolver_sdk::{
 use github_mirror::domain::error::DomainError;
 use github_mirror::domain::ports::github::{
     ActionsListing, CommitDetail, CommitListing, DeclaredCounts, FetchOptions, FetchedRepository,
-    GithubPort, IssueDetail, IssueDetailWants, IssueListing, ListingCompleteness, MetadataListing,
-    PullDetail, PullListing,
+    GithubPort, IssueDetail, IssueDetailWants, IssueListing, Listing, ListingCompleteness,
+    MetadataListing, PullDetail, PullListing,
 };
 use github_mirror::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
@@ -115,6 +115,26 @@ impl FakeGithub {
     }
 }
 
+/// What GitHub's `?since=` does to a listing: keep an entity when its stamp
+/// is at or after the bound. No stamp, or no bound, keeps it.
+fn not_before(stamp: Option<&str>, since: Option<chrono::DateTime<chrono::Utc>>) -> bool {
+    let (Some(stamp), Some(since)) = (stamp, since) else {
+        return true;
+    };
+    chrono::DateTime::parse_from_rfc3339(stamp)
+        .is_ok_and(|at| at.with_timezone(&chrono::Utc) >= since)
+}
+
+/// The fixture's completeness narrowed to the listings one port method
+/// actually walked, the way the real client reports only its own families.
+fn only(complete: &ListingCompleteness, listings: &[Listing]) -> ListingCompleteness {
+    let mut narrowed = ListingCompleteness::none();
+    for listing in listings {
+        narrowed.set(*listing, complete.is_complete(*listing));
+    }
+    narrowed
+}
+
 #[async_trait]
 impl GithubPort for FakeGithub {
     async fn fetch_repository_metadata(
@@ -131,19 +151,34 @@ impl GithubPort for FakeGithub {
         _owner: &str,
         _name: &str,
         _repo_id: i64,
-        _since: Option<chrono::DateTime<chrono::Utc>>,
+        updated_after: Option<chrono::DateTime<chrono::Utc>>,
         _page1_etag: Option<&str>,
         _options: &FetchOptions,
     ) -> Result<IssueListing, DomainError> {
         let f = self.fixture()?;
         Ok(IssueListing {
-            complete: f.complete.clone(),
-            issues: f.issues.clone(),
-            comments: f.comments.clone(),
+            complete: if updated_after.is_some() {
+                ListingCompleteness::none()
+            } else {
+                only(&f.complete, &[Listing::Issues, Listing::Comments])
+            },
+            issues: f
+                .issues
+                .iter()
+                .filter(|i| not_before(Some(&i.updated_at), updated_after))
+                .cloned()
+                .collect(),
+            comments: f
+                .comments
+                .iter()
+                .filter(|c| not_before(Some(&c.updated_at), updated_after))
+                .cloned()
+                .collect(),
             issue_events: f.issue_events.clone(),
             contributors: f.contributors.clone(),
             page1_etag: None,
             unchanged: false,
+            swept_to_end: true,
         })
     }
 
@@ -189,7 +224,10 @@ impl GithubPort for FakeGithub {
     ) -> Result<PullListing, DomainError> {
         let f = self.fixture()?;
         Ok(PullListing {
-            complete: f.complete.clone(),
+            complete: only(
+                &f.complete,
+                &[Listing::PullRequests, Listing::ReviewComments],
+            ),
             pull_requests: f.pull_requests.clone(),
             review_comments: f.review_comments.clone(),
             contributors: Vec::new(),
@@ -247,15 +285,25 @@ impl GithubPort for FakeGithub {
         _owner: &str,
         _name: &str,
         _repo_id: i64,
-        _since: Option<chrono::DateTime<chrono::Utc>>,
+        updated_after: Option<chrono::DateTime<chrono::Utc>>,
         _options: &FetchOptions,
     ) -> Result<CommitListing, DomainError> {
         let f = self.fixture()?;
         Ok(CommitListing {
-            complete: f.complete.clone(),
-            commits: f.commits.clone(),
+            complete: if updated_after.is_some() {
+                ListingCompleteness::none()
+            } else {
+                only(&f.complete, &[Listing::Commits])
+            },
+            commits: f
+                .commits
+                .iter()
+                .filter(|c| not_before(c.committed_at.as_deref(), updated_after))
+                .cloned()
+                .collect(),
             commit_comments: f.commit_comments.clone(),
             contributors: Vec::new(),
+            swept_to_end: true,
         })
     }
 
@@ -313,7 +361,16 @@ impl GithubPort for FakeGithub {
     ) -> Result<MetadataListing, DomainError> {
         let f = self.fixture()?;
         Ok(MetadataListing {
-            complete: f.complete.clone(),
+            complete: only(
+                &f.complete,
+                &[
+                    Listing::Labels,
+                    Listing::Milestones,
+                    Listing::Releases,
+                    Listing::Branches,
+                    Listing::Tags,
+                ],
+            ),
             labels: f.labels.clone(),
             milestones: f.milestones.clone(),
             releases: f.releases.clone(),

@@ -47,7 +47,7 @@ pub fn high_water(seen: &[&str], threshold: Option<DateTime<Utc>>) -> Option<Dat
 /// time so an unchanged listing can stop before page two.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SweepStart {
-    pub since: Option<DateTime<Utc>>,
+    pub updated_after: Option<DateTime<Utc>>,
     pub page1_etag: Option<String>,
 }
 
@@ -72,7 +72,7 @@ impl SweepWatermark {
     ) -> Result<SweepStart, DomainError> {
         let stored = self.watermark_store.find(scope, repo_id, family).await?;
         Ok(SweepStart {
-            since: stop_threshold(stored.as_ref(), force),
+            updated_after: stop_threshold(stored.as_ref(), force),
             page1_etag: if force {
                 None
             } else {

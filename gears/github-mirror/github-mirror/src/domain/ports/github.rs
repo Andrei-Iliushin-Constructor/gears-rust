@@ -121,6 +121,11 @@ pub struct IssueListing {
     /// Page one matched the validator the caller passed, so no page was
     /// walked and every vector above is empty.
     pub unchanged: bool,
+    /// The issues walk reached its last page. Unlike `complete`, this stays
+    /// true when an `updated_after` bound narrowed the walk: everything asked for was
+    /// seen, which is what advancing the watermark needs, even though
+    /// reconciliation cannot trust a narrowed walk.
+    pub swept_to_end: bool,
 }
 
 /// Which per-issue sub-resources a refinement should fetch, decided by the
@@ -176,6 +181,9 @@ pub struct CommitListing {
     pub commits: Vec<CommitRecord>,
     pub commit_comments: Vec<CommitCommentRecord>,
     pub contributors: Vec<ContributorRecord>,
+    /// The commits walk reached its last page, bounded or not; see
+    /// [`IssueListing::swept_to_end`].
+    pub swept_to_end: bool,
 }
 
 /// What a pull request payload says it holds, for the completeness check.
@@ -278,7 +286,7 @@ pub trait GithubPort: Send + Sync {
         owner: &str,
         name: &str,
         repo_id: i64,
-        since: Option<DateTime<Utc>>,
+        updated_after: Option<DateTime<Utc>>,
         page1_etag: Option<&str>,
         options: &FetchOptions,
     ) -> Result<IssueListing, DomainError>;
@@ -315,7 +323,7 @@ pub trait GithubPort: Send + Sync {
         owner: &str,
         name: &str,
         repo_id: i64,
-        since: Option<DateTime<Utc>>,
+        updated_after: Option<DateTime<Utc>>,
         options: &FetchOptions,
     ) -> Result<CommitListing, DomainError>;
 

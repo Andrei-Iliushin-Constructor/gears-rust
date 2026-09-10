@@ -45,8 +45,8 @@ fn within_since(state: &str, updated_at: &str, since: Option<DateTime<Utc>>) -> 
     DateTime::parse_from_rfc3339(updated_at).is_ok_and(|at| at.with_timezone(&Utc) >= since)
 }
 
-fn since_param(since: Option<DateTime<Utc>>) -> String {
-    since.map_or_else(String::new, |at| {
+fn updated_after_param(updated_after: Option<DateTime<Utc>>) -> String {
+    updated_after.map_or_else(String::new, |at| {
         format!(
             "&since={}",
             at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -1831,14 +1831,14 @@ impl GithubPort for GithubClient {
         owner: &str,
         name: &str,
         repo_id: i64,
-        since: Option<DateTime<Utc>>,
+        updated_after: Option<DateTime<Utc>>,
         page1_etag: Option<&str>,
         options: &FetchOptions,
     ) -> Result<IssueListing, DomainError> {
         if !options.scope.objects.issues {
             return Ok(IssueListing::default());
         }
-        let bound = since_param(since);
+        let bound = updated_after_param(updated_after);
 
         let walk: ListingWalk<GhIssue> = self
             .walk_pages(
@@ -1853,6 +1853,7 @@ impl GithubPort for GithubClient {
             return Ok(IssueListing {
                 page1_etag: walk.page1_etag,
                 unchanged: true,
+                swept_to_end: false,
                 ..IssueListing::default()
             });
         }
@@ -1877,7 +1878,7 @@ impl GithubPort for GithubClient {
             .map(|i| issue_record(repo_id, i))
             .filter(|i| within_since(&i.state, &i.updated_at, options.since))
             .collect();
-        let bounded = options.since.is_some();
+        let bounded = updated_after.is_some() || options.since.is_some();
 
         let mut complete = ListingCompleteness::none();
         complete.set(Listing::Issues, issues_complete && !bounded);
@@ -1897,6 +1898,7 @@ impl GithubPort for GithubClient {
             contributors,
             page1_etag: walk_etag,
             unchanged: false,
+            swept_to_end: issues_complete,
         })
     }
 
@@ -2115,13 +2117,13 @@ impl GithubPort for GithubClient {
         owner: &str,
         name: &str,
         repo_id: i64,
-        since: Option<DateTime<Utc>>,
+        updated_after: Option<DateTime<Utc>>,
         options: &FetchOptions,
     ) -> Result<CommitListing, DomainError> {
         if !options.scope.objects.commits {
             return Ok(CommitListing::default());
         }
-        let bound = since_param(since);
+        let bound = updated_after_param(updated_after);
 
         let (commits, commits_complete): (Vec<GhCommit>, bool) = self
             .get_json_all(
@@ -2137,8 +2139,9 @@ impl GithubPort for GithubClient {
             .await?;
 
         let contributors = derive_commit_people(repo_id, &commits, &commit_comments).into_records();
+        let bounded = updated_after.is_some();
         let mut complete = ListingCompleteness::none();
-        complete.set(Listing::Commits, commits_complete);
+        complete.set(Listing::Commits, commits_complete && !bounded);
 
         Ok(CommitListing {
             complete,
@@ -2151,6 +2154,7 @@ impl GithubPort for GithubClient {
                 .map(|c| commit_comment_record(repo_id, c))
                 .collect(),
             contributors,
+            swept_to_end: commits_complete,
         })
     }
 

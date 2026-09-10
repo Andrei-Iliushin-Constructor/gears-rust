@@ -1500,3 +1500,57 @@ async fn an_unchanged_first_page_stops_the_issue_sweep_before_page_two() {
          would delete every issue it did not re-stamp"
     );
 }
+
+#[tokio::test]
+async fn a_walk_bounded_by_the_watermark_is_swept_to_its_end_but_never_complete() {
+    let server = MockServer::start_async().await;
+    for (path, body) in [
+        ("/repos/rust-lang/rust/issues", gh_issues_json()),
+        ("/repos/rust-lang/rust/issues/comments", json!([])),
+        ("/repos/rust-lang/rust/issues/events", json!([])),
+        ("/repos/rust-lang/rust/commits", gh_commits_json()),
+        ("/repos/rust-lang/rust/comments", json!([])),
+    ] {
+        server
+            .mock_async(move |when, then| {
+                when.method("GET").path(path);
+                then.status(200).json_body(body);
+            })
+            .await;
+    }
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let options = opts(ScopeConfig::default());
+    let watermark = Some(instant("2026-08-19T23:55:00Z"));
+
+    let unbounded = client
+        .list_issues("rust-lang", "rust", 42, None, None, &options)
+        .await
+        .expect("the unbounded walk must succeed");
+    assert!(
+        unbounded.complete.is_complete(Listing::Issues),
+        "with no bound, a walk that ran out of pages saw every issue there is"
+    );
+
+    let issues = client
+        .list_issues("rust-lang", "rust", 42, watermark, None, &options)
+        .await
+        .expect("the bounded walk must succeed");
+    assert!(issues.swept_to_end, "the bounded walk ran out of pages too");
+    assert!(
+        !issues.complete.is_complete(Listing::Issues),
+        "GitHub only returned issues updated since the bound, so absence from \
+         this walk proves nothing and reconciliation must not delete on it"
+    );
+    assert!(!issues.complete.is_complete(Listing::Comments));
+
+    let commits = client
+        .list_commits("rust-lang", "rust", 42, watermark, &options)
+        .await
+        .expect("the bounded commits walk must succeed");
+    assert!(commits.swept_to_end);
+    assert!(
+        !commits.complete.is_complete(Listing::Commits),
+        "the commits walk carries the same bound and the same rule"
+    );
+}
