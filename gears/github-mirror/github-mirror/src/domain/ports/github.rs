@@ -158,6 +158,15 @@ pub struct PullListing {
     pub pull_requests: Vec<PullRequestRecord>,
     pub review_comments: Vec<ReviewCommentRecord>,
     pub contributors: Vec<ContributorRecord>,
+    /// The validator page one of the pull-request listing carried, for the
+    /// next sweep to compare against.
+    pub page1_etag: Option<String>,
+    /// Page one matched the validator the caller passed, so no page was
+    /// walked and every vector above is empty.
+    pub unchanged: bool,
+    /// The pull-request walk reached its last page; see
+    /// [`IssueListing::swept_to_end`].
+    pub swept_to_end: bool,
     /// Where the next page of this family is, or `None` once its last page
     /// has been served. Opaque to the caller, which hands it back unchanged
     /// as `continue_from` to get the page after this one.
@@ -189,6 +198,12 @@ pub struct CommitListing {
     pub commits: Vec<CommitRecord>,
     pub commit_comments: Vec<CommitCommentRecord>,
     pub contributors: Vec<ContributorRecord>,
+    /// The validator page one of the commits listing carried, for the next
+    /// sweep to compare against.
+    pub page1_etag: Option<String>,
+    /// Page one matched the validator the caller passed, so no page was
+    /// walked and every vector above is empty.
+    pub unchanged: bool,
     /// The commits walk reached its last page, bounded or not; see
     /// [`IssueListing::swept_to_end`].
     pub swept_to_end: bool,
@@ -327,6 +342,7 @@ pub trait GithubPort: Send + Sync {
         owner: &str,
         name: &str,
         repo_id: i64,
+        page1_etag: Option<&str>,
         continue_from: Option<&str>,
         options: &FetchOptions,
     ) -> Result<PullListing, DomainError>;
@@ -340,12 +356,14 @@ pub trait GithubPort: Send + Sync {
         options: &FetchOptions,
     ) -> Result<PullDetail, DomainError>;
 
+    #[allow(clippy::too_many_arguments)]
     async fn list_commits(
         &self,
         owner: &str,
         name: &str,
         repo_id: i64,
         updated_after: Option<DateTime<Utc>>,
+        page1_etag: Option<&str>,
         continue_from: Option<&str>,
         options: &FetchOptions,
     ) -> Result<CommitListing, DomainError>;

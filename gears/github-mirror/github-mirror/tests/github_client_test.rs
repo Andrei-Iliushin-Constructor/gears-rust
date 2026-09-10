@@ -514,18 +514,31 @@ async fn walk_pulls(
     owner: &str,
     name: &str,
     repo_id: i64,
+    page1_etag: Option<&str>,
     options: &FetchOptions,
 ) -> Result<PullListing, DomainError> {
     let mut all = PullListing::default();
     let mut continue_from: Option<String> = None;
     loop {
         let page = client
-            .list_pull_requests(owner, name, repo_id, continue_from.as_deref(), options)
+            .list_pull_requests(
+                owner,
+                name,
+                repo_id,
+                page1_etag,
+                continue_from.as_deref(),
+                options,
+            )
             .await?;
         all.complete.absorb(&page.complete);
         all.pull_requests.extend(page.pull_requests);
         all.review_comments.extend(page.review_comments);
         all.contributors.extend(page.contributors);
+        all.swept_to_end |= page.swept_to_end;
+        all.unchanged |= page.unchanged;
+        if all.page1_etag.is_none() {
+            all.page1_etag = page.page1_etag;
+        }
         match page.next {
             Some(next) => continue_from = Some(next),
             None => return Ok(all),
@@ -539,6 +552,7 @@ async fn walk_commits(
     name: &str,
     repo_id: i64,
     updated_after: Option<chrono::DateTime<chrono::Utc>>,
+    page1_etag: Option<&str>,
     options: &FetchOptions,
 ) -> Result<CommitListing, DomainError> {
     let mut all = CommitListing::default();
@@ -550,6 +564,7 @@ async fn walk_commits(
                 name,
                 repo_id,
                 updated_after,
+                page1_etag,
                 continue_from.as_deref(),
                 options,
             )
@@ -559,6 +574,10 @@ async fn walk_commits(
         all.commit_comments.extend(page.commit_comments);
         all.contributors.extend(page.contributors);
         all.swept_to_end |= page.swept_to_end;
+        all.unchanged |= page.unchanged;
+        if all.page1_etag.is_none() {
+            all.page1_etag = page.page1_etag;
+        }
         match page.next {
             Some(next) => continue_from = Some(next),
             None => return Ok(all),
@@ -579,8 +598,8 @@ async fn fetch_repository(
     let collection = options.scope.collection;
 
     let issues = walk_issues(client, owner, name, repo_id, None, None, options).await?;
-    let pulls = walk_pulls(client, owner, name, repo_id, options).await?;
-    let commits = walk_commits(client, owner, name, repo_id, None, options).await?;
+    let pulls = walk_pulls(client, owner, name, repo_id, None, options).await?;
+    let commits = walk_commits(client, owner, name, repo_id, None, None, options).await?;
     let meta = client.list_metadata(owner, name, repo_id, options).await?;
     let actions = client.list_actions(owner, name, repo_id, options).await?;
 
@@ -1636,7 +1655,7 @@ async fn a_walk_bounded_by_the_watermark_is_swept_to_its_end_but_never_complete(
     );
     assert!(!issues.complete.is_complete(Listing::Comments));
 
-    let commits = walk_commits(&client, "rust-lang", "rust", 42, watermark, &options)
+    let commits = walk_commits(&client, "rust-lang", "rust", 42, watermark, None, &options)
         .await
         .expect("the bounded commits walk must succeed");
     assert!(commits.swept_to_end);
@@ -1644,4 +1663,120 @@ async fn a_walk_bounded_by_the_watermark_is_swept_to_its_end_but_never_complete(
         !commits.complete.is_complete(Listing::Commits),
         "the commits walk carries the same bound and the same rule"
     );
+}
+
+#[tokio::test]
+async fn an_unchanged_first_page_stops_the_pull_and_commit_sweeps_too() {
+    let server = MockServer::start_async().await;
+    let pulls_page_two = format!("{}/repos/rust-lang/rust/pulls?page=2", server.base_url());
+    let commits_page_two = format!("{}/repos/rust-lang/rust/commits?page=2", server.base_url());
+    let pulls_first = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/pulls")
+                .query_param("sort", "updated")
+                .query_param_exists("per_page");
+            then.status(200)
+                .header("etag", "W/\"pulls-page-one\"")
+                .header("link", format!("<{pulls_page_two}>; rel=\"next\""))
+                .json_body(gh_pulls_json());
+        })
+        .await;
+    let pulls_second = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/pulls")
+                .query_param("page", "2");
+            then.status(200).json_body(json!([]));
+        })
+        .await;
+    let commits_first = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/commits")
+                .query_param_exists("per_page");
+            then.status(200)
+                .header("etag", "W/\"commits-page-one\"")
+                .header("link", format!("<{commits_page_two}>; rel=\"next\""))
+                .json_body(gh_commits_json());
+        })
+        .await;
+    let commits_second = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/commits")
+                .query_param("page", "2");
+            then.status(200).json_body(json!([]));
+        })
+        .await;
+    for path in [
+        "/repos/rust-lang/rust/pulls/comments",
+        "/repos/rust-lang/rust/comments",
+    ] {
+        server
+            .mock_async(move |when, then| {
+                when.method("GET").path(path);
+                then.status(200).json_body(json!([]));
+            })
+            .await;
+    }
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let options = opts(ScopeConfig::default());
+
+    let pulls = walk_pulls(&client, "rust-lang", "rust", 42, None, &options)
+        .await
+        .expect("the first pull sweep must walk");
+    assert_eq!(pulls.page1_etag.as_deref(), Some("W/\"pulls-page-one\""));
+    pulls_second.assert_calls_async(1).await;
+    let commits = walk_commits(&client, "rust-lang", "rust", 42, None, None, &options)
+        .await
+        .expect("the first commit sweep must walk");
+    assert_eq!(
+        commits.page1_etag.as_deref(),
+        Some("W/\"commits-page-one\"")
+    );
+    commits_second.assert_calls_async(1).await;
+
+    let pulls_again = client
+        .list_pull_requests(
+            "rust-lang",
+            "rust",
+            42,
+            Some("W/\"pulls-page-one\""),
+            None,
+            &options,
+        )
+        .await
+        .expect("the second pull sweep must succeed");
+    assert!(
+        pulls_again.unchanged,
+        "page one of the pulls did not change"
+    );
+    assert!(
+        !pulls_again.complete.is_complete(Listing::PullRequests),
+        "an unwalked listing must never count as complete"
+    );
+    let commits_again = client
+        .list_commits(
+            "rust-lang",
+            "rust",
+            42,
+            None,
+            Some("W/\"commits-page-one\""),
+            None,
+            &options,
+        )
+        .await
+        .expect("the second commit sweep must succeed");
+    assert!(
+        commits_again.unchanged,
+        "page one of the commits did not change"
+    );
+    assert!(!commits_again.complete.is_complete(Listing::Commits));
+
+    assert_eq!(pulls_first.calls_async().await, 2);
+    assert_eq!(commits_first.calls_async().await, 2);
+    pulls_second.assert_calls_async(1).await;
+    commits_second.assert_calls_async(1).await;
 }

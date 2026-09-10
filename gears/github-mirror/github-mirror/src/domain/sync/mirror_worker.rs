@@ -447,6 +447,19 @@ impl MirrorWorker {
     async fn index_pull_requests(&self, ctx: &WorkerContext) -> Result<(), DomainError> {
         let run = &self.run;
         let repo_id = run.repo_id()?;
+        let start = self
+            .watermark
+            .start_sweep(
+                &run.scope,
+                repo_id,
+                sweep_families::PULL_REQUESTS,
+                run.options.force,
+            )
+            .await?;
+        let updated_after = start.updated_after;
+        let mut high = updated_after;
+        let mut page1_etag: Option<String> = None;
+        let mut swept: HashSet<i64> = HashSet::new();
         let mut continue_from: Option<String> = None;
 
         while !ctx.cancel.is_cancelled() {
@@ -456,13 +469,32 @@ impl MirrorWorker {
                     &run.owner,
                     &run.name,
                     repo_id,
+                    start.page1_etag.as_deref(),
                     continue_from.as_deref(),
                     &run.options,
                 )
                 .await?;
             run.mark_complete(&listing.complete);
+            if listing.swept_to_end {
+                run.mark_swept(sweep_families::PULL_REQUESTS);
+            }
+            if page1_etag.is_none() {
+                page1_etag.clone_from(&listing.page1_etag);
+            }
+            let seen: Vec<&str> = listing
+                .pull_requests
+                .iter()
+                .map(|p| p.updated_at.as_str())
+                .collect();
+            high = high_water(&seen, high);
+            if listing.unchanged {
+                break;
+            }
 
             for pull in &listing.pull_requests {
+                if !swept.insert(pull.number) || is_stale(Some(&pull.updated_at), updated_after) {
+                    continue;
+                }
                 let entity_id = pull.number.to_string();
                 if !self
                     .needs_refinement(entities::PULL_REQUEST, &entity_id, &pull_inputs(pull))
@@ -503,6 +535,17 @@ impl MirrorWorker {
                 None => break,
             }
         }
+
+        self.watermark
+            .stage(
+                &run.scope,
+                run.tenant_id,
+                repo_id,
+                sweep_families::PULL_REQUESTS,
+                high,
+                page1_etag,
+            )
+            .await?;
         Ok(())
     }
 
@@ -585,7 +628,7 @@ impl MirrorWorker {
     async fn index_commits(&self, ctx: &WorkerContext) -> Result<(), DomainError> {
         let run = &self.run;
         let repo_id = run.repo_id()?;
-        let updated_after = self
+        let start = self
             .watermark
             .start_sweep(
                 &run.scope,
@@ -593,10 +636,11 @@ impl MirrorWorker {
                 sweep_families::COMMITS,
                 run.options.force,
             )
-            .await?
-            .updated_after;
+            .await?;
+        let updated_after = start.updated_after;
         let with_ci = run.options.scope.collection.actions != CollectionMode::None;
         let mut high = updated_after;
+        let mut page1_etag: Option<String> = None;
         let mut swept: HashSet<String> = HashSet::new();
         let mut continue_from: Option<String> = None;
 
@@ -608,6 +652,7 @@ impl MirrorWorker {
                     &run.name,
                     repo_id,
                     updated_after,
+                    start.page1_etag.as_deref(),
                     continue_from.as_deref(),
                     &run.options,
                 )
@@ -616,12 +661,18 @@ impl MirrorWorker {
             if listing.swept_to_end {
                 run.mark_swept(sweep_families::COMMITS);
             }
+            if page1_etag.is_none() {
+                page1_etag.clone_from(&listing.page1_etag);
+            }
             let seen: Vec<&str> = listing
                 .commits
                 .iter()
                 .filter_map(|c| c.committed_at.as_deref())
                 .collect();
             high = high_water(&seen, high);
+            if listing.unchanged {
+                break;
+            }
 
             for commit in &listing.commits {
                 if !swept.insert(commit.sha.clone())
@@ -675,7 +726,7 @@ impl MirrorWorker {
                 repo_id,
                 sweep_families::COMMITS,
                 high,
-                None,
+                page1_etag,
             )
             .await?;
         Ok(())

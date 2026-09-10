@@ -3665,7 +3665,11 @@ impl Service {
             )));
         }
 
-        for family in [sweep_families::ISSUES, sweep_families::COMMITS] {
+        for family in [
+            sweep_families::ISSUES,
+            sweep_families::PULL_REQUESTS,
+            sweep_families::COMMITS,
+        ] {
             if run.is_swept(family) {
                 self.sweep_watermark
                     .promote(&run.scope, run.tenant_id, run.repo_id()?, family)

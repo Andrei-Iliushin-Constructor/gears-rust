@@ -11,6 +11,7 @@ pub const SWEEP_OVERLAP: Duration = Duration::minutes(5);
 
 pub mod sweep_families {
     pub const ISSUES: &str = "issues";
+    pub const PULL_REQUESTS: &str = "pull_requests";
     pub const COMMITS: &str = "commits";
 }
 

@@ -1931,6 +1931,7 @@ impl GithubPort for GithubClient {
         owner: &str,
         name: &str,
         repo_id: i64,
+        page1_etag: Option<&str>,
         continue_from: Option<&str>,
         options: &FetchOptions,
     ) -> Result<PullListing, DomainError> {
@@ -1958,6 +1959,14 @@ impl GithubPort for GithubClient {
         let mut listing = PullListing::default();
         if stage == 0 {
             let page: FetchedPage<Vec<GhPullRequest>> = self.get_page(&url, options).await?;
+            if continue_from.is_none() {
+                listing.page1_etag.clone_from(&page.etag);
+                if page1_etag.is_some() && page.etag.as_deref() == page1_etag {
+                    tracing::debug!(%url, "page one is unchanged; the sweep stops here");
+                    listing.unchanged = true;
+                    return Ok(listing);
+                }
+            }
             listing.contributors = derive_pull_people(repo_id, &page.parsed, &[]).into_records();
             listing.pull_requests = page
                 .parsed
@@ -1982,6 +1991,7 @@ impl GithubPort for GithubClient {
                 .set(Listing::ReviewComments, page.next.is_none() && !bounded);
             listing.next = continue_after(&stages, stage, page.next);
         }
+        listing.swept_to_end = listing.next.is_none();
         Ok(listing)
     }
 
@@ -2098,12 +2108,14 @@ impl GithubPort for GithubClient {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn list_commits(
         &self,
         owner: &str,
         name: &str,
         repo_id: i64,
         updated_after: Option<DateTime<Utc>>,
+        page1_etag: Option<&str>,
         continue_from: Option<&str>,
         options: &FetchOptions,
     ) -> Result<CommitListing, DomainError> {
@@ -2132,6 +2144,14 @@ impl GithubPort for GithubClient {
         let mut listing = CommitListing::default();
         if stage == 0 {
             let page: FetchedPage<Vec<GhCommit>> = self.get_page(&url, options).await?;
+            if continue_from.is_none() {
+                listing.page1_etag.clone_from(&page.etag);
+                if page1_etag.is_some() && page.etag.as_deref() == page1_etag {
+                    tracing::debug!(%url, "page one is unchanged; the sweep stops here");
+                    listing.unchanged = true;
+                    return Ok(listing);
+                }
+            }
             listing.contributors = derive_commit_people(repo_id, &page.parsed, &[]).into_records();
             listing.commits = page
                 .parsed
