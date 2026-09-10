@@ -12,14 +12,18 @@
 //!   lookup through `uq_tr_entity_gts_id` on an identifier `key` derived, never
 //!   a scan of the family.
 //!
-//! Only [`FamilyKey`], [`family_key`], [`FamilyRefusal`] and [`admits_new_member`]
-//! leave the directory — the key the storage layer persists, and the question the
-//! commit path asks. `sibling_id`, `version_probe` and `VersionProbe` are the rules'
-//! own arithmetic, with no caller outside; publishing them would make any change to
-//! the probe's shape a breaking release.
+//! [`FamilyKey`], [`family_key`], [`FamilyRefusal`] and [`admits_new_member`] leave
+//! the directory — the key the storage layer persists, and the question the commit
+//! path asks. [`version_probe`] leaves it too, for exactly one reason:
+//! [`compat`](crate::domain::compat) needs the identifier of a candidate's
+//! preceding minor, which is the same `vM.(n-1)~` the contiguity rule looks up.
+//! Reading it from the probe rather than deriving it again is what keeps the
+//! baseline and the rule from ever naming different identifiers. `sibling_id`
+//! stays private: it is the spelling arithmetic underneath, and the probe is the
+//! answer callers actually want.
 
 mod key;
 mod rules;
 
 pub use key::{FamilyKey, family_key, lock_order};
-pub use rules::{FamilyRefusal, admits_new_member};
+pub use rules::{FamilyRefusal, VersionProbe, admits_new_member, version_probe};

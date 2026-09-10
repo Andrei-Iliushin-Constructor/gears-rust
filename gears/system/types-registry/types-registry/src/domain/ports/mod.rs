@@ -240,6 +240,8 @@ pub struct OperationItemRow {
     pub dry_run: bool,
     pub kind: OperationKind,
     pub precondition: Precondition,
+    /// ADR-0004's accepted `force`, as acceptance recorded it.
+    pub compat_forced: bool,
     pub status: OperationItemStatus,
     pub request_payload: Option<String>,
     pub result_revision_no: Option<i32>,
@@ -476,6 +478,10 @@ pub struct NewOperationItem {
     pub item_no: i32,
     pub gts_id: String,
     pub precondition: Precondition,
+    /// ADR-0004's accepted `force`. Persisted rather than left in the request,
+    /// because the worker that reads the verdict reads this row. Named for the
+    /// column it lands in — `force` is a MySQL reserved word.
+    pub compat_forced: bool,
     /// The canonical request body. The stored CHECK requires it while the item is
     /// non-terminal, and the worker drops it at terminality.
     pub request_payload: String,

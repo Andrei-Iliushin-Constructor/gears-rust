@@ -37,6 +37,7 @@ use super::fingerprint::{
 };
 use super::{Accepted, OperationDispatch, Precondition, SubmitRequest};
 use crate::config::TypesRegistryConfig;
+use crate::domain::compat::select_baseline;
 use crate::domain::enums::{OperationKind, OwnershipScope, Plane};
 use crate::domain::policy::{PolicyRefusal, RegistrationPolicy};
 use crate::domain::ports::metrics::{AdmissionMetrics, RefusalStage};
@@ -98,8 +99,6 @@ pub enum AcceptanceError {
     ForceNotPermitted { gts_id: String },
     #[error("force on '{gts_id}' is refused: it has no cross-minor check to waive")]
     ForceHasNothingToWaive { gts_id: String },
-    #[error("force on '{gts_id}' is not accepted until T17 implements compatibility evaluation")]
-    ForceCompatibilityUnavailable { gts_id: String },
     #[error("minor-bearing Type Schema '{gts_id}' is content-immutable")]
     MinorTypeSchemaRevision { gts_id: String },
     #[error(
@@ -146,7 +145,6 @@ impl AcceptanceError {
             Self::AuthoredDocumentTooLarge { .. } => "authored_document_too_large",
             Self::ForceNotPermitted { .. } => "force_not_permitted",
             Self::ForceHasNothingToWaive { .. } => "force_has_nothing_to_waive",
-            Self::ForceCompatibilityUnavailable { .. } => "force_compatibility_unavailable",
             Self::MinorTypeSchemaRevision { .. } => "minor_type_schema_revision",
             Self::ZeroPrecondition { .. } => "zero_precondition",
             Self::NegativePrecondition { .. } => "negative_precondition",
@@ -352,25 +350,27 @@ pub fn validate(
         }
 
         // --- step 6: force ------------------------------------------------
+        // Both halves are request-static, which is what makes them acceptance's:
+        // the deployment flag, and whether this candidate *has* the one waivable
+        // check. Whether the waived comparison would in fact have failed is a
+        // worker decision inside the commit transaction.
         if candidate.force {
             if !ctx.config.allow_compatibility_force {
                 return Err(AcceptanceError::ForceNotPermitted {
                     gts_id: id.id().to_owned(),
                 });
             }
-            if !has_cross_minor_check(&id) {
+            // Asked of `compat`, not of a local predicate over versions. ADR-0004
+            // permits waiving exactly the cross-minor edge, so "is there something
+            // to waive" and "which baseline is this" are one question, and two
+            // implementations of it would drift — most damagingly in the direction
+            // of accepting a waiver against the intra-entity edge, which nothing may
+            // waive.
+            if !select_baseline(&id, expected).waivable() {
                 return Err(AcceptanceError::ForceHasNothingToWaive {
                     gts_id: id.id().to_owned(),
                 });
             }
-            // ponytail: ceiling C9 — T14/T17 close Checkpoints 3–4.
-            // T17 owns both the compatibility comparison and the durable
-            // `compat_forced` provenance bit. Accepting the flag before those two
-            // arrive would silently record `false` on a creation whose check was
-            // actually waived.
-            return Err(AcceptanceError::ForceCompatibilityUnavailable {
-                gts_id: id.id().to_owned(),
-            });
         }
 
         // TODO(T18): enforce ADR-0015 quarantine for major-0 bases and `$ref` targets.
@@ -395,6 +395,9 @@ pub fn validate(
             item_no,
             gts_id: id.id().to_owned(),
             precondition: expected,
+            // The wire and ADR-0004 say `force`; the column says `compat_forced`.
+            // This is the one place the two names meet.
+            compat_forced: candidate.force,
             request_payload: canonical,
         });
     }
@@ -645,20 +648,6 @@ fn conflicting_dialect_at(value: &Value, path: &str) -> Option<String> {
         }
     }
     conflicting_dialect_below(value, path)
-}
-
-/// Whether the candidate has a cross-minor compatibility check for `force` to
-/// waive: a minor-bearing segment past `M.0`, at a stable major. Request-static,
-/// which is why it belongs to acceptance — whether the waived comparison *would*
-/// have failed stays a worker decision under the family lock.
-fn has_cross_minor_check(id: &GtsId) -> bool {
-    let Some(last) = id.segments().last() else {
-        return false;
-    };
-    match (last.ver_major_opt(), last.ver_minor()) {
-        (Some(0) | None, _) | (_, None | Some(0)) => false,
-        (Some(_), Some(_)) => true,
-    }
 }
 
 /// ADR-0004 makes a minor-bearing Type Schema an immutable published contract.

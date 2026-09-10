@@ -9,10 +9,19 @@ use toolkit_macros::domain_model;
 pub enum AdmissionFailureReason {
     ActivationWriteSetExceeded,
     AlreadyExists,
+    /// The baseline's own references no longer resolve, so no comparison could be
+    /// performed. Distinct from an undecidable one: the check never ran.
+    BaselineUnresolvable,
+    /// `compare_documents` returned `Unknown`. Kept apart from
+    /// [`Self::IncompatibleWithBaseline`] because `principle-fail-closed` refuses
+    /// the two for different reasons, and an operator acts on them differently.
+    CompatibilityUndecidable,
     DependentInvalid,
     EntityDeleted,
     FamilyKindConflict,
     FamilyShapeConflict,
+    /// `Valid(baseline) ⊆ Valid(candidate)` does not hold (ADR-0003).
+    IncompatibleWithBaseline,
     InvalidDocument,
     InvalidIdentifier,
     InvalidSchema,
@@ -36,10 +45,13 @@ impl AdmissionFailureReason {
         match code {
             "activation_write_set_exceeded" => Self::ActivationWriteSetExceeded,
             "already_exists" => Self::AlreadyExists,
+            "baseline_unresolvable" => Self::BaselineUnresolvable,
+            "compatibility_undecidable" => Self::CompatibilityUndecidable,
             "dependent_invalid" => Self::DependentInvalid,
             "entity_deleted" => Self::EntityDeleted,
             "family_kind_conflict" => Self::FamilyKindConflict,
             "family_shape_conflict" => Self::FamilyShapeConflict,
+            "incompatible_with_baseline" => Self::IncompatibleWithBaseline,
             "invalid_document" => Self::InvalidDocument,
             "invalid_identifier" => Self::InvalidIdentifier,
             "invalid_schema" => Self::InvalidSchema,
@@ -71,10 +83,13 @@ impl AdmissionFailureReason {
         match self {
             Self::ActivationWriteSetExceeded => "activation_write_set_exceeded",
             Self::AlreadyExists => "already_exists",
+            Self::BaselineUnresolvable => "baseline_unresolvable",
+            Self::CompatibilityUndecidable => "compatibility_undecidable",
             Self::DependentInvalid => "dependent_invalid",
             Self::EntityDeleted => "entity_deleted",
             Self::FamilyKindConflict => "family_kind_conflict",
             Self::FamilyShapeConflict => "family_shape_conflict",
+            Self::IncompatibleWithBaseline => "incompatible_with_baseline",
             Self::InvalidDocument => "invalid_document",
             Self::InvalidIdentifier => "invalid_identifier",
             Self::InvalidSchema => "invalid_schema",
@@ -97,3 +112,7 @@ impl std::fmt::Display for AdmissionFailureReason {
         f.write_str(self.as_str())
     }
 }
+
+#[cfg(test)]
+#[path = "reasons_tests.rs"]
+mod reasons_tests;

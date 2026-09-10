@@ -98,6 +98,9 @@ fn unit(gts_id: &str, body: &str, operation_item_id: i64) -> EvaluatedUnit {
             },
         },
         operation_item_id,
+        // No waiver: this fixture races two commits, and the compatibility verdict
+        // is not what it is about.
+        compat_forced: false,
         edges: Vec::new(),
         // The vector a real evaluation of this fixture would record, spelled out: the closure over
         // the candidate's own identifier resolves to the candidate and nothing else, and nothing

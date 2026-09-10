@@ -57,6 +57,18 @@ pub enum WorkerError {
     /// projection is missing behind an entity that is still there.
     #[error("entity '{gts_id}' (id {entity_id}) vanished mid-transaction")]
     EntityVanished { gts_id: String, entity_id: i64 },
+    /// A stored baseline document is not valid JSON.
+    ///
+    /// Corruption rather than a race: the document was canonicalized before it was
+    /// stored and an admitted revision is immutable afterwards. Infrastructure, not
+    /// a statement about the candidate — the candidate is not the document that
+    /// failed to parse.
+    #[error("the stored baseline document for '{gts_id}' is not valid JSON: {source}")]
+    BaselineUnparsable {
+        gts_id: String,
+        #[source]
+        source: serde_json::Error,
+    },
     /// A resolved edge target disappeared before commit.
     #[error("dependency target '{gts_id}' vanished before its edge was committed")]
     DependencyTargetAbsent { gts_id: String },

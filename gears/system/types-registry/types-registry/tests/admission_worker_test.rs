@@ -21,7 +21,7 @@ use uuid::Uuid;
 use types_registry::config::TypesRegistryConfig;
 use types_registry::domain::admission::AdmissionFailureReason;
 use types_registry::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
-use types_registry::domain::admission::unit::{commit_creation, evaluate};
+use types_registry::domain::admission::unit::{EvaluationTarget, commit_creation, evaluate};
 use types_registry::domain::admission::worker::{Tuning, WorkerError, run_operation};
 use types_registry::domain::admission::{Candidate, OperationDispatch, SubmitRequest};
 use types_registry::domain::artifacts::resolution_fingerprint;
@@ -332,10 +332,15 @@ async fn a_pass_that_loses_the_item_cas_writes_nothing_at_all() {
         &stores(),
         &provider,
         &allow_all(),
-        &item.gts_id,
-        &payload,
-        item.id,
+        EvaluationTarget {
+            gts_id: &item.gts_id,
+            canonical_body: &payload,
+            operation_item_id: item.id,
+            precondition: item.precondition,
+            force: item.compat_forced,
+        },
         &common::limits(),
+        &common::metrics(),
         None,
     )
     .await

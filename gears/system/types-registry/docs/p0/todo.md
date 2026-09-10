@@ -1439,7 +1439,7 @@ reads as scope rather than as silence.
   The suite that proves the `entity_write_order` claim on a backend with real row locking was
   reachable only by hand, so `make ci` never ran it — the container test the last commit added to
   close a P0 blocker was outside the gate meant to protect it. One line in the `Makefile` target
-- [ ] Human review — four items below; item 3's design decision is resolved
+- [x] Human review — four items below; item 3's design decision is resolved
 
 **Handoff review (commit `319eb16a5`), item by item.**
 
@@ -1480,7 +1480,7 @@ reads as scope rather than as silence.
 
 ## Phase 4 — Compatibility
 
-### - [ ] T17: Compatibility against one baseline
+### - [x] T17: Compatibility against one baseline
 
 **Description:** Baseline selection — the entity's current revision for a major-only
 candidate, or the `ACTIVE`/`DELETED` definition of `vM.(n-1)~` for a minor-bearing one —
@@ -1488,48 +1488,70 @@ compared through `GtsStore::compare_documents`, which resolves both sides. `Unkn
 rejected with its own reason, never collapsed into `Incompatible`.
 
 **Acceptance criteria:**
-- [ ] `compare_documents` is the only comparison entry point; `is_minor_compatible` is not used
-- [ ] `CompatibilityVerdict::Unknown` fails the candidate with a reason distinct from `Incompatible` (`principle-fail-closed`)
-- [ ] Every admitted revision records `gts_spec_version`, `gts_impl_version` and `compat_forced`
-- [ ] `force` waives exactly one cross-minor check, only where the deployment enabled it and the candidate has such a check to waive; this removes `ForceCompatibilityUnavailable` and carries the accepted flag into `compat_forced`
-- [ ] Major-0 candidates get no baseline and no verdict
+- [x] `compare_documents` is the only comparison entry point; `is_minor_compatible` is not used
+- [x] `CompatibilityVerdict::Unknown` fails the candidate with a reason distinct from `Incompatible` (`principle-fail-closed`)
+- [x] Every admitted revision records `gts_spec_version`, `gts_impl_version` and `compat_forced`
+- [x] `force` waives exactly one cross-minor check, only where the deployment enabled it and the candidate has such a check to waive; this removes `ForceCompatibilityUnavailable` and carries the accepted flag into `compat_forced`
+- [x] Major-0 candidates get no baseline and no verdict
 
 **Observability (`plan.md` P16 — this task instruments what it adds):**
-- [ ] Every verdict is counted, and `Unknown` is distinguishable from `Incompatible` in the
+- [x] Every verdict is counted, and `Unknown` is distinguishable from `Incompatible` in the
       metrics and not only in the refusal reason: a new instrument
       `types_registry_compat_verdicts_total{verdict,forced}` over the closed set
       `compatible | incompatible | unknown`. A refusal still increments `refusals_total`; the
       verdict counter exists because `compatible` is not a refusal and has nowhere else to go,
       and because SPEC §16.12's *"rejected with its own reason"* is unobservable when it is one
       `reason` label among a dozen
-- [ ] A waived cross-minor check is countable on its own — `forced="true"` on the recorded
+- [x] A waived cross-minor check is countable on its own — `forced="true"` on the recorded
       verdict. A `force` is a deployment-enabled policy escape, and `compat_forced` on the row is
       visible only to whoever queries the row
-- [ ] The unit span records what the counter cannot: the baseline it selected
+- [x] The unit span records what the counter cannot: the baseline it selected
       (`baseline_gts_id`, `baseline_revision`), the verdict, and `gts_spec_version` /
       `gts_impl_version`. Identifiers are span fields, never labels
 - [x] **The admission reason vocabulary has one home, compile-enforced** (P16 rule 3):
       `ItemFailure::new` takes `AdmissionFailureReason` from `domain::admission::reasons`.
       Stored codes are unchanged; known codes restore typed variants and their metric labels,
       while `Unknown(String)` preserves unfamiliar codes and maps them to `other` in metrics
-- [ ] Add this task's compatibility refusal variants to `AdmissionFailureReason`
+- [x] Add this task's compatibility refusal variants to `AdmissionFailureReason`
 
 **Verification:**
-- [ ] Gear tests, all three backends (see [Commands](#commands))
-- [ ] Compatibility matrix: optional property added at a `Closed` level (compatible), at `Open` (incompatible), at `Partial` (`Unknown`)
-- [ ] Test: provenance columns match `GTS_SPECIFICATION_VERSION` and the crate version
-- [ ] Test: `force` refused when `allow_compatibility_force` is off, including on Dry Run
-- [ ] Test: the verdict instrument's rendered name, label keys and both label vocabularies
+- [x] Gear tests, all three backends (see [Commands](#commands))
+- [x] Compatibility matrix: optional property added at a `Closed` level (compatible), at `Open` (incompatible), at `Partial` (`Unknown`)
+- [x] Test: provenance columns match `GTS_SPECIFICATION_VERSION` and the crate version
+- [~] Test: `force` refused when `allow_compatibility_force` is off — done
+      (`force_is_refused_while_the_deployment_disallows_it`). **The Dry Run half is
+      unreachable in P0**: acceptance refuses `dry_run` for the whole request before
+      step 6 is asked, so there is no forced dry run to refuse. Pinned as ordering by
+      `a_forced_dry_run_is_refused_for_being_a_dry_run_before_force_is_considered`,
+      which fails naming `force` on the day T20 makes a dry run acceptable
+- [x] Test: the verdict instrument's rendered name, label keys and both label vocabularies
       against an `InMemoryMetricExporter` — T16's bar, and the only thing that catches a dropped
       `_total` or a renamed label value
-- [ ] Test: emission end to end through `run_operation` — compatible, incompatible, `Unknown` and
+- [x] Test: emission end to end through `run_operation` — compatible, incompatible, `Unknown` and
       forced each land under their own label pair — plus a mutation check that removing the
       emission calls fails those tests
-- [ ] Test: every `Reason` const is reachable and the vocabulary test enumerates the module, so
+- [x] Test: every `Reason` const is reachable and the vocabulary test enumerates the module, so
       the set a dashboard depends on is asserted rather than greppable
 
 **Dependencies:** Checkpoint 3
 **Files likely touched:** `TR/src/domain/compat.rs` (baseline selection; T18's derivation chain joins it and the pair takes `TR/src/domain/compat/` — trigger table above), `TR/src/domain/admission/unit.rs`, `TR/src/domain/error.rs`, `TR/src/domain/admission/reasons.rs` (NEW — the vocabulary), `TR/src/domain/ports/metrics.rs`, `TR/src/infra/metrics.rs`, `TR/src/observability.rs`, `TR/tests/compat_test.rs`
+
+**One file this list missed, and it is a migration.** `force` is a per-candidate request
+input: it cannot be recomputed from the identifier, and the request fingerprint that
+already covers it is a digest. Admission reads the item row — after T21 that is *all* it
+reads — so an accepted waiver that is not a column is one the worker never sees, and
+`compat_forced` would record `false` on a revision whose check was waived. Added as
+`m20260908_000003_operation_item_compat_forced` (append-only, like `000002` before it),
+plus the `operation_item` entity, `NewOperationItem`, `OperationItemRow` and
+`database.sql`.
+
+**The column is not called `force`, and the MySQL container suite is what said so.**
+`FORCE` is a MySQL reserved word: `ADD COLUMN force` is error 1064 there, which the
+SQLite suite cannot see. Back-quoting would work and would leave every future raw
+statement one omission away from the same failure, so the column takes the name its
+value already has on `type_schema_revision` — `compat_forced`, copied verbatim. The wire
+and the domain keep ADR-0004's word; acceptance is the single place the two names meet.
+Pinned by `no_backend_names_the_column_with_a_reserved_word`
 **Scope:** M
 
 ---

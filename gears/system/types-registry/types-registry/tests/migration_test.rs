@@ -176,6 +176,83 @@ async fn an_existing_schema_gains_the_coordination_state_table_and_seed() {
     );
 }
 
+/// An installation that already holds operation items gains `compat_forced` on
+/// every one of them, reading `false`.
+///
+/// This is the case a fresh-install test cannot reach, and the only one where
+/// `ADD COLUMN` can fail: without `NOT NULL DEFAULT false` the statement has no
+/// value for the rows already there. `false` is also the *true* value for them —
+/// every item a deployment holds was accepted while acceptance refused every
+/// effective `force` (ceiling C9), so nothing is being back-filled with a guess.
+#[tokio::test]
+async fn an_existing_operation_item_gains_compat_forced_reading_false() {
+    let db = Database::connect("sqlite::memory:")
+        .await
+        .expect("connect in-memory sqlite");
+
+    // A deployment that stopped at the initial migration, with one item in flight.
+    Migrator::up(&db, Some(1))
+        .await
+        .expect("apply the initial migration alone");
+    insert_operation(&db, OP_ID, 1, 0).await;
+    exec(
+        &db,
+        format!(
+            "INSERT INTO types_registry__operation_item \
+             (id, operation_id, item_no, gts_id, dry_run, kind, \
+              expected_resource_version, status, request_payload, created_at) \
+             VALUES (1, {OP_ID}, 0, '{GTS_TYPE}', 0, 1, 0, 1, '{{}}', '{TS}')"
+        ),
+    )
+    .await
+    .expect("insert a pending item under the pre-upgrade schema");
+    assert!(
+        exec(
+            &db,
+            "SELECT compat_forced FROM types_registry__operation_item"
+        )
+        .await
+        .is_err(),
+        "the initial migration must not carry the column, which is the whole point",
+    );
+
+    Migrator::up(&db, None).await.expect("apply the rest");
+
+    let row = db
+        .query_one_raw(stmt(
+            &db,
+            "SELECT compat_forced FROM types_registry__operation_item WHERE id = 1",
+        ))
+        .await
+        .expect("query the upgraded item")
+        .expect("the item survives the upgrade");
+    assert!(
+        !row.try_get::<bool>("", "compat_forced")
+            .expect("compat_forced"),
+        "an item accepted before waivers existed cannot have been forced",
+    );
+}
+
+/// SQLite lowers the boolean to an INTEGER, so the migration carries the same 0/1
+/// `CHECK` every other lowered boolean in this schema does — without it SQLite
+/// would accept a `7` that Postgres and MySQL refuse.
+#[tokio::test]
+async fn the_lowered_compat_forced_boolean_refuses_a_value_outside_zero_and_one() {
+    let db = migrated_db().await;
+    insert_operation(&db, OP_ID, 1, 0).await;
+    exec(
+        &db,
+        format!(
+            "INSERT INTO types_registry__operation_item \
+             (id, operation_id, item_no, gts_id, dry_run, kind, \
+              expected_resource_version, compat_forced, status, request_payload, created_at) \
+             VALUES (1, {OP_ID}, 0, '{GTS_TYPE}', 0, 1, 0, 7, 1, '{{}}', '{TS}')"
+        ),
+    )
+    .await
+    .expect_err("compat_forced is a boolean; the SQLite lowering must reject 7");
+}
+
 /// The migration preserves a pre-existing table and advanced seed.
 #[tokio::test]
 async fn the_coordination_state_migration_absorbs_a_table_that_already_exists() {

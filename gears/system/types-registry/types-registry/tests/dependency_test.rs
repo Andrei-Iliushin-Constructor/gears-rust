@@ -270,13 +270,19 @@ async fn a_revision_removes_the_edge_it_dropped_and_adds_the_one_it_gained() {
     let db = test_db().await;
     admit(&db, "shape", SHAPE, schema(SHAPE), None).await;
     admit(&db, "invoice", INVOICE, schema(INVOICE), None).await;
+    // One property whose target moves, rather than one property swapped for
+    // another: adding or removing a property changes what the schema accepts, and
+    // T17 refuses a revision that is not backward compatible with its own current
+    // revision. `SHAPE` and `INVOICE` are structurally identical, so moving the
+    // reference between them is compatible — and it is the edge replacement this
+    // test is about, with the property name held still.
     admit(
         &db,
         "first",
         BASE,
         schema_with(
             BASE,
-            &json!({ "shape": { "$ref": format!("gts://{SHAPE}") } }),
+            &json!({ "link": { "$ref": format!("gts://{SHAPE}") } }),
         ),
         None,
     )
@@ -292,7 +298,7 @@ async fn a_revision_removes_the_edge_it_dropped_and_adds_the_one_it_gained() {
         BASE,
         schema_with(
             BASE,
-            &json!({ "invoice": { "$ref": format!("gts://{INVOICE}") } }),
+            &json!({ "link": { "$ref": format!("gts://{INVOICE}") } }),
         ),
         Some(1),
     )

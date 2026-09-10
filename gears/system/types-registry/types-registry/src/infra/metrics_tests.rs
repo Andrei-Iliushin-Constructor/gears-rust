@@ -12,6 +12,7 @@ use super::{
 };
 use crate::domain::admission::vector::{VectorDrift, VectorRole};
 use crate::domain::ports::metrics::{AdmissionMetrics, RefusalStage, TerminalStatus};
+use gts::CompatibilityVerdict;
 
 fn default_prefix() -> String {
     crate::config::MetricsConfig::default().effective_prefix("types-registry")
@@ -428,4 +429,149 @@ fn recorded_names(exporter: &InMemoryMetricExporter) -> Vec<String> {
         }
     }
     names
+}
+
+// ---------------------------------------------------------------------------
+// `types_registry_compat_verdicts_total{verdict,forced}` (T17, P16)
+// ---------------------------------------------------------------------------
+
+/// The instrument's **rendered name**, which no other test in this repository
+/// would notice losing its `_total`.
+#[test]
+fn the_verdict_counter_renders_under_its_prefixed_total_name() {
+    let (provider, exporter, metrics) = recorder();
+
+    metrics.compat_verdict(CompatibilityVerdict::Compatible, false);
+    provider.force_flush().unwrap();
+
+    assert_eq!(
+        counter_sum(&exporter, "types_registry_compat_verdicts_total"),
+        1,
+        "the name is what a dashboard queries; a renamed instrument is an empty panel",
+    );
+}
+
+/// **The whole point of this instrument.** A refusal is already counted by
+/// `refusals_total`, so `incompatible` and `unknown` would be observable without
+/// it — but `compatible` is not a refusal and has nowhere else to go, and
+/// SPEC §16.12's "rejected with its own reason" is unobservable when it is one
+/// `reason` label among a dozen. All three verdicts, each its own series.
+#[test]
+fn all_three_verdicts_are_counted_under_their_own_label_value() {
+    let (provider, exporter, metrics) = recorder();
+
+    metrics.compat_verdict(CompatibilityVerdict::Compatible, false);
+    metrics.compat_verdict(CompatibilityVerdict::Incompatible, false);
+    metrics.compat_verdict(CompatibilityVerdict::Incompatible, false);
+    metrics.compat_verdict(CompatibilityVerdict::Unknown, false);
+    provider.force_flush().unwrap();
+
+    for (verdict, expected) in [("compatible", 1), ("incompatible", 2), ("unknown", 1)] {
+        assert_eq!(
+            counter_sum_where(
+                &exporter,
+                "types_registry_compat_verdicts_total",
+                &[("verdict", verdict), ("forced", "false")],
+            ),
+            expected,
+            "verdict={verdict}",
+        );
+    }
+    assert_eq!(
+        counter_sum(&exporter, "types_registry_compat_verdicts_total"),
+        4,
+    );
+}
+
+/// A waived cross-minor check is countable on its own. `compat_forced` on the row
+/// is visible only to whoever queries the row; a `force` is a deployment-enabled
+/// policy escape, and an operator needs to see one without a database.
+#[test]
+fn a_waived_verdict_is_its_own_series_under_forced_true() {
+    let (provider, exporter, metrics) = recorder();
+
+    metrics.compat_verdict(CompatibilityVerdict::Incompatible, true);
+    metrics.compat_verdict(CompatibilityVerdict::Incompatible, false);
+    provider.force_flush().unwrap();
+
+    for (forced, expected) in [("true", 1), ("false", 1)] {
+        assert_eq!(
+            counter_sum_where(
+                &exporter,
+                "types_registry_compat_verdicts_total",
+                &[("verdict", "incompatible"), ("forced", forced)],
+            ),
+            expected,
+            "forced={forced}: a waiver must not be blended into the unwaived series",
+        );
+    }
+}
+
+/// Both label **keys** are present on every data point, and both vocabularies are
+/// closed. A dropped key silently merges series; a stray value silently splits one.
+#[test]
+fn the_verdict_counter_carries_exactly_two_closed_label_keys() {
+    let (provider, exporter, metrics) = recorder();
+
+    for verdict in [
+        CompatibilityVerdict::Compatible,
+        CompatibilityVerdict::Incompatible,
+        CompatibilityVerdict::Unknown,
+    ] {
+        for forced in [true, false] {
+            metrics.compat_verdict(verdict, forced);
+        }
+    }
+    provider.force_flush().unwrap();
+
+    let mut seen: Vec<(String, String)> = Vec::new();
+    let finished = exporter.get_finished_metrics().unwrap();
+    for rm in &finished {
+        for sm in rm.scope_metrics() {
+            for metric in sm.metrics() {
+                if metric.name() != "types_registry_compat_verdicts_total" {
+                    continue;
+                }
+                let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
+                    panic!("the verdict instrument must be a u64 sum");
+                };
+                for dp in sum.data_points() {
+                    let keys: Vec<&str> = dp.attributes().map(|kv| kv.key.as_str()).collect();
+                    assert_eq!(
+                        keys.len(),
+                        2,
+                        "exactly `verdict` and `forced`, got {keys:?}",
+                    );
+                    assert!(
+                        keys.contains(&"verdict") && keys.contains(&"forced"),
+                        "{keys:?}"
+                    );
+                    let value_of = |key: &str| {
+                        dp.attributes()
+                            .find(|kv| kv.key.as_str() == key)
+                            .map(|kv| kv.value.as_str().to_string())
+                            .unwrap_or_default()
+                    };
+                    seen.push((value_of("verdict"), value_of("forced")));
+                }
+            }
+        }
+    }
+
+    seen.sort_unstable();
+    seen.dedup();
+    let expected: Vec<(String, String)> = ["compatible", "incompatible", "unknown"]
+        .into_iter()
+        .flat_map(|v| {
+            ["false", "true"]
+                .into_iter()
+                .map(move |f| (v.to_owned(), f.to_owned()))
+        })
+        .collect();
+    let mut expected_sorted = expected;
+    expected_sorted.sort_unstable();
+    assert_eq!(
+        seen, expected_sorted,
+        "the two vocabularies are closed at three verdicts and two booleans",
+    );
 }

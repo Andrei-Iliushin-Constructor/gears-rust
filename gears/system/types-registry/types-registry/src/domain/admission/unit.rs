@@ -16,12 +16,13 @@
 
 use std::sync::Arc;
 
-use gts::{GTS_IMPLEMENTATION_VERSION, GTS_SPECIFICATION_VERSION, GtsId};
+use gts::{CompatibilityVerdict, GTS_IMPLEMENTATION_VERSION, GTS_SPECIFICATION_VERSION, GtsId};
 use serde_json::Value;
 use time::OffsetDateTime;
 use toolkit_db::secure::AccessScope;
 use toolkit_db::{DBProvider, DbTx};
 use toolkit_macros::domain_model;
+use tracing::Span;
 use uuid::Uuid;
 
 use super::bounds::{check_closure, materialize_bounded};
@@ -35,8 +36,9 @@ use super::revision::{
 use super::unchanged::{self, UnchangedCandidate};
 use super::vector::{self, RevisionVector, VectorDrift};
 use crate::config::Limits;
-use crate::domain::admission::AdmissionFailureReason;
+use crate::domain::admission::{AdmissionFailureReason, Precondition};
 use crate::domain::artifacts::{MaterializedArtifacts, content_hash};
+use crate::domain::compat::{self, Baseline};
 use crate::domain::dependency::{DependencyEdge, extract_edges};
 use crate::domain::enums::{DependencyKind, EntityKind, OwnershipScope};
 use crate::domain::family::{FamilyKey, admits_new_member, family_key};
@@ -46,6 +48,7 @@ use crate::domain::ports::{
     NewCurrentInstance, NewCurrentTypeSchema, NewEntity, NewInstanceRevision, NewRevision,
     OperationItemRow, Stores, snapshot_read,
 };
+use crate::observability::{self, CompatFacts};
 
 /// The owning gear recorded on a P0 admission.
 ///
@@ -96,10 +99,122 @@ pub struct EvaluatedUnit {
     pub content_hash: Vec<u8>,
     pub outcome: EvaluatedOutcome,
     pub operation_item_id: i64,
+    /// ADR-0004's accepted `force`, carried to the revision row as `compat_forced`.
+    ///
+    /// **The accepted flag verbatim, not "the waiver was needed".** A caller that
+    /// sent `force` may turn out to have had a compatible candidate anyway, and
+    /// recording `false` there would be the more informative choice — but ADR-0003's
+    /// whole-history guarantee is withdrawn from a major containing a forced step,
+    /// and the safe direction for a guarantee is to withdraw it rather than to
+    /// assert it. So the column reads the request, and it errs towards claiming
+    /// less.
+    pub compat_forced: bool,
     /// The candidate's outgoing edges, by target **identifier** (T13).
     pub edges: Vec<DependencyEdge>,
     /// The database state on which this evaluation's verdict rests.
     pub vector: RevisionVector,
+}
+
+/// The baseline as evaluation found it, ready to cross into the blocking task.
+///
+/// Owned, because it crosses a `spawn_blocking` boundary. Where a refusal follows,
+/// the variant carries the identifier the baseline was read from: the message has
+/// to name the definition a candidate was measured against, which is the one thing
+/// an operator cannot reconstruct from the candidate alone.
+#[domain_model]
+#[derive(Clone, Debug)]
+enum BaselineDocument {
+    /// No comparison is owed. Which exemption it was stays on the [`Baseline`] the
+    /// choice came from, so it is not carried a second time here.
+    Exempt,
+    /// The definition to compare against, and the revision it is.
+    ///
+    /// `revision_no` is span material, not comparison material: the comparison uses
+    /// the document, and an operator reading a refusal needs to know *which*
+    /// revision of the baseline produced the verdict, since the baseline moves.
+    Present {
+        gts_id: String,
+        revision_no: i32,
+        content: Value,
+    },
+    /// The preceding minor named by contiguity has no entity row, so there is
+    /// nothing to compare against **yet**.
+    ///
+    /// Not a refusal here, and the ordering is the reason. `family::admits_new_member`
+    /// answers predecessor existence inside the commit transaction, where a *shape*
+    /// conflict outranks a missing predecessor — a `vM.n~` submitted while `vM~`
+    /// exists is a shape refusal, and refusing it earlier under
+    /// `missing_predecessor` would report the wrong rule. Every path that selects
+    /// this baseline is a creation (ADR-0004 makes a minor-bearing revision
+    /// permanently inadmissible and acceptance refuses it), so that gate always
+    /// runs and nothing commits without it.
+    ///
+    /// **The comparison is not lost if the predecessor lands meanwhile.** The
+    /// preceding minor is one of the store's closure roots, so it is in the revision
+    /// vector: a row appearing between evaluation and commit is
+    /// `VectorDrift::Appeared`, which rolls the commit back and revalidates, and the
+    /// fresh evaluation finds the predecessor and compares against it.
+    PredecessorAbsent,
+    /// The candidate's own entity is gone, so a revision has nothing to revise.
+    /// `commit_revision` refuses the same case under the same reason.
+    EntityAbsent { gts_id: String },
+}
+
+/// Read the definition this candidate is compared against, in the same snapshot as
+/// the store the comparison resolves through (SPEC §8.1 step 3).
+///
+/// Reading it in a *later* transaction would compare the candidate against a
+/// definition the store was not built from, which is how a verdict comes to be true
+/// of no state that ever existed.
+async fn read_baseline(
+    stores: &dyn Stores,
+    tx: &DbTx<'_>,
+    scope: &AccessScope,
+    candidate_id: &str,
+    choice: &Baseline,
+) -> Result<BaselineDocument, WorkerError> {
+    // Which identifier holds the baseline, and what its absence means. The two
+    // absences are different answers — one is a missing predecessor the family gate
+    // owns, the other a revision with nothing to revise — so each arm names its own.
+    let (gts_id, absent) = match choice {
+        // `Unreadable` is refused before any read is made, so it cannot arrive here.
+        Baseline::Exempt(_) | Baseline::Unreadable => return Ok(BaselineDocument::Exempt),
+        Baseline::CurrentRevision => (
+            candidate_id,
+            BaselineDocument::EntityAbsent {
+                gts_id: candidate_id.to_owned(),
+            },
+        ),
+        Baseline::PrecedingMinor { gts_id } => {
+            (gts_id.as_str(), BaselineDocument::PredecessorAbsent)
+        }
+    };
+
+    // Tombstones included, and deliberately: a `DELETED` definition still decides
+    // the baseline, because deletion does not unaccept the instances it accepted
+    // (ADR-0003, ADR-0008).
+    let Some(entity) = stores.find_by_gts_id(tx, scope, gts_id).await? else {
+        return Ok(absent);
+    };
+    let current = stores
+        .current_documents(tx, scope, &[entity.id])
+        .await?
+        .pop()
+        .ok_or_else(|| WorkerError::CurrentStateMissing {
+            gts_id: gts_id.to_owned(),
+            entity_id: entity.id,
+        })?;
+    let content = serde_json::from_str(&current.raw_schema).map_err(|source| {
+        WorkerError::BaselineUnparsable {
+            gts_id: gts_id.to_owned(),
+            source,
+        }
+    })?;
+    Ok(BaselineDocument::Present {
+        gts_id: gts_id.to_owned(),
+        revision_no: current.revision_no,
+        content,
+    })
 }
 
 /// Claim the write order as the first statement of every commit transaction.
@@ -124,6 +239,10 @@ enum EvaluationSnapshot {
         schema_pair: Option<(i64, i32)>,
         vector: RevisionVector,
         edges: Vec<DependencyEdge>,
+        /// Parsed inside the snapshot, after a probe miss, and carried out because
+        /// the comparison in the blocking task reads it.
+        content: Value,
+        baseline: BaselineDocument,
     },
 }
 
@@ -133,6 +252,28 @@ enum EvaluationSnapshot {
 pub enum PreparedUnit {
     Evaluated(Arc<EvaluatedUnit>),
     Unchanged(Arc<UnchangedCandidate>),
+}
+
+/// The stored operation item one evaluation is about.
+///
+/// Grouped rather than passed as four positional parameters, in the shape
+/// `worker::CommitRequest` already uses: the four travel together, and `gts_id` and
+/// `canonical_body` are both `&str`, which is exactly the pair a positional call
+/// can transpose without the compiler noticing.
+#[domain_model]
+#[derive(Clone, Copy, Debug)]
+pub struct EvaluationTarget<'a> {
+    pub gts_id: &'a str,
+    /// The canonicalized authored document, as acceptance stored it.
+    pub canonical_body: &'a str,
+    pub operation_item_id: i64,
+    /// The accepted optimistic precondition. It is what separates a creation from a
+    /// revision, and therefore which definition the candidate is compared against.
+    pub precondition: Precondition,
+    /// ADR-0004's accepted `force`, read off the item. Acceptance has already
+    /// established that the deployment permits the waiver and that this candidate's
+    /// baseline is the cross-minor one, so evaluation applies it without re-asking.
+    pub force: bool,
 }
 
 /// Probe once when requested, then evaluate a miss from the same snapshot.
@@ -154,12 +295,18 @@ pub async fn evaluate(
     stores: &Arc<dyn Stores>,
     db: &DBProvider<WorkerError>,
     scope: &AccessScope,
-    gts_id: &str,
-    canonical_body: &str,
-    operation_item_id: i64,
+    target: EvaluationTarget<'_>,
     limits: &Limits,
+    metrics: &Arc<dyn AdmissionMetrics>,
     probe_item: Option<&OperationItemRow>,
 ) -> Result<Result<PreparedUnit, ItemFailure>, WorkerError> {
+    let EvaluationTarget {
+        gts_id,
+        canonical_body,
+        operation_item_id,
+        precondition,
+        force,
+    } = target;
     let limits = *limits;
     let id = match GtsId::try_new(gts_id) {
         Ok(id) => id,
@@ -172,6 +319,26 @@ pub async fn evaluate(
             )));
         }
     };
+    // Which definition this candidate is measured against (ADR-0003). Chosen from
+    // the identifier and the accepted precondition alone, so it is settled before
+    // any row is read and cannot depend on what a read happened to find.
+    let baseline_choice = compat::select_baseline(&id, precondition);
+    if matches!(baseline_choice, Baseline::Unreadable) {
+        return Ok(Err(ItemFailure::new(
+            AdmissionFailureReason::UnreadableVersion,
+            format!(
+                "'{}' names no readable major in its last segment, so no compatibility \
+                 baseline can be selected",
+                id.id()
+            ),
+        )));
+    }
+    // The preceding minor is an entity no candidate names, so its own bases and
+    // stored `$ref` targets reach the store only as an extra closure root.
+    let baseline_roots: Vec<String> = match &baseline_choice {
+        Baseline::PrecedingMinor { gts_id } => vec![gts_id.clone()],
+        _ => Vec::new(),
+    };
     // The conforming type's `(entity_id, revision_no)` is read in the same snapshot as
     // the store: the recorded revision must be the one that validated the value.
     let conforming_type = (!id.is_type()).then(|| id.get_type_id()).flatten();
@@ -183,6 +350,8 @@ pub async fn evaluate(
         let probe_item = probe_item.cloned();
         let canonical_body = canonical_body.to_owned();
         let id = id.clone();
+        let baseline_choice = baseline_choice.clone();
+        let baseline_id = candidate_id.clone();
         db.transaction_with_config(snapshot_read(&db.db()), move |tx| {
             Box::pin(async move {
                 if let Some(item) = probe_item
@@ -215,11 +384,15 @@ pub async fn evaluate(
 
                 let candidates = vec![UnitDocument {
                     gts_id: id.id().to_owned(),
-                    content,
+                    content: content.clone(),
                 }];
-                let store = load_unit_store(stores.as_ref(), tx, &scope, candidates)
-                    .await
-                    .map_err(WorkerError::StoreBuild)?;
+                let store =
+                    load_unit_store(stores.as_ref(), tx, &scope, candidates, &baseline_roots)
+                        .await
+                        .map_err(WorkerError::StoreBuild)?;
+                let baseline =
+                    read_baseline(stores.as_ref(), tx, &scope, &baseline_id, &baseline_choice)
+                        .await?;
                 let pair = match conforming_type {
                     Some(type_id) => {
                         let entity = stores.find_by_gts_id(tx, &scope, &type_id).await?;
@@ -255,18 +428,22 @@ pub async fn evaluate(
                     schema_pair: pair,
                     vector,
                     edges,
+                    content,
+                    baseline,
                 }))
             })
         })
         .await?
     };
-    let (store, schema_pair, vector, edges) = match snapshot {
+    let (store, schema_pair, vector, edges, content, baseline) = match snapshot {
         Ok(EvaluationSnapshot::Loaded {
             store,
             schema_pair,
             vector,
             edges,
-        }) => (store, schema_pair, vector, edges),
+            content,
+            baseline,
+        }) => (store, schema_pair, vector, edges, content, baseline),
         Ok(EvaluationSnapshot::Unchanged(candidate)) => {
             return Ok(Ok(PreparedUnit::Unchanged(Arc::new(candidate))));
         }
@@ -274,6 +451,12 @@ pub async fn evaluate(
     };
 
     let canonical_body = canonical_body.to_owned();
+    // Captured here, not inside the closure: `Span::current()` is the unit span
+    // while `evaluate` runs in the worker's task, and `spawn_blocking` does not
+    // carry it across.
+    let span = Span::current();
+    let metrics = Arc::clone(metrics);
+    let baseline_label = baseline_choice.label();
     tokio::task::spawn_blocking(move || {
         evaluate_loaded(
             *store,
@@ -281,6 +464,15 @@ pub async fn evaluate(
             conforming_type,
             schema_pair,
             canonical_body,
+            &content,
+            &baseline,
+            CompatReporting {
+                span: &span,
+                metrics: &metrics,
+                baseline: baseline_label,
+                forced: force,
+            },
+            force,
             operation_item_id,
             edges,
             vector,
@@ -302,6 +494,10 @@ fn evaluate_loaded(
     conforming_type: Option<String>,
     schema_pair: Option<(i64, i32)>,
     canonical_body: String,
+    content: &Value,
+    baseline: &BaselineDocument,
+    reporting: CompatReporting<'_>,
+    force: bool,
     operation_item_id: i64,
     edges: Vec<DependencyEdge>,
     vector: RevisionVector,
@@ -368,6 +564,13 @@ fn evaluate_loaded(
         }
     };
 
+    // Compatibility runs **after** the candidate stands on its own: an unresolvable
+    // or malformed document must report that, not a verdict about a relation
+    // nothing could compute.
+    if let Err(failure) = check_compatibility(&mut store, id, content, baseline, force, reporting) {
+        return Ok(Err(failure));
+    }
+
     let content_hash = content_hash(&canonical_body);
     Ok(Ok(EvaluatedUnit {
         gts_id: id.id().to_owned(),
@@ -381,9 +584,143 @@ fn evaluate_loaded(
         content_hash,
         outcome,
         operation_item_id,
+        compat_forced: force,
         edges,
         vector,
     }))
+}
+
+/// Where a compatibility check reports what it found: the unit span, and the
+/// verdict counter.
+///
+/// Grouped because the two are emitted together at every exit of
+/// [`check_compatibility`] — five of them — and a return that reports to one but not
+/// the other is exactly the drift P16 exists to prevent. The span is captured before
+/// `spawn_blocking`, since `Span::current()` does not cross that boundary.
+#[derive(Clone, Copy)]
+struct CompatReporting<'a> {
+    span: &'a Span,
+    metrics: &'a Arc<dyn AdmissionMetrics>,
+    /// The selection token, known before any row is read.
+    baseline: &'static str,
+    /// ADR-0004's accepted waiver, which labels the verdict.
+    forced: bool,
+}
+
+impl CompatReporting<'_> {
+    /// Record one check's outcome. A `verdict` of `None` means no comparison ran, so
+    /// nothing is counted — there is no fourth label value for "no baseline".
+    fn record(
+        &self,
+        baseline_gts_id: Option<&str>,
+        baseline_revision: Option<i32>,
+        verdict: Option<CompatibilityVerdict>,
+    ) {
+        observability::record_compat_facts(
+            self.span,
+            CompatFacts {
+                baseline: self.baseline,
+                gts_id: baseline_gts_id,
+                revision: baseline_revision,
+                verdict: verdict.map(CompatibilityVerdict::as_str),
+            },
+        );
+        if let Some(verdict) = verdict {
+            self.metrics.compat_verdict(verdict, self.forced);
+        }
+    }
+}
+
+/// Compare the candidate against its baseline and read the verdict (ADR-0003).
+///
+/// Returns `Ok(())` when the candidate is admissible — compatible, waived, or owed
+/// no comparison at all. Every refusal is an [`ItemFailure`]: a verdict is an
+/// outcome, and retrying it would answer the same forever.
+///
+/// **An unresolvable baseline refuses rather than admits.** `compare_documents`
+/// fails when either side has a reference the store cannot resolve, and P0 records
+/// that as its own reason: the check did not run, which is not the same as running
+/// and coming out undecided, and it is certainly not the same as passing.
+fn check_compatibility(
+    store: &mut UnitStore,
+    id: &GtsId,
+    candidate: &Value,
+    baseline: &BaselineDocument,
+    forced: bool,
+    reporting: CompatReporting<'_>,
+) -> Result<(), ItemFailure> {
+    let (baseline_id, baseline_revision, baseline_content) = match baseline {
+        // The commit-time family gate owns the absent-predecessor case; see the
+        // variant's own note. Both land on the span with a `baseline` token and no
+        // verdict, which is how an exemption reads.
+        BaselineDocument::Exempt | BaselineDocument::PredecessorAbsent => {
+            reporting.record(None, None, None);
+            return Ok(());
+        }
+        BaselineDocument::EntityAbsent { gts_id } => {
+            reporting.record(Some(gts_id), None, None);
+            return Err(ItemFailure::new(
+                AdmissionFailureReason::PreconditionFailed,
+                format!(
+                    "'{gts_id}' does not exist, so a revision has no baseline to compare against"
+                ),
+            ));
+        }
+        BaselineDocument::Present {
+            gts_id,
+            revision_no,
+            content,
+        } => (gts_id, *revision_no, content),
+    };
+
+    let comparison =
+        match compat::backward_comparison(store.store_mut(), baseline_content, candidate) {
+            Ok(comparison) => comparison,
+            Err(error) => {
+                // No verdict is recorded and none is counted: the check did not run,
+                // which is not the same fact as running and coming out undecided.
+                reporting.record(Some(baseline_id), Some(baseline_revision), None);
+                return Err(ItemFailure::new(
+                    AdmissionFailureReason::BaselineUnresolvable,
+                    format!(
+                        "'{}' could not be compared against baseline '{baseline_id}': {error}",
+                        id.id()
+                    ),
+                ));
+            }
+        };
+    let verdict = comparison.backward_compatibility();
+    reporting.record(Some(baseline_id), Some(baseline_revision), Some(verdict));
+    match compat::refusal(verdict, forced) {
+        None => Ok(()),
+        // The offending levels, not just prose: ADR-0003 requires the level that
+        // prevents admission to be named, and `$` alone would not locate a level
+        // sitting inside a closed envelope's extension container.
+        Some(reason) => Err(ItemFailure::new(
+            reason,
+            format!(
+                "'{}' is not backward compatible with baseline '{baseline_id}' \
+                 (verdict {}): {}",
+                id.id(),
+                verdict.as_str(),
+                diagnostics_summary(&comparison),
+            ),
+        )),
+    }
+}
+
+/// The backward diagnostics as `finding at path` pairs, in the order `gts-rust`
+/// reported them.
+fn diagnostics_summary(comparison: &gts::SchemaComparison) -> String {
+    if comparison.backward_diagnostics.is_empty() {
+        return "no diagnostic evidence".to_owned();
+    }
+    comparison
+        .backward_diagnostics
+        .iter()
+        .map(|d| format!("{:?} at {}", d.finding, d.path))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Resolve and replace an admitted entity's outgoing edges.
@@ -558,7 +895,7 @@ pub async fn commit_creation(
                         // and that cannot be reconstructed later (ADR-0003).
                         gts_spec_version: GTS_SPECIFICATION_VERSION.to_owned(),
                         gts_impl_version: GTS_IMPLEMENTATION_VERSION.to_owned(),
-                        compat_forced: false,
+                        compat_forced: unit.compat_forced,
                         operation_item_id: unit.operation_item_id,
                         now,
                     },
@@ -793,7 +1130,7 @@ pub async fn commit_revision(
                         content_hash: unit.content_hash.clone(),
                         gts_spec_version: GTS_SPECIFICATION_VERSION.to_owned(),
                         gts_impl_version: GTS_IMPLEMENTATION_VERSION.to_owned(),
-                        compat_forced: false,
+                        compat_forced: unit.compat_forced,
                         operation_item_id: unit.operation_item_id,
                         now,
                     },

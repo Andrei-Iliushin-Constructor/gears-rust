@@ -44,9 +44,9 @@ pub struct TypesRegistryConfig {
     /// guarantee advisory. The per-candidate gate is acceptance step 6 (T7);
     /// this key is what it consults.
     ///
-    /// **Effectively inert until T17:** without compatibility evaluation, enabling
-    /// this key changes only whether the caller sees `ForceNotPermitted` or
-    /// `ForceCompatibilityUnavailable`; it cannot make a candidate admissible.
+    /// Enabling it makes a candidate admissible only where ADR-0004 permits the
+    /// waiver at all: the cross-minor edge. It cannot waive the intra-entity one,
+    /// because acceptance asks baseline selection which edge the candidate has.
     #[serde(default)]
     pub allow_compatibility_force: bool,
 

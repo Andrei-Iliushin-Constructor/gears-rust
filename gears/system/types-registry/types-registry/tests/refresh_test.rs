@@ -55,12 +55,22 @@ fn worker(db: &Provider) -> DBProvider<WorkerError> {
     DBProvider::new(db.db())
 }
 
-fn base_schema(property: &str) -> Value {
+/// The base, varied by an **annotation** rather than by its properties.
+///
+/// `title` changes the document — so the content hash, the revision, and every
+/// dependent's resolved artifacts move, which is what these tests are about — while
+/// leaving the accepted-instance set untouched, so the revision is backward
+/// compatible with its own current revision (T17). Varying a *property* instead is
+/// permanently inadmissible: adding one is incompatible at an open level and
+/// removing one is incompatible at a closed level, so a swap fails either way
+/// (ADR-0003 §*The comparison baseline*).
+fn base_schema(marker: &str) -> Value {
     json!({
         "$id": format!("gts://{BASE}"),
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": marker,
         "type": "object",
-        "properties": { property: { "type": "string" } },
+        "properties": { "name": { "type": "string" } },
     })
 }
 

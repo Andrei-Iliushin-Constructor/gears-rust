@@ -284,6 +284,14 @@ pub fn build_store(mut documents: Vec<UnitDocument>) -> Result<UnitStore, StoreB
 ///
 /// Load a snapshot store with candidate documents overriding committed versions.
 ///
+/// `extra_roots` are identifiers the unit needs resolvable that no candidate names.
+/// T17's compatibility baseline is the case: `vM.n~` is compared against
+/// `vM.(n-1)~`, an entity no candidate references, whose own bases and `$ref`
+/// targets must nevertheless resolve or the comparison would run against an
+/// unresolved document. Passing the identifier is enough — `Stores::closure` seeds
+/// every root's `chain_ids()` and then follows its **stored** outgoing edges, so a
+/// committed document's references come along without being re-extracted here.
+///
 /// # Errors
 /// Propagates the closure and document reads, and every [`StoreBuildError`] the
 /// row set can produce.
@@ -292,12 +300,14 @@ pub async fn load_unit_store(
     tx: &DbTx<'_>,
     scope: &AccessScope,
     candidates: Vec<UnitDocument>,
+    extra_roots: &[String],
 ) -> Result<UnitStore, StoreBuildError> {
     let candidate_ids: Vec<String> = candidates.iter().map(|c| c.gts_id.clone()).collect();
     let overlay: HashSet<&str> = candidate_ids.iter().map(String::as_str).collect();
 
     let mut roots = candidate_ids.clone();
     roots.extend(candidate_reference_targets(&candidates));
+    roots.extend(extra_roots.iter().cloned());
     roots.sort();
     roots.dedup();
 

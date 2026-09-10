@@ -23,7 +23,7 @@ use types_registry::domain::admission::AdmissionFailureReason;
 use types_registry::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
 use types_registry::domain::admission::revision::RevisionCommit;
 use types_registry::domain::admission::unit::{
-    EvaluatedUnit, commit_creation, commit_revision, evaluate,
+    EvaluatedUnit, EvaluationTarget, commit_creation, commit_revision, evaluate,
 };
 use types_registry::domain::admission::vector::{VectorDrift, VectorRole};
 use types_registry::domain::admission::worker::{
@@ -65,12 +65,17 @@ fn worker(db: &Provider) -> DBProvider<WorkerError> {
     DBProvider::new(db.db())
 }
 
-fn base_schema(property: &str) -> Value {
+/// Varied by an **annotation**, so each revision is backward compatible with the
+/// one before it (T17) while still moving the document, the content hash and every
+/// dependent's artifacts. A varied *property* would be refused: a swap is
+/// incompatible in both content models (ADR-0003).
+fn base_schema(marker: &str) -> Value {
     json!({
         "$id": format!("gts://{BASE}"),
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": marker,
         "type": "object",
-        "properties": { property: { "type": "string" } },
+        "properties": { "name": { "type": "string" } },
     })
 }
 
@@ -89,11 +94,9 @@ fn referencing_schema(marker: &str) -> Value {
     json!({
         "$id": format!("gts://{REFERRER}"),
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": marker,
         "type": "object",
-        "properties": {
-            "subject": { "$ref": format!("gts://{BASE}") },
-            marker: { "type": "string" },
-        },
+        "properties": { "subject": { "$ref": format!("gts://{BASE}") } },
     })
 }
 
@@ -102,11 +105,9 @@ fn chained_schema(marker: &str) -> Value {
     json!({
         "$id": format!("gts://{REFERRER}"),
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": marker,
         "type": "object",
-        "properties": {
-            "leaf": { "$ref": format!("gts://{DERIVED}") },
-            marker: { "type": "string" },
-        },
+        "properties": { "leaf": { "$ref": format!("gts://{DERIVED}") } },
     })
 }
 
@@ -208,10 +209,15 @@ async fn submitted(
         &stores(),
         &provider,
         &allow_all(),
-        &item.gts_id,
-        &payload,
-        item.id,
+        EvaluationTarget {
+            gts_id: &item.gts_id,
+            canonical_body: &payload,
+            operation_item_id: item.id,
+            precondition: item.precondition,
+            force: item.compat_forced,
+        },
         &common::limits(),
+        &common::metrics(),
         None,
     )
     .await

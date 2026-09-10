@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use gts::CompatibilityVerdict;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 use opentelemetry::{InstrumentationScope, KeyValue};
 
@@ -19,6 +20,20 @@ pub const ACTIVATION_WRITE_SET_BUCKETS: [f64; 10] =
 /// Bucket boundaries (seconds) for `types_registry_operation_duration_seconds`.
 pub const OPERATION_DURATION_BUCKETS_SECONDS: [f64; 10] =
     [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0];
+
+/// The verdict's label value, over a closed set of three.
+///
+/// Mapped here with an exhaustive `match` rather than through
+/// `CompatibilityVerdict::as_str()`: the strings agree today, and doing it this way
+/// is what makes a fourth variant in `gts-rust` a compile error here instead of a
+/// new series appearing in a dashboard nobody changed (P16 rule 3).
+const fn verdict_label(verdict: CompatibilityVerdict) -> &'static str {
+    match verdict {
+        CompatibilityVerdict::Compatible => "compatible",
+        CompatibilityVerdict::Incompatible => "incompatible",
+        CompatibilityVerdict::Unknown => "unknown",
+    }
+}
 
 /// The *shape* of a drift, never the identifier that drifted.
 const fn drift_label(drift: &VectorDrift) -> &'static str {
@@ -40,6 +55,8 @@ pub struct AdmissionMetricsMeter {
     candidates: Counter<u64>,
     /// `types_registry_refusals_total{stage,reason}`.
     refusals: Counter<u64>,
+    /// `types_registry_compat_verdicts_total{verdict,forced}`.
+    compat_verdicts: Counter<u64>,
     /// Revalidation retries, by drift.
     revalidations: Counter<u64>,
     /// Dependents rewritten by one revision (SPEC §8.1 step 4.6).
@@ -69,6 +86,15 @@ impl AdmissionMetricsMeter {
                 .with_description(
                     "Refusals by the stage that refused (acceptance / admission) and the \
                      machine reason",
+                )
+                .build(),
+            compat_verdicts: meter
+                .u64_counter(format!("{prefix}_compat_verdicts_total"))
+                .with_description(
+                    "Compatibility verdicts computed against a baseline \
+                     (compatible / incompatible / unknown), and whether an accepted \
+                     ADR-0004 force waived the check. A candidate owed no comparison \
+                     is not counted here",
                 )
                 .build(),
             revalidations: meter
@@ -109,6 +135,17 @@ impl AdmissionMetrics for AdmissionMetricsMeter {
                 KeyValue::new("stage", stage.label()),
                 // The static type enforces a closed label vocabulary.
                 KeyValue::new("reason", reason),
+            ],
+        );
+    }
+
+    fn compat_verdict(&self, verdict: CompatibilityVerdict, forced: bool) {
+        self.compat_verdicts.add(
+            1,
+            &[
+                // The static types enforce both closed vocabularies.
+                KeyValue::new("verdict", verdict_label(verdict)),
+                KeyValue::new("forced", forced),
             ],
         );
     }

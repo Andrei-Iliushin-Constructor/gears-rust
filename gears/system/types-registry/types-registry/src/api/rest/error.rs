@@ -184,6 +184,12 @@ impl From<WorkerError> for CanonicalError {
                 &format!("entity '{gts_id}' (id {entity_id}) vanished mid-transaction"),
                 "admission",
             ),
+            // Corruption of an immutable stored revision, so the document itself
+            // stays in the operator log and never reaches the caller.
+            WorkerError::BaselineUnparsable { gts_id, source } => opaque_internal(
+                &format!("the stored baseline document for '{gts_id}' is not valid JSON: {source}"),
+                "admission",
+            ),
             // A retryable snapshot race, not a malformed candidate.
             WorkerError::DependencyTargetAbsent { gts_id } => opaque_internal(
                 &format!("dependency target '{gts_id}' vanished before its edge was committed"),
@@ -374,14 +380,6 @@ impl From<AcceptanceError> for CanonicalError {
                 gts_id,
                 vf::FORCE,
                 format!("force on '{gts_id}' has no cross-minor compatibility check to waive"),
-                field::VALIDATION_FAILED,
-            ),
-            AcceptanceError::ForceCompatibilityUnavailable { gts_id } => invalid_candidate(
-                gts_id,
-                vf::FORCE,
-                format!(
-                    "force on '{gts_id}' is not available until compatibility evaluation is enabled"
-                ),
                 field::VALIDATION_FAILED,
             ),
             AcceptanceError::MinorTypeSchemaRevision { gts_id } => invalid_candidate(
@@ -597,11 +595,6 @@ mod tests {
             ),
             (
                 AcceptanceError::ForceHasNothingToWaive { gts_id: id.clone() },
-                violation_field::FORCE,
-                field::VALIDATION_FAILED,
-            ),
-            (
-                AcceptanceError::ForceCompatibilityUnavailable { gts_id: id.clone() },
                 violation_field::FORCE,
                 field::VALIDATION_FAILED,
             ),

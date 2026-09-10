@@ -41,7 +41,7 @@ use uuid::Uuid;
 pub use super::errors::{ItemFailure, WorkerError};
 use super::revision::{CommittedUnit, RevisionCommit};
 use super::unchanged;
-use super::unit::{PreparedUnit, commit_creation, commit_revision, evaluate};
+use super::unit::{EvaluationTarget, PreparedUnit, commit_creation, commit_revision, evaluate};
 use super::vector::VectorDrift;
 use crate::config::{Limits, WorkerSettings};
 use crate::domain::admission::AdmissionFailureReason;
@@ -192,10 +192,15 @@ async fn prepare(
         stores,
         db,
         scope,
-        &item.gts_id,
-        payload,
-        item.id,
+        EvaluationTarget {
+            gts_id: &item.gts_id,
+            canonical_body: payload,
+            operation_item_id: item.id,
+            precondition: item.precondition,
+            force: item.compat_forced,
+        },
         tuning.limits,
+        tuning.metrics,
         Some(item),
     )
     .await?;
@@ -329,6 +334,7 @@ async fn process_item(
     };
     // Log attempts using one-based numbering.
     for attempt in 1..=attempts {
+        // Step 3: evaluation releases its snapshot before CPU-heavy validation.
         let prepared = match initial.take() {
             Some(prepared) => prepared,
             None => {
@@ -336,10 +342,15 @@ async fn process_item(
                     stores,
                     db,
                     scope,
-                    &item.gts_id,
-                    payload,
-                    item.id,
+                    EvaluationTarget {
+                        gts_id: &item.gts_id,
+                        canonical_body: payload,
+                        operation_item_id: item.id,
+                        precondition: item.precondition,
+                        force: item.compat_forced,
+                    },
                     tuning.limits,
+                    tuning.metrics,
                     None,
                 )
                 .await?

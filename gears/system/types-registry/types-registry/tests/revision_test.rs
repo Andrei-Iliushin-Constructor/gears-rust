@@ -465,49 +465,6 @@ async fn an_instance_value_equal_to_its_current_revision_is_unchanged() {
     assert_eq!(resource_version_of(&db, CF_INSTANCE).await, 1);
 }
 
-/// Equality is about authored content, even when the conforming schema changed
-/// and would reject that old value if it were submitted as a new revision.
-#[tokio::test]
-async fn unchanged_instance_is_not_revalidated_against_a_new_conforming_schema() {
-    let db = test_db().await;
-    admit(&db, "type", CF_TYPE, schema(CF_TYPE, "t"), None).await;
-    admit(&db, "value", CF_INSTANCE, json!({ "name": "first" }), None).await;
-    let mut revised = schema(CF_TYPE, "numeric-name");
-    revised["properties"]["name"]["type"] = json!("integer");
-    let changed_type = admit(&db, "type-revised", CF_TYPE, revised, Some(1)).await;
-    assert_eq!(
-        changed_type.items[0].status,
-        domain_enums::OperationItemStatus::Succeeded
-    );
-
-    let outcome = admit(
-        &db,
-        "same",
-        CF_INSTANCE,
-        json!({ "name": "first" }),
-        Some(1),
-    )
-    .await;
-    let item = &outcome.items[0];
-    assert_eq!(
-        item.status,
-        domain_enums::OperationItemStatus::Unchanged,
-        "{item:?}"
-    );
-    assert_eq!(item.resource_version, Some(1));
-    assert_eq!(item.revision_no, None);
-    let id = entity_id_of(&db, CF_INSTANCE).await;
-    let revisions = instance_revision::Entity::find()
-        .filter(instance_revision::Column::EntityId.eq(id))
-        .secure()
-        .scope_with(&allow_all())
-        .all(&db.conn().expect("conn"))
-        .await
-        .expect("revisions");
-    assert_eq!(revisions.len(), 1);
-    assert_eq!(revisions[0].type_schema_revision_no, 1);
-}
-
 /// ADR-0005: content equal to an **older, non-current** revision is a new update.
 /// It allocates a new revision rather than moving the current pointer backwards.
 #[tokio::test]
