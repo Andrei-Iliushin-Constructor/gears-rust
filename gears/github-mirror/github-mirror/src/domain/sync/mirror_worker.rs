@@ -318,86 +318,103 @@ impl MirrorWorker {
             )
             .await?;
         let updated_after = start.updated_after;
-        let listing = self
-            .github
-            .list_issues(
-                &run.owner,
-                &run.name,
-                repo_id,
-                updated_after,
-                start.page1_etag.as_deref(),
-                &run.options,
-            )
-            .await?;
-        run.mark_complete(&listing.complete);
-        if listing.swept_to_end {
-            run.mark_swept(sweep_families::ISSUES);
+        let collection = run.options.scope.collection;
+        let mut high = updated_after;
+        let mut page1_etag: Option<String> = None;
+        let mut swept: HashSet<i64> = HashSet::new();
+        let mut continue_from: Option<String> = None;
+
+        while !ctx.cancel.is_cancelled() {
+            let listing = self
+                .github
+                .list_issues(
+                    &run.owner,
+                    &run.name,
+                    repo_id,
+                    updated_after,
+                    start.page1_etag.as_deref(),
+                    continue_from.as_deref(),
+                    &run.options,
+                )
+                .await?;
+            run.mark_complete(&listing.complete);
+            if listing.swept_to_end {
+                run.mark_swept(sweep_families::ISSUES);
+            }
+            if page1_etag.is_none() {
+                page1_etag.clone_from(&listing.page1_etag);
+            }
+            let seen: Vec<&str> = listing
+                .issues
+                .iter()
+                .map(|i| i.updated_at.as_str())
+                .collect();
+            high = high_water(&seen, high);
+            if listing.unchanged {
+                break;
+            }
+
+            for issue in &listing.issues {
+                if !swept.insert(issue.number) || is_stale(Some(&issue.updated_at), updated_after) {
+                    continue;
+                }
+                let open = issue.state == "open";
+                if !(collection.reactions.includes(open) || collection.timeline.includes(open)) {
+                    continue;
+                }
+                let entity_id = issue.number.to_string();
+                if !self
+                    .needs_refinement(entities::ISSUE, &entity_id, &issue_inputs(issue))
+                    .await?
+                {
+                    continue;
+                }
+                let priority = if open {
+                    TaskPriority::OPEN_ISSUE
+                } else {
+                    TaskPriority::CLOSED_ISSUE
+                };
+                self.seed(
+                    ctx,
+                    TaskPhase::Refinement,
+                    entities::ISSUE,
+                    Some(entity_id),
+                    priority,
+                );
+            }
+
+            let (issues, comments, events, people) = (
+                count(&listing.issues),
+                count(&listing.comments),
+                count(&listing.issue_events),
+                count(&listing.contributors),
+            );
+            let next = listing.next.clone();
+            self.writer
+                .write_issue_listing(&run.scope, run.tenant_id, repo_id, listing)
+                .await?;
+            run.tally(|s| {
+                s.issues_synced += issues;
+                s.comments_synced += comments;
+                s.issue_events_synced += events;
+                s.contributors_synced += people;
+            });
+            match next {
+                Some(next) => continue_from = Some(next),
+                None => break,
+            }
         }
-        let seen: Vec<&str> = listing
-            .issues
-            .iter()
-            .map(|i| i.updated_at.as_str())
-            .collect();
+
         self.watermark
             .stage(
                 &run.scope,
                 run.tenant_id,
                 repo_id,
                 sweep_families::ISSUES,
-                high_water(&seen, updated_after),
-                listing.page1_etag.clone(),
+                high,
+                page1_etag,
             )
             .await?;
-        if listing.unchanged {
-            return Ok(());
-        }
-
-        let collection = run.options.scope.collection;
-        let mut swept: HashSet<i64> = HashSet::new();
-        for issue in &listing.issues {
-            if !swept.insert(issue.number) || is_stale(Some(&issue.updated_at), updated_after) {
-                continue;
-            }
-            let open = issue.state == "open";
-            if !(collection.reactions.includes(open) || collection.timeline.includes(open)) {
-                continue;
-            }
-            let entity_id = issue.number.to_string();
-            if !self
-                .needs_refinement(entities::ISSUE, &entity_id, &issue_inputs(issue))
-                .await?
-            {
-                continue;
-            }
-            let priority = if open {
-                TaskPriority::OPEN_ISSUE
-            } else {
-                TaskPriority::CLOSED_ISSUE
-            };
-            self.seed(
-                ctx,
-                TaskPhase::Refinement,
-                entities::ISSUE,
-                Some(entity_id),
-                priority,
-            );
-        }
-
-        let (issues, comments, events, people) = (
-            count(&listing.issues),
-            count(&listing.comments),
-            count(&listing.issue_events),
-            count(&listing.contributors),
-        );
-        self.writer
-            .write_issue_listing(&run.scope, run.tenant_id, repo_id, listing)
-            .await?;
-        run.tally(|s| {
-            s.issues_synced += issues;
-            s.comments_synced += comments;
-            s.issue_events_synced += events;
-            s.contributors_synced += people;
-        });
         Ok(())
     }
 
@@ -430,47 +447,62 @@ impl MirrorWorker {
     async fn index_pull_requests(&self, ctx: &WorkerContext) -> Result<(), DomainError> {
         let run = &self.run;
         let repo_id = run.repo_id()?;
-        let listing = self
-            .github
-            .list_pull_requests(&run.owner, &run.name, repo_id, &run.options)
-            .await?;
-        run.mark_complete(&listing.complete);
+        let mut continue_from: Option<String> = None;
 
-        for pull in &listing.pull_requests {
-            let entity_id = pull.number.to_string();
-            if !self
-                .needs_refinement(entities::PULL_REQUEST, &entity_id, &pull_inputs(pull))
-                .await?
-            {
-                continue;
+        while !ctx.cancel.is_cancelled() {
+            let listing = self
+                .github
+                .list_pull_requests(
+                    &run.owner,
+                    &run.name,
+                    repo_id,
+                    continue_from.as_deref(),
+                    &run.options,
+                )
+                .await?;
+            run.mark_complete(&listing.complete);
+
+            for pull in &listing.pull_requests {
+                let entity_id = pull.number.to_string();
+                if !self
+                    .needs_refinement(entities::PULL_REQUEST, &entity_id, &pull_inputs(pull))
+                    .await?
+                {
+                    continue;
+                }
+                let priority = if pull.state == "open" {
+                    TaskPriority::OPEN_PR
+                } else {
+                    TaskPriority::CLOSED_PR
+                };
+                self.seed(
+                    ctx,
+                    TaskPhase::Refinement,
+                    entities::PULL_REQUEST,
+                    Some(entity_id),
+                    priority,
+                );
             }
-            let priority = if pull.state == "open" {
-                TaskPriority::OPEN_PR
-            } else {
-                TaskPriority::CLOSED_PR
-            };
-            self.seed(
-                ctx,
-                TaskPhase::Refinement,
-                entities::PULL_REQUEST,
-                Some(entity_id),
-                priority,
-            );
-        }
 
-        let (pulls, comments, people) = (
-            count(&listing.pull_requests),
-            count(&listing.review_comments),
-            count(&listing.contributors),
-        );
-        self.writer
-            .write_pull_listing(&run.scope, run.tenant_id, repo_id, listing)
-            .await?;
-        run.tally(|s| {
-            s.pull_requests_synced += pulls;
-            s.review_comments_synced += comments;
-            s.contributors_synced += people;
-        });
+            let (pulls, comments, people) = (
+                count(&listing.pull_requests),
+                count(&listing.review_comments),
+                count(&listing.contributors),
+            );
+            let next = listing.next.clone();
+            self.writer
+                .write_pull_listing(&run.scope, run.tenant_id, repo_id, listing)
+                .await?;
+            run.tally(|s| {
+                s.pull_requests_synced += pulls;
+                s.review_comments_synced += comments;
+                s.contributors_synced += people;
+            });
+            match next {
+                Some(next) => continue_from = Some(next),
+                None => break,
+            }
+        }
         Ok(())
     }
 
@@ -563,70 +595,89 @@ impl MirrorWorker {
             )
             .await?
             .updated_after;
-        let listing = self
-            .github
-            .list_commits(&run.owner, &run.name, repo_id, updated_after, &run.options)
-            .await?;
-        run.mark_complete(&listing.complete);
-        if listing.swept_to_end {
-            run.mark_swept(sweep_families::COMMITS);
+        let with_ci = run.options.scope.collection.actions != CollectionMode::None;
+        let mut high = updated_after;
+        let mut swept: HashSet<String> = HashSet::new();
+        let mut continue_from: Option<String> = None;
+
+        while !ctx.cancel.is_cancelled() {
+            let listing = self
+                .github
+                .list_commits(
+                    &run.owner,
+                    &run.name,
+                    repo_id,
+                    updated_after,
+                    continue_from.as_deref(),
+                    &run.options,
+                )
+                .await?;
+            run.mark_complete(&listing.complete);
+            if listing.swept_to_end {
+                run.mark_swept(sweep_families::COMMITS);
+            }
+            let seen: Vec<&str> = listing
+                .commits
+                .iter()
+                .filter_map(|c| c.committed_at.as_deref())
+                .collect();
+            high = high_water(&seen, high);
+
+            for commit in &listing.commits {
+                if !swept.insert(commit.sha.clone())
+                    || is_stale(commit.committed_at.as_deref(), updated_after)
+                {
+                    continue;
+                }
+                if !self
+                    .needs_refinement(
+                        entities::COMMIT,
+                        &commit.sha,
+                        &commit_inputs(commit, with_ci),
+                    )
+                    .await?
+                {
+                    continue;
+                }
+                self.seed(
+                    ctx,
+                    TaskPhase::Refinement,
+                    entities::COMMIT,
+                    Some(commit.sha.clone()),
+                    TaskPriority::NORMAL,
+                );
+            }
+
+            let (commits, comments, people) = (
+                count(&listing.commits),
+                count(&listing.commit_comments),
+                count(&listing.contributors),
+            );
+            let next = listing.next.clone();
+            self.writer
+                .write_commit_listing(&run.scope, run.tenant_id, repo_id, listing)
+                .await?;
+            run.tally(|s| {
+                s.commits_synced += commits;
+                s.commit_comments_synced += comments;
+                s.contributors_synced += people;
+            });
+            match next {
+                Some(next) => continue_from = Some(next),
+                None => break,
+            }
         }
-        let seen: Vec<&str> = listing
-            .commits
-            .iter()
-            .filter_map(|c| c.committed_at.as_deref())
-            .collect();
+
         self.watermark
             .stage(
                 &run.scope,
                 run.tenant_id,
                 repo_id,
                 sweep_families::COMMITS,
-                high_water(&seen, updated_after),
+                high,
                 None,
             )
             .await?;
-
-        let with_ci = run.options.scope.collection.actions != CollectionMode::None;
-        let mut swept: HashSet<&str> = HashSet::new();
-        for commit in &listing.commits {
-            if !swept.insert(commit.sha.as_str())
-                || is_stale(commit.committed_at.as_deref(), updated_after)
-            {
-                continue;
-            }
-            if !self
-                .needs_refinement(
-                    entities::COMMIT,
-                    &commit.sha,
-                    &commit_inputs(commit, with_ci),
-                )
-                .await?
-            {
-                continue;
-            }
-            self.seed(
-                ctx,
-                TaskPhase::Refinement,
-                entities::COMMIT,
-                Some(commit.sha.clone()),
-                TaskPriority::NORMAL,
-            );
-        }
-
-        let (commits, comments, people) = (
-            count(&listing.commits),
-            count(&listing.commit_comments),
-            count(&listing.contributors),
-        );
-        self.writer
-            .write_commit_listing(&run.scope, run.tenant_id, repo_id, listing)
-            .await?;
-        run.tally(|s| {
-            s.commits_synced += commits;
-            s.commit_comments_synced += comments;
-            s.contributors_synced += people;
-        });
         Ok(())
     }
 

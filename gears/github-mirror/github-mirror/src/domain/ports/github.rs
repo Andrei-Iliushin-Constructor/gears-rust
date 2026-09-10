@@ -126,6 +126,10 @@ pub struct IssueListing {
     /// seen, which is what advancing the watermark needs, even though
     /// reconciliation cannot trust a narrowed walk.
     pub swept_to_end: bool,
+    /// Where the next page of this family is, or `None` once its last page
+    /// has been served. Opaque to the caller, which hands it back unchanged
+    /// as `continue_from` to get the page after this one.
+    pub next: Option<String>,
 }
 
 /// Which per-issue sub-resources a refinement should fetch, decided by the
@@ -154,6 +158,10 @@ pub struct PullListing {
     pub pull_requests: Vec<PullRequestRecord>,
     pub review_comments: Vec<ReviewCommentRecord>,
     pub contributors: Vec<ContributorRecord>,
+    /// Where the next page of this family is, or `None` once its last page
+    /// has been served. Opaque to the caller, which hands it back unchanged
+    /// as `continue_from` to get the page after this one.
+    pub next: Option<String>,
 }
 
 /// One pull request refined: the detail record (which, unlike the listing
@@ -184,6 +192,10 @@ pub struct CommitListing {
     /// The commits walk reached its last page, bounded or not; see
     /// [`IssueListing::swept_to_end`].
     pub swept_to_end: bool,
+    /// Where the next page of this family is, or `None` once its last page
+    /// has been served. Opaque to the caller, which hands it back unchanged
+    /// as `continue_from` to get the page after this one.
+    pub next: Option<String>,
 }
 
 /// What a pull request payload says it holds, for the completeness check.
@@ -271,6 +283,13 @@ pub struct FetchedRepository {
 /// per-entity detail a Refinement task fetches. A method for an object type
 /// the scope switched off returns an empty value without a GitHub call - the
 /// point of the scope is the request budget, not the size of the result.
+///
+/// The issue, pull-request and commit listings are served one page per call
+/// so a repository of any size is never held in memory whole (PRD
+/// `fr-memory-efficiency`). A call with no `continue_from` serves the first
+/// page; each result says in `next` where to continue from, and `None` there
+/// means the family has been walked to its end. Completeness flags are reported on the
+/// page that finishes each listing, and `swept_to_end` on the last page.
 #[async_trait]
 pub trait GithubPort: Send + Sync {
     /// The repository itself (Discovery).
@@ -281,6 +300,7 @@ pub trait GithubPort: Send + Sync {
         options: &FetchOptions,
     ) -> Result<RepoRecord, DomainError>;
 
+    #[allow(clippy::too_many_arguments)]
     async fn list_issues(
         &self,
         owner: &str,
@@ -288,6 +308,7 @@ pub trait GithubPort: Send + Sync {
         repo_id: i64,
         updated_after: Option<DateTime<Utc>>,
         page1_etag: Option<&str>,
+        continue_from: Option<&str>,
         options: &FetchOptions,
     ) -> Result<IssueListing, DomainError>;
 
@@ -306,6 +327,7 @@ pub trait GithubPort: Send + Sync {
         owner: &str,
         name: &str,
         repo_id: i64,
+        continue_from: Option<&str>,
         options: &FetchOptions,
     ) -> Result<PullListing, DomainError>;
 
@@ -324,6 +346,7 @@ pub trait GithubPort: Send + Sync {
         name: &str,
         repo_id: i64,
         updated_after: Option<DateTime<Utc>>,
+        continue_from: Option<&str>,
         options: &FetchOptions,
     ) -> Result<CommitListing, DomainError>;
 

@@ -37,6 +37,7 @@ impl GithubPort for StopsAfterDiscovery {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn list_issues(
         &self,
         owner: &str,
@@ -44,11 +45,20 @@ impl GithubPort for StopsAfterDiscovery {
         repo_id: i64,
         updated_after: Option<DateTime<Utc>>,
         page1_etag: Option<&str>,
+        continue_from: Option<&str>,
         options: &FetchOptions,
     ) -> Result<IssueListing, DomainError> {
         self.cancel.cancel();
         self.inner
-            .list_issues(owner, name, repo_id, updated_after, page1_etag, options)
+            .list_issues(
+                owner,
+                name,
+                repo_id,
+                updated_after,
+                page1_etag,
+                continue_from,
+                options,
+            )
             .await
     }
 
@@ -71,10 +81,11 @@ impl GithubPort for StopsAfterDiscovery {
         owner: &str,
         name: &str,
         repo_id: i64,
+        continue_from: Option<&str>,
         options: &FetchOptions,
     ) -> Result<PullListing, DomainError> {
         self.inner
-            .list_pull_requests(owner, name, repo_id, options)
+            .list_pull_requests(owner, name, repo_id, continue_from, options)
             .await
     }
 
@@ -97,10 +108,11 @@ impl GithubPort for StopsAfterDiscovery {
         name: &str,
         repo_id: i64,
         updated_after: Option<DateTime<Utc>>,
+        continue_from: Option<&str>,
         options: &FetchOptions,
     ) -> Result<CommitListing, DomainError> {
         self.inner
-            .list_commits(owner, name, repo_id, updated_after, options)
+            .list_commits(owner, name, repo_id, updated_after, continue_from, options)
             .await
     }
 

@@ -2,7 +2,8 @@
 
 use github_mirror::domain::error::DomainError;
 use github_mirror::domain::ports::github::{
-    FetchOptions, FetchedRepository, GithubPort, IssueDetailWants, Listing, ListingCompleteness,
+    CommitListing, FetchOptions, FetchedRepository, GithubPort, IssueDetailWants, IssueListing,
+    Listing, ListingCompleteness, PullListing,
 };
 use github_mirror::domain::repo::ContributorRecord;
 use github_mirror::domain::scope::{CollectionMode, ScopeConfig};
@@ -466,6 +467,105 @@ fn shipped_scope() -> ScopeConfig {
 /// Everything the sync's tasks would fetch for one repository, gathered into
 /// the one-value shape these tests assert on: the port is called the way the
 /// phases call it — listings first, then one refinement per entity.
+/// Every page of the issue family, merged, the way the worker's loop sees it.
+#[allow(clippy::too_many_arguments)]
+async fn walk_issues(
+    client: &GithubClient,
+    owner: &str,
+    name: &str,
+    repo_id: i64,
+    updated_after: Option<chrono::DateTime<chrono::Utc>>,
+    page1_etag: Option<&str>,
+    options: &FetchOptions,
+) -> Result<IssueListing, DomainError> {
+    let mut all = IssueListing::default();
+    let mut continue_from: Option<String> = None;
+    loop {
+        let page = client
+            .list_issues(
+                owner,
+                name,
+                repo_id,
+                updated_after,
+                page1_etag,
+                continue_from.as_deref(),
+                options,
+            )
+            .await?;
+        all.complete.absorb(&page.complete);
+        all.issues.extend(page.issues);
+        all.comments.extend(page.comments);
+        all.issue_events.extend(page.issue_events);
+        all.contributors.extend(page.contributors);
+        all.swept_to_end |= page.swept_to_end;
+        all.unchanged |= page.unchanged;
+        if all.page1_etag.is_none() {
+            all.page1_etag = page.page1_etag;
+        }
+        match page.next {
+            Some(next) => continue_from = Some(next),
+            None => return Ok(all),
+        }
+    }
+}
+
+async fn walk_pulls(
+    client: &GithubClient,
+    owner: &str,
+    name: &str,
+    repo_id: i64,
+    options: &FetchOptions,
+) -> Result<PullListing, DomainError> {
+    let mut all = PullListing::default();
+    let mut continue_from: Option<String> = None;
+    loop {
+        let page = client
+            .list_pull_requests(owner, name, repo_id, continue_from.as_deref(), options)
+            .await?;
+        all.complete.absorb(&page.complete);
+        all.pull_requests.extend(page.pull_requests);
+        all.review_comments.extend(page.review_comments);
+        all.contributors.extend(page.contributors);
+        match page.next {
+            Some(next) => continue_from = Some(next),
+            None => return Ok(all),
+        }
+    }
+}
+
+async fn walk_commits(
+    client: &GithubClient,
+    owner: &str,
+    name: &str,
+    repo_id: i64,
+    updated_after: Option<chrono::DateTime<chrono::Utc>>,
+    options: &FetchOptions,
+) -> Result<CommitListing, DomainError> {
+    let mut all = CommitListing::default();
+    let mut continue_from: Option<String> = None;
+    loop {
+        let page = client
+            .list_commits(
+                owner,
+                name,
+                repo_id,
+                updated_after,
+                continue_from.as_deref(),
+                options,
+            )
+            .await?;
+        all.complete.absorb(&page.complete);
+        all.commits.extend(page.commits);
+        all.commit_comments.extend(page.commit_comments);
+        all.contributors.extend(page.contributors);
+        all.swept_to_end |= page.swept_to_end;
+        match page.next {
+            Some(next) => continue_from = Some(next),
+            None => return Ok(all),
+        }
+    }
+}
+
 async fn fetch_repository(
     client: &GithubClient,
     owner: &str,
@@ -478,15 +578,9 @@ async fn fetch_repository(
     let repo_id = repository.id;
     let collection = options.scope.collection;
 
-    let issues = client
-        .list_issues(owner, name, repo_id, None, None, options)
-        .await?;
-    let pulls = client
-        .list_pull_requests(owner, name, repo_id, options)
-        .await?;
-    let commits = client
-        .list_commits(owner, name, repo_id, None, options)
-        .await?;
+    let issues = walk_issues(client, owner, name, repo_id, None, None, options).await?;
+    let pulls = walk_pulls(client, owner, name, repo_id, options).await?;
+    let commits = walk_commits(client, owner, name, repo_id, None, options).await?;
     let meta = client.list_metadata(owner, name, repo_id, options).await?;
     let actions = client.list_actions(owner, name, repo_id, options).await?;
 
@@ -1453,8 +1547,7 @@ async fn an_unchanged_first_page_stops_the_issue_sweep_before_page_two() {
     let client = GithubClient::new(server.base_url(), None).expect("client must build");
     let options = opts(ScopeConfig::default());
 
-    let walked = client
-        .list_issues("rust-lang", "rust", 42, None, None, &options)
+    let walked = walk_issues(&client, "rust-lang", "rust", 42, None, None, &options)
         .await
         .expect("the first sweep must walk");
 
@@ -1478,6 +1571,7 @@ async fn an_unchanged_first_page_stops_the_issue_sweep_before_page_two() {
             42,
             None,
             Some("W/\"issues-page-one\""),
+            None,
             &options,
         )
         .await
@@ -1523,8 +1617,7 @@ async fn a_walk_bounded_by_the_watermark_is_swept_to_its_end_but_never_complete(
     let options = opts(ScopeConfig::default());
     let watermark = Some(instant("2026-08-19T23:55:00Z"));
 
-    let unbounded = client
-        .list_issues("rust-lang", "rust", 42, None, None, &options)
+    let unbounded = walk_issues(&client, "rust-lang", "rust", 42, None, None, &options)
         .await
         .expect("the unbounded walk must succeed");
     assert!(
@@ -1532,8 +1625,7 @@ async fn a_walk_bounded_by_the_watermark_is_swept_to_its_end_but_never_complete(
         "with no bound, a walk that ran out of pages saw every issue there is"
     );
 
-    let issues = client
-        .list_issues("rust-lang", "rust", 42, watermark, None, &options)
+    let issues = walk_issues(&client, "rust-lang", "rust", 42, watermark, None, &options)
         .await
         .expect("the bounded walk must succeed");
     assert!(issues.swept_to_end, "the bounded walk ran out of pages too");
@@ -1544,8 +1636,7 @@ async fn a_walk_bounded_by_the_watermark_is_swept_to_its_end_but_never_complete(
     );
     assert!(!issues.complete.is_complete(Listing::Comments));
 
-    let commits = client
-        .list_commits("rust-lang", "rust", 42, watermark, &options)
+    let commits = walk_commits(&client, "rust-lang", "rust", 42, watermark, &options)
         .await
         .expect("the bounded commits walk must succeed");
     assert!(commits.swept_to_end);

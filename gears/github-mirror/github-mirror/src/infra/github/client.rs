@@ -8,8 +8,7 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 use crate::domain::error::DomainError;
 use crate::domain::ports::github::{
     ActionsListing, CommitDetail, CommitListing, DeclaredCounts, FetchOptions, GithubPort,
-    IssueDetail, IssueDetailWants, IssueListing, Listing, ListingCompleteness, MetadataListing,
-    PullDetail, PullListing,
+    IssueDetail, IssueDetailWants, IssueListing, Listing, MetadataListing, PullDetail, PullListing,
 };
 use crate::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
@@ -27,13 +26,6 @@ use crate::redact::redacted_word;
 /// size costs the fewest requests.
 const FIRST_PAGE_SIZE: u32 = 100;
 const ACCEPT_JSON: &str = "application/vnd.github+json";
-
-/// Most pages one listing will walk before giving up.
-///
-/// An Indexing task still gathers its whole listing before writing it, so
-/// this bounds one task's memory and call count. It goes when listings stream
-/// page by page into the writer (#4632 slice 6, memory NFR).
-const MAX_PAGES: usize = 10;
 
 fn within_since(state: &str, updated_at: &str, since: Option<DateTime<Utc>>) -> bool {
     let Some(since) = since else {
@@ -62,14 +54,32 @@ struct FetchedPage<T> {
     etag: Option<String>,
 }
 
-/// One walked listing: every page concatenated, whether the walk reached the
-/// end, page one's `ETag` for the next sweep to compare against, and whether
-/// that comparison stopped this walk before page two.
-struct ListingWalk<T> {
-    items: Vec<T>,
-    complete: bool,
-    page1_etag: Option<String>,
-    unchanged: bool,
+/// One listing an Indexing family walks: the path it ends with, and its
+/// first page. The URL to continue from is matched back to its stage by that
+/// path tail rather than by the whole URL, because GitHub's `rel="next"` links may name the
+/// repository by id instead of by owner and name.
+struct Stage {
+    tail: &'static str,
+    first: String,
+}
+
+fn stage_of(stages: &[Stage], url: &str) -> Result<usize, DomainError> {
+    let path = url.split('?').next().unwrap_or(url);
+    stages
+        .iter()
+        .position(|stage| path.ends_with(stage.tail))
+        .ok_or_else(|| {
+            DomainError::internal(format!(
+                "cannot continue from an unknown listing URL: {}",
+                redacted_word(url)
+            ))
+        })
+}
+
+/// Where to continue after a page of `stage`: the page's own `rel="next"`,
+/// else the first page of the following stage, else nothing.
+fn continue_after(stages: &[Stage], stage: usize, page_next: Option<String>) -> Option<String> {
+    page_next.or_else(|| stages.get(stage + 1).map(|next| next.first.clone()))
 }
 
 const USER_AGENT: &str = concat!("cf-gears-github-mirror/", env!("CARGO_PKG_VERSION"));
@@ -380,85 +390,37 @@ impl GithubClient {
         Ok(fetched.parsed)
     }
 
+    fn absolute(&self, path: &str) -> String {
+        format!("{}{path}", self.api_base_url.trim_end_matches('/'))
+    }
+
     /// GET `path` and every page after it, concatenated, plus whether the
     /// listing was walked to its end.
     ///
-    /// Follows the `Link` header's `rel="next"` until it stops appearing or
-    /// [`MAX_PAGES`] is reached. Without this a listing is silently truncated
-    /// to whatever fits in one page, which is the single most misleading way a
-    /// mirror can be wrong. The completeness flag is what lets a sync
-    /// reconcile deletions: rows may only be removed for a listing that ran
-    /// out of pages rather than out of budget.
+    /// Follows the `Link` header's `rel="next"` until it stops appearing.
+    /// Without this a listing is silently truncated to whatever fits in one
+    /// page, which is the single most misleading way a mirror can be wrong.
+    /// The completeness flag is what lets a sync reconcile deletions: rows may
+    /// only be removed for a listing that ran out of pages. Only the small
+    /// families come through here; issues, pull requests and commits stream
+    /// one page per port call instead, so a large repository is never held
+    /// whole.
     async fn get_json_all<T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
         options: &FetchOptions,
     ) -> Result<(Vec<T>, bool), DomainError> {
-        let walk = self.walk_pages(path, options, None).await?;
-        Ok((walk.items, walk.complete))
-    }
-
-    /// The paging walk behind [`Self::get_json_all`], with the sweep's
-    /// short-circuit (`ALGORITHMS` §6.2).
-    ///
-    /// When `page1_etag` is the validator this listing carried last time and
-    /// page one comes back with the same one, nothing in the listing has
-    /// changed and the remaining pages are not fetched. The walk is reported
-    /// as incomplete in that case: no row had its `extracted_at` refreshed, so
-    /// letting reconciliation run against it would delete the whole family.
-    async fn walk_pages<T: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-        options: &FetchOptions,
-        page1_etag: Option<&str>,
-    ) -> Result<ListingWalk<T>, DomainError> {
-        let mut url = format!("{}{path}", self.api_base_url.trim_end_matches('/'));
+        let mut url = self.absolute(path);
         let mut items: Vec<T> = Vec::new();
-        let mut observed: Option<String> = None;
-
-        for page in 1..=MAX_PAGES {
+        loop {
             let fetched: FetchedPage<Vec<T>> = self.get_page(&url, options).await?;
-            if page == 1 {
-                observed.clone_from(&fetched.etag);
-                if page1_etag.is_some() && fetched.etag.as_deref() == page1_etag {
-                    tracing::debug!(%url, "page one is unchanged; the sweep stops here");
-                    return Ok(ListingWalk {
-                        items,
-                        complete: false,
-                        page1_etag: observed,
-                        unchanged: true,
-                    });
-                }
-            }
-
             let mut batch = fetched.parsed;
             items.append(&mut batch);
-
-            let Some(next) = fetched.next else {
-                return Ok(ListingWalk {
-                    items,
-                    complete: true,
-                    page1_etag: observed,
-                    unchanged: false,
-                });
-            };
-            if page == MAX_PAGES {
-                tracing::warn!(
-                    %url,
-                    pages = MAX_PAGES,
-                    "page cap reached; the listing is truncated"
-                );
-                break;
+            match fetched.next {
+                Some(next) => url = next,
+                None => return Ok((items, true)),
             }
-            url = next;
         }
-
-        Ok(ListingWalk {
-            items,
-            complete: false,
-            page1_etag: observed,
-            unchanged: false,
-        })
     }
 
     /// Store a fresh response so the next request can revalidate it.
@@ -1833,73 +1795,88 @@ impl GithubPort for GithubClient {
         repo_id: i64,
         updated_after: Option<DateTime<Utc>>,
         page1_etag: Option<&str>,
+        continue_from: Option<&str>,
         options: &FetchOptions,
     ) -> Result<IssueListing, DomainError> {
         if !options.scope.objects.issues {
             return Ok(IssueListing::default());
         }
         let bound = updated_after_param(updated_after);
-
-        let walk: ListingWalk<GhIssue> = self
-            .walk_pages(
-                &format!(
+        let stages = [
+            Stage {
+                tail: "/issues",
+                first: self.absolute(&format!(
                     "/repos/{owner}/{name}/issues?state=all&sort=updated&direction=desc&per_page={FIRST_PAGE_SIZE}{bound}"
-                ),
-                options,
-                page1_etag,
-            )
-            .await?;
-        if walk.unchanged {
-            return Ok(IssueListing {
-                page1_etag: walk.page1_etag,
-                unchanged: true,
-                swept_to_end: false,
-                ..IssueListing::default()
-            });
-        }
-        let walk_etag = walk.page1_etag;
-        let (issues, issues_complete) = (walk.items, walk.complete);
-        let (comments, comments_complete): (Vec<GhComment>, bool) = self
-            .get_json_all(
-                &format!("/repos/{owner}/{name}/issues/comments?per_page={FIRST_PAGE_SIZE}{bound}"),
-                options,
-            )
-            .await?;
-        let (issue_events, _issue_events_complete): (Vec<GhIssueEvent>, bool) = self
-            .get_json_all(
-                &format!("/repos/{owner}/{name}/issues/events?per_page={FIRST_PAGE_SIZE}"),
-                options,
-            )
-            .await?;
-
-        let contributors = derive_issue_people(repo_id, &issues, &comments).into_records();
-        let kept: Vec<_> = issues
-            .into_iter()
-            .map(|i| issue_record(repo_id, i))
-            .filter(|i| within_since(&i.state, &i.updated_at, options.since))
-            .collect();
+                )),
+            },
+            Stage {
+                tail: "/issues/comments",
+                first: self.absolute(&format!(
+                    "/repos/{owner}/{name}/issues/comments?per_page={FIRST_PAGE_SIZE}{bound}"
+                )),
+            },
+            Stage {
+                tail: "/issues/events",
+                first: self.absolute(&format!(
+                    "/repos/{owner}/{name}/issues/events?per_page={FIRST_PAGE_SIZE}"
+                )),
+            },
+        ];
+        let url = continue_from.map_or_else(|| stages[0].first.clone(), str::to_owned);
+        let stage = stage_of(&stages, &url)?;
         let bounded = updated_after.is_some() || options.since.is_some();
 
-        let mut complete = ListingCompleteness::none();
-        complete.set(Listing::Issues, issues_complete && !bounded);
-        complete.set(Listing::Comments, comments_complete && !bounded);
-
-        Ok(IssueListing {
-            complete,
-            issues: kept,
-            comments: comments
-                .into_iter()
-                .filter_map(|c| comment_record(repo_id, c))
-                .collect(),
-            issue_events: issue_events
-                .into_iter()
-                .map(|e| issue_event_record(repo_id, e))
-                .collect(),
-            contributors,
-            page1_etag: walk_etag,
-            unchanged: false,
-            swept_to_end: issues_complete,
-        })
+        let mut listing = IssueListing::default();
+        match stage {
+            0 => {
+                let page: FetchedPage<Vec<GhIssue>> = self.get_page(&url, options).await?;
+                if continue_from.is_none() {
+                    listing.page1_etag.clone_from(&page.etag);
+                    if page1_etag.is_some() && page.etag.as_deref() == page1_etag {
+                        tracing::debug!(%url, "page one is unchanged; the sweep stops here");
+                        listing.unchanged = true;
+                        return Ok(listing);
+                    }
+                }
+                listing.contributors =
+                    derive_issue_people(repo_id, &page.parsed, &[]).into_records();
+                listing.issues = page
+                    .parsed
+                    .into_iter()
+                    .map(|i| issue_record(repo_id, i))
+                    .filter(|i| within_since(&i.state, &i.updated_at, options.since))
+                    .collect();
+                listing
+                    .complete
+                    .set(Listing::Issues, page.next.is_none() && !bounded);
+                listing.next = continue_after(&stages, stage, page.next);
+            }
+            1 => {
+                let page: FetchedPage<Vec<GhComment>> = self.get_page(&url, options).await?;
+                listing.contributors =
+                    derive_issue_people(repo_id, &[], &page.parsed).into_records();
+                listing.comments = page
+                    .parsed
+                    .into_iter()
+                    .filter_map(|c| comment_record(repo_id, c))
+                    .collect();
+                listing
+                    .complete
+                    .set(Listing::Comments, page.next.is_none() && !bounded);
+                listing.next = continue_after(&stages, stage, page.next);
+            }
+            _ => {
+                let page: FetchedPage<Vec<GhIssueEvent>> = self.get_page(&url, options).await?;
+                listing.issue_events = page
+                    .parsed
+                    .into_iter()
+                    .map(|e| issue_event_record(repo_id, e))
+                    .collect();
+                listing.next = continue_after(&stages, stage, page.next);
+            }
+        }
+        listing.swept_to_end = listing.next.is_none();
+        Ok(listing)
     }
 
     async fn refine_issue(
@@ -1954,49 +1931,58 @@ impl GithubPort for GithubClient {
         owner: &str,
         name: &str,
         repo_id: i64,
+        continue_from: Option<&str>,
         options: &FetchOptions,
     ) -> Result<PullListing, DomainError> {
         if !options.scope.objects.pull_requests {
             return Ok(PullListing::default());
         }
-
-        let (pulls, pull_requests_complete): (Vec<GhPullRequest>, bool) = self
-            .get_json_all(
-                &format!("/repos/{owner}/{name}/pulls?state=all&per_page={FIRST_PAGE_SIZE}"),
-                options,
-            )
-            .await?;
-        let (review_comments, review_comments_complete): (Vec<GhReviewComment>, bool) = self
-            .get_json_all(
-                &format!("/repos/{owner}/{name}/pulls/comments?per_page={FIRST_PAGE_SIZE}"),
-                options,
-            )
-            .await?;
-
-        let contributors = derive_pull_people(repo_id, &pulls, &review_comments).into_records();
-        let kept: Vec<_> = pulls
-            .into_iter()
-            .map(|p| pull_request_record(repo_id, p))
-            .filter(|p| within_since(&p.state, &p.updated_at, options.since))
-            .collect();
+        let stages = [
+            Stage {
+                tail: "/pulls",
+                first: self.absolute(&format!(
+                    "/repos/{owner}/{name}/pulls?state=all&per_page={FIRST_PAGE_SIZE}"
+                )),
+            },
+            Stage {
+                tail: "/pulls/comments",
+                first: self.absolute(&format!(
+                    "/repos/{owner}/{name}/pulls/comments?per_page={FIRST_PAGE_SIZE}"
+                )),
+            },
+        ];
+        let url = continue_from.map_or_else(|| stages[0].first.clone(), str::to_owned);
+        let stage = stage_of(&stages, &url)?;
         let bounded = options.since.is_some();
 
-        let mut complete = ListingCompleteness::none();
-        complete.set(Listing::PullRequests, pull_requests_complete && !bounded);
-        complete.set(
-            Listing::ReviewComments,
-            review_comments_complete && !bounded,
-        );
-
-        Ok(PullListing {
-            complete,
-            pull_requests: kept,
-            review_comments: review_comments
+        let mut listing = PullListing::default();
+        if stage == 0 {
+            let page: FetchedPage<Vec<GhPullRequest>> = self.get_page(&url, options).await?;
+            listing.contributors = derive_pull_people(repo_id, &page.parsed, &[]).into_records();
+            listing.pull_requests = page
+                .parsed
+                .into_iter()
+                .map(|p| pull_request_record(repo_id, p))
+                .filter(|p| within_since(&p.state, &p.updated_at, options.since))
+                .collect();
+            listing
+                .complete
+                .set(Listing::PullRequests, page.next.is_none() && !bounded);
+            listing.next = continue_after(&stages, stage, page.next);
+        } else {
+            let page: FetchedPage<Vec<GhReviewComment>> = self.get_page(&url, options).await?;
+            listing.contributors = derive_pull_people(repo_id, &[], &page.parsed).into_records();
+            listing.review_comments = page
+                .parsed
                 .into_iter()
                 .filter_map(|c| review_comment_record(repo_id, c))
-                .collect(),
-            contributors,
-        })
+                .collect();
+            listing
+                .complete
+                .set(Listing::ReviewComments, page.next.is_none() && !bounded);
+            listing.next = continue_after(&stages, stage, page.next);
+        }
+        Ok(listing)
     }
 
     /// The pull's own detail record — the per-pull payload carries the line
@@ -2118,44 +2104,56 @@ impl GithubPort for GithubClient {
         name: &str,
         repo_id: i64,
         updated_after: Option<DateTime<Utc>>,
+        continue_from: Option<&str>,
         options: &FetchOptions,
     ) -> Result<CommitListing, DomainError> {
         if !options.scope.objects.commits {
             return Ok(CommitListing::default());
         }
         let bound = updated_after_param(updated_after);
-
-        let (commits, commits_complete): (Vec<GhCommit>, bool) = self
-            .get_json_all(
-                &format!("/repos/{owner}/{name}/commits?per_page={FIRST_PAGE_SIZE}{bound}"),
-                options,
-            )
-            .await?;
-        let (commit_comments, _commit_comments_complete): (Vec<GhCommitComment>, bool) = self
-            .get_json_all(
-                &format!("/repos/{owner}/{name}/comments?per_page={FIRST_PAGE_SIZE}"),
-                options,
-            )
-            .await?;
-
-        let contributors = derive_commit_people(repo_id, &commits, &commit_comments).into_records();
+        let stages = [
+            Stage {
+                tail: "/commits",
+                first: self.absolute(&format!(
+                    "/repos/{owner}/{name}/commits?per_page={FIRST_PAGE_SIZE}{bound}"
+                )),
+            },
+            Stage {
+                tail: "/comments",
+                first: self.absolute(&format!(
+                    "/repos/{owner}/{name}/comments?per_page={FIRST_PAGE_SIZE}"
+                )),
+            },
+        ];
+        let url = continue_from.map_or_else(|| stages[0].first.clone(), str::to_owned);
+        let stage = stage_of(&stages, &url)?;
         let bounded = updated_after.is_some();
-        let mut complete = ListingCompleteness::none();
-        complete.set(Listing::Commits, commits_complete && !bounded);
 
-        Ok(CommitListing {
-            complete,
-            commits: commits
+        let mut listing = CommitListing::default();
+        if stage == 0 {
+            let page: FetchedPage<Vec<GhCommit>> = self.get_page(&url, options).await?;
+            listing.contributors = derive_commit_people(repo_id, &page.parsed, &[]).into_records();
+            listing.commits = page
+                .parsed
                 .into_iter()
                 .map(|c| commit_record(repo_id, c))
-                .collect(),
-            commit_comments: commit_comments
+                .collect();
+            listing
+                .complete
+                .set(Listing::Commits, page.next.is_none() && !bounded);
+            listing.next = continue_after(&stages, stage, page.next);
+        } else {
+            let page: FetchedPage<Vec<GhCommitComment>> = self.get_page(&url, options).await?;
+            listing.contributors = derive_commit_people(repo_id, &[], &page.parsed).into_records();
+            listing.commit_comments = page
+                .parsed
                 .into_iter()
                 .map(|c| commit_comment_record(repo_id, c))
-                .collect(),
-            contributors,
-            swept_to_end: commits_complete,
-        })
+                .collect();
+            listing.next = continue_after(&stages, stage, page.next);
+        }
+        listing.swept_to_end = listing.next.is_none();
+        Ok(listing)
     }
 
     /// The per-commit detail: the record with its stats, its files, and —

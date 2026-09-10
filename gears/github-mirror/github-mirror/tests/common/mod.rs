@@ -146,6 +146,7 @@ impl GithubPort for FakeGithub {
         Ok(self.fixture()?.repository.clone())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn list_issues(
         &self,
         _owner: &str,
@@ -153,6 +154,7 @@ impl GithubPort for FakeGithub {
         _repo_id: i64,
         updated_after: Option<chrono::DateTime<chrono::Utc>>,
         _page1_etag: Option<&str>,
+        _continue_from: Option<&str>,
         _options: &FetchOptions,
     ) -> Result<IssueListing, DomainError> {
         let f = self.fixture()?;
@@ -179,6 +181,7 @@ impl GithubPort for FakeGithub {
             page1_etag: None,
             unchanged: false,
             swept_to_end: true,
+            next: None,
         })
     }
 
@@ -220,6 +223,7 @@ impl GithubPort for FakeGithub {
         _owner: &str,
         _name: &str,
         _repo_id: i64,
+        _continue_from: Option<&str>,
         _options: &FetchOptions,
     ) -> Result<PullListing, DomainError> {
         let f = self.fixture()?;
@@ -231,6 +235,7 @@ impl GithubPort for FakeGithub {
             pull_requests: f.pull_requests.clone(),
             review_comments: f.review_comments.clone(),
             contributors: Vec::new(),
+            next: None,
         })
     }
 
@@ -286,6 +291,7 @@ impl GithubPort for FakeGithub {
         _name: &str,
         _repo_id: i64,
         updated_after: Option<chrono::DateTime<chrono::Utc>>,
+        _continue_from: Option<&str>,
         _options: &FetchOptions,
     ) -> Result<CommitListing, DomainError> {
         let f = self.fixture()?;
@@ -304,6 +310,7 @@ impl GithubPort for FakeGithub {
             commit_comments: f.commit_comments.clone(),
             contributors: Vec::new(),
             swept_to_end: true,
+            next: None,
         })
     }
 
