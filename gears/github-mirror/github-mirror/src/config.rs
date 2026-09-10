@@ -2,7 +2,7 @@ use serde::Deserialize;
 use toolkit_utils::SecretString;
 use toolkit_utils::var_expand::ExpandVarsError;
 
-use crate::domain::scope::{CollectionMode, ScopeConfig};
+use crate::domain::scope::ScopeConfig;
 use crate::infra::github::compression::Compression;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -21,14 +21,10 @@ pub struct GithubMirrorConfig {
     /// leak a literally-configured PAT.
     #[serde(default)]
     pub github_token: Option<SecretString>,
-    /// What a sync collects when the request does not say (PRD §5.4).
-    ///
-    /// The shipped default differs from [`ScopeConfig::default`] in one
-    /// place: timeline collection is on. The reference implementation leaves
-    /// it off as a high-volume, low-signal feed, but the mirror has always
-    /// collected it and turning it off here would silently shrink what an
-    /// existing deployment stores.
-    #[serde(default = "default_scope")]
+    /// What a sync collects when the request does not say (PRD §5.4): the
+    /// type's default, which leaves timeline events off until a deployment or
+    /// a request turns them on (PRD §5.2).
+    #[serde(default)]
     pub scope: ScopeConfig,
     /// How cached response bodies are stored: `none`, `gzip` or `zstd`
     /// (PRD §5.6). GitHub JSON gzips to roughly a fifth of its size, so the
@@ -76,14 +72,6 @@ fn default_max_concurrent_tasks() -> usize {
 
 fn default_compression() -> String {
     "gzip".to_owned()
-}
-
-/// The gear's shipped scope: the type's default, with timeline turned on to
-/// preserve the behaviour the mirror has had since #4532.
-fn default_scope() -> ScopeConfig {
-    let mut scope = ScopeConfig::default();
-    scope.collection.timeline = CollectionMode::Open;
-    scope
 }
 
 impl GithubMirrorConfig {
@@ -170,7 +158,7 @@ impl Default for GithubMirrorConfig {
         Self {
             api_base_url: default_api_base_url(),
             github_token: None,
-            scope: default_scope(),
+            scope: ScopeConfig::default(),
             cache_compression: default_compression(),
             max_concurrent_syncs: default_max_concurrent_syncs(),
             max_concurrent_tasks: default_max_concurrent_tasks(),

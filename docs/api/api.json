@@ -42040,7 +42040,7 @@
             }
           },
           {
-            "description": "Bypass the HTTP cache (inert until #4630)",
+            "description": "Bypass the HTTP cache and re-fetch everything",
             "in": "query",
             "name": "force",
             "required": false,
@@ -42433,7 +42433,7 @@
             }
           },
           {
-            "description": "Bypass the HTTP cache (inert until #4630)",
+            "description": "Bypass the HTTP cache and re-fetch everything",
             "in": "query",
             "name": "force",
             "required": false,

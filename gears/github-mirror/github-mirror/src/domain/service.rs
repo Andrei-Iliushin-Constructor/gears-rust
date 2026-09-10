@@ -3341,7 +3341,12 @@ impl Service {
                 session.summary_json = serde_json::to_string(&summary).ok();
             }
             Err(e) => {
-                session_states::FAILED.clone_into(&mut session.status);
+                let ended_as = if cancel.is_cancelled() {
+                    session_states::INTERRUPTED
+                } else {
+                    session_states::FAILED
+                };
+                ended_as.clone_into(&mut session.status);
                 session.error = Some(e.to_string());
             }
         }

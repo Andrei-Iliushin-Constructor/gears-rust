@@ -457,11 +457,12 @@ fn opts(scope: ScopeConfig) -> FetchOptions {
     }
 }
 
-/// The scope the gear actually ships with — the type default plus timeline,
-/// which the reference implementation leaves off. Using it here keeps this
-/// test asserting what a stock deployment collects.
-fn shipped_scope() -> ScopeConfig {
-    github_mirror::config::GithubMirrorConfig::default().scope
+/// The type default with timeline turned on, so every family the client maps
+/// is exercised; a stock deployment leaves timeline off (PRD §5.2).
+fn full_scope() -> ScopeConfig {
+    let mut scope = github_mirror::config::GithubMirrorConfig::default().scope;
+    scope.collection.timeline = CollectionMode::Open;
+    scope
 }
 
 /// Everything the sync's tasks would fetch for one repository, gathered into
@@ -927,7 +928,7 @@ async fn fetch_repository_maps_github_payloads_into_records() {
 
     let client =
         GithubClient::new(server.base_url(), Some("tok".to_owned())).expect("client must build");
-    let fetched = fetch_repository(&client, "rust-lang", "rust", &opts(shipped_scope()))
+    let fetched = fetch_repository(&client, "rust-lang", "rust", &opts(full_scope()))
         .await
         .expect("fetch must succeed");
 

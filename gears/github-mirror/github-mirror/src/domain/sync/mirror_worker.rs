@@ -351,7 +351,7 @@ impl MirrorWorker {
                 .collect();
             high = high_water(&seen, high);
             if listing.unchanged {
-                break;
+                return Ok(());
             }
 
             for issue in &listing.issues {
@@ -488,7 +488,7 @@ impl MirrorWorker {
                 .collect();
             high = high_water(&seen, high);
             if listing.unchanged {
-                break;
+                return Ok(());
             }
 
             for pull in &listing.pull_requests {
@@ -677,7 +677,7 @@ impl MirrorWorker {
                 .collect();
             high = high_water(&seen, high);
             if listing.unchanged {
-                break;
+                return Ok(());
             }
 
             for commit in &listing.commits {

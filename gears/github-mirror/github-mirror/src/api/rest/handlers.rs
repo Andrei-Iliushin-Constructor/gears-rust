@@ -43,8 +43,8 @@ const MAX_PER_PAGE: u64 = 100;
 /// response-header size.
 const MAX_FILTER_VALUE: usize = 64;
 
-/// `?force=true` bypasses the HTTP cache (PRD §5.2 force mode). Accepted and
-/// carried through, but inert until conditional requests land (#4630).
+/// `?force=true` bypasses the HTTP cache (PRD §5.2 force mode): every request
+/// goes out without its stored validator, so nothing is served from cache.
 ///
 /// The remaining fields narrow what the run collects (PRD §5.4, §5.19). Any
 /// field left out keeps the gear's configured default, and `include`

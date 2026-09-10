@@ -63,7 +63,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .require_license_features::<License>([])
         .path_param("owner", "Repo owner login")
         .path_param("name", "Repo name")
-        .query_param("force", false, "Bypass the HTTP cache (inert until #4630)")
+        .query_param("force", false, "Bypass the HTTP cache and re-fetch everything")
         .query_param(
             "include",
             false,
@@ -118,7 +118,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .authenticated()
         .require_license_features::<License>([])
         .query_param("repo", false, "Resume only this `owner/name` repository")
-        .query_param("force", false, "Bypass the HTTP cache (inert until #4630)")
+        .query_param("force", false, "Bypass the HTTP cache and re-fetch everything")
         .handler(handlers::resume_syncs)
         .json_response_with_schema::<dto::ResumeAcceptedDto>(
             openapi,

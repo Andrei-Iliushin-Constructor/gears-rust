@@ -168,9 +168,8 @@ pub struct CollectionScope {
     pub actions: CollectionMode,
     /// Reactions on issues and pull requests.
     pub reactions: CollectionMode,
-    /// Timeline events. The reference disables these by default — a
-    /// high-volume, low-signal feed — and so does this type. The gear's
-    /// shipped config turns them back on to preserve today's behaviour.
+    /// Timeline events. Off by default, as in the reference: a high-volume,
+    /// low-signal feed that costs one request per issue (PRD §5.2).
     pub timeline: CollectionMode,
 }
 

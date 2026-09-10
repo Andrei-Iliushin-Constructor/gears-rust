@@ -294,7 +294,7 @@ async fn an_interrupted_sync_resumes_to_the_state_an_uninterrupted_one_reaches()
         .await
         .expect("sessions must list");
     assert_eq!(
-        sessions.items[0].status, "failed",
+        sessions.items[0].status, "interrupted",
         "an interrupted run must not report success"
     );
 
