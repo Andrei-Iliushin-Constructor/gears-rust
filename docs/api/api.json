@@ -2873,6 +2873,41 @@
         ],
         "type": "string"
       },
+      "CountDriftDto": {
+        "description": "One count gap verification gave up on, as served in a session's summary.",
+        "properties": {
+          "entity_type": {
+            "type": "string"
+          },
+          "expected": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "passes": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pull_number": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "stored": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entity_type",
+          "pull_number",
+          "expected",
+          "stored",
+          "passes"
+        ],
+        "type": "object"
+      },
       "CoverageEndView": {
         "description": "Where a key's coverage stops, as the three-armed answer the domain carries.\n\n`kind` and a nullable instant rather than a bare nullable instant, because\n`null` would have to serve two **opposite** answers: a key covered forever\npasses every horizon predicate and a key covered not at all fails all of them.\nThe read-model payload declares the same shape for the same reason.",
         "properties": {
@@ -17064,6 +17099,13 @@
       "SyncSummaryDto": {
         "description": "Result of one sync pass, as served by the extended sync endpoint.",
         "properties": {
+          "accepted_drift": {
+            "description": "Count gaps verification could not close after its repair passes.",
+            "items": {
+              "$ref": "#/components/schemas/CountDriftDto"
+            },
+            "type": "array"
+          },
           "branches_synced": {
             "format": "int64",
             "minimum": 0,
@@ -17226,7 +17268,8 @@
           "issue_reactions_synced",
           "check_runs_synced",
           "issue_timeline_synced",
-          "stale_rows_deleted"
+          "stale_rows_deleted",
+          "accepted_drift"
         ],
         "type": "object"
       },

@@ -12,7 +12,7 @@ use github_mirror_sdk::{
     PullRequest, PullRequestCommit, PullRequestFile, Release, ReleaseAsset, Repo, Review,
     ReviewComment, ReviewThread, Tag, WorkflowJob, WorkflowRun, WorkflowStep,
 };
-use github_mirror_sdk::{MirrorStatus, SyncSummary};
+use github_mirror_sdk::{CountDrift, MirrorStatus, SyncSummary};
 
 use crate::domain::repo::{RepoSyncStatusRecord, SyncSessionRecord};
 
@@ -901,6 +901,31 @@ pub struct SyncSummaryDto {
     pub issue_timeline_synced: u64,
     /// Rows hard-deleted because a complete listing no longer contained them.
     pub stale_rows_deleted: u64,
+    /// Count gaps verification could not close after its repair passes.
+    pub accepted_drift: Vec<CountDriftDto>,
+}
+
+/// One count gap verification gave up on, as served in a session's summary.
+#[derive(Debug)]
+#[toolkit_macros::api_dto(response)]
+pub struct CountDriftDto {
+    pub entity_type: String,
+    pub pull_number: i64,
+    pub expected: u64,
+    pub stored: u64,
+    pub passes: u32,
+}
+
+impl From<CountDrift> for CountDriftDto {
+    fn from(d: CountDrift) -> Self {
+        Self {
+            entity_type: d.entity_type,
+            pull_number: d.pull_number,
+            expected: d.expected,
+            stored: d.stored,
+            passes: d.passes,
+        }
+    }
 }
 
 impl From<SyncSummary> for SyncSummaryDto {
@@ -933,6 +958,7 @@ impl From<SyncSummary> for SyncSummaryDto {
             check_runs_synced: s.check_runs_synced,
             issue_timeline_synced: s.issue_timeline_synced,
             stale_rows_deleted: s.stale_rows_deleted,
+            accepted_drift: s.accepted_drift.into_iter().map(Into::into).collect(),
         }
     }
 }

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use github_mirror_sdk::SyncSummary;
+use github_mirror_sdk::{CountDrift, SyncSummary};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
@@ -57,7 +57,7 @@ pub struct RunState {
     complete: Mutex<ListingCompleteness>,
     swept: Mutex<HashSet<&'static str>>,
     summary: Mutex<SyncSummary>,
-    drift: Mutex<Vec<CountGap>>,
+    drift: Mutex<Vec<CountDrift>>,
 }
 
 impl RunState {
@@ -144,15 +144,15 @@ impl RunState {
             .contains(family)
     }
 
-    pub fn accept_drift(&self, gap: CountGap) {
+    pub fn accept_drift(&self, drift: CountDrift) {
         self.drift
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(gap);
+            .push(drift);
     }
 
     #[must_use]
-    pub fn drift(&self) -> Vec<CountGap> {
+    pub fn drift(&self) -> Vec<CountDrift> {
         self.drift
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -612,7 +612,13 @@ impl MirrorWorker {
                 );
             }
             GapOutcome::AcceptedDrift => {
-                self.run.accept_drift(gap.clone());
+                self.run.accept_drift(CountDrift {
+                    entity_type: gap.entity_type.clone(),
+                    pull_number: number,
+                    expected: gap.expected,
+                    stored: gap.stored,
+                    passes: attempt,
+                });
                 tracing::warn!(
                     pull = number,
                     entity_type = %gap.entity_type,

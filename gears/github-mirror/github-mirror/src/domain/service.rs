@@ -3692,6 +3692,7 @@ impl Service {
 
         let mut summary = run.summary();
         summary.stale_rows_deleted = stale_rows_deleted;
+        summary.accepted_drift = run.drift();
         Ok(summary)
     }
 }
