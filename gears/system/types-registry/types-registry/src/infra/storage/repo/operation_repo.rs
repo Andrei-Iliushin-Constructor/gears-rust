@@ -303,8 +303,8 @@ impl OperationRepo {
         runner: &impl DBRunner,
         scope: &AccessScope,
         item_id: i64,
-        revision_no: i32,
-        resource_version: i64,
+        revision_no: Option<i32>,
+        resource_version: Option<i64>,
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError> {
         let result = operation_item::Entity::update_many()
@@ -319,11 +319,11 @@ impl OperationRepo {
             )
             .col_expr(
                 operation_item::Column::ResultRevisionNo,
-                Expr::value(Some(revision_no)),
+                Expr::value(revision_no),
             )
             .col_expr(
                 operation_item::Column::ResultResourceVersion,
-                Expr::value(Some(resource_version)),
+                Expr::value(resource_version),
             )
             .col_expr(operation_item::Column::StartedAt, Expr::value(now))
             .col_expr(operation_item::Column::CompletedAt, Expr::value(now))

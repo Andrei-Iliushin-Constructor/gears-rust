@@ -30,6 +30,7 @@
 //! content revisions both land here — the item's stored precondition chooses which
 //! commit runs.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -40,8 +41,12 @@ use toolkit_macros::domain_model;
 use tracing::{Instrument, Span};
 use uuid::Uuid;
 
-pub use super::errors::{ItemFailure, WorkerError};
-use super::graph::{BatchCandidate, BatchOrder, BlockKind, Blocker, order_batch};
+use super::deletion;
+pub use super::errors::{DryRunResult, ItemFailure, WorkerError};
+use super::graph::{
+    BatchCandidate, BatchOrder, BlockKind, Blocker, DependencyLink, order_batch,
+    order_deletion_batch,
+};
 use super::revision::{CommittedUnit, RevisionCommit};
 use super::unchanged;
 use super::unit::{EvaluationTarget, PreparedUnit, commit_creation, commit_revision, evaluate};
@@ -49,7 +54,7 @@ use super::vector::VectorDrift;
 use crate::config::{Limits, WorkerSettings};
 use crate::domain::admission::AdmissionFailureReason;
 use crate::domain::admission::Precondition;
-use crate::domain::enums::{OperationItemStatus, OperationStatus};
+use crate::domain::enums::{OperationItemStatus, OperationKind, OperationStatus};
 use crate::domain::ports::metrics::{AdmissionMetrics, RefusalStage, TerminalStatus};
 use crate::domain::ports::{OperationItemRow, OperationRow, Stores, commit_write, snapshot_read};
 use crate::observability;
@@ -152,9 +157,16 @@ async fn run_operation_inner(
     }
 
     // Steps 1–2: order the batch before touching any candidate. One candidate is
-    // one unit, but *which* unit runs next is a property of the whole batch.
-    let batch: Vec<BatchCandidate> = items.iter().map(batch_candidate).collect();
-    let order = order_batch(&batch);
+    // one unit, but *which* unit runs next is a property of the whole batch —
+    // and the two kinds order by opposite relations. A registration puts what it
+    // consumes first; a deletion puts what consumes **it** first, or the target
+    // is refused for a dependant the same batch was about to remove.
+    let order = if operation.kind == OperationKind::Deletion {
+        deletion_order(stores, db, scope, &items).await?
+    } else {
+        let batch: Vec<BatchCandidate> = items.iter().map(batch_candidate).collect();
+        order_batch(&batch)
+    };
     // Indexed by position in `items`, so the report keeps submission order while
     // the work follows dependency order.
     let mut outcomes: Vec<Option<ItemOutcome>> = vec![None; items.len()];
@@ -213,6 +225,52 @@ fn batch_candidate(item: &OperationItemRow) -> BatchCandidate {
             .as_deref()
             .and_then(|payload| serde_json::from_str(payload).ok()),
     }
+}
+
+/// Order a deletion batch from the edges already in `dependency`.
+///
+/// The read a registration does not need: a deletion submits no document, so
+/// the only place its `$ref`, derivation and conformance edges exist is the
+/// table. One snapshot, two statements — resolve the batch's identifiers to
+/// entity ids, then take the edges between them.
+///
+/// An identifier the registry does not hold resolves to no row and therefore to
+/// no edge. That is correct rather than lenient: its own commit refuses it with
+/// `precondition_failed`, and nothing in the batch waits on a deletion that was
+/// never going to happen.
+async fn deletion_order(
+    stores: &Arc<dyn Stores>,
+    db: &DBProvider<WorkerError>,
+    scope: &AccessScope,
+    items: &[OperationItemRow],
+) -> Result<BatchOrder, WorkerError> {
+    let gts_ids: Vec<String> = items.iter().map(|item| item.gts_id.clone()).collect();
+    let stores_tx = Arc::clone(stores);
+    let scope_tx = scope.clone();
+    let read_ids = gts_ids.clone();
+    let links = db
+        .transaction_with_config(snapshot_read(&db.db()), move |tx| {
+            Box::pin(async move {
+                let rows = stores_tx.find_by_gts_ids(tx, &scope_tx, &read_ids).await?;
+                let entity_ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
+                let named: HashMap<i64, String> =
+                    rows.into_iter().map(|row| (row.id, row.gts_id)).collect();
+                let edges = stores_tx
+                    .edges_within(tx, &scope_tx, &entity_ids)
+                    .await?
+                    .into_iter()
+                    .filter_map(|(from, to)| {
+                        Some(DependencyLink {
+                            dependant: named.get(&from)?.clone(),
+                            target: named.get(&to)?.clone(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                Ok(edges)
+            })
+        })
+        .await?;
+    Ok(order_deletion_batch(&gts_ids, &links))
 }
 
 fn unit_span(operation_id: Uuid, item: &OperationItemRow) -> Span {
@@ -326,6 +384,7 @@ async fn prepare(
             operation_item_id: item.id,
             precondition: item.precondition,
             force: effective_force(item.compat_forced, &tuning),
+            labels: item.pass_labels(),
         },
         tuning.limits,
         tuning.metrics,
@@ -386,6 +445,10 @@ async fn commit_prepared(
     let tx_metrics = Arc::clone(metrics);
     // Copy limits into the `'static` retry closure.
     let tx_limits = limits;
+    // A dry run runs the whole commit — every recheck, every write — and then
+    // discards it. Everything above is real work against real state; the only
+    // difference is that the transaction ends in a rollback.
+    let dry_run = item.dry_run;
     db.db()
         .transaction_with_retry(commit_write(&db.db()), retryable_db_err, |tx| {
             let prepared = prepared.clone();
@@ -395,18 +458,19 @@ async fn commit_prepared(
             Box::pin(async move {
                 let unit = match &prepared {
                     PreparedUnit::Unchanged(candidate) => {
-                        return unchanged::commit(
-                            tx_stores.as_ref(),
-                            tx,
-                            &tx_scope,
-                            candidate,
-                            now,
-                        )
-                        .await;
+                        let committed =
+                            unchanged::commit(tx_stores.as_ref(), tx, &tx_scope, candidate, now)
+                                .await;
+                        return match committed {
+                            Ok(result) if dry_run => Err(WorkerError::DryRunRolledBack(Box::new(
+                                DryRunResult::Revision(result),
+                            ))),
+                            other => other,
+                        };
                     }
                     PreparedUnit::Evaluated(unit) => unit,
                 };
-                match precondition {
+                let committed = match precondition {
                     Precondition::MustNotExist => {
                         commit_creation(tx_stores.as_ref(), tx, &tx_scope, unit, &tx_limits, now)
                             .await
@@ -425,10 +489,180 @@ async fn commit_prepared(
                         )
                         .await
                     }
+                };
+                match committed {
+                    Ok(result) if dry_run => Err(WorkerError::DryRunRolledBack(Box::new(
+                        DryRunResult::Revision(result),
+                    ))),
+                    other => other,
                 }
             })
         })
         .await
+}
+
+/// Commit one deletion, or record why it could not be.
+///
+/// Retried on lock contention like every other commit: the transaction re-reads
+/// everything it decides on, so an attempt that rolled back leaves nothing to
+/// undo. There is no revalidation loop, because there is no evaluation to
+/// revalidate — every question the transaction asks is asked inside it.
+async fn process_deletion(
+    stores: &Arc<dyn Stores>,
+    db: &DBProvider<WorkerError>,
+    scope: &AccessScope,
+    tuning: Tuning<'_>,
+    operation_id: Uuid,
+    item: &OperationItemRow,
+    now: OffsetDateTime,
+) -> Result<ItemOutcome, WorkerError> {
+    let Precondition::Version(expected) = item.precondition else {
+        // Acceptance refuses an absent version for a deletion, so a stored item
+        // in this shape disagrees with the rules that admitted it.
+        return record_failure(
+            stores,
+            db,
+            scope,
+            operation_id,
+            item,
+            ItemFailure::new(
+                AdmissionFailureReason::PreconditionFailed,
+                format!(
+                    "stored deletion item {} carries no expected_resource_version",
+                    item.id
+                ),
+            ),
+            now,
+            tuning.metrics,
+        )
+        .await;
+    };
+
+    let tx_scope = scope.clone();
+    let tx_stores = Arc::clone(stores);
+    let tx_limits = *tuning.limits;
+    let gts_id = item.gts_id.clone();
+    let span = Span::current();
+    // A dry-run deletion runs every check — including the dependants recheck,
+    // which is the one it exists to ask — and then discards the tombstone.
+    let dry_run = item.dry_run;
+    let committed = db
+        .db()
+        .transaction_with_retry(commit_write(&db.db()), retryable_db_err, |tx| {
+            let tx_scope = tx_scope.clone();
+            let tx_stores = Arc::clone(&tx_stores);
+            let gts_id = gts_id.clone();
+            let span = span.clone();
+            Box::pin(async move {
+                let committed = deletion::commit_deletion(
+                    tx_stores.as_ref(),
+                    tx,
+                    &tx_scope,
+                    &gts_id,
+                    expected,
+                    &tx_limits,
+                    &span,
+                    now,
+                )
+                .await;
+                match committed {
+                    Ok(result) if dry_run => Err(WorkerError::DryRunRolledBack(Box::new(
+                        DryRunResult::Deletion(result),
+                    ))),
+                    other => other,
+                }
+            })
+        })
+        .await;
+
+    let committed = match committed {
+        Ok(committed) => committed,
+        // The expected end of a dry run: the rollback carried the result out.
+        Err(WorkerError::DryRunRolledBack(result)) => match *result {
+            DryRunResult::Deletion(committed) => committed,
+            // This path only ever wraps a deletion; see the mirror of this arm
+            // in `process_item`.
+            revision @ DryRunResult::Revision(_) => {
+                return Err(WorkerError::DryRunRolledBack(Box::new(revision)));
+            }
+        },
+        // Another pass terminalized the item; this pass rolled back.
+        Err(WorkerError::ItemAlreadyTerminal { item_id }) => {
+            return stored_item(stores, db, scope, operation_id, item_id).await;
+        }
+        Err(error) => return Err(error),
+    };
+
+    match committed {
+        Ok(commit) => {
+            if !terminalize_deletion(stores, db, scope, item, &commit, now).await? {
+                return stored_item(stores, db, scope, operation_id, item.id).await;
+            }
+            tracing::info!(
+                %operation_id,
+                operation_item_id = item.id,
+                gts_id = %item.gts_id,
+                resource_version = commit.resource_version,
+                "types_registry entity deleted"
+            );
+            tuning
+                .metrics
+                .candidate_terminalized(TerminalStatus::Succeeded, item.pass_labels());
+            Ok(ItemOutcome {
+                gts_id: item.gts_id.clone(),
+                status: OperationItemStatus::Succeeded,
+                gts_uuid: Some(commit.gts_uuid),
+                resource_version: (!item.dry_run).then_some(commit.resource_version),
+                // A deletion allocates no revision (ADR-0005), and a dry run
+                // moved no version.
+                revision_no: None,
+                failure: None,
+            })
+        }
+        Err(failure) => {
+            record_failure(
+                stores,
+                db,
+                scope,
+                operation_id,
+                item,
+                failure,
+                now,
+                tuning.metrics,
+            )
+            .await
+        }
+    }
+}
+
+/// Record a committed deletion on its item, in its own statement.
+///
+/// Separate from the deletion transaction rather than folded into it: the
+/// tombstone is already committed, and a `false` here means another pass won the
+/// item — whose stored outcome then stands. Registration writes the item inside
+/// its transaction because it has a revision to roll back; a deletion has none.
+async fn terminalize_deletion(
+    stores: &Arc<dyn Stores>,
+    db: &DBProvider<WorkerError>,
+    scope: &AccessScope,
+    item: &OperationItemRow,
+    commit: &deletion::DeletionCommit,
+    now: OffsetDateTime,
+) -> Result<bool, WorkerError> {
+    let tx_stores = Arc::clone(stores);
+    let tx_scope = scope.clone();
+    let item_id = item.id;
+    // `ck_tr_operation_item_state`: a succeeded dry run records no version,
+    // because it moved none.
+    let resource_version = (!item.dry_run).then_some(commit.resource_version);
+    db.transaction(move |tx| {
+        Box::pin(async move {
+            Ok(tx_stores
+                .mark_item_succeeded(tx, &tx_scope, item_id, None, resource_version, now)
+                .await?)
+        })
+    })
+    .await
 }
 
 /// Evaluate and commit one non-terminal item.
@@ -444,6 +678,13 @@ async fn process_item(
 ) -> Result<ItemOutcome, WorkerError> {
     if item.status != OperationItemStatus::Pending && item.status != OperationItemStatus::Running {
         return Ok(stored_outcome(item));
+    }
+
+    // A deletion has no document, so it has nothing to evaluate: no store build,
+    // no compatibility check, no revision vector and therefore no revalidation
+    // loop. It is a commit transaction and nothing else.
+    if item.kind == OperationKind::Deletion {
+        return process_deletion(stores, db, scope, tuning, operation_id, item, now).await;
     }
 
     let payload = item
@@ -476,6 +717,7 @@ async fn process_item(
                         operation_item_id: item.id,
                         precondition: item.precondition,
                         force: effective_force(item.compat_forced, &tuning),
+                        labels: item.pass_labels(),
                     },
                     tuning.limits,
                     tuning.metrics,
@@ -516,6 +758,18 @@ async fn process_item(
         .await
         {
             Ok(committed) => committed,
+            // The expected end of a dry run: the transaction rolled back and
+            // carried its result out here. The item is written below, outside
+            // the transaction that refused to keep anything.
+            Err(WorkerError::DryRunRolledBack(result)) => match *result {
+                DryRunResult::Revision(committed) => committed,
+                // This path only ever wraps a revision. Propagated rather than
+                // renamed: a deletion arriving here is a worker bug, and the
+                // error already says which invariant broke.
+                deletion @ DryRunResult::Deletion(_) => {
+                    return Err(WorkerError::DryRunRolledBack(Box::new(deletion)));
+                }
+            },
             // Another pass terminalized the item; this pass rolled back.
             Err(WorkerError::ItemAlreadyTerminal { item_id }) => {
                 return stored_item(stores, db, scope, operation_id, item_id).await;
@@ -553,13 +807,22 @@ async fn process_item(
         };
 
         return match committed {
-            Ok(commit) => Ok(committed_outcome(
-                operation_id,
-                item,
-                commit,
-                attempt,
-                tuning.metrics,
-            )),
+            Ok(commit) => {
+                // A dry run's own item write rolled back with the rest of the
+                // transaction, so it is made here, where nothing can discard it.
+                if item.dry_run
+                    && !terminalize_dry_run(stores, db, scope, item, commit, now).await?
+                {
+                    return stored_item(stores, db, scope, operation_id, item.id).await;
+                }
+                Ok(committed_outcome(
+                    operation_id,
+                    item,
+                    commit,
+                    attempt,
+                    tuning.metrics,
+                ))
+            }
             Err(failure) => {
                 record_failure(
                     stores,
@@ -601,6 +864,49 @@ async fn process_item(
     .await
 }
 
+/// Write a dry run's terminal outcome, outside the transaction that discarded
+/// everything else it did.
+///
+/// `false` means an overlapping pass terminalized the item first; its outcome
+/// stands, exactly as it does for a committing pass.
+///
+/// `unchanged` is the one dry-run outcome that still reports a version: it names
+/// the version that did **not** move, which is a fact about committed state
+/// rather than about this pass. `ck_tr_operation_item_state` encodes precisely
+/// that distinction.
+async fn terminalize_dry_run(
+    stores: &Arc<dyn Stores>,
+    db: &DBProvider<WorkerError>,
+    scope: &AccessScope,
+    item: &OperationItemRow,
+    commit: RevisionCommit,
+    now: OffsetDateTime,
+) -> Result<bool, WorkerError> {
+    let tx_stores = Arc::clone(stores);
+    let tx_scope = scope.clone();
+    let item_id = item.id;
+    db.transaction(move |tx| {
+        Box::pin(async move {
+            let recorded = match commit {
+                RevisionCommit::Admitted(_) => {
+                    tx_stores
+                        .mark_item_succeeded(tx, &tx_scope, item_id, None, None, now)
+                        .await?
+                }
+                RevisionCommit::Unchanged {
+                    resource_version, ..
+                } => {
+                    tx_stores
+                        .mark_item_unchanged(tx, &tx_scope, item_id, resource_version, now)
+                        .await?
+                }
+            };
+            Ok(recorded)
+        })
+    })
+    .await
+}
+
 /// Report, log, and count a successful commit.
 fn committed_outcome(
     operation_id: Uuid,
@@ -624,13 +930,16 @@ fn committed_outcome(
                 attempt,
                 "types_registry candidate admitted"
             );
-            metrics.candidate_terminalized(TerminalStatus::Succeeded);
+            metrics.candidate_terminalized(TerminalStatus::Succeeded, item.pass_labels());
             ItemOutcome {
                 gts_id: item.gts_id.clone(),
                 status: OperationItemStatus::Succeeded,
                 gts_uuid: Some(gts_uuid),
-                resource_version: Some(resource_version),
-                revision_no: Some(revision_no),
+                // A dry run moved no version and allocated no revision, so
+                // naming either would name something that does not exist. The
+                // storage CHECK says the same thing about the columns.
+                resource_version: (!item.dry_run).then_some(resource_version),
+                revision_no: (!item.dry_run).then_some(revision_no),
                 failure: None,
             }
         }
@@ -649,7 +958,7 @@ fn committed_outcome(
                 attempt,
                 "types_registry candidate content already current"
             );
-            metrics.candidate_terminalized(TerminalStatus::Unchanged);
+            metrics.candidate_terminalized(TerminalStatus::Unchanged, item.pass_labels());
             ItemOutcome {
                 gts_id: item.gts_id.clone(),
                 status: OperationItemStatus::Unchanged,
@@ -706,8 +1015,12 @@ async fn record_failure(
 
     if recorded {
         // Count only the pass that won the item CAS.
-        metrics.candidate_terminalized(TerminalStatus::Failed);
-        metrics.refused(RefusalStage::Admission, reason_label(&failure.reason));
+        metrics.candidate_terminalized(TerminalStatus::Failed, item.pass_labels());
+        metrics.refused(
+            RefusalStage::Admission,
+            reason_label(&failure.reason),
+            item.pass_labels(),
+        );
         tracing::warn!(
             %operation_id,
             operation_item_id = item.id,

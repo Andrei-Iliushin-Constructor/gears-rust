@@ -137,6 +137,17 @@ impl EntityStore for Repos {
         EntityRepo::compare_and_swap_version(tx, scope, entity_id, expected_resource_version, now)
             .await
     }
+
+    async fn mark_deleted(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_id: i64,
+        expected_resource_version: i64,
+        now: OffsetDateTime,
+    ) -> Result<Option<i64>, ScopeError> {
+        EntityRepo::mark_deleted(tx, scope, entity_id, expected_resource_version, now).await
+    }
 }
 
 #[async_trait]
@@ -325,8 +336,8 @@ impl OperationStore for Repos {
         tx: &DbTx<'_>,
         scope: &AccessScope,
         item_id: i64,
-        revision_no: i32,
-        resource_version: i64,
+        revision_no: Option<i32>,
+        resource_version: Option<i64>,
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError> {
         OperationRepo::mark_item_succeeded(tx, scope, item_id, revision_no, resource_version, now)
@@ -365,6 +376,25 @@ impl DependencyStore for Repos {
         type_schema_entity_id: i64,
     ) -> Result<bool, ScopeError> {
         DependencyRepo::has_live_direct_instances(tx, scope, type_schema_entity_id).await
+    }
+
+    async fn live_direct_dependents(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_id: i64,
+        bound: usize,
+    ) -> Result<usize, ScopeError> {
+        DependencyRepo::live_direct_dependents(tx, scope, entity_id, bound).await
+    }
+
+    async fn edges_within(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_ids: &[i64],
+    ) -> Result<Vec<(i64, i64)>, ScopeError> {
+        DependencyRepo::edges_within(tx, scope, entity_ids).await
     }
 
     async fn closure(

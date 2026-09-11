@@ -14,6 +14,7 @@
 
 pub mod acceptance;
 mod bounds;
+pub mod deletion;
 mod drift;
 mod errors;
 mod reasons;

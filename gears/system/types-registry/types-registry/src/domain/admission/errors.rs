@@ -7,7 +7,9 @@ use toolkit_macros::domain_model;
 use uuid::Uuid;
 
 use super::AdmissionFailureReason;
+use super::deletion::DeletionCommit;
 use super::drift::VectorDrift;
+use super::revision::RevisionCommit;
 use crate::domain::gts_store::StoreBuildError;
 
 /// An infrastructure failure. Retryable by construction: nothing here is a
@@ -76,6 +78,14 @@ pub enum WorkerError {
     /// rolls the already-executed resource-version CAS back on this error.
     #[error("entity '{gts_id}' cannot allocate a revision after i32::MAX")]
     RevisionNumberExhausted { gts_id: String },
+    /// **Not a failure.** A dry run runs the real commit path and then refuses
+    /// to commit it, and returning an error is the only way to make the
+    /// transaction roll back — so the result it computed travels out in the
+    /// error position and the caller unwraps it immediately. `retryable_db_err`
+    /// answers `None` for it, so the retry loop short-circuits rather than
+    /// running the pass again.
+    #[error("a dry run's transaction was rolled back, as every dry run's is")]
+    DryRunRolledBack(Box<DryRunResult>),
     /// A candidate refusal discovered after the commit transaction began writing.
     #[error("the revision was refused after its writes began: {0}")]
     RefusedAfterWrite(ItemFailure),
@@ -150,4 +160,15 @@ impl ItemFailure {
             ),
         }
     }
+}
+
+/// What a rolled-back dry-run transaction computed before it was discarded.
+///
+/// One enum rather than two error variants: the two commit paths differ in what
+/// they produce, and the caller of each already knows which it asked for.
+#[domain_model]
+#[derive(Clone, Debug)]
+pub enum DryRunResult {
+    Revision(Result<RevisionCommit, ItemFailure>),
+    Deletion(Result<DeletionCommit, ItemFailure>),
 }

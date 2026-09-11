@@ -252,6 +252,17 @@ pub struct OperationItemRow {
     pub completed_at: Option<OffsetDateTime>,
 }
 
+impl OperationItemRow {
+    /// The metric labels every outcome of this item is counted under (T20).
+    ///
+    /// Read from the stored row rather than from the request, so a redelivered
+    /// pass labels its counts exactly as the first pass did.
+    #[must_use]
+    pub const fn pass_labels(&self) -> metrics::PassLabels {
+        metrics::PassLabels::new(self.kind, self.dry_run)
+    }
+}
+
 /// One `type_schema` current-state row: the revision pointer plus D3's
 /// materialized artifacts.
 #[domain_model]
@@ -587,6 +598,22 @@ pub trait EntityStore: Send + Sync {
         expected_resource_version: i64,
         now: OffsetDateTime,
     ) -> Result<Option<i64>, ScopeError>;
+
+    /// Move an **active** entity at `expected` to `DELETED`, advancing its
+    /// version (T20). The row survives: a tombstone stays exact-readable and
+    /// keeps serving as a compatibility baseline until purge (ADR-0013).
+    ///
+    /// Like [`Self::compare_and_swap_version`], both preconditions are in the
+    /// statement's `WHERE`, so `None` is a lost race rather than a separate read
+    /// the caller has to guard.
+    async fn mark_deleted(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_id: i64,
+        expected_resource_version: i64,
+        now: OffsetDateTime,
+    ) -> Result<Option<i64>, ScopeError>;
 }
 
 /// Authored revisions and the current-state row.
@@ -754,13 +781,17 @@ pub trait OperationStore: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError>;
 
+    /// Both results are optional, and `ck_tr_operation_item_state` says exactly
+    /// when each is present: a revision number only for a committing
+    /// registration, and a resource version only for a pass that wrote. A
+    /// deletion allocates no revision; a dry run moves no version.
     async fn mark_item_succeeded(
         &self,
         tx: &DbTx<'_>,
         scope: &AccessScope,
         item_id: i64,
-        revision_no: i32,
-        resource_version: i64,
+        revision_no: Option<i32>,
+        resource_version: Option<i64>,
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError>;
 
@@ -797,6 +828,26 @@ pub trait DependencyStore: Send + Sync {
         scope: &AccessScope,
         type_schema_entity_id: i64,
     ) -> Result<bool, ScopeError>;
+
+    /// Count the live **direct** registered dependants of one entity, bounded at
+    /// `bound + 1`. Deletion refuses on a non-zero count and reports the number,
+    /// never the identities (T20).
+    async fn live_direct_dependents(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_id: i64,
+        bound: usize,
+    ) -> Result<usize, ScopeError>;
+
+    /// The stored edges between the given entities, as `(from, to)` pairs, for
+    /// the deletion order (T20). Edges leaving the set are dropped.
+    async fn edges_within(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_ids: &[i64],
+    ) -> Result<Vec<(i64, i64)>, ScopeError>;
 
     /// The roots plus everything they transitively consume.
     async fn closure(

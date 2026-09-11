@@ -25,6 +25,9 @@ pub enum AdmissionFailureReason {
     DialectChanged,
     EntityDeleted,
     FamilyKindConflict,
+    /// Deleting this entity would strand a live direct registered dependant.
+    /// The refusal reports how many; never which ones.
+    HasRegisteredDependents,
     FamilyShapeConflict,
     /// `Valid(baseline) ⊆ Valid(candidate)` does not hold (ADR-0003).
     IncompatibleWithBaseline,
@@ -35,6 +38,11 @@ pub enum AdmissionFailureReason {
     InvalidSchema,
     InvalidValue,
     MissingPredecessor,
+    /// The deletion target is not `ACTIVE`. Distinct from
+    /// [`Self::EntityDeleted`], which says the entity a *revision* wanted is
+    /// gone: this one says the deletion has nothing left to do, and a second
+    /// attempt must never read as "retry with a newer version".
+    NotActive,
     PreconditionFailed,
     ResolutionClosureExceeded,
     ResolvedDocumentTooLarge,
@@ -66,6 +74,7 @@ impl AdmissionFailureReason {
             "dialect_changed" => Self::DialectChanged,
             "entity_deleted" => Self::EntityDeleted,
             "family_kind_conflict" => Self::FamilyKindConflict,
+            "has_registered_dependents" => Self::HasRegisteredDependents,
             "family_shape_conflict" => Self::FamilyShapeConflict,
             "incompatible_with_baseline" => Self::IncompatibleWithBaseline,
             "instance_of_major_zero" => Self::InstanceOfMajorZero,
@@ -74,6 +83,7 @@ impl AdmissionFailureReason {
             "invalid_schema" => Self::InvalidSchema,
             "invalid_value" => Self::InvalidValue,
             "missing_predecessor" => Self::MissingPredecessor,
+            "not_active" => Self::NotActive,
             "precondition_failed" => Self::PreconditionFailed,
             "resolution_closure_exceeded" => Self::ResolutionClosureExceeded,
             "resolved_document_too_large" => Self::ResolvedDocumentTooLarge,
@@ -110,6 +120,7 @@ impl AdmissionFailureReason {
             Self::DialectChanged => "dialect_changed",
             Self::EntityDeleted => "entity_deleted",
             Self::FamilyKindConflict => "family_kind_conflict",
+            Self::HasRegisteredDependents => "has_registered_dependents",
             Self::FamilyShapeConflict => "family_shape_conflict",
             Self::IncompatibleWithBaseline => "incompatible_with_baseline",
             Self::InstanceOfMajorZero => "instance_of_major_zero",
@@ -118,6 +129,7 @@ impl AdmissionFailureReason {
             Self::InvalidSchema => "invalid_schema",
             Self::InvalidValue => "invalid_value",
             Self::MissingPredecessor => "missing_predecessor",
+            Self::NotActive => "not_active",
             Self::PreconditionFailed => "precondition_failed",
             Self::ResolutionClosureExceeded => "resolution_closure_exceeded",
             Self::ResolvedDocumentTooLarge => "resolved_document_too_large",

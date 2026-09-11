@@ -44,7 +44,7 @@ use crate::config::TypesRegistryConfig;
 use crate::domain::compat::{normalize_dialect, select_baseline};
 use crate::domain::enums::{OperationKind, OwnershipScope, Plane};
 use crate::domain::policy::{PolicyRefusal, RegistrationPolicy};
-use crate::domain::ports::metrics::{AdmissionMetrics, RefusalStage};
+use crate::domain::ports::metrics::{AdmissionMetrics, PassLabels, RefusalStage};
 use crate::domain::ports::{NewOperation, NewOperationItem, OperationRow, Stores};
 
 /// Largest `Idempotency-Key` the column accepts (`varchar(255)`).
@@ -83,6 +83,12 @@ pub enum AcceptanceError {
     ConflictingDialect { gts_id: String, path: String },
     #[error("'{gts_id}' carries no document, which a registration requires")]
     MissingContent { gts_id: String },
+    /// Never "delete if present": the only other reading of an absent version is
+    /// a deletion that races whoever last wrote the entity.
+    #[error("deleting '{gts_id}' requires a positive expected_resource_version")]
+    DeletionRequiresVersion { gts_id: String },
+    #[error("deleting '{gts_id}' takes no document, and nothing would read one")]
+    DeletionCarriesContent { gts_id: String },
     #[error("'{gts_id}' is {size} bytes, over limits.authored_document ({limit})")]
     AuthoredDocumentTooLarge {
         gts_id: String,
@@ -104,10 +110,6 @@ pub enum AcceptanceError {
     ZeroPrecondition { gts_id: String },
     #[error("expected_resource_version {version} on '{gts_id}' is negative")]
     NegativePrecondition { gts_id: String, version: i64 },
-    #[error("operation kind is not accepted yet: deletion arrives with T20")]
-    UnsupportedOperationKind,
-    #[error("dry_run is not accepted yet: rollback-only evaluation arrives with T20")]
-    DryRunNotAccepted,
     /// The `409` case: the key exists with a different request behind it.
     #[error(
         "Idempotency-Key is already bound to operation {operation_id} with a different request"
@@ -139,6 +141,8 @@ impl AcceptanceError {
             Self::UnsupportedDialect { .. } => "unsupported_dialect",
             Self::ConflictingDialect { .. } => "conflicting_dialect",
             Self::MissingContent { .. } => "missing_content",
+            Self::DeletionRequiresVersion { .. } => "deletion_requires_version",
+            Self::DeletionCarriesContent { .. } => "deletion_carries_content",
             Self::AuthoredDocumentTooLarge { .. } => "authored_document_too_large",
             Self::ForceNotPermitted { .. } => "force_not_permitted",
             Self::ForceHasNothingToWaive { .. } => "force_has_nothing_to_waive",
@@ -146,8 +150,6 @@ impl AcceptanceError {
             Self::MinorTypeSchemaRevision { .. } => "minor_type_schema_revision",
             Self::ZeroPrecondition { .. } => "zero_precondition",
             Self::NegativePrecondition { .. } => "negative_precondition",
-            Self::UnsupportedOperationKind => "unsupported_operation_kind",
-            Self::DryRunNotAccepted => "dry_run_not_accepted",
             Self::FingerprintConflict { .. } => "fingerprint_conflict",
             Self::Dispatch(_) => "dispatch_failure",
             Self::Storage(_) => "storage_failure",
@@ -202,19 +204,9 @@ pub fn validate(
     if key.len() > MAX_IDEMPOTENCY_KEY {
         return Err(AcceptanceError::IdempotencyKeyTooLong { length: key.len() });
     }
-    if request.kind != OperationKind::Registration {
-        // Deletion has its own short protocol and its own precondition rule
-        // (T20). Refusing loudly beats accepting an operation whose rules are not
-        // implemented, which would fail later in the worker with a worse message.
-        return Err(AcceptanceError::UnsupportedOperationKind);
-    }
-    if request.dry_run {
-        // Dry Run needs a rollback-only evaluation transaction and a separate
-        // terminal-outcome write (T20). Letting it reach the ordinary creation
-        // worker makes `mark_item_succeeded` violate the dry-run result-column
-        // CHECK and strands the accepted operation in `running`.
-        return Err(AcceptanceError::DryRunNotAccepted);
-    }
+    // Registration and Deletion are the whole vocabulary; `OperationKind` is
+    // closed, so there is no third kind to refuse.
+    let deletion = request.kind == OperationKind::Deletion;
     if request.candidates.is_empty() {
         return Err(AcceptanceError::EmptyBatch);
     }
@@ -255,6 +247,11 @@ pub fn validate(
 
         // --- preconditions ------------------------------------------------
         let expected = match candidate.expected_resource_version {
+            None if deletion => {
+                return Err(AcceptanceError::DeletionRequiresVersion {
+                    gts_id: id.id().to_owned(),
+                });
+            }
             None => Precondition::MustNotExist,
             Some(0) => {
                 return Err(AcceptanceError::ZeroPrecondition {
@@ -336,14 +333,29 @@ pub fn validate(
         }
 
         // --- step 5: declared dialect ------------------------------------
-        let content =
-            candidate
-                .content
-                .as_ref()
-                .ok_or_else(|| AcceptanceError::MissingContent {
+        //
+        // A deletion names an entity and a version and submits no document, so
+        // steps 5 and 8 have nothing to read. The stored payload is JSON `null`:
+        // `ck_tr_operation_item_state` requires a non-null payload while the item
+        // is pending, and `null` is the JSON spelling of the absence rather than a
+        // placeholder document that something might one day try to parse.
+        let content = match (&candidate.content, deletion) {
+            (Some(_), true) => {
+                return Err(AcceptanceError::DeletionCarriesContent {
                     gts_id: id.id().to_owned(),
-                })?;
-        if id.is_type() {
+                });
+            }
+            (None, true) => None,
+            (Some(content), false) => Some(content),
+            (None, false) => {
+                return Err(AcceptanceError::MissingContent {
+                    gts_id: id.id().to_owned(),
+                });
+            }
+        };
+        if let Some(content) = content
+            && id.is_type()
+        {
             check_dialect(id.id(), content)?;
         }
 
@@ -377,7 +389,7 @@ pub fn validate(
         // Step 7 runs in the worker over the extracted dependency edges.
 
         // --- step 8: canonicalize ----------------------------------------
-        let canonical = canonical_text(content);
+        let canonical = content.map_or_else(|| canonical_text(&Value::Null), canonical_text);
         let authored_limit = ctx.config.limits.authored_document.bytes();
         if canonical.len() > authored_limit {
             return Err(AcceptanceError::AuthoredDocumentTooLarge {
@@ -456,7 +468,13 @@ pub async fn accept(
     // Count at the shared exit so every refusal is covered.
     if let Err(error) = &accepted {
         let reason = error.reason();
-        ctx.metrics.refused(RefusalStage::Acceptance, reason);
+        // The request's own kind and mode: a synchronous refusal has no stored item
+        // to read them from, and both are top-level fields it always carries.
+        ctx.metrics.refused(
+            RefusalStage::Acceptance,
+            reason,
+            PassLabels::new(request.kind, request.dry_run),
+        );
         // The `warn` is for client refusals only.
         let infrastructure = matches!(
             error,

@@ -76,6 +76,117 @@ impl DependencyRepo {
             .is_some())
     }
 
+    /// Count the **live direct** registered dependants of one entity (T20).
+    ///
+    /// Direct only: SPEC §16.9 blocks a deletion on a dependant that names the
+    /// target itself. A transitive one is separated by an entity that is still
+    /// resolvable, so it is not stranded by this deletion.
+    ///
+    /// Every edge kind counts, unlike [`Self::has_live_direct_instances`]: a
+    /// `$ref` holder, a derived Type Schema and a conforming Instance are all
+    /// stranded the same way. `x-gts-ref` is absent by construction — the keyword
+    /// produces no edge (T18), which is exactly what makes it not a dependant.
+    ///
+    /// The read is bounded at `bound + 1` rows, and the returned count saturates
+    /// there: the caller reports a number, and an unbounded count would make a
+    /// refusal cost more than the commit it refuses. `DISTINCT` because one
+    /// dependant can hold two edge kinds to one target.
+    ///
+    /// # Errors
+    /// Propagates the scoped query's failure.
+    pub async fn live_direct_dependents(
+        runner: &impl DBRunner,
+        scope: &AccessScope,
+        entity_id: i64,
+        bound: usize,
+    ) -> Result<usize, ScopeError> {
+        /// The projection: the dependant's entity id and nothing else, and the
+        /// field is deliberately never read. Identities do not leave this
+        /// function — the refusal reports a count — but the column has to be
+        /// selected for `DISTINCT` to mean "distinct dependants".
+        #[derive(FromQueryResult)]
+        struct DependentId {
+            #[allow(dead_code)]
+            id: i64,
+        }
+
+        const DIRECT_DEPENDENTS: &str = "direct_dependents";
+        let read_limit = u64::try_from(bound.saturating_add(1)).unwrap_or(u64::MAX);
+        let rows = entity::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .with_ctes()
+            .cte::<dependency::Entity>(DIRECT_DEPENDENTS, |query| {
+                query
+                    .filter(dependency::Column::ToEntityId.eq(entity_id))
+                    .select_only()
+                    .column(dependency::Column::FromEntityId)
+            })
+            .join_cte(
+                DIRECT_DEPENDENTS,
+                Condition::all().add(
+                    Expr::col((Alias::new(DIRECT_DEPENDENTS), Alias::new("from_entity_id")))
+                        .equals((entity::Entity, entity::Column::Id)),
+                ),
+            )
+            .filter(
+                Condition::all().add(entity::Column::LifecycleStatus.eq(LifecycleStatus::Active)),
+            )
+            .select_only()
+            .column(entity::Column::Id)
+            .distinct()
+            .limit(read_limit)
+            .all_as::<DependentId>(runner)
+            .await?;
+        Ok(rows.len())
+    }
+
+    /// The stored edges **between** the given entities, as `(from, to)` pairs.
+    ///
+    /// Deletion order needs them (T20): a deletion submits no document, so the
+    /// only place its edges exist is this table. Edges leaving the set are
+    /// dropped — that dependant survives the deletion, and refusing on it is
+    /// the commit-time recheck's job, not the ordering's.
+    ///
+    /// Only `from_entity_id` is filtered in SQL; the far end is matched in Rust.
+    /// Two `IN (…)` lists would bind twice the parameters for the same rows, and
+    /// the set's own outgoing edges are what a deletion batch reads anyway.
+    ///
+    /// # Errors
+    /// Propagates the scoped query's failure.
+    pub async fn edges_within(
+        runner: &impl DBRunner,
+        scope: &AccessScope,
+        entity_ids: &[i64],
+    ) -> Result<Vec<(i64, i64)>, ScopeError> {
+        if entity_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let within: HashSet<i64> = entity_ids.iter().copied().collect();
+        let mut pairs: Vec<(i64, i64)> = Vec::new();
+        for chunk in entity_ids.chunks(IN_CHUNK) {
+            let rows = dependency::Entity::find()
+                .secure()
+                .scope_with(scope)
+                .filter(
+                    Condition::all()
+                        .add(dependency::Column::FromEntityId.is_in(chunk.iter().copied())),
+                )
+                .all(runner)
+                .await?;
+            pairs.extend(
+                rows.into_iter()
+                    .filter(|row| within.contains(&row.to_entity_id))
+                    .map(|row| (row.from_entity_id, row.to_entity_id)),
+            );
+        }
+        // One dependant can hold two edge kinds to one target; the order cares
+        // only that it waits.
+        pairs.sort_unstable();
+        pairs.dedup();
+        Ok(pairs)
+    }
+
     /// Replace one entity's outgoing edges.
     ///
     /// Admission replaces only the admitted entity's outgoing rows, never anyone

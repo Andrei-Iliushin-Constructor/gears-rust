@@ -43,7 +43,7 @@ use crate::domain::dependency::{DependencyEdge, extract_edges};
 use crate::domain::enums::{DependencyKind, EntityKind, LifecycleStatus, OwnershipScope};
 use crate::domain::family::{FamilyKey, admits_new_member, family_key};
 use crate::domain::gts_store::{CommittedSchema, UnitDocument, UnitStore, load_unit_store};
-use crate::domain::ports::metrics::AdmissionMetrics;
+use crate::domain::ports::metrics::{AdmissionMetrics, PassLabels};
 use crate::domain::ports::{
     NewCurrentInstance, NewCurrentTypeSchema, NewEntity, NewInstanceRevision, NewRevision,
     OperationItemRow, Stores, snapshot_read,
@@ -111,6 +111,11 @@ pub struct EvaluatedUnit {
     pub edges: Vec<DependencyEdge>,
     /// The database state on which this evaluation's verdict rests.
     pub vector: RevisionVector,
+    /// Which pass produced this unit, for the series its commit emits (T20).
+    /// Carried on the unit rather than threaded through every commit signature:
+    /// each commit already takes the unit, and a separate argument would be one
+    /// more place the two could disagree.
+    pub labels: PassLabels,
 }
 
 /// Owned baseline snapshot passed into `spawn_blocking`, with refusal provenance.
@@ -267,6 +272,8 @@ pub struct EvaluationTarget<'a> {
     pub precondition: Precondition,
     /// Accepted waiver request, subject to worker and baseline re-authorization.
     pub force: bool,
+    /// Which pass this evaluation belongs to, for the series it emits (T20).
+    pub labels: PassLabels,
 }
 
 /// Probe once when requested, then evaluate a miss from the same snapshot.
@@ -299,6 +306,7 @@ pub async fn evaluate(
         operation_item_id,
         precondition,
         force,
+        labels,
     } = target;
     let limits = *limits;
     let id = match GtsId::try_new(gts_id) {
@@ -476,7 +484,7 @@ pub async fn evaluate(
             canonical_body,
             &content,
             &baseline,
-            CompatReporting::new(&span, metrics.as_ref(), &baseline_choice, force),
+            CompatReporting::new(&span, metrics.as_ref(), &baseline_choice, force, labels),
             operation_item_id,
             edges,
             vector,
@@ -591,6 +599,7 @@ fn evaluate_loaded(
         compat_forced: reporting.forced,
         edges,
         vector,
+        labels: reporting.labels,
     }))
 }
 
@@ -606,6 +615,8 @@ struct CompatReporting<'a> {
     choice: &'a Baseline,
     /// Effective waiver shared by the refusal decision, metrics, and revision provenance.
     forced: bool,
+    /// Which pass this verdict belongs to; only `dry_run` reaches the counter.
+    labels: PassLabels,
 }
 
 impl<'a> CompatReporting<'a> {
@@ -616,12 +627,14 @@ impl<'a> CompatReporting<'a> {
         metrics: &'a dyn AdmissionMetrics,
         choice: &'a Baseline,
         accepted_force: bool,
+        labels: PassLabels,
     ) -> Self {
         Self {
             span,
             metrics,
             choice,
             forced: accepted_force && choice.waivable(),
+            labels,
         }
     }
 
@@ -643,7 +656,8 @@ impl<'a> CompatReporting<'a> {
             },
         );
         if let Some(verdict) = verdict {
-            self.metrics.compat_verdict(verdict, self.forced);
+            self.metrics
+                .compat_verdict(verdict, self.forced, self.labels);
         }
     }
 }
@@ -1038,8 +1052,12 @@ pub async fn commit_creation(
             tx,
             scope,
             unit.operation_item_id,
-            revision_no,
-            entity.resource_version,
+            // A dry run's transaction is rolled back, but its statements still
+            // execute — and `ck_tr_operation_item_state` fires at statement
+            // time, not at commit. So the values have to be the dry-run ones
+            // here too, even though this write is about to be discarded.
+            (!unit.labels.dry_run).then_some(revision_no),
+            (!unit.labels.dry_run).then_some(entity.resource_version),
             now,
         )
         .await?
@@ -1309,8 +1327,10 @@ pub async fn commit_revision(
             tx,
             scope,
             unit.operation_item_id,
-            revision_no,
-            resource_version,
+            // See `commit_creation`: a dry run's discarded write must still
+            // satisfy the item CHECK.
+            (!unit.labels.dry_run).then_some(revision_no),
+            (!unit.labels.dry_run).then_some(resource_version),
             now,
         )
         .await?
@@ -1345,7 +1365,7 @@ async fn refresh_reverse_impact(
     match refresh_dependents(stores, tx, scope, &[entity_id], limits, now).await? {
         Ok(outcome) => {
             // Record only write sets that actually commit.
-            metrics.observe_activation_write_set(outcome.refreshed.len());
+            metrics.observe_activation_write_set(outcome.refreshed.len(), unit.labels);
             tracing::debug!(
                 gts_id = %unit.gts_id,
                 refreshed = outcome.refreshed.len(),

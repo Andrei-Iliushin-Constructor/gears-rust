@@ -9,7 +9,9 @@ mod test_stores;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub use test_stores::{CasMissHooks, ClaimHooks, PauseHooks, PausePoint, StoreHooks, TestStores};
+pub use test_stores::{
+    CasMissHooks, ClaimHooks, DeletionMissHooks, PauseHooks, PausePoint, StoreHooks, TestStores,
+};
 
 use gts::GtsConfig;
 use types_registry::{
@@ -290,6 +292,68 @@ pub async fn seed_pending_revision_item_with(
     )
     .await
     .expect("insert pending operation item");
+    (op_id, item.id)
+}
+
+/// A **pending deletion** item written directly, so a test can produce a shape
+/// acceptance refuses — a deletion with no `expected_resource_version` being the
+/// one the worker still has to answer for. Returns `(operation_id, item_id)`.
+pub async fn seed_pending_deletion_item(
+    runner: &impl DBRunner,
+    gts_id: &str,
+    expected_resource_version: i64,
+    now: OffsetDateTime,
+) -> (Uuid, i64) {
+    let scope = allow_all();
+    let op_id = Uuid::new_v4();
+    secure_insert::<operation::Entity>(
+        operation::ActiveModel {
+            id: Set(op_id),
+            kind: Set(OperationKind::Deletion),
+            dry_run: Set(false),
+            plane: Set(Plane::Platform),
+            tenant_id: Set(None),
+            principal_id: Set(Uuid::from_u128(0xB1)),
+            idempotency_key: Set(format!("idem-{op_id}")),
+            idempotency_scope_hash: Set(vec![0x01; 32]),
+            request_fingerprint: Set(vec![0x02; 32]),
+            status: Set(OperationStatus::Running),
+            created_at: Set(now),
+            started_at: Set(Some(now)),
+            completed_at: Set(None),
+        },
+        &scope,
+        runner,
+    )
+    .await
+    .expect("insert operation");
+
+    let item = secure_insert::<operation_item::Entity>(
+        operation_item::ActiveModel {
+            operation_id: Set(op_id),
+            item_no: Set(0),
+            gts_id: Set(gts_id.to_owned()),
+            dry_run: Set(false),
+            kind: Set(OperationKind::Deletion),
+            expected_resource_version: Set(expected_resource_version),
+            compat_forced: Set(false),
+            status: Set(OperationItemStatus::Pending),
+            // `ck_tr_operation_item_state` requires a payload while pending, and
+            // a deletion records the absence of a document as JSON `null`.
+            request_payload: Set(Some("null".to_owned())),
+            result_revision_no: Set(None),
+            result_resource_version: Set(None),
+            error_payload: Set(None),
+            created_at: Set(now),
+            started_at: Set(None),
+            completed_at: Set(None),
+            ..Default::default()
+        },
+        &scope,
+        runner,
+    )
+    .await
+    .expect("insert pending deletion item");
     (op_id, item.id)
 }
 

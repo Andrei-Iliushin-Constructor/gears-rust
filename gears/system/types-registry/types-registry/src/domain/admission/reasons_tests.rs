@@ -24,6 +24,7 @@ fn known() -> Vec<Reason> {
         Reason::DialectChanged,
         Reason::EntityDeleted,
         Reason::FamilyKindConflict,
+        Reason::HasRegisteredDependents,
         Reason::FamilyShapeConflict,
         Reason::IncompatibleWithBaseline,
         Reason::InstanceOfMajorZero,
@@ -32,6 +33,7 @@ fn known() -> Vec<Reason> {
         Reason::InvalidSchema,
         Reason::InvalidValue,
         Reason::MissingPredecessor,
+        Reason::NotActive,
         Reason::PreconditionFailed,
         Reason::ResolutionClosureExceeded,
         Reason::ResolvedDocumentTooLarge,
@@ -46,7 +48,7 @@ fn known() -> Vec<Reason> {
 
 /// The count [`known`] must have. Bumped deliberately, which is the point: a
 /// variant added without a thought about the dashboards reading it fails here.
-const KNOWN_VARIANTS: usize = 27;
+const KNOWN_VARIANTS: usize = 29;
 
 /// Read variant names from the enum source, failing on unexpected syntax
 /// rather than returning an incomplete vocabulary.
@@ -120,6 +122,7 @@ fn variant_name(reason: &Reason) -> &'static str {
             Reason::DialectChanged => "DialectChanged",
             Reason::EntityDeleted => "EntityDeleted",
             Reason::FamilyKindConflict => "FamilyKindConflict",
+            Reason::HasRegisteredDependents => "HasRegisteredDependents",
             Reason::FamilyShapeConflict => "FamilyShapeConflict",
             Reason::IncompatibleWithBaseline => "IncompatibleWithBaseline",
             Reason::InstanceOfMajorZero => "InstanceOfMajorZero",
@@ -128,6 +131,7 @@ fn variant_name(reason: &Reason) -> &'static str {
             Reason::InvalidSchema => "InvalidSchema",
             Reason::InvalidValue => "InvalidValue",
             Reason::MissingPredecessor => "MissingPredecessor",
+            Reason::NotActive => "NotActive",
             Reason::PreconditionFailed => "PreconditionFailed",
             Reason::ResolutionClosureExceeded => "ResolutionClosureExceeded",
             Reason::ResolvedDocumentTooLarge => "ResolvedDocumentTooLarge",

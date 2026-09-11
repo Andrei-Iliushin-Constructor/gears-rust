@@ -341,6 +341,7 @@ async fn a_pass_that_loses_the_item_cas_writes_nothing_at_all() {
             operation_item_id: item.id,
             precondition: item.precondition,
             force: item.compat_forced,
+            labels: item.pass_labels(),
         },
         &common::limits(),
         &common::metrics(),

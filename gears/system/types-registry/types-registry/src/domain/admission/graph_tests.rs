@@ -9,7 +9,7 @@
 use serde_json::{Value, json};
 use toolkit_gts::gts_id;
 
-use super::{BatchCandidate, BlockKind, order_batch};
+use super::{BatchCandidate, BlockKind, DependencyLink, order_batch, order_deletion_batch};
 
 const ROOT: &str = gts_id!("cf.core.batch.root.v1~");
 const DERIVED: &str = gts_id!("cf.core.batch.root.v1~cf.core.batch.leaf.v1~");
@@ -317,4 +317,96 @@ fn every_candidate_is_either_ordered_or_refused_exactly_once() {
         !order.cyclic().is_empty(),
         "the ROOT/OTHER pair must be refused, or this test proves only the easy half",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Deletion order (T20): the reverse relation, over stored edges
+// ---------------------------------------------------------------------------
+
+/// Identifiers in the order a batch would be deleted in.
+fn deletion_order(ids: &[&str], edges: &[(&str, &str)]) -> Vec<String> {
+    let owned: Vec<String> = ids.iter().map(|id| (*id).to_owned()).collect();
+    let links: Vec<DependencyLink> = edges
+        .iter()
+        .map(|(dependant, target)| DependencyLink {
+            dependant: (*dependant).to_owned(),
+            target: (*target).to_owned(),
+        })
+        .collect();
+    order_deletion_batch(&owned, &links)
+        .order()
+        .iter()
+        .map(|&index| owned[index].clone())
+        .collect()
+}
+
+/// The whole point: a dependant is deleted **before** what it consumes. This is
+/// the mirror of a registration's order, not the same order.
+#[test]
+fn a_dependant_is_deleted_before_its_target() {
+    // Submitted target-first, which is the order that fails without this.
+    assert_eq!(
+        deletion_order(&[ROOT, OTHER], &[(OTHER, ROOT)]),
+        vec![OTHER.to_owned(), ROOT.to_owned()],
+    );
+}
+
+#[test]
+fn a_chain_is_deleted_from_its_far_end() {
+    assert_eq!(
+        deletion_order(&[ROOT, OTHER, DERIVED], &[(OTHER, ROOT), (DERIVED, OTHER)]),
+        vec![DERIVED.to_owned(), OTHER.to_owned(), ROOT.to_owned()],
+    );
+}
+
+/// An edge whose other end is not in the batch orders nothing: that dependant
+/// survives the deletion and is exactly what the commit-time recheck refuses on.
+#[test]
+fn an_edge_leaving_the_batch_does_not_order_a_deletion() {
+    let order = deletion_order(&[ROOT], &[(OUTSIDE, ROOT)]);
+    assert_eq!(order, vec![ROOT.to_owned()]);
+}
+
+#[test]
+fn unrelated_deletions_keep_their_submission_order() {
+    assert_eq!(
+        deletion_order(&[ROOT, OTHER], &[]),
+        vec![ROOT.to_owned(), OTHER.to_owned()],
+    );
+}
+
+/// Every candidate is placed exactly once, whatever the edges say. A deletion
+/// the order dropped would be an item the operation never answers.
+#[test]
+fn every_deletion_candidate_is_placed_exactly_once() {
+    let ids = [ROOT, OTHER, DERIVED, V1_0, V1_1];
+    let order = deletion_order(&ids, &[(OTHER, ROOT), (DERIVED, OTHER), (V1_1, V1_0)]);
+    let mut sorted = order.clone();
+    sorted.sort();
+    let mut expected: Vec<String> = ids.iter().map(|id| (*id).to_owned()).collect();
+    expected.sort();
+    assert_eq!(sorted, expected);
+    assert_eq!(order.len(), ids.len());
+}
+
+/// The committed dependency relation is acyclic (ADR-0012), so this shape is
+/// corrupt state rather than a candidate error — and a deletion batch must not
+/// lose an item over it. The cycle members are appended in submission order and
+/// each still earns its own outcome from the commit-time recheck.
+#[test]
+fn a_cycle_in_stored_edges_still_places_every_candidate() {
+    let mut sorted = deletion_order(&[ROOT, OTHER], &[(OTHER, ROOT), (ROOT, OTHER)]);
+    sorted.sort();
+    assert_eq!(sorted, vec![OTHER.to_owned(), ROOT.to_owned()]);
+}
+
+/// Same input, same output — the same requirement the registration order has.
+#[test]
+fn the_deletion_order_is_deterministic() {
+    let ids = [ROOT, OTHER, DERIVED, V1_0];
+    let edges = [(OTHER, ROOT), (DERIVED, OTHER)];
+    let first = deletion_order(&ids, &edges);
+    for _ in 0..8 {
+        assert_eq!(deletion_order(&ids, &edges), first);
+    }
 }

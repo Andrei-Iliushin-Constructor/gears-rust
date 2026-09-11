@@ -8,7 +8,7 @@ use opentelemetry::metrics::{Counter, Histogram, Meter};
 use opentelemetry::{InstrumentationScope, KeyValue};
 
 use crate::domain::admission::vector::VectorDrift;
-use crate::domain::ports::metrics::{AdmissionMetrics, RefusalStage, TerminalStatus};
+use crate::domain::ports::metrics::{AdmissionMetrics, PassLabels, RefusalStage, TerminalStatus};
 
 /// Instrumentation scope shared by this gear's metrics.
 pub const SCOPE: &str = "cf-gears-types-registry";
@@ -118,29 +118,39 @@ impl AdmissionMetrics for AdmissionMetricsMeter {
         self.unchanged_probes.add(1, &[KeyValue::new("hit", hit)]);
     }
 
-    fn candidate_terminalized(&self, status: TerminalStatus) {
-        self.candidates
-            .add(1, &[KeyValue::new("status", status.label())]);
+    fn candidate_terminalized(&self, status: TerminalStatus, labels: PassLabels) {
+        self.candidates.add(
+            1,
+            &[
+                KeyValue::new("status", status.label()),
+                KeyValue::new("kind", labels.kind_label()),
+                KeyValue::new("dry_run", labels.dry_run),
+            ],
+        );
     }
 
-    fn refused(&self, stage: RefusalStage, reason: &'static str) {
+    fn refused(&self, stage: RefusalStage, reason: &'static str, labels: PassLabels) {
         self.refusals.add(
             1,
             &[
                 KeyValue::new("stage", stage.label()),
                 // The static type enforces a closed label vocabulary.
                 KeyValue::new("reason", reason),
+                KeyValue::new("kind", labels.kind_label()),
+                KeyValue::new("dry_run", labels.dry_run),
             ],
         );
     }
 
-    fn compat_verdict(&self, verdict: CompatibilityVerdict, forced: bool) {
+    fn compat_verdict(&self, verdict: CompatibilityVerdict, forced: bool, labels: PassLabels) {
         self.compat_verdicts.add(
             1,
             &[
                 // The static types enforce both closed vocabularies.
                 KeyValue::new("verdict", verdict_label(verdict)),
                 KeyValue::new("forced", forced),
+                // No `kind`: see the port's documentation — it would be constant.
+                KeyValue::new("dry_run", labels.dry_run),
             ],
         );
     }
@@ -150,7 +160,13 @@ impl AdmissionMetrics for AdmissionMetricsMeter {
             .add(1, &[KeyValue::new("drift", drift_label(drift))]);
     }
 
-    fn observe_activation_write_set(&self, refreshed: usize) {
+    fn observe_activation_write_set(&self, refreshed: usize, labels: PassLabels) {
+        // A rollback-only pass rewrote nothing, so it is not an observation about
+        // how close this deployment runs to `limits.activation_write_set`. Skipped
+        // rather than labelled: see the port's documentation.
+        if labels.dry_run {
+            return;
+        }
         // The configured bound fits exactly in `f64` in practice.
         #[allow(clippy::cast_precision_loss)]
         self.activation_write_set.record(refreshed as f64, &[]);

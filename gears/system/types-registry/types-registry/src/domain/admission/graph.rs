@@ -169,6 +169,93 @@ impl BatchOrder {
     }
 }
 
+/// One stored dependency edge, as the deletion order reads it.
+///
+/// Identifiers rather than entity ids, so the ordering stays a pure function
+/// over names and its tests need no database — the same property the
+/// registration order has.
+#[domain_model]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DependencyLink {
+    /// The entity that consumes `target`, and therefore must be deleted first.
+    pub dependant: String,
+    pub target: String,
+}
+
+/// Order a **deletion** batch: a dependant before the entity it consumes.
+///
+/// The mirror of [`order_batch`], and deliberately a separate function rather
+/// than a flag on it. The two are different relations read from different
+/// places: a registration's edges come from the candidate's own document, while
+/// a deletion submits none — its edges are the ones already stored in
+/// `dependency`, which is why they arrive as an argument.
+///
+/// **No blocking and no refusals.** If a deletion fails, the entity it consumed
+/// is refused by the commit-time recheck with `has_registered_dependents`, which
+/// names the real problem and counts it; inventing a second, vaguer reason here
+/// would be worse. And a cycle is impossible in committed state (ADR-0012), so
+/// anything the sort cannot place is corrupt state rather than a candidate
+/// error: those are appended in submission order and left to earn their own
+/// outcome. The one guarantee is that **every** candidate is placed exactly
+/// once — an item the order dropped is an item the operation never answers.
+///
+/// Edges whose other end is outside the batch are ignored: that dependant
+/// survives the deletion, and refusing on it is the recheck's job.
+#[must_use]
+pub fn order_deletion_batch(gts_ids: &[String], edges: &[DependencyLink]) -> BatchOrder {
+    let count = gts_ids.len();
+    let mut position: BTreeMap<&str, usize> = BTreeMap::new();
+    for (index, gts_id) in gts_ids.iter().enumerate() {
+        position.entry(gts_id.as_str()).or_insert(index);
+    }
+
+    // `waits_on[target]` is its in-batch dependants: the target is deleted last.
+    let mut waits_on: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); count];
+    for edge in edges {
+        let (Some(&dependant), Some(&target)) = (
+            position.get(edge.dependant.as_str()),
+            position.get(edge.target.as_str()),
+        ) else {
+            continue;
+        };
+        if dependant != target {
+            waits_on[target].insert(dependant);
+        }
+    }
+
+    let blockers: Vec<Vec<Blocker>> = waits_on
+        .iter()
+        .map(|dependants| {
+            dependants
+                .iter()
+                .map(|&index| Blocker {
+                    index,
+                    // The kind is unused here: nothing blocks in a deletion
+                    // order. `Blocker` is reused only to share `topological`.
+                    kind: BlockKind::Dependency,
+                })
+                .collect()
+        })
+        .collect();
+
+    let (mut order, unplaced) = topological(&blockers, &BTreeSet::new(), count);
+    if !unplaced.is_empty() {
+        tracing::warn!(
+            unplaced = unplaced.len(),
+            "types_registry deletion batch holds a dependency cycle, which committed state \
+             cannot: appending its members in submission order"
+        );
+        order.extend(unplaced);
+    }
+    BatchOrder {
+        order,
+        // Nothing is refused and nothing blocks here; see this function's
+        // documentation. The empty vectors let the worker's loop stay one loop.
+        cyclic: Vec::new(),
+        blockers: vec![Vec::new(); count],
+    }
+}
+
 /// Order one candidate set, reporting the cycles it cannot order.
 ///
 /// Total: a candidate whose identifier does not parse, or whose content is not
