@@ -459,6 +459,24 @@ impl GithubClient {
         }
     }
 
+    async fn get_json_all_wrapped<P: serde::de::DeserializeOwned, T>(
+        &self,
+        path: &str,
+        options: &FetchOptions,
+        unwrap: impl Fn(P) -> Vec<T>,
+    ) -> Result<Vec<T>, DomainError> {
+        let mut url = self.absolute(path);
+        let mut items: Vec<T> = Vec::new();
+        loop {
+            let fetched: FetchedPage<P> = self.get_page(&url, options).await?;
+            items.extend(unwrap(fetched.parsed));
+            match fetched.next {
+                Some(next) => url = next,
+                None => return Ok(items),
+            }
+        }
+    }
+
     /// Store a fresh response so the next request can revalidate it.
     ///
     /// Entries without a validator are dropped: the next request could not
@@ -2252,16 +2270,16 @@ impl GithubPort for GithubClient {
                 .map(|s| commit_status_record(repo_id, sha, s))
                 .collect();
 
-            let checks: GhCheckRunsPage = self
-                .get_json(
+            let checks = self
+                .get_json_all_wrapped(
                     &format!(
                         "/repos/{owner}/{name}/commits/{sha}/check-runs?per_page={FIRST_PAGE_SIZE}"
                     ),
                     options,
+                    |page: GhCheckRunsPage| page.check_runs,
                 )
                 .await?;
             check_runs = checks
-                .check_runs
                 .into_iter()
                 .map(|c| check_run_record(repo_id, c))
                 .collect();
@@ -2370,10 +2388,11 @@ impl GithubPort for GithubClient {
             return Ok(ActionsListing::default());
         }
 
-        let runs: GhWorkflowRunsPage = self
-            .get_json(
+        let runs = self
+            .get_json_all_wrapped(
                 &format!("/repos/{owner}/{name}/actions/runs?per_page={FIRST_PAGE_SIZE}"),
                 options,
+                |page: GhWorkflowRunsPage| page.workflow_runs,
             )
             .await?;
         let (deployments, _deployments_complete): (Vec<GhDeployment>, bool) = self
@@ -2385,7 +2404,6 @@ impl GithubPort for GithubClient {
 
         Ok(ActionsListing {
             workflow_runs: runs
-                .workflow_runs
                 .into_iter()
                 .map(|w| workflow_run_record(repo_id, w))
                 .collect(),
@@ -2404,16 +2422,16 @@ impl GithubPort for GithubClient {
         run_id: i64,
         options: &FetchOptions,
     ) -> Result<Vec<WorkflowJobRecord>, DomainError> {
-        let page: GhWorkflowJobsPage = self
-            .get_json(
+        let jobs = self
+            .get_json_all_wrapped(
                 &format!(
                     "/repos/{owner}/{name}/actions/runs/{run_id}/jobs?per_page={FIRST_PAGE_SIZE}"
                 ),
                 options,
+                |page: GhWorkflowJobsPage| page.jobs,
             )
             .await?;
-        Ok(page
-            .jobs
+        Ok(jobs
             .into_iter()
             .map(|j| workflow_job_record(repo_id, j))
             .collect())
