@@ -1501,9 +1501,7 @@ async fn a_rate_limited_response_is_retried_before_giving_up() {
     let limited = server
         .mock_async(|when, then| {
             when.method("GET").path("/repos/acme/busy");
-            then.status(403)
-                .header("retry-after", "0")
-                .header("x-ratelimit-remaining", "0");
+            then.status(403).header("retry-after", "0");
         })
         .await;
 
@@ -1788,9 +1786,7 @@ async fn a_rate_limit_seen_by_one_request_pauses_every_other_request() {
     let limited = server
         .mock_async(|when, then| {
             when.method("GET").path("/repos/acme/limited");
-            then.status(403)
-                .header("retry-after", "2")
-                .header("x-ratelimit-remaining", "0");
+            then.status(403).header("retry-after", "2");
         })
         .await;
     server

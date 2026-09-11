@@ -1,10 +1,9 @@
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone as _, Utc};
 use serde::Deserialize;
 use tokio::sync::{Semaphore, SemaphorePermit};
-use tokio::time::Instant;
 
 use crate::domain::error::DomainError;
 use crate::domain::ports::github::{
@@ -21,6 +20,9 @@ use crate::domain::repo::{
 };
 use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache, NoCache};
 use crate::infra::github::pagination::parse_link_next;
+use crate::infra::github::rate_limit::{
+    AuthoritativeQuota, QuotaProbe, RateLimitController, RateLimitHeaders,
+};
 use crate::redact::redacted_word;
 
 /// Items asked for per request. GitHub's maximum, so a listing of a given
@@ -95,33 +97,83 @@ const RATE_LIMIT_RETRIES: u32 = 30;
 /// Requests in flight a client allows before the gear config says otherwise.
 /// Matches the PRD's "parallelism <= 8" rate-limit threshold.
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 8;
-/// Longest single back-off sleep, whatever `Retry-After` or the reset stamp
-/// asks for; an exhausted hourly window is re-checked at this pace.
+/// Longest exponential back-off sleep for a rate limit that carried no
+/// guidance; limits with `Retry-After` or a reset stamp are waited out by the
+/// token's controller instead.
 const MAX_RETRY_SLEEP: std::time::Duration = std::time::Duration::from_mins(5);
 
 /// Whether a `403` is GitHub's rate limiter rather than an authorization
 /// refusal: rate-limit responses carry `Retry-After` or an exhausted
 /// `x-ratelimit-remaining`.
-fn is_rate_limited(headers: &reqwest::header::HeaderMap) -> bool {
-    headers.contains_key("retry-after")
-        || header_string(headers, "x-ratelimit-remaining").as_deref() == Some("0")
+fn is_rate_limited(seen: &RateLimitHeaders) -> bool {
+    seen.retry_after_secs.is_some() || seen.remaining == Some(0)
 }
 
-/// How long to wait before retrying a rate-limited request: `Retry-After`
-/// when present, else time until `x-ratelimit-reset`, else exponential in
-/// the attempt number — always capped at [`MAX_RETRY_SLEEP`].
-fn retry_delay(headers: &reqwest::header::HeaderMap, attempt: u32) -> std::time::Duration {
-    let seconds = header_string(headers, "retry-after")
-        .and_then(|v| v.parse::<u64>().ok())
-        .or_else(|| {
-            let reset = header_string(headers, "x-ratelimit-reset")?
-                .parse::<i64>()
-                .ok()?;
-            let now = time::OffsetDateTime::now_utc().unix_timestamp();
-            u64::try_from(reset - now).ok()
+/// Exponential wait for a rate limit that came with neither `Retry-After`
+/// nor an exhausted budget, so the controller has nothing to park on; capped
+/// at [`MAX_RETRY_SLEEP`].
+fn fallback_delay(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(1u64 << attempt.min(8)).min(MAX_RETRY_SLEEP)
+}
+
+/// Releases the token's in-flight slot when dropped, so an admitted request
+/// counts against its controller exactly as long as it is in flight.
+struct Admission<'a> {
+    controller: &'a RateLimitController,
+}
+
+impl Drop for Admission<'_> {
+    fn drop(&mut self) {
+        self.controller.release();
+    }
+}
+
+/// The controller's authoritative-quota hook: `GET /rate_limit`, which GitHub
+/// answers without charging the budget.
+struct RateLimitProbe {
+    http: reqwest::Client,
+    url: String,
+    token: Option<String>,
+}
+
+impl std::fmt::Debug for RateLimitProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RateLimitProbe")
+            .field("url", &self.url)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl QuotaProbe for RateLimitProbe {
+    async fn fetch_core_quota(&self) -> Option<AuthoritativeQuota> {
+        let mut request = self
+            .http
+            .get(&self.url)
+            .header("Accept", ACCEPT_JSON)
+            .header("X-GitHub-Api-Version", GITHUB_API_VERSION);
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+        let body: serde_json::Value = request
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        let core = body.get("resources")?.get("core")?;
+        Some(AuthoritativeQuota {
+            remaining: u32::try_from(core.get("remaining")?.as_u64()?).ok()?,
+            limit: u32::try_from(core.get("limit")?.as_u64()?).ok()?,
+            reset_at: core
+                .get("reset")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|secs| Utc.timestamp_opt(secs, 0).single()),
         })
-        .unwrap_or(1u64 << attempt);
-    std::time::Duration::from_secs(seconds).min(MAX_RETRY_SLEEP)
+    }
 }
 
 /// One response header as an owned string, when it is present and printable.
@@ -148,8 +200,8 @@ fn next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
 
 /// GitHub REST client for the mirror (gears-rust#4630).
 ///
-/// Conditional requests and `Link`-header pagination are in; per-token
-/// rate-limit admission is not. The token comes from gear config as a
+/// Conditional requests, `Link`-header pagination and per-token rate-limit
+/// admission (ADR-0003) are in. The token comes from gear config as a
 /// temporary shortcut until credstore integration (#4534).
 pub struct GithubClient {
     http: reqwest::Client,
@@ -160,10 +212,12 @@ pub struct GithubClient {
     /// GitHub's secondary rate limit reacts to concurrency, so the ceiling is
     /// global rather than per sync.
     permits: Semaphore,
-    /// Instant before which no request may be sent: set when any request is
-    /// told to back off, so one rate limit pauses every task at once instead
-    /// of each discovering it in turn.
-    cooldown_until: Mutex<Option<Instant>>,
+    /// The token's admission controller: every request is admitted here
+    /// before it takes a shared permit, so a token that is backing off or out
+    /// of budget never occupies capacity another token could use.
+    controller: Arc<RateLimitController>,
+    /// Ceiling the controller's adaptive soft cap may grow to.
+    max_cap: u32,
 }
 
 impl GithubClient {
@@ -190,13 +244,20 @@ impl GithubClient {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|e| DomainError::internal(format!("failed to build HTTP client: {e}")))?;
+        let controller = Arc::new(RateLimitController::new());
+        controller.set_quota_probe(Arc::new(RateLimitProbe {
+            http: http.clone(),
+            url: format!("{}/rate_limit", api_base_url.trim_end_matches('/')),
+            token: token.clone(),
+        }));
         Ok(Self {
             http,
             api_base_url,
             token,
             cache,
             permits: Semaphore::new(DEFAULT_MAX_CONCURRENT_REQUESTS),
-            cooldown_until: Mutex::new(None),
+            controller,
+            max_cap: u32::try_from(DEFAULT_MAX_CONCURRENT_REQUESTS).unwrap_or(u32::MAX),
         })
     }
 
@@ -204,43 +265,54 @@ impl GithubClient {
     /// one, so the client always makes progress).
     #[must_use]
     pub fn with_max_concurrent_requests(mut self, max: usize) -> Self {
-        self.permits = Semaphore::new(max.max(1));
+        let max = max.max(1);
+        self.permits = Semaphore::new(max);
+        self.max_cap = u32::try_from(max).unwrap_or(u32::MAX);
         self
     }
 
-    /// A permit for one outbound request, held until the response body has
-    /// been read.
-    async fn request_permit(&self) -> Result<SemaphorePermit<'_>, DomainError> {
-        self.wait_out_cooldown().await;
-        self.permits
+    /// Admission for one outbound request: the token's controller first, then
+    /// a shared permit, both held until the response body has been read.
+    async fn admit(&self) -> Result<(Admission<'_>, SemaphorePermit<'_>), DomainError> {
+        self.controller
+            .admit()
+            .await
+            .map_err(|e| DomainError::internal(format!("GitHub rate limit: {e}")))?;
+        let admission = Admission {
+            controller: &self.controller,
+        };
+        let permit = self
+            .permits
             .acquire()
             .await
-            .map_err(|e| DomainError::internal(format!("request semaphore closed: {e}")))
+            .map_err(|e| DomainError::internal(format!("request semaphore closed: {e}")))?;
+        Ok((admission, permit))
     }
 
-    /// Sleep until the shared cooldown has passed, re-checking in case another
-    /// request pushed it further while this one slept.
-    async fn wait_out_cooldown(&self) {
-        loop {
-            let deadline = *self
-                .cooldown_until
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            match deadline {
-                Some(until) if until > Instant::now() => tokio::time::sleep_until(until).await,
-                _ => return,
-            }
+    /// Feed a response's rate-limit headers to the token's controller.
+    async fn observe(
+        &self,
+        headers: &reqwest::header::HeaderMap,
+        status: reqwest::StatusCode,
+    ) -> RateLimitHeaders {
+        let mut seen = RateLimitHeaders::parse(
+            headers
+                .iter()
+                .filter_map(|(name, value)| value.to_str().ok().map(|v| (name.as_str(), v))),
+        );
+        seen.is_secondary_rate_limit = status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+        self.controller
+            .observe(&seen, status.as_u16(), self.max_cap)
+            .await;
+        seen
+    }
+
+    /// Sleep before retrying a limit that gave the controller nothing to park
+    /// on: no `Retry-After` and a budget that is not exhausted.
+    async fn wait_without_guidance(&self, seen: &RateLimitHeaders, attempt: u32) {
+        if seen.retry_after_secs.is_none() && seen.remaining.is_none_or(|left| left > 0) {
+            tokio::time::sleep(fallback_delay(attempt)).await;
         }
-    }
-
-    /// Push the shared cooldown out to at least `delay` from now.
-    fn extend_cooldown(&self, delay: std::time::Duration) {
-        let deadline = Instant::now() + delay;
-        let mut slot = self
-            .cooldown_until
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        *slot = Some(slot.map_or(deadline, |current| current.max(deadline)));
     }
 
     /// The stored entry for this request, unless `force` says to ignore it.
@@ -294,10 +366,12 @@ impl GithubClient {
     /// One response: what it parsed to, plus the `rel="next"` URL if the list
     /// continues.
     ///
-    /// A rate limit (429, or a 403 carrying rate-limit headers) puts the whole
-    /// client into a shared cooldown for as long as GitHub asks, then the
-    /// request is retried; only [`RATE_LIMIT_RETRIES`] refusals in a row fail
-    /// it. Adaptive concurrency (ADR-0003) is #4630's remaining half.
+    /// Every request is admitted by the token's controller before it takes a
+    /// shared permit (ADR-0003). A rate limit (429, or a 403 carrying rate-limit
+    /// headers) halves the token's soft cap and parks its requests for
+    /// `Retry-After`; an exhausted budget is confirmed against `/rate_limit`
+    /// and waited out until the reset. Only [`RATE_LIMIT_RETRIES`] refusals in
+    /// a row fail the request.
     async fn get_page<T: serde::de::DeserializeOwned>(
         &self,
         url: &str,
@@ -307,11 +381,12 @@ impl GithubClient {
         let cached = self.cached_entry(options, url, &key).await;
 
         let mut attempt: u32 = 0;
-        // `_permit` lives until this function returns, so a request counts
-        // against the ceiling until its body has been read. A retry gives its
-        // permit up first: a request asleep on a backoff is not in flight.
-        let (response, rate_limited, _permit) = loop {
-            let permit = self.request_permit().await?;
+        // `_admission` and `_permit` live until this function returns, so a
+        // request counts against both ceilings until its body has been read.
+        // A retry gives them up first: a request asleep on a backoff is not
+        // in flight.
+        let (response, rate_limited, _admission, _permit) = loop {
+            let (admission, permit) = self.admit().await?;
             let response = self
                 .conditional_request(url, cached.as_ref())
                 .send()
@@ -319,24 +394,25 @@ impl GithubClient {
                 .map_err(|e| DomainError::internal(format!("GitHub request failed: {e}")))?;
 
             let status = response.status();
+            let seen = self.observe(response.headers(), status).await;
             let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                || (status == reqwest::StatusCode::FORBIDDEN
-                    && is_rate_limited(response.headers()));
+                || (status == reqwest::StatusCode::FORBIDDEN && is_rate_limited(&seen));
             if rate_limited && attempt < RATE_LIMIT_RETRIES {
-                let delay = retry_delay(response.headers(), attempt);
                 tracing::warn!(
                     url = %redacted_word(url),
                     %status,
                     attempt,
-                    delay_secs = delay.as_secs(),
+                    retry_after_secs = ?seen.retry_after_secs,
+                    remaining = ?seen.remaining,
                     "GitHub rate limit hit; backing off before retrying"
                 );
                 drop(permit);
-                self.extend_cooldown(delay);
+                drop(admission);
+                self.wait_without_guidance(&seen, attempt).await;
                 attempt += 1;
                 continue;
             }
-            break (response, rate_limited, permit);
+            break (response, rate_limited, admission, permit);
         };
 
         let status = response.status();
@@ -505,9 +581,10 @@ impl GithubClient {
         let url = format!("{}/graphql", self.api_base_url.trim_end_matches('/'));
 
         let mut attempt: u32 = 0;
-        // GraphQL shares the REST ceiling: both spend the same token's budget.
-        let (response, _permit) = loop {
-            let permit = self.request_permit().await?;
+        // GraphQL shares the REST ceilings: both spend the same token's
+        // budget, though the controller only reads the core budget headers.
+        let (response, _admission, _permit) = loop {
+            let (admission, permit) = self.admit().await?;
             let mut request = self
                 .http
                 .post(&url)
@@ -520,23 +597,24 @@ impl GithubClient {
             })?;
 
             let status = response.status();
+            let seen = self.observe(response.headers(), status).await;
             let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                || (status == reqwest::StatusCode::FORBIDDEN
-                    && is_rate_limited(response.headers()));
+                || (status == reqwest::StatusCode::FORBIDDEN && is_rate_limited(&seen));
             if rate_limited && attempt < RATE_LIMIT_RETRIES {
-                let delay = retry_delay(response.headers(), attempt);
                 tracing::warn!(
                     %status,
                     attempt,
-                    delay_secs = delay.as_secs(),
+                    retry_after_secs = ?seen.retry_after_secs,
+                    remaining = ?seen.remaining,
                     "GitHub GraphQL rate limit hit; backing off before retrying"
                 );
                 drop(permit);
-                self.extend_cooldown(delay);
+                drop(admission);
+                self.wait_without_guidance(&seen, attempt).await;
                 attempt += 1;
                 continue;
             }
-            break (response, permit);
+            break (response, admission, permit);
         };
 
         let status = response.status();
