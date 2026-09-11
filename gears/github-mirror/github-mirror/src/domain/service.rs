@@ -3438,12 +3438,22 @@ impl Service {
             .sync_sessions
             .list_by_statuses(
                 &scope,
-                &[session_states::QUEUED, session_states::IN_PROGRESS],
+                &[
+                    session_states::QUEUED,
+                    session_states::IN_PROGRESS,
+                    session_states::INTERRUPTED,
+                ],
             )
             .await?;
 
-        let count = stale.len();
+        let mut count = 0;
         for (tenant_id, mut session) in stale {
+            self.release_stale_sync_lock(tenant_id, &session.repo_full_name)
+                .await;
+            if session.status == session_states::INTERRUPTED {
+                continue;
+            }
+            count += 1;
             session_states::INTERRUPTED.clone_into(&mut session.status);
             session.ended_at = Some(now_rfc3339());
             session.error = Some("the server restarted while this sync was in flight".to_owned());
@@ -3453,6 +3463,28 @@ impl Service {
         }
 
         Ok(count)
+    }
+
+    /// Drop the per-repo sync lock marker a dead process left for `repo`, if
+    /// one is there. Safe at start-up only: this process holds no sync lock
+    /// yet, and the file backend is used by one process per `SQLite` file.
+    async fn release_stale_sync_lock(&self, tenant_id: Uuid, repo: &str) {
+        let Some((owner, name)) = repo.split_once('/') else {
+            return;
+        };
+        let lock_key = format!("sync/{tenant_id}/{owner}/{name}");
+        match self.db.db().break_stale_lock(GEAR_NAME, &lock_key).await {
+            Ok(true) => tracing::info!(
+                repository = repo,
+                "released the sync lock a dead process left behind"
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                repository = repo,
+                error = %e,
+                "could not release a stale sync lock"
+            ),
+        }
     }
 
     /// One sync session by id, tenant-scoped.
