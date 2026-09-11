@@ -146,7 +146,7 @@ fn map_scope_error(e: ScopeError) -> DomainError {
     match e {
         ScopeError::Denied(msg) => DomainError::forbidden(msg),
         ScopeError::Invalid(msg) => DomainError::internal(format!("scope invalid: {msg}")),
-        ScopeError::Db(e) => DomainError::internal(format!("database error: {e}")),
+        ScopeError::Db(e) => DomainError::Database(e.into()),
         ScopeError::TenantNotInScope { tenant_id } => {
             DomainError::forbidden(format!("tenant {tenant_id} not in scope"))
         }

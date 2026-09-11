@@ -37,6 +37,9 @@ const STREAMED_PHASES: [TaskPhase; 3] = [
 
 const VERIFICATION_PHASES: [TaskPhase; 1] = [TaskPhase::Verification];
 
+const TRANSIENT_RETRIES: u32 = 3;
+const TRANSIENT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Progress bands in permille, so the whole estimate stays integer.
 ///
 /// DESIGN gives Discovery 2, Indexing 10, `ChangeDetection` 3, Refinement 80
@@ -298,14 +301,33 @@ impl RepoPhaseRunner {
         let dispatcher = Arc::clone(&self.dispatcher);
         let ctx = ctx.clone();
         in_flight.spawn(async move {
-            let error = match dispatcher.dispatch(&ctx, &task).await {
-                Ok(()) => {
-                    queue.complete_task(task.id);
-                    None
-                }
-                Err(e) => {
-                    queue.fail_task(task.id);
-                    Some(e)
+            let mut task = task;
+            let error = loop {
+                match dispatcher.dispatch(&ctx, &task).await {
+                    Ok(()) => {
+                        queue.complete_task(task.id);
+                        break None;
+                    }
+                    Err(e)
+                        if e.is_transient()
+                            && task.attempt < TRANSIENT_RETRIES
+                            && !ctx.cancel.is_cancelled() =>
+                    {
+                        task.attempt += 1;
+                        tracing::warn!(
+                            phase = ?task.phase,
+                            entity_type = %task.entity_type,
+                            entity_id = ?task.entity_id,
+                            attempt = task.attempt,
+                            error = %e,
+                            "sync task hit a transient database error; retrying"
+                        );
+                        tokio::time::sleep(TRANSIENT_RETRY_DELAY * task.attempt).await;
+                    }
+                    Err(e) => {
+                        queue.fail_task(task.id);
+                        break Some(e);
+                    }
                 }
             };
             TaskOutcome { task, error }
