@@ -12,6 +12,12 @@ pub enum AdmissionFailureReason {
     /// The baseline's own references no longer resolve, so no comparison could be
     /// performed. Distinct from an undecidable one: the check never ran.
     BaselineUnresolvable,
+    /// A selected in-batch dependency — an authored `$ref`, the derivation base
+    /// or an Instance's conforming type — did not reach a successful outcome.
+    BlockedByDependency,
+    /// The preceding minor of a minor-bearing candidate was submitted in the same
+    /// batch and failed, so the implicit `vM.(n-1)~ -> vM.n~` edge never closed.
+    BlockedByPredecessor,
     /// `compare_documents` returned `Unknown`, distinct from an incompatible verdict.
     CompatibilityUndecidable,
     DependentInvalid,
@@ -53,6 +59,8 @@ impl AdmissionFailureReason {
             "activation_write_set_exceeded" => Self::ActivationWriteSetExceeded,
             "already_exists" => Self::AlreadyExists,
             "baseline_unresolvable" => Self::BaselineUnresolvable,
+            "blocked_by_dependency" => Self::BlockedByDependency,
+            "blocked_by_predecessor" => Self::BlockedByPredecessor,
             "compatibility_undecidable" => Self::CompatibilityUndecidable,
             "dependent_invalid" => Self::DependentInvalid,
             "dialect_changed" => Self::DialectChanged,
@@ -95,6 +103,8 @@ impl AdmissionFailureReason {
             Self::ActivationWriteSetExceeded => "activation_write_set_exceeded",
             Self::AlreadyExists => "already_exists",
             Self::BaselineUnresolvable => "baseline_unresolvable",
+            Self::BlockedByDependency => "blocked_by_dependency",
+            Self::BlockedByPredecessor => "blocked_by_predecessor",
             Self::CompatibilityUndecidable => "compatibility_undecidable",
             Self::DependentInvalid => "dependent_invalid",
             Self::DialectChanged => "dialect_changed",

@@ -19,14 +19,16 @@
 //! already final. So the two travel in different positions: `Err(WorkerError)`
 //! versus `Ok(_)` with a failed item.
 //!
-//! # Current admission scope (through T18)
+//! # Current admission scope (through T19)
 //!
-//! Each item is its own unit, processed in `item_no` order. References resolve
-//! against committed dependencies plus this candidate; `gts-rust` validation
-//! rejects circular `$ref`s. T19 adds the batch-wide candidate overlay,
-//! topological ordering and cycle detection over combined `$ref`/derivation edges.
-//! Creations and content revisions both land here — the item's stored precondition
-//! chooses which commit runs.
+//! Each item is its own unit, and the order those units run in is the batch's
+//! dependency order ([`super::graph`]), not its submission order. A candidate's
+//! in-batch dependencies are therefore committed by the time it is evaluated,
+//! which is what makes an in-batch reference resolve against the candidate rather
+//! than against whatever is committed under the same identifier; a dependency
+//! that failed instead blocks it, and everything downstream in turn. Creations and
+//! content revisions both land here — the item's stored precondition chooses which
+//! commit runs.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -39,6 +41,7 @@ use tracing::{Instrument, Span};
 use uuid::Uuid;
 
 pub use super::errors::{ItemFailure, WorkerError};
+use super::graph::{BatchCandidate, BatchOrder, BlockKind, Blocker, order_batch};
 use super::revision::{CommittedUnit, RevisionCommit};
 use super::unchanged;
 use super::unit::{EvaluationTarget, PreparedUnit, commit_creation, commit_revision, evaluate};
@@ -148,16 +151,39 @@ async fn run_operation_inner(
         );
     }
 
-    let mut outcomes = Vec::with_capacity(items.len());
-    for item in items {
-        // Instrument each item without splitting `process_item` to own the span.
-        let span =
-            observability::unit_span(operation_id, &item.gts_id, item.kind, item.dry_run, item.id);
-        outcomes.push(
-            process_item(stores, db, scope, tuning, operation_id, &item, now)
-                .instrument(span)
-                .await?,
+    // Steps 1–2: order the batch before touching any candidate. One candidate is
+    // one unit, but *which* unit runs next is a property of the whole batch.
+    let batch: Vec<BatchCandidate> = items.iter().map(batch_candidate).collect();
+    let order = order_batch(&batch);
+    // Indexed by position in `items`, so the report keeps submission order while
+    // the work follows dependency order.
+    let mut outcomes: Vec<Option<ItemOutcome>> = vec![None; items.len()];
+
+    // A cycle member is refused without being evaluated: it has no resolved form,
+    // so there is nothing to evaluate it against.
+    for member in order.cyclic() {
+        let item = &items[member.index];
+        let failure = ItemFailure::new(AdmissionFailureReason::InvalidSchema, member.message());
+        outcomes[member.index] = Some(
+            refuse_unevaluated(stores, db, scope, tuning, operation_id, item, failure, now).await?,
         );
+    }
+
+    for &index in order.order() {
+        let item = &items[index];
+        outcomes[index] = Some(match blocked_by(&order, index, &outcomes) {
+            Some(blocker) => {
+                let failure = blocked_failure(blocker, &items[blocker.index].gts_id);
+                refuse_unevaluated(stores, db, scope, tuning, operation_id, item, failure, now)
+                    .await?
+            }
+            // Instrument each item without splitting `process_item` to own the span.
+            None => {
+                process_item(stores, db, scope, tuning, operation_id, item, now)
+                    .instrument(unit_span(operation_id, item))
+                    .await?
+            }
+        });
     }
 
     mark_completed(stores, db, scope, operation_id, now).await?;
@@ -165,8 +191,101 @@ async fn run_operation_inner(
     Ok(OperationOutcome {
         operation_id,
         already_terminal: false,
-        items: outcomes,
+        // `order_batch` partitions the candidate set into the ordered and the
+        // cyclic, so every position is filled; the fallback reports what the store
+        // holds rather than dropping an item the operation owes an outcome.
+        items: items
+            .iter()
+            .zip(outcomes)
+            .map(|(item, outcome)| outcome.unwrap_or_else(|| stored_outcome(item)))
+            .collect(),
     })
+}
+
+/// The ordering's view of one stored item. An unparsable payload yields no
+/// content and therefore no edge — the item's own evaluation refuses it with
+/// `invalid_document`, which is a better message than anything this layer has.
+fn batch_candidate(item: &OperationItemRow) -> BatchCandidate {
+    BatchCandidate {
+        gts_id: item.gts_id.clone(),
+        content: item
+            .request_payload
+            .as_deref()
+            .and_then(|payload| serde_json::from_str(payload).ok()),
+    }
+}
+
+fn unit_span(operation_id: Uuid, item: &OperationItemRow) -> Span {
+    observability::unit_span(operation_id, &item.gts_id, item.kind, item.dry_run, item.id)
+}
+
+/// Terminalize a candidate the batch refused before it could be evaluated — a
+/// cycle member, or one whose in-batch dependency failed.
+///
+/// An item an earlier pass already decided is left alone: `record_failure`'s CAS
+/// reports the stored outcome instead, which is the same rule an evaluated
+/// refusal follows.
+#[allow(clippy::too_many_arguments)]
+async fn refuse_unevaluated(
+    stores: &Arc<dyn Stores>,
+    db: &DBProvider<WorkerError>,
+    scope: &AccessScope,
+    tuning: Tuning<'_>,
+    operation_id: Uuid,
+    item: &OperationItemRow,
+    failure: ItemFailure,
+    now: OffsetDateTime,
+) -> Result<ItemOutcome, WorkerError> {
+    if item.status != OperationItemStatus::Pending && item.status != OperationItemStatus::Running {
+        return Ok(stored_outcome(item));
+    }
+    record_failure(
+        stores,
+        db,
+        scope,
+        operation_id,
+        item,
+        failure,
+        now,
+        tuning.metrics,
+    )
+    .instrument(unit_span(operation_id, item))
+    .await
+}
+
+/// The first in-batch edge whose target failed, or `None` if this candidate is
+/// free to be evaluated.
+///
+/// Transitive without being computed transitively: a blocked candidate is itself
+/// `failed`, so everything downstream of it finds a failed blocker in turn. Every
+/// blocker is decided before this candidate — cycle members up front, the rest by
+/// the topological order — so a `None` outcome here means the blocker is this
+/// candidate itself, which only a cycle member has.
+fn blocked_by(
+    order: &BatchOrder,
+    index: usize,
+    outcomes: &[Option<ItemOutcome>],
+) -> Option<Blocker> {
+    order.blockers(index).iter().copied().find(|blocker| {
+        outcomes[blocker.index]
+            .as_ref()
+            .is_some_and(|outcome| outcome.status == OperationItemStatus::Failed)
+    })
+}
+
+/// The refusal a blocked candidate carries, naming the candidate that blocked it.
+fn blocked_failure(blocker: Blocker, target: &str) -> ItemFailure {
+    let edge = match blocker.kind {
+        BlockKind::Predecessor => "the preceding minor",
+        BlockKind::Dependency => "the selected dependency",
+    };
+    ItemFailure::new(
+        blocker.kind.reason(),
+        format!(
+            "{edge} '{target}' was submitted in the same batch and did not succeed, so this \
+             candidate was not evaluated and nothing was committed for it"
+        ),
+    )
 }
 
 /// The `DbErr` inside a [`WorkerError`], for the transaction retry helper.

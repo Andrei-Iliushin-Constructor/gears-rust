@@ -1613,7 +1613,7 @@ MySQL's integer boolean, and the SQLite insert chunk accounts for all 15 columns
 
 ## Phase 5 — Batching, deletion, dry run, and the REST surface
 
-### - [ ] T19: Dependency-aware partial admission
+### - [x] T19: Dependency-aware partial admission
 
 **Description:** Batch admission over two edge sets, which are not the same set. The
 **ordering** graph is authored `$ref`s between candidates, each candidate's
@@ -1632,31 +1632,101 @@ no condensation step and no atomic group. The ordering stays a pure function ove
 set.
 
 **Acceptance criteria:**
-- [ ] Independent passing branches commit despite failures elsewhere
-- [ ] In-batch references resolve against the candidate overlay, never a previously committed revision
-- [ ] A failed selected dependency yields `blocked_by_dependency`; a failed lower minor yields `blocked_by_predecessor`
-- [ ] A circular `$ref` between two candidates in one batch is refused as `invalid_schema` — the overlay makes both visible to each other, so this is where the acyclicity invariant is actually tested
-- [ ] A cycle mixing `$ref` with derivation — a base candidate `$ref`ing a schema derived from it — is refused the same way: the ordering runs over the combined edge set, not over `$ref` alone
-- [ ] A candidate with a self-referential GTS `$ref` is refused as `invalid_schema`.
+- [x] Independent passing branches commit despite failures elsewhere
+- [x] In-batch references resolve against the candidate overlay, never a previously committed
+  revision. **The overlay is realized by commit order, not by a second document set** — see
+  the note below, which also records why the obvious test for it passes without the feature
+- [x] A failed selected dependency yields `blocked_by_dependency`; a failed lower minor yields `blocked_by_predecessor`
+- [x] A circular `$ref` between two candidates in one batch is refused as `invalid_schema` — the overlay makes both visible to each other, so this is where the acyclicity invariant is actually tested
+- [x] A cycle mixing `$ref` with derivation — a base candidate `$ref`ing a schema derived from it — is refused the same way: the ordering runs over the combined edge set, not over `$ref` alone
+- [x] A candidate with a self-referential GTS `$ref` is refused as `invalid_schema`.
   For self-cycles and multi-candidate cycles, assert every cycle member fails and no new
   entity/revision or outgoing edge is committed; existing revisions remain unchanged
-- [ ] The implicit predecessor edge is not written to `dependency`
-- [ ] The ordering is exposed as a pure function over a candidate set, usable without a database — required for unit testing without a fixture DB
+- [x] The implicit predecessor edge is not written to `dependency` —
+  `a_minor_pair_is_ordered_by_an_edge_that_is_never_stored` admits both minors in one batch
+  and asserts the upper one has no outgoing edge, beside `family_test`'s single-candidate form
+- [x] The ordering is exposed as a pure function over a candidate set, usable without a
+  database — `graph::order_batch(&[BatchCandidate]) -> BatchOrder`. All 17 of its tests run
+  with no database, which is the point: a cycle is exactly what no fixture database can hold,
+  because nothing cyclic is ever committed
 
 **Observability (P16):**
-- [ ] `blocked_by_dependency` and `blocked_by_predecessor` are `Reason` consts and are counted
+- [x] `blocked_by_dependency` and `blocked_by_predecessor` are `Reason` consts and are counted
       per blocked candidate, so a batch's blocked fan-out is one query rather than a read of
-      every item row
+      every item row. Both go through `record_failure`, so a blocked candidate is counted by
+      `candidates_total{status="failed"}` and `refusals_total{stage="admission",reason}` the
+      same way an evaluated refusal is — there is no second, quieter terminalization path
 
 **Verification:**
-- [ ] Gear tests, all three backends (see [Commands](#commands))
-- [ ] Tests: partial commit, blocked dependent, blocked predecessor, refused in-batch `$ref` cycle
-- [ ] Test: batch over `limits.batch_candidates` refused synchronously
-- [ ] Test: a batch with one failing dependency emits one `candidates_total{status="failed"}` per
-      blocked candidate, under the right `reason` label for each of the two blocking kinds
+- [x] Gear tests, all three backends (see [Commands](#commands)) — 781/781 on `SQLite`, up
+      from 750 by this task's 31 tests. `partial_admission_backends_test` runs the ordering,
+      partial-commit, both blocking kinds and the cycle on PostgreSQL and MySQL; it is
+      selected by `make test-types-registry-db`, whose whole set is 24/24 **run green with
+      Docker up**
+- [x] Tests: partial commit, blocked dependent, blocked predecessor, refused in-batch `$ref` cycle
+- [x] Test: batch over `limits.batch_candidates` refused synchronously — T7's
+      `a_batch_over_the_limit_is_refused_with_both_numbers`, unchanged. No new test: the bound
+      is enforced in `validate` before any operation row exists, which is the property, and a
+      second test of it would assert the same call
+- [x] Test: a batch with one failing dependency emits one `candidates_total{status="failed"}` per
+      blocked candidate, under the right `reason` label for each of the two blocking kinds —
+      `a_blocked_batch_counts_one_failed_candidate_per_blocked_reason`, one broken candidate
+      with two dependents, one of each blocking kind
+
+**The overlay is commit order, and that is a decision rather than a shortcut.** SPEC step 3
+says a unit's store holds "the candidates" plus their closure, which reads as a literal
+document overlay. It is not implemented that way: the topological order commits a
+candidate's in-batch dependencies *before* it is evaluated, so its store reads them from the
+database, and their committed content is by definition the candidate content. A literal
+overlay would additionally have to be excluded from the revision vector's closure roots and
+from `missing_candidates`, for an outcome that is identical wherever a dependent is evaluated
+at all — a dependency that failed blocks its dependents, so no candidate is ever evaluated
+against an overlay entry that did not commit. T20's Dry Run is where the two stop agreeing,
+because nothing commits there; that is T20's to decide.
+
+**A test that passed for the wrong reason, and what replaced it.** The obvious test for the
+criterion — revise a base and create a referrer in one batch, then assert the referrer's
+artifacts carry the revision — passes with no ordering at all, because T14's dependent
+refresh rewrites the referrer from the new base whichever order they ran in. The
+discriminating shape is a revision that is **refused**: a referrer resolved against the
+committed row would sail through, so `blocked_by_dependency` is the evidence that the
+candidate is what the reference named. `an_in_batch_reference_never_resolves_against_the_committed_revision`.
+
+**One case beyond the stated criteria: a loop no cycle check sees.** `v1.0~` `$ref`s `v1.1~`
+while both are in the batch. The cycle-bearing graph holds only the `$ref`, so there is no
+cycle in it — yet `v1.1~` waits on `v1.0~` as its predecessor, and no topological order
+exists. Refusing the pair as `invalid_schema` with its own message (`CycleKind::Unorderable`)
+is the honest answer; ordering them arbitrarily would make the outcome depend on which one
+the sort happened to pick. Conformance cannot close a loop this way — nothing references an
+Instance — but the residue is detected rather than argued, so a future edge kind cannot
+silently produce an arbitrary order.
+
+**Blocked both ways: predecessor wins.** A candidate whose preceding minor *and* an authored
+dependency both failed reports `blocked_by_predecessor`. Without its predecessor the
+identifier itself is inadmissible — `missing_predecessor` is what it would earn on its own —
+so that is the stronger statement. `BlockKind` orders `Predecessor` before `Dependency` and
+the blocker set is sorted by `(kind, index)`, so the choice is a total order rather than
+whichever edge was discovered first.
+
+**Added:** `graph::order_batch` (iterative Tarjan for the cycle-bearing SCCs, Kahn over the
+ordering graph with a `BTreeSet` ready set so ties break on the lowest index and a batch's
+outcome cannot vary between pods); `BlockKind`, `Blocker`, `CycleKind`, `CyclicCandidate`,
+`BatchOrder`; two `AdmissionFailureReason` variants; and the worker's per-item loop rebuilt
+around the order, reporting outcomes in submission order while working in dependency order.
+`every_candidate_is_either_ordered_or_refused_exactly_once` pins the partition the worker's
+outcome vector depends on.
 
 **Dependencies:** Checkpoint 4
-**Files likely touched:** `TR/src/domain/admission/graph.rs`, `TR/src/domain/admission/worker.rs`, `TR/tests/partial_admission_test.rs`
+**Files touched:**
+- `TR/src/domain/admission/graph.rs` — NEW, the pure ordering
+- `TR/src/domain/admission/graph_tests.rs` — NEW, 17 in-source tests, no database
+- `TR/src/domain/admission/mod.rs` — declare `graph`
+- `TR/src/domain/admission/reasons.rs`, `reasons_tests.rs` — `BlockedByDependency`,
+  `BlockedByPredecessor`; `KNOWN_VARIANTS` 25 → 27
+- `TR/src/domain/admission/worker.rs` — order the batch, refuse cycle members, block dependents
+- `TR/tests/partial_admission_test.rs` — NEW, 13 `SQLite` tests
+- `TR/tests/partial_admission_backends_test.rs` — NEW, 3 tests behind `integration`
+- `TR/tests/observability_test.rs` — the blocked-fan-out metric test and its two fixtures
 **Scope:** M
 
 ---

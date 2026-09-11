@@ -20,6 +20,7 @@ mod reasons;
 mod unchanged;
 
 pub mod fingerprint;
+pub mod graph;
 pub mod refresh;
 pub mod revision;
 pub mod unit;

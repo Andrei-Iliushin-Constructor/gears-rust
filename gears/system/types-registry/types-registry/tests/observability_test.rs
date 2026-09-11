@@ -54,6 +54,10 @@ const UNSTABLE: &str = gts_id!("cf.core.obsv.draft.v0~");
 const DERIVED_FROM_UNSTABLE: &str = gts_id!("cf.core.obsv.draft.v0~cf.core.obsv.leaf.v1~");
 const INSTANCE_OF_UNSTABLE: &str = gts_id!("cf.core.obsv.draft.v0~cf.core.obsv.first.v1");
 const RESTATED: &str = gts_id!("cf.core.obsv.restated.v1~");
+/// T19: a minor pair whose lower member fails, so the upper is blocked by the
+/// implicit predecessor edge rather than by anything it authored.
+const MINOR_V1_0: &str = gts_id!("cf.core.obsv.blocked.v1.0~");
+const MINOR_V1_1: &str = gts_id!("cf.core.obsv.blocked.v1.1~");
 
 type Provider = Arc<DBProvider<DbError>>;
 
@@ -1310,6 +1314,88 @@ async fn the_quarantine_and_dialect_refusals_each_carry_their_own_reason_label()
         label_values_of("types_registry_refusals_total", "stage"),
         vec!["admission"],
         "all four are per-candidate refusals recorded on an operation item",
+    );
+}
+
+/// T19: a blocked candidate is counted like any other refusal, so a batch's
+/// blocked fan-out is one query rather than a read of every item row. Both
+/// blocking kinds appear under their own `reason`, never merged.
+#[tokio::test]
+async fn a_blocked_batch_counts_one_failed_candidate_per_blocked_reason() {
+    let _serial = SERIAL.lock().await;
+    recorder();
+    let db = test_db().await;
+    reset_metrics();
+
+    // `MINOR_V1_0` fails on an unresolvable reference; `MINOR_V1_1` is blocked by
+    // it as a predecessor, and `REFERRER` by it as a selected dependency.
+    let operation_id = submit(
+        &db,
+        "k-blocked-batch",
+        vec![
+            candidate(MINOR_V1_0, referencing_target(MINOR_V1_0, ABSENT), None),
+            candidate(MINOR_V1_1, plain(MINOR_V1_1), None),
+            candidate(REFERRER, referencing_target(REFERRER, MINOR_V1_0), None),
+        ],
+    )
+    .await
+    .expect("acceptance");
+    let outcome = run_operation(
+        &stores(),
+        &worker(&db),
+        &allow_all(),
+        Tuning {
+            limits: &common::limits(),
+            worker: &worker_settings(),
+            metrics: metrics(),
+            allow_compatibility_force: false,
+        },
+        operation_id,
+        LATER,
+    )
+    .await
+    .expect("the worker must not fail on infrastructure");
+    flush();
+
+    assert!(
+        outcome
+            .items
+            .iter()
+            .all(|item| item.status == OperationItemStatus::Failed),
+        "one broken candidate and its two blocked dependents: {:?}",
+        outcome.items,
+    );
+    assert_eq!(
+        counter_sum_where("types_registry_candidates_total", &[("status", "failed")]),
+        3,
+        "every blocked candidate is terminalized and counted, not silently skipped",
+    );
+    assert_eq!(
+        counter_sum_where(
+            "types_registry_refusals_total",
+            &[
+                ("stage", "admission"),
+                (
+                    "reason",
+                    reason_label(&AdmissionFailureReason::BlockedByDependency)
+                ),
+            ],
+        ),
+        1,
+    );
+    assert_eq!(
+        counter_sum_where(
+            "types_registry_refusals_total",
+            &[
+                ("stage", "admission"),
+                (
+                    "reason",
+                    reason_label(&AdmissionFailureReason::BlockedByPredecessor)
+                ),
+            ],
+        ),
+        1,
+        "a failed lower minor is its own number, not merged into the dependency one",
     );
 }
 
