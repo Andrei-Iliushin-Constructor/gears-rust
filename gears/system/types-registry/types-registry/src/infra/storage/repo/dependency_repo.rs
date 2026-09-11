@@ -4,7 +4,10 @@ use std::collections::{HashMap, HashSet};
 
 use gts::GtsId;
 use sea_orm::sea_query::{Alias, Expr, ExprTrait};
-use sea_orm::{ActiveValue::Set, ColumnTrait, Condition, EntityTrait, FromQueryResult};
+use sea_orm::{
+    ActiveValue::Set, ColumnTrait, Condition, EntityTrait, FromQueryResult, QueryFilter,
+    QuerySelect,
+};
 use toolkit_db::secure::{
     AccessScope, DBRunner, RecursiveCte, ScopeError, SecureDeleteExt, SecureEntityExt,
     SecureInsertManyExt,
@@ -14,6 +17,9 @@ use super::IN_CHUNK;
 use super::entity_repo::EntityRepo;
 use crate::domain::enums::DependencyKind;
 use crate::domain::ports::{DependencyClosure, EntityRow, ReverseImpact};
+use crate::infra::storage::entity::enums::{
+    DependencyKind as StoredDependencyKind, LifecycleStatus,
+};
 use crate::infra::storage::entity::{dependency, entity};
 
 /// Maximum size of one dependency closure.
@@ -30,6 +36,46 @@ const REVERSE_IMPACT_CTE: &str = "reverse_impact";
 pub struct DependencyRepo;
 
 impl DependencyRepo {
+    /// Test direct Instance conformance without loading values or walking the graph.
+    /// Both queries apply the supplied scope through `SecureORM`; P0 declares both
+    /// entities `unrestricted`. At most one matching entity is returned,
+    /// irrespective of the number of Instances.
+    ///
+    /// # Errors
+    /// Propagates the scoped query's failure.
+    pub async fn has_live_direct_instances(
+        runner: &impl DBRunner,
+        scope: &AccessScope,
+        type_schema_entity_id: i64,
+    ) -> Result<bool, ScopeError> {
+        const DIRECT_INSTANCES: &str = "direct_instances";
+        Ok(entity::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .with_ctes()
+            .cte::<dependency::Entity>(DIRECT_INSTANCES, |query| {
+                query
+                    .filter(dependency::Column::ToEntityId.eq(type_schema_entity_id))
+                    .filter(dependency::Column::Kind.eq(StoredDependencyKind::InstanceOf))
+                    .select_only()
+                    .column(dependency::Column::FromEntityId)
+            })
+            .join_cte(
+                DIRECT_INSTANCES,
+                Condition::all().add(
+                    Expr::col((Alias::new(DIRECT_INSTANCES), Alias::new("from_entity_id")))
+                        .equals((entity::Entity, entity::Column::Id)),
+                ),
+            )
+            .filter(
+                Condition::all().add(entity::Column::LifecycleStatus.eq(LifecycleStatus::Active)),
+            )
+            .limit(1)
+            .one(runner)
+            .await?
+            .is_some())
+    }
+
     /// Replace one entity's outgoing edges.
     ///
     /// Admission replaces only the admitted entity's outgoing rows, never anyone

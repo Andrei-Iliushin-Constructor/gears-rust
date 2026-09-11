@@ -19,7 +19,7 @@
 //! already final. So the two travel in different positions: `Err(WorkerError)`
 //! versus `Ok(_)` with a failed item.
 //!
-//! # Current admission scope (through T16)
+//! # Current admission scope (through T18)
 //!
 //! Each item is its own unit, processed in `item_no` order. References resolve
 //! against committed dependencies plus this candidate; `gts-rust` validation
@@ -41,7 +41,7 @@ use uuid::Uuid;
 pub use super::errors::{ItemFailure, WorkerError};
 use super::revision::{CommittedUnit, RevisionCommit};
 use super::unchanged;
-use super::unit::{PreparedUnit, commit_creation, commit_revision, evaluate};
+use super::unit::{EvaluationTarget, PreparedUnit, commit_creation, commit_revision, evaluate};
 use super::vector::VectorDrift;
 use crate::config::{Limits, WorkerSettings};
 use crate::domain::admission::AdmissionFailureReason;
@@ -51,12 +51,21 @@ use crate::domain::ports::metrics::{AdmissionMetrics, RefusalStage, TerminalStat
 use crate::domain::ports::{OperationItemRow, OperationRow, Stores, commit_write, snapshot_read};
 use crate::observability;
 
-/// The two configuration sections one admission pass obeys, carried together.
+/// The configuration one admission pass obeys, carried together.
 #[derive(Clone, Copy)]
 pub struct Tuning<'a> {
     pub limits: &'a Limits,
     pub worker: &'a WorkerSettings,
     pub metrics: &'a Arc<dyn AdmissionMetrics>,
+    /// Deployment waiver setting for this pass, including retries and revalidation.
+    /// See [`effective_force`].
+    pub allow_compatibility_force: bool,
+}
+
+/// Clear a stored waiver when the deployment disables it. The candidate then
+/// receives the ordinary verdict, and provenance records the cleared flag.
+const fn effective_force(item_forced: bool, tuning: &Tuning<'_>) -> bool {
+    item_forced && tuning.allow_compatibility_force
 }
 
 /// What one pass over an operation produced.
@@ -192,10 +201,15 @@ async fn prepare(
         stores,
         db,
         scope,
-        &item.gts_id,
-        payload,
-        item.id,
+        EvaluationTarget {
+            gts_id: &item.gts_id,
+            canonical_body: payload,
+            operation_item_id: item.id,
+            precondition: item.precondition,
+            force: effective_force(item.compat_forced, &tuning),
+        },
         tuning.limits,
+        tuning.metrics,
         Some(item),
     )
     .await?;
@@ -329,6 +343,7 @@ async fn process_item(
     };
     // Log attempts using one-based numbering.
     for attempt in 1..=attempts {
+        // Step 3: evaluation releases its snapshot before CPU-heavy validation.
         let prepared = match initial.take() {
             Some(prepared) => prepared,
             None => {
@@ -336,10 +351,15 @@ async fn process_item(
                     stores,
                     db,
                     scope,
-                    &item.gts_id,
-                    payload,
-                    item.id,
+                    EvaluationTarget {
+                        gts_id: &item.gts_id,
+                        canonical_body: payload,
+                        operation_item_id: item.id,
+                        precondition: item.precondition,
+                        force: effective_force(item.compat_forced, &tuning),
+                    },
                     tuning.limits,
+                    tuning.metrics,
                     None,
                 )
                 .await?

@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use gts::CompatibilityVerdict;
 use toolkit_macros::domain_model;
 
 use crate::domain::admission::vector::VectorDrift;
@@ -71,6 +72,12 @@ pub trait AdmissionMetrics: std::fmt::Debug + Send + Sync {
     /// `types_registry_refusals_total{stage,reason}` — one increment per refusal.
     fn refused(&self, stage: RefusalStage, reason: &'static str);
 
+    /// Count each computed verdict in `types_registry_compat_verdicts_total{verdict,forced}`.
+    /// Includes compatible verdicts, which do not increment [`Self::refused`].
+    /// Exempt candidates emit nothing; their baseline is recorded on the unit span.
+    /// `forced` records the effective ADR-0004 waiver.
+    fn compat_verdict(&self, verdict: CompatibilityVerdict, forced: bool);
+
     /// Count revalidation retries by drift.
     fn revalidation_retried(&self, drift: &VectorDrift);
 
@@ -92,6 +99,8 @@ impl AdmissionMetrics for NoopMetrics {
     fn candidate_terminalized(&self, _status: TerminalStatus) {}
 
     fn refused(&self, _stage: RefusalStage, _reason: &'static str) {}
+
+    fn compat_verdict(&self, _verdict: CompatibilityVerdict, _forced: bool) {}
 
     fn revalidation_retried(&self, _drift: &VectorDrift) {}
 

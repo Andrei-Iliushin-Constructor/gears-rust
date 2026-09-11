@@ -567,9 +567,7 @@ fn force_is_refused_while_the_deployment_disallows_it() {
     ));
 }
 
-/// With `force` permitted, the candidate must still *have* a cross-minor check to
-/// waive. No-op shapes keep their precise refusal; a real case stays unavailable
-/// until T17 can both evaluate it and persist its provenance.
+/// Even with the deployment flag enabled, only a cross-minor baseline is waivable.
 #[test]
 fn force_needs_a_cross_minor_check_to_waive() {
     let (policy, mut config) = closed();
@@ -596,6 +594,14 @@ fn force_needs_a_cross_minor_check_to_waive() {
             }
         }
     }
+}
+
+/// Acceptance persists the cross-minor waiver request for the worker.
+#[test]
+fn force_on_a_later_minor_is_accepted_and_travels_on_the_item() {
+    let (policy, mut config) = closed();
+    config.allow_compatibility_force = true;
+    let pair = (policy, config);
 
     let mut req = request(vec![candidate(gts_id!("cf.core.example.type.v2.1~"))]);
     req.candidates[0].force = true;
@@ -603,10 +609,66 @@ fn force_needs_a_cross_minor_check_to_waive() {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
     }));
-    assert!(matches!(
-        run(&pair, &req),
-        Err(AcceptanceError::ForceCompatibilityUnavailable { .. })
-    ));
+    let validated = run(&pair, &req).expect("a later minor has a cross-minor check to waive");
+    assert!(
+        validated.items[0].compat_forced,
+        "the flag is durable state: the worker reads the item, and after T21 that is \
+         all it reads",
+    );
+}
+
+/// The precondition selects an intra-entity revision, which `force` cannot waive.
+#[test]
+fn force_cannot_waive_the_intra_entity_edge_of_a_revision() {
+    let (policy, mut config) = closed();
+    config.allow_compatibility_force = true;
+    let pair = (policy, config);
+
+    let id = gts_id!("cf.core.example.type.v2~");
+    let mut req = request(vec![candidate(id)]);
+    req.candidates[0].force = true;
+    req.candidates[0].expected_resource_version = Some(3);
+    req.candidates[0].content = Some(json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+    }));
+    match run(&pair, &req) {
+        Err(AcceptanceError::ForceHasNothingToWaive { gts_id }) => assert_eq!(gts_id, id),
+        other => panic!("expected ForceHasNothingToWaive, got {other:?}"),
+    }
+}
+
+/// P0 refuses `dry_run` before reaching the force gate. Revisit this ordering
+/// when T20 enables Dry Run.
+#[test]
+fn a_forced_dry_run_is_refused_for_being_a_dry_run_before_force_is_considered() {
+    let pair = closed();
+    let mut req = request(vec![candidate(gts_id!("cf.core.example.type.v1.2~"))]);
+    req.dry_run = true;
+    req.candidates[0].force = true;
+    req.candidates[0].content = Some(json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+    }));
+    match run(&pair, &req) {
+        Err(AcceptanceError::DryRunNotAccepted) => {}
+        Err(AcceptanceError::ForceNotPermitted { .. }) => {
+            panic!(
+                "dry run has become acceptable: extend T17's force gate to it and \
+                 re-point this test at the force refusal"
+            )
+        }
+        other => panic!("expected DryRunNotAccepted, got {other:?}"),
+    }
+}
+
+/// An ordinary candidate carries the flag as `false`, so `compat_forced` is a
+/// reading of the request rather than a default nobody set.
+#[test]
+fn a_candidate_without_force_records_the_flag_as_false() {
+    let pair = closed();
+    let validated = run(&pair, &request(vec![candidate(CF_TYPE)])).expect("accepted");
+    assert!(!validated.items[0].compat_forced);
 }
 
 // ---------------------------------------------------------------------------
