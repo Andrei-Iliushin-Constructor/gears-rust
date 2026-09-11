@@ -8871,7 +8871,7 @@
         "description": "One candidate's durable outcome.",
         "properties": {
           "error": {
-            "description": "The structured refusal reason, when this candidate failed."
+            "description": "The refusal as `{reason, message}`, when this candidate failed.\n`reason` is a stable machine-readable code; `message` is an explanation for humans.\nCompatibility messages include causes and schema locations where available.\nClients must not parse `message` or depend on its wording."
           },
           "gts_id": {
             "type": "string"
@@ -16819,7 +16819,7 @@
             ]
           },
           "force": {
-            "description": "ADR-0004 `force`: waive one cross-minor compatibility check. Refused where\nthe deployment disallows it, where the candidate has no such check, and\nuntil T17 can evaluate the check and persist the waiver provenance.",
+            "description": "ADR-0004: waive one cross-minor check when the deployment permits it.\nIntra-entity revisions are never waivable. The revision records the\neffective waiver as `compat_forced`.",
             "type": [
               "boolean",
               "null"

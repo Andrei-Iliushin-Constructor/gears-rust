@@ -9,10 +9,21 @@ use toolkit_macros::domain_model;
 pub enum AdmissionFailureReason {
     ActivationWriteSetExceeded,
     AlreadyExists,
+    /// The baseline's own references no longer resolve, so no comparison could be
+    /// performed. Distinct from an undecidable one: the check never ran.
+    BaselineUnresolvable,
+    /// `compare_documents` returned `Unknown`, distinct from an incompatible verdict.
+    CompatibilityUndecidable,
     DependentInvalid,
+    /// The declared dialect differs from the major's pinned dialect (ADR-0014).
+    DialectChanged,
     EntityDeleted,
     FamilyKindConflict,
     FamilyShapeConflict,
+    /// `Valid(baseline) ⊆ Valid(candidate)` does not hold (ADR-0003).
+    IncompatibleWithBaseline,
+    /// ADR-0015: a registered Instance cannot conform to a major-0 Type Schema.
+    InstanceOfMajorZero,
     InvalidDocument,
     InvalidIdentifier,
     InvalidSchema,
@@ -22,6 +33,11 @@ pub enum AdmissionFailureReason {
     ResolutionClosureExceeded,
     ResolvedDocumentTooLarge,
     RevalidationExhausted,
+    /// ADR-0015 quarantine: a stable candidate's immediate derivation base names
+    /// a major-0 entity.
+    StableDerivesFromMajorZero,
+    /// ADR-0015: a stable candidate `$ref`s a major-0 entity.
+    StableRefsMajorZero,
     UnparsablePayload,
     UnreadableVersion,
     UnrecognizedPayload,
@@ -36,10 +52,15 @@ impl AdmissionFailureReason {
         match code {
             "activation_write_set_exceeded" => Self::ActivationWriteSetExceeded,
             "already_exists" => Self::AlreadyExists,
+            "baseline_unresolvable" => Self::BaselineUnresolvable,
+            "compatibility_undecidable" => Self::CompatibilityUndecidable,
             "dependent_invalid" => Self::DependentInvalid,
+            "dialect_changed" => Self::DialectChanged,
             "entity_deleted" => Self::EntityDeleted,
             "family_kind_conflict" => Self::FamilyKindConflict,
             "family_shape_conflict" => Self::FamilyShapeConflict,
+            "incompatible_with_baseline" => Self::IncompatibleWithBaseline,
+            "instance_of_major_zero" => Self::InstanceOfMajorZero,
             "invalid_document" => Self::InvalidDocument,
             "invalid_identifier" => Self::InvalidIdentifier,
             "invalid_schema" => Self::InvalidSchema,
@@ -49,6 +70,8 @@ impl AdmissionFailureReason {
             "resolution_closure_exceeded" => Self::ResolutionClosureExceeded,
             "resolved_document_too_large" => Self::ResolvedDocumentTooLarge,
             "revalidation_exhausted" => Self::RevalidationExhausted,
+            "stable_derives_from_major_zero" => Self::StableDerivesFromMajorZero,
+            "stable_refs_major_zero" => Self::StableRefsMajorZero,
             "unparsable_payload" => Self::UnparsablePayload,
             "unreadable_version" => Self::UnreadableVersion,
             "unrecognized_payload" => Self::UnrecognizedPayload,
@@ -71,10 +94,15 @@ impl AdmissionFailureReason {
         match self {
             Self::ActivationWriteSetExceeded => "activation_write_set_exceeded",
             Self::AlreadyExists => "already_exists",
+            Self::BaselineUnresolvable => "baseline_unresolvable",
+            Self::CompatibilityUndecidable => "compatibility_undecidable",
             Self::DependentInvalid => "dependent_invalid",
+            Self::DialectChanged => "dialect_changed",
             Self::EntityDeleted => "entity_deleted",
             Self::FamilyKindConflict => "family_kind_conflict",
             Self::FamilyShapeConflict => "family_shape_conflict",
+            Self::IncompatibleWithBaseline => "incompatible_with_baseline",
+            Self::InstanceOfMajorZero => "instance_of_major_zero",
             Self::InvalidDocument => "invalid_document",
             Self::InvalidIdentifier => "invalid_identifier",
             Self::InvalidSchema => "invalid_schema",
@@ -84,6 +112,8 @@ impl AdmissionFailureReason {
             Self::ResolutionClosureExceeded => "resolution_closure_exceeded",
             Self::ResolvedDocumentTooLarge => "resolved_document_too_large",
             Self::RevalidationExhausted => "revalidation_exhausted",
+            Self::StableDerivesFromMajorZero => "stable_derives_from_major_zero",
+            Self::StableRefsMajorZero => "stable_refs_major_zero",
             Self::UnparsablePayload => "unparsable_payload",
             Self::UnreadableVersion => "unreadable_version",
             Self::UnrecognizedPayload => "unrecognized_payload",
@@ -97,3 +127,7 @@ impl std::fmt::Display for AdmissionFailureReason {
         f.write_str(self.as_str())
     }
 }
+
+#[cfg(test)]
+#[path = "reasons_tests.rs"]
+mod reasons_tests;

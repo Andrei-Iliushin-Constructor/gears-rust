@@ -358,6 +358,15 @@ impl OperationStore for Repos {
 
 #[async_trait]
 impl DependencyStore for Repos {
+    async fn has_live_direct_instances(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        type_schema_entity_id: i64,
+    ) -> Result<bool, ScopeError> {
+        DependencyRepo::has_live_direct_instances(tx, scope, type_schema_entity_id).await
+    }
+
     async fn closure(
         &self,
         tx: &DbTx<'_>,

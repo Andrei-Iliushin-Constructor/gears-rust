@@ -240,6 +240,8 @@ pub struct OperationItemRow {
     pub dry_run: bool,
     pub kind: OperationKind,
     pub precondition: Precondition,
+    /// ADR-0004's accepted `force`, as acceptance recorded it.
+    pub compat_forced: bool,
     pub status: OperationItemStatus,
     pub request_payload: Option<String>,
     pub result_revision_no: Option<i32>,
@@ -476,6 +478,8 @@ pub struct NewOperationItem {
     pub item_no: i32,
     pub gts_id: String,
     pub precondition: Precondition,
+    /// Persisted ADR-0004 waiver request. `compat_forced` avoids `MySQL`'s reserved `force`.
+    pub compat_forced: bool,
     /// The canonical request body. The stored CHECK requires it while the item is
     /// non-terminal, and the worker drops it at terminality.
     pub request_payload: String,
@@ -785,6 +789,15 @@ pub trait OperationStore: Send + Sync {
 /// Dependency edges.
 #[async_trait]
 pub trait DependencyStore: Send + Sync {
+    /// Whether a live Instance conforms directly to this Type Schema.
+    /// Deleted Instances and Instances of derived types do not count.
+    async fn has_live_direct_instances(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        type_schema_entity_id: i64,
+    ) -> Result<bool, ScopeError>;
+
     /// The roots plus everything they transitively consume.
     async fn closure(
         &self,

@@ -3586,6 +3586,7 @@ dependencies = [
  "cf-gears-toolkit-contract",
  "cf-gears-toolkit-contract-macros",
  "cf-gears-toolkit-security",
+ "futures-core",
  "secrecy",
  "serde",
  "thiserror 2.0.18",

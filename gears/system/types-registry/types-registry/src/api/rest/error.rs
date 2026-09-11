@@ -184,6 +184,12 @@ impl From<WorkerError> for CanonicalError {
                 &format!("entity '{gts_id}' (id {entity_id}) vanished mid-transaction"),
                 "admission",
             ),
+            // Corruption of an immutable stored revision, so the document itself
+            // stays in the operator log and never reaches the caller.
+            WorkerError::BaselineUnparsable { gts_id, source } => opaque_internal(
+                &format!("the stored baseline document for '{gts_id}' is not valid JSON: {source}"),
+                "admission",
+            ),
             // A retryable snapshot race, not a malformed candidate.
             WorkerError::DependencyTargetAbsent { gts_id } => opaque_internal(
                 &format!("dependency target '{gts_id}' vanished before its edge was committed"),
@@ -376,13 +382,13 @@ impl From<AcceptanceError> for CanonicalError {
                 format!("force on '{gts_id}' has no cross-minor compatibility check to waive"),
                 field::VALIDATION_FAILED,
             ),
-            AcceptanceError::ForceCompatibilityUnavailable { gts_id } => invalid_candidate(
+            // The identifier is at fault, not the flag, so the violation points at
+            // the identifier field rather than at `force`.
+            AcceptanceError::UnreadableVersion { gts_id } => invalid_candidate(
                 gts_id,
-                vf::FORCE,
-                format!(
-                    "force on '{gts_id}' is not available until compatibility evaluation is enabled"
-                ),
-                field::VALIDATION_FAILED,
+                field::GTS_ID_FIELD,
+                format!("'{gts_id}' names no readable major in its last segment"),
+                field::INVALID_GTS_ID,
             ),
             AcceptanceError::MinorTypeSchemaRevision { gts_id } => invalid_candidate(
                 gts_id,
@@ -601,9 +607,9 @@ mod tests {
                 field::VALIDATION_FAILED,
             ),
             (
-                AcceptanceError::ForceCompatibilityUnavailable { gts_id: id.clone() },
-                violation_field::FORCE,
-                field::VALIDATION_FAILED,
+                AcceptanceError::UnreadableVersion { gts_id: id.clone() },
+                field::GTS_ID_FIELD,
+                field::INVALID_GTS_ID,
             ),
             (
                 AcceptanceError::MinorTypeSchemaRevision { gts_id: id.clone() },
@@ -722,6 +728,13 @@ mod tests {
                 recorded: 1,
                 found: 2,
             })),
+            // The `source` is a real serde error, since the variant interpolates both
+            // it and the identifier into its `Display`.
+            worker_problem(WorkerError::BaselineUnparsable {
+                gts_id: "baseline-secret".to_owned(),
+                source: serde_json::from_str::<serde_json::Value>("{not-secret-json")
+                    .expect_err("the fixture must not parse"),
+            }),
             worker_problem(WorkerError::Storage(ScopeError::Invalid("storage-secret"))),
             worker_problem(WorkerError::Db(DbError::InvalidConfig(
                 "database-secret".to_owned(),
