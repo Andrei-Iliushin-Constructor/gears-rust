@@ -1,9 +1,10 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::time::Instant;
 
 use crate::domain::error::DomainError;
 use crate::domain::ports::github::{
@@ -87,13 +88,16 @@ const USER_AGENT: &str = concat!("cf-gears-github-mirror/", env!("CARGO_PKG_VERS
 /// The REST API version every request pins (DESIGN 3.5). Without it the
 /// response schema follows GitHub's default, which can change under us.
 const GITHUB_API_VERSION: &str = "2022-11-28";
-/// Attempts after the first request when GitHub answers with a rate limit.
-const RATE_LIMIT_RETRIES: u32 = 3;
+/// Times in a row GitHub may answer one request with a rate limit before the
+/// task gives up. A limit is a wait, not an error, so this is generous: at
+/// [`MAX_RETRY_SLEEP`] a request rides out a whole hourly window.
+const RATE_LIMIT_RETRIES: u32 = 30;
 /// Requests in flight a client allows before the gear config says otherwise.
 /// Matches the PRD's "parallelism <= 8" rate-limit threshold.
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 8;
-/// Longest single back-off sleep, whatever `Retry-After` asks for.
-const MAX_RETRY_SLEEP: std::time::Duration = std::time::Duration::from_mins(1);
+/// Longest single back-off sleep, whatever `Retry-After` or the reset stamp
+/// asks for; an exhausted hourly window is re-checked at this pace.
+const MAX_RETRY_SLEEP: std::time::Duration = std::time::Duration::from_mins(5);
 
 /// Whether a `403` is GitHub's rate limiter rather than an authorization
 /// refusal: rate-limit responses carry `Retry-After` or an exhausted
@@ -117,7 +121,7 @@ fn retry_delay(headers: &reqwest::header::HeaderMap, attempt: u32) -> std::time:
             u64::try_from(reset - now).ok()
         })
         .unwrap_or(1u64 << attempt);
-    std::time::Duration::from_secs(seconds.max(1)).min(MAX_RETRY_SLEEP)
+    std::time::Duration::from_secs(seconds).min(MAX_RETRY_SLEEP)
 }
 
 /// One response header as an owned string, when it is present and printable.
@@ -156,6 +160,10 @@ pub struct GithubClient {
     /// GitHub's secondary rate limit reacts to concurrency, so the ceiling is
     /// global rather than per sync.
     permits: Semaphore,
+    /// Instant before which no request may be sent: set when any request is
+    /// told to back off, so one rate limit pauses every task at once instead
+    /// of each discovering it in turn.
+    cooldown_until: Mutex<Option<Instant>>,
 }
 
 impl GithubClient {
@@ -188,6 +196,7 @@ impl GithubClient {
             token,
             cache,
             permits: Semaphore::new(DEFAULT_MAX_CONCURRENT_REQUESTS),
+            cooldown_until: Mutex::new(None),
         })
     }
 
@@ -202,10 +211,36 @@ impl GithubClient {
     /// A permit for one outbound request, held until the response body has
     /// been read.
     async fn request_permit(&self) -> Result<SemaphorePermit<'_>, DomainError> {
+        self.wait_out_cooldown().await;
         self.permits
             .acquire()
             .await
             .map_err(|e| DomainError::internal(format!("request semaphore closed: {e}")))
+    }
+
+    /// Sleep until the shared cooldown has passed, re-checking in case another
+    /// request pushed it further while this one slept.
+    async fn wait_out_cooldown(&self) {
+        loop {
+            let deadline = *self
+                .cooldown_until
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            match deadline {
+                Some(until) if until > Instant::now() => tokio::time::sleep_until(until).await,
+                _ => return,
+            }
+        }
+    }
+
+    /// Push the shared cooldown out to at least `delay` from now.
+    fn extend_cooldown(&self, delay: std::time::Duration) {
+        let deadline = Instant::now() + delay;
+        let mut slot = self
+            .cooldown_until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *slot = Some(slot.map_or(deadline, |current| current.max(deadline)));
     }
 
     /// The stored entry for this request, unless `force` says to ignore it.
@@ -259,9 +294,10 @@ impl GithubClient {
     /// One response: what it parsed to, plus the `rel="next"` URL if the list
     /// continues.
     ///
-    /// Secondary rate limits (429, or a 403 carrying rate-limit headers) are
-    /// waited out and retried a few times rather than failing the whole sync
-    /// on the spot; full admission control is #4630's remaining half.
+    /// A rate limit (429, or a 403 carrying rate-limit headers) puts the whole
+    /// client into a shared cooldown for as long as GitHub asks, then the
+    /// request is retried; only [`RATE_LIMIT_RETRIES`] refusals in a row fail
+    /// it. Adaptive concurrency (ADR-0003) is #4630's remaining half.
     async fn get_page<T: serde::de::DeserializeOwned>(
         &self,
         url: &str,
@@ -296,7 +332,7 @@ impl GithubClient {
                     "GitHub rate limit hit; backing off before retrying"
                 );
                 drop(permit);
-                tokio::time::sleep(delay).await;
+                self.extend_cooldown(delay);
                 attempt += 1;
                 continue;
             }
@@ -478,7 +514,7 @@ impl GithubClient {
                     "GitHub GraphQL rate limit hit; backing off before retrying"
                 );
                 drop(permit);
-                tokio::time::sleep(delay).await;
+                self.extend_cooldown(delay);
                 attempt += 1;
                 continue;
             }

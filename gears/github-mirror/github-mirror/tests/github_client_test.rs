@@ -1781,3 +1781,59 @@ async fn an_unchanged_first_page_stops_the_pull_and_commit_sweeps_too() {
     pulls_second.assert_calls_async(1).await;
     commits_second.assert_calls_async(1).await;
 }
+
+#[tokio::test]
+async fn a_rate_limit_seen_by_one_request_pauses_every_other_request() {
+    let server = MockServer::start_async().await;
+    let limited = server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/acme/limited");
+            then.status(403)
+                .header("retry-after", "2")
+                .header("x-ratelimit-remaining", "0");
+        })
+        .await;
+    server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/acme/free");
+            then.status(200).json_body(gh_repo_json());
+        })
+        .await;
+
+    let client =
+        std::sync::Arc::new(GithubClient::new(server.base_url(), None).expect("client must build"));
+    let options = opts(ScopeConfig::default());
+
+    let first = {
+        let client = std::sync::Arc::clone(&client);
+        tokio::spawn(async move {
+            client
+                .fetch_repository_metadata("acme", "limited", &options)
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    limited.delete_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/acme/limited");
+            then.status(200).json_body(gh_repo_json());
+        })
+        .await;
+
+    let started = std::time::Instant::now();
+    client
+        .fetch_repository_metadata("acme", "free", &options)
+        .await
+        .expect("the free request must succeed once the cooldown has passed");
+    let waited = started.elapsed();
+    assert!(
+        waited >= std::time::Duration::from_millis(1500),
+        "a request that had nothing to do with the limit must still wait it out, waited {waited:?}"
+    );
+
+    first
+        .await
+        .expect("the limited request task must finish")
+        .expect("the limited request must succeed on its retry");
+}

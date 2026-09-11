@@ -237,7 +237,7 @@ gears:
       # flight across all of them (GitHub's secondary rate limit reacts to
       # concurrency, so raise the second one only with a token pool).
       max_concurrent_syncs: 4
-      max_concurrent_requests: 8
+      max_concurrent_requests: 4
       # Tasks (list pages, single entities) in flight inside one sync.
       max_concurrent_tasks: 4
 
