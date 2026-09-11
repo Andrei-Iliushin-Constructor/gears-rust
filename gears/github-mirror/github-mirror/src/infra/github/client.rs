@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone as _, Utc};
@@ -19,6 +20,7 @@ use crate::domain::repo::{
     WorkflowRunRecord,
 };
 use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache, NoCache};
+use crate::infra::github::metrics::{GithubRequestMetrics, Outcome};
 use crate::infra::github::pagination::parse_link_next;
 use crate::infra::github::rate_limit::{
     AuthoritativeQuota, QuotaProbe, RateLimitController, RateLimitHeaders,
@@ -107,6 +109,17 @@ const MAX_RETRY_SLEEP: std::time::Duration = std::time::Duration::from_mins(5);
 /// `x-ratelimit-remaining`.
 fn is_rate_limited(seen: &RateLimitHeaders) -> bool {
     seen.retry_after_secs.is_some() || seen.remaining == Some(0)
+}
+
+/// The `outcome` a finished request is counted under.
+fn outcome_of(status: reqwest::StatusCode) -> Outcome {
+    if status == reqwest::StatusCode::NOT_MODIFIED {
+        Outcome::NotModified
+    } else if status.is_success() {
+        Outcome::Fresh
+    } else {
+        Outcome::Failed
+    }
 }
 
 /// Exponential wait for a rate limit that came with neither `Retry-After`
@@ -218,6 +231,7 @@ pub struct GithubClient {
     controller: Arc<RateLimitController>,
     /// Ceiling the controller's adaptive soft cap may grow to.
     max_cap: u32,
+    metrics: GithubRequestMetrics,
 }
 
 impl GithubClient {
@@ -258,6 +272,7 @@ impl GithubClient {
             permits: Semaphore::new(DEFAULT_MAX_CONCURRENT_REQUESTS),
             controller,
             max_cap: u32::try_from(DEFAULT_MAX_CONCURRENT_REQUESTS).unwrap_or(u32::MAX),
+            metrics: GithubRequestMetrics::from_global(),
         })
     }
 
@@ -287,6 +302,31 @@ impl GithubClient {
             .await
             .map_err(|e| DomainError::internal(format!("request semaphore closed: {e}")))?;
         Ok((admission, permit))
+    }
+
+    /// Send `request`, timing it; a request that gets no answer at all is
+    /// counted as failed with status 0.
+    async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
+        method: &'static str,
+    ) -> Result<(reqwest::Response, Duration), DomainError> {
+        let started = Instant::now();
+        match request.send().await {
+            Ok(response) => Ok((response, started.elapsed())),
+            Err(e) => {
+                self.metrics.request(
+                    method,
+                    0,
+                    Outcome::Failed,
+                    started.elapsed(),
+                    &RateLimitHeaders::default(),
+                );
+                Err(DomainError::internal(format!(
+                    "GitHub {method} request failed: {e}"
+                )))
+            }
+        }
     }
 
     /// Feed a response's rate-limit headers to the token's controller.
@@ -387,17 +427,17 @@ impl GithubClient {
         // in flight.
         let (response, rate_limited, _admission, _permit) = loop {
             let (admission, permit) = self.admit().await?;
-            let response = self
-                .conditional_request(url, cached.as_ref())
-                .send()
-                .await
-                .map_err(|e| DomainError::internal(format!("GitHub request failed: {e}")))?;
+            let (response, took) = self
+                .send(self.conditional_request(url, cached.as_ref()), "GET")
+                .await?;
 
             let status = response.status();
             let seen = self.observe(response.headers(), status).await;
             let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
                 || (status == reqwest::StatusCode::FORBIDDEN && is_rate_limited(&seen));
             if rate_limited && attempt < RATE_LIMIT_RETRIES {
+                self.metrics
+                    .request("GET", status.as_u16(), Outcome::RateLimited, took, &seen);
                 tracing::warn!(
                     url = %redacted_word(url),
                     %status,
@@ -412,6 +452,8 @@ impl GithubClient {
                 attempt += 1;
                 continue;
             }
+            self.metrics
+                .request("GET", status.as_u16(), outcome_of(status), took, &seen);
             break (response, rate_limited, admission, permit);
         };
 
@@ -453,6 +495,7 @@ impl GithubClient {
             last_modified,
             next_page,
         };
+        self.metrics.response_bytes("GET", entry.body.len());
 
         let parsed = serde_json::from_str(&entry.body)
             .map_err(|e| DomainError::internal(format!("GitHub response decode failed: {e}")))?;
@@ -592,15 +635,15 @@ impl GithubClient {
             if let Some(token) = &self.token {
                 request = request.bearer_auth(token);
             }
-            let response = request.send().await.map_err(|e| {
-                DomainError::internal(format!("GitHub GraphQL request failed: {e}"))
-            })?;
+            let (response, took) = self.send(request, "POST").await?;
 
             let status = response.status();
             let seen = self.observe(response.headers(), status).await;
             let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
                 || (status == reqwest::StatusCode::FORBIDDEN && is_rate_limited(&seen));
             if rate_limited && attempt < RATE_LIMIT_RETRIES {
+                self.metrics
+                    .request("POST", status.as_u16(), Outcome::RateLimited, took, &seen);
                 tracing::warn!(
                     %status,
                     attempt,
@@ -614,6 +657,8 @@ impl GithubClient {
                 attempt += 1;
                 continue;
             }
+            self.metrics
+                .request("POST", status.as_u16(), outcome_of(status), took, &seen);
             break (response, admission, permit);
         };
 
@@ -624,9 +669,11 @@ impl GithubClient {
             )));
         }
 
-        let body: serde_json::Value = response
-            .json()
-            .await
+        let bytes = response.bytes().await.map_err(|e| {
+            DomainError::internal(format!("GitHub GraphQL response read failed: {e}"))
+        })?;
+        self.metrics.response_bytes("POST", bytes.len());
+        let body: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|e| DomainError::internal(format!("GitHub GraphQL decode failed: {e}")))?;
 
         if let Some(errors) = body.get("errors").and_then(serde_json::Value::as_array)

@@ -2539,6 +2539,7 @@ dependencies = [
  "hex",
  "httpmock",
  "inventory",
+ "opentelemetry",
  "reqwest",
  "sea-orm",
  "sea-orm-migration",
