@@ -594,7 +594,7 @@ struct GhIssue {
     title: String,
     body: Option<String>,
     state: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "actor_or_none")]
     user: Option<GhActor>,
     #[serde(default)]
     assignees: Vec<GhActor>,
@@ -616,6 +616,7 @@ struct GhIssue {
 struct GhIssueReaction {
     id: i64,
     content: String,
+    #[serde(default, deserialize_with = "actor_or_none")]
     user: Option<GhActor>,
     created_at: String,
 }
@@ -679,7 +680,7 @@ struct GhPullRequest {
     title: String,
     body: Option<String>,
     state: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "actor_or_none")]
     user: Option<GhActor>,
     #[serde(default)]
     assignees: Vec<GhActor>,
@@ -726,6 +727,18 @@ struct GhCommitDetails {
     committer: Option<GhCommitPerson>,
 }
 
+fn actor_or_none<'de, D>(deserializer: D) -> Result<Option<GhActor>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    value
+        .filter(|actor| actor.get("login").is_some_and(serde_json::Value::is_string))
+        .map(GhActor::deserialize)
+        .transpose()
+        .map_err(serde::de::Error::custom)
+}
+
 #[derive(Debug, Deserialize)]
 struct GhActor {
     /// Every real GitHub user object carries one; kept optional so a
@@ -748,7 +761,7 @@ struct GhActor {
 #[derive(Debug, Deserialize)]
 struct GhComment {
     id: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "actor_or_none")]
     user: Option<GhActor>,
     body: Option<String>,
     created_at: String,
@@ -760,7 +773,7 @@ struct GhComment {
 #[derive(Debug, Deserialize)]
 struct GhReviewComment {
     id: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "actor_or_none")]
     user: Option<GhActor>,
     body: Option<String>,
     path: Option<String>,
@@ -831,7 +844,7 @@ struct GhRelease {
     draft: bool,
     prerelease: bool,
     body: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "actor_or_none")]
     author: Option<GhActor>,
     created_at: String,
     published_at: Option<String>,
@@ -893,7 +906,7 @@ struct GhWorkflowRun {
     conclusion: Option<String>,
     head_branch: Option<String>,
     head_sha: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "actor_or_none")]
     actor: Option<GhActor>,
     created_at: String,
     updated_at: String,
@@ -947,7 +960,7 @@ struct GhCommitDetail {
 #[derive(Debug, Deserialize)]
 struct GhCommitComment {
     id: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "actor_or_none")]
     user: Option<GhActor>,
     commit_id: String,
     path: Option<String>,
@@ -977,11 +990,11 @@ struct GhIssueEventIssue {
 struct GhIssueEvent {
     id: i64,
     event: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "actor_or_none")]
     actor: Option<GhActor>,
     #[serde(default)]
     label: Option<GhEventLabel>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "actor_or_none")]
     assignee: Option<GhActor>,
     #[serde(default)]
     milestone: Option<GhEventMilestone>,
@@ -1000,7 +1013,7 @@ struct GhDeployment {
     environment: String,
     task: String,
     description: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "actor_or_none")]
     creator: Option<GhActor>,
     created_at: String,
     updated_at: String,
@@ -1013,7 +1026,7 @@ struct GhCommitStatus {
     context: String,
     description: Option<String>,
     target_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "actor_or_none")]
     creator: Option<GhActor>,
     created_at: String,
     updated_at: String,
@@ -1046,7 +1059,7 @@ struct GhWorkflowJobsPage {
 #[derive(Debug, Deserialize)]
 struct GhReview {
     id: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "actor_or_none")]
     user: Option<GhActor>,
     state: String,
     body: Option<String>,
@@ -1059,7 +1072,9 @@ struct GhReview {
 struct GhCommit {
     sha: String,
     commit: GhCommitDetails,
+    #[serde(default, deserialize_with = "actor_or_none")]
     author: Option<GhActor>,
+    #[serde(default, deserialize_with = "actor_or_none")]
     committer: Option<GhActor>,
 }
 
