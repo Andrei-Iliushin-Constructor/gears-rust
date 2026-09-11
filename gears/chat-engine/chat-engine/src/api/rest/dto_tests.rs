@@ -41,6 +41,34 @@ fn non_text_part_content_is_untouched() {
 }
 
 #[test]
+fn tool_part_types_round_trip_through_the_wire_mapping() {
+    // Tool calls and their results are first-class parts, so a backend that
+    // does tool calling can persist both sides of the exchange.
+    for (wire, ty) in [
+        ("tool_call", MessagePartType::ToolCall),
+        ("tool_result", MessagePartType::ToolResult),
+    ] {
+        assert_eq!(part_type_from_wire(wire), ty);
+        assert_eq!(part_type_to_wire(ty), wire);
+    }
+}
+
+#[test]
+fn tool_call_part_content_is_untouched() {
+    let dto = MessagePartInputDto {
+        part_type: "tool_call".into(),
+        content: json!({
+            "tool_call_id": "call_1",
+            "name": "search",
+            "arguments": { "query": "rust" },
+        }),
+    };
+    let sdk = SdkMessagePartInput::from(dto);
+    assert_eq!(sdk.part_type, MessagePartType::ToolCall);
+    assert_eq!(sdk.content["arguments"]["query"], json!("rust"));
+}
+
+#[test]
 fn streaming_event_dto_serializes_as_tagged_union() {
     let evt = StreamingEventDto::Start(StreamingStartDto {
         message_id: Uuid::nil(),

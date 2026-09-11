@@ -244,6 +244,8 @@ fn part_type_to_wire(t: MessagePartType) -> &'static str {
         MessagePartType::Videos => "videos",
         MessagePartType::Links => "links",
         MessagePartType::Statuses => "statuses",
+        MessagePartType::ToolCall => "tool_call",
+        MessagePartType::ToolResult => "tool_result",
     }
 }
 
@@ -256,6 +258,8 @@ fn part_type_from_wire(s: &str) -> MessagePartType {
         "videos" => MessagePartType::Videos,
         "links" => MessagePartType::Links,
         "statuses" => MessagePartType::Statuses,
+        "tool_call" => MessagePartType::ToolCall,
+        "tool_result" => MessagePartType::ToolResult,
         _ => MessagePartType::Text,
     }
 }

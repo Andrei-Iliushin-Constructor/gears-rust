@@ -904,6 +904,106 @@ async fn streamed_parts_and_metadata_persist_against_sqlite() {
 }
 
 // ===========================================================================
+// 3d. Tool calling (FR-022): a plugin that invokes a tool streams the call and
+// its result as parts; both persist with their discriminants and verbatim
+// content, so the exchange survives into reads and session exports.
+// ===========================================================================
+
+#[tokio::test]
+async fn streamed_tool_call_and_result_parts_persist_against_sqlite() {
+    let harness = db::setup_sqlite().await;
+    let plugin_id = "tool-calling-plugin";
+    let session_type_id = db::seed_session_type(&harness, plugin_id).await;
+    let session_id = db::seed_active_session(&harness, TENANT_ID, USER_ID, session_type_id).await;
+
+    let placeholder = Uuid::nil();
+    let plugin = FakePlugin::new(
+        plugin_id,
+        FakePluginScript::Events(vec![
+            StreamingEvent::Part(StreamingPartEvent {
+                message_id: placeholder,
+                part: MessagePartInput {
+                    part_type: MessagePartType::ToolCall,
+                    content: serde_json::json!({
+                        "tool_call_id": "call_1",
+                        "name": "get_weather",
+                        "arguments": { "city": "Berlin" },
+                    }),
+                    file_citations: vec![],
+                    link_citations: vec![],
+                    references: vec![],
+                },
+            }),
+            StreamingEvent::Part(StreamingPartEvent {
+                message_id: placeholder,
+                part: MessagePartInput {
+                    part_type: MessagePartType::ToolResult,
+                    content: serde_json::json!({
+                        "tool_call_id": "call_1",
+                        "name": "get_weather",
+                        "result": { "temp_c": 12 },
+                    }),
+                    file_citations: vec![],
+                    link_citations: vec![],
+                    references: vec![],
+                },
+            }),
+            StreamingEvent::Chunk(StreamingChunkEvent {
+                message_id: placeholder,
+                chunk: "It is 12 degrees in Berlin.".into(),
+            }),
+            StreamingEvent::Complete(StreamingCompleteEvent {
+                message_id: placeholder,
+                metadata: None,
+                file_citations: vec![],
+                link_citations: vec![],
+                references: vec![],
+            }),
+        ]),
+    );
+    let plugin_dyn: Arc<dyn ChatEngineBackendPlugin> = plugin;
+    let svc = build_service(&harness, plugin_id, plugin_dyn);
+
+    let cancel = CancellationToken::new();
+    let mut stream = svc
+        .send_message(make_request(session_id), &make_ctx(), cancel)
+        .await
+        .expect("send_message dispatch");
+    while stream.next().await.is_some() {}
+
+    db::wait_for_finalize(&harness.db, session_id, Duration::from_secs(2)).await;
+
+    let parts = db::message_parts_ordered(&harness.db, session_id, "assistant").await;
+    let types: Vec<&str> = parts.iter().map(|(t, _, _)| t.as_str()).collect();
+    assert!(
+        types.contains(&"tool_call") && types.contains(&"tool_result"),
+        "tool parts must persist with their own discriminants; got {types:?}",
+    );
+
+    let call = parts
+        .iter()
+        .find(|(t, _, _)| t == "tool_call")
+        .expect("tool_call part");
+    assert_eq!(
+        call.2["arguments"]["city"], "Berlin",
+        "tool_call arguments must round-trip verbatim",
+    );
+
+    let result = parts
+        .iter()
+        .find(|(t, _, _)| t == "tool_result")
+        .expect("tool_result part");
+    assert_eq!(
+        result.2["tool_call_id"], call.2["tool_call_id"],
+        "the result must pair with its call by tool_call_id",
+    );
+    assert_eq!(
+        result.2["result"]["temp_c"], 12,
+        "tool_result payload must round-trip verbatim",
+    );
+}
+
+// ===========================================================================
 // 4. Resume buffer is populated while the stream runs (FR-024, 3b-2)
 //
 // The detached driver tees every projected wire event into the
