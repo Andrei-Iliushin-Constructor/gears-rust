@@ -667,7 +667,7 @@ Outcome and evidence: the criteria below.
   **The wire is unchanged.** AM stores and exposes the payload content, so `MetadataSchemaRegistry::validate_value` composes the envelope (`{"payload": value}`) at the one seam that validates a whole metadata document. `gts_validation::validate_property_value` checks individual properties and is unaffected. AM's REST contract, its domain models and the e2e suite keep their shapes
 - [x] `make dylint` **re-run** after T9a and T10 — workspace-wide, exit 0, zero findings. Unlike the first run at Checkpoint 1, nothing had accumulated: a phase is a short enough window that the two tasks since carried no layering debt (P13)
 - [x] **v1 is intact and the new surface is additive (T9a).** Both v1 routes are restored verbatim from `main` and the async surface sits under `/v2/`; three handlers take `TypesRegistryService`, three take `Option<Arc<RegistryService>>`, and neither falls back to the other. `make e2e-local` is green with **no e2e file edited for T9a** — the one e2e file this branch touches, `account_management/conftest.py`, belongs to the envelope fix above and would have been needed with or without T9a
-- [x] **Review follow-up: unsupported dry-run fails synchronously, and replays are explicit.** Until T20 supplies a rollback-only evaluation transaction, `dry_run: true` is rejected during admission with a canonical `400` field violation, before an operation can be created or stranded in `running`. Successful idempotency replays now include `Idempotency-Replayed: true`; first submissions omit it. Domain and REST regression tests pin both contracts
+- [x] **Review follow-up: unsupported dry-run fails synchronously, and replays are explicit.** Before T20, unsupported `dry_run: true` was rejected during admission with a canonical `400` field violation, before an operation can be created or stranded in `running`. Successful idempotency replays now include `Idempotency-Replayed: true`; first submissions omit it. Domain and REST regression tests pin both contracts
 - [ ] **Human review — everything after this widens the path rather than reshaping it.** Five open items, none of them a failing check:
   - **Another gear owns part of `/types-registry/v1/*`.** `resource-group` registers five routes — `POST|GET /types`, `GET|PUT|DELETE /types/{code}` — inside this gear's service namespace, from `gears/system/resource-group/.../api/rest/routes/types.rs`. T20a, T22a and T28 widen that namespace, so a collision waits for whichever gear registers a conflicting path first. Decide: report to the resource-group owners now, or carry it as a known hazard into T20a/T22a/T28
   - ~~**`Idempotency-Key` cannot be declared in OpenAPI.**~~ **Retracted — the claim was false and is now fixed.** `ParamLocation::Header` exists and `openapi_registry.rs:200` already maps it onto utoipa's `ParameterIn::Header`; the generic `OperationBuilder::param(ParamSpec)` declares it. What misled us is that there is no `header_param` convenience beside `path_param` / `query_param`, so the capability is discoverable only by reading the enum. `POST /v2/entities` now declares the header as a required parameter, pinned by `the_idempotency_key_header_is_declared_as_a_required_parameter` and mutation-checked. The remaining toolkit gap is the missing convenience method — filed upstream as constructorfabric/gears-rust#4614
@@ -1653,7 +1653,7 @@ set.
 **Observability (P16):**
 - [x] `blocked_by_dependency` and `blocked_by_predecessor` are `Reason` consts and are counted
       per blocked candidate, so a batch's blocked fan-out is one query rather than a read of
-      every item row. Both go through `record_failure`, so a blocked candidate is counted by
+      every item row. Like evaluated refusals, blocked candidates are counted by
       `candidates_total{status="failed"}` and `refusals_total{stage="admission",reason}` the
       same way an evaluated refusal is — there is no second, quieter terminalization path
 
@@ -1674,10 +1674,8 @@ set.
 - An ordering loop involving a predecessor edge is refused as `invalid_schema`
   (`CycleKind::Unorderable`). When both blocking reasons apply, `blocked_by_predecessor` wins.
   Execution follows dependency order; outcomes retain submission order, one per candidate.
-- **Open: dependent-batch dry-run parity.** T20 rolls back each candidate before evaluating
-  the next, so hypothetical in-batch writes are not visible to later candidates. Commit-order
-  overlay therefore does not provide full batch simulation in dry-run mode; this remains an
-  unresolved limitation, not a decision completed by T20.
+- Dry-run batches use one coherent snapshot plus prior successful candidates' virtual changes.
+  The T20 follow-up below replaces the original per-candidate rollback limitation.
 
 **Dependencies:** Checkpoint 4
 **Main files:**
@@ -1690,17 +1688,17 @@ set.
 
 ### - [x] T20: Deletion and Dry Run
 
-**Inherited from T15:** deletion claims `entity_write_order` as its transaction's first
+**Inherited from T15:** committed deletion claims `entity_write_order` as its transaction's first
 statement, before checking dependents. A revision-vector guard alone cannot serialize a new
 dependency edge against deletion. See `plan.md` P15, DESIGN §3.7 and SPEC §8.1 step 4.2.
 
 **Description:** The short deletion protocol — positive `expected_resource_version`, family
 and entity locks, recheck `ACTIVE` with no direct registered dependents, lifecycle to
 `DELETED`, version increment, outcome — and Dry Run as a mode of both registration and
-deletion, running every check in a rollback-only transaction.
+deletion, predicting the whole batch against one coherent snapshot without entity-state writes.
 
 **Acceptance criteria:**
-- [x] Deletion claims the `entity_write_order` row as its transaction's first statement — without it the commit order admission's correctness rests on is no longer total, and `a_creation_claims_the_entity_write_order_row_exactly_once` (with its revision / `unchanged` siblings) is the shape of the test that catches an omission
+- [x] Committed deletion claims the `entity_write_order` row as its transaction's first statement — without it the commit order admission's correctness rests on is no longer total, and `a_creation_claims_the_entity_write_order_row_exactly_once` (with its revision / `unchanged` siblings) is the shape of the test that catches an omission
 - [x] Deletion with a live direct registered dependent is refused, reporting a count without identities
 - [x] A transitive-only dependent does not block
 - [x] A schema whose `x-gts-ref` names the target does **not** block: the keyword creates no edge, so there is no registered dependent to find
@@ -1711,13 +1709,13 @@ deletion, running every check in a rollback-only transaction.
   than two schemas. Tenant disable/unavailability scenarios belong to the deferred
   Availability Evaluator, not T20 or P0
 - [x] A deleted entity is still exact-readable as deleted, and absent from lists
-- [x] Dry Run commits nothing, moves no `resource_version`, and its mode is part of the fingerprint
+- [x] Dry Run writes no entity state, claims no `entity_write_order`, and its mode is part of the fingerprint; operation outcomes remain durable
 - [x] Dry-run `succeeded` omits `resource_version`; dry-run `unchanged` reports the existing one
 
 **Observability — this task owns the label sweep (`plan.md` P16 rule 2):**
 - [x] **A dry run is distinguishable from a commit in every series it touches.** `dry_run`
       becomes a label on `candidates_total`, `refusals_total` and T17's verdict counter. Without
-      it a rollback-only pass increments `candidates_total{status="succeeded"}` beside admissions
+      it a dry run increments `candidates_total{status="succeeded"}` beside admissions
       that actually wrote, and "how many registrations succeeded today" answers with a number
       that includes passes which wrote nothing
 - [x] The activation-write-set histogram is **either labelled or not observed** for a dry run —
@@ -1756,9 +1754,10 @@ deletion, running every check in a rollback-only transaction.
   (`DependencyRepo::edges_within`, `graph::order_deletion_batch`). Each deletion rechecks live
   dependents; failed deletions lead to `has_registered_dependents` on affected targets.
   Unorderable stored rows are warned about and still processed for individual outcomes.
-- Dry run executes the mutation path and rolls back entity changes, revisions and the
-  write-order claim; operation outcomes persist outside that transaction. Rollback is per
-  candidate; the dependent-batch limitation is recorded under T19 above.
+- Dry run reuses admission checks over a snapshot and virtual candidate layers. Refused layers
+  are discarded; outcomes and operation completion publish atomically after the snapshot closes.
+  No entity-state write or write-order claim reaches storage.
+- Replay returns the same outcome fields in both modes, including the derived Registry Reference.
 - Dry runs do not observe the activation-write-set histogram. The compatibility verdict
   counter carries `dry_run` only; candidate/refusal counters also carry `kind`.
 - POST registration already exposes dry run. REST deletion remains T20a's responsibility.
@@ -1774,11 +1773,29 @@ is untested; the deletion refusal itself is covered.
 **Dependencies:** T19
 **Main files:**
 - `TR/src/domain/admission/deletion.rs`, `worker.rs`, `graph.rs`, `acceptance.rs`
+- `TR/src/domain/admission/simulate.rs`, `publish.rs`, `view/`
 - `TR/src/domain/ports/metrics.rs`, `TR/src/infra/metrics.rs`, `TR/src/observability.rs`
 - `TR/src/infra/storage/repo/dependency_repo.rs`, `operation_repo.rs`
 - `TR/tests/deletion_test.rs`, `dry_run_test.rs`, `deletion_backends_test.rs`
+- `TR/tests/dry_run_batch_test.rs`, `dry_run_parity_test.rs`, `dry_run_batch_backends_test.rs`
 - `TR/tests/observability_test.rs`, `api_rest_test.rs`, `common/test_stores.rs`
 **Scope:** M
+
+---
+
+### T20 follow-up — dry run without entity writes
+
+Implementation plan: [dry-run-plan.md](./dry-run-plan.md). Completed and reviewed before T20a.
+
+- [x] DR1: Batch-simulation contract and failing parity regressions, including false approval
+- [x] DR2: Coherent admission view and one passing vertical slice; coordinator reviews the seam
+- [x] DR3: Registration, revision/refresh and deletion parity; candidate layers discard on refusal
+- [x] DR4: Durable outcomes, replay/recovery and removal of rollback-only dry-run control flow
+- [x] DR5: SQLite/PostgreSQL/MySQL verification, architecture checks and coordinator review
+
+**Verification:** 871/871 gear tests; PostgreSQL/MySQL backend suite 36/36, no skipped tests.
+`make fmt`, `make clippy GEAR=types-registry` and `make dylint` passed. Dylint retains four
+existing DE1201 warnings in unrelated file-storage/simple-user-settings crates.
 
 ---
 

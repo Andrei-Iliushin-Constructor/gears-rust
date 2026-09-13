@@ -161,7 +161,7 @@ impl AdmissionMetrics for AdmissionMetricsMeter {
     }
 
     fn observe_activation_write_set(&self, refreshed: usize, labels: PassLabels) {
-        // A rollback-only pass rewrote nothing, so it is not an observation about
+        // A dry-run pass rewrote nothing, so it is not an observation about
         // how close this deployment runs to `limits.activation_write_set`. Skipped
         // rather than labelled: see the port's documentation.
         if labels.dry_run {

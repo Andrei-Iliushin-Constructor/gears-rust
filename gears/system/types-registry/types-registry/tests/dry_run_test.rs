@@ -1,10 +1,18 @@
 //! Dry Run as a mode of both registration and deletion (T20).
 //!
 //! A dry run runs **every** check the committing pass runs — that is the point
-//! of it — inside a transaction that is rolled back rather than committed. What
-//! it must never do is leave a trace: no entity, no revision, no moved version.
-//! Its outcome is still recorded, because the caller asked a question and is
-//! owed the answer.
+//! of it — and issues no entity-state write at all. It reads one coherent
+//! snapshot and applies each candidate's hypothetical effects to an overlay the
+//! next candidate sees, so the same `commit_creation`, `commit_revision`,
+//! `unchanged::commit` and `commit_deletion` decide the outcome against a store
+//! that never reaches a statement. Its outcome is still recorded, because the
+//! caller asked a question and is owed the answer: the item results and the
+//! operation's completion are published in one short transaction once the
+//! snapshot is released.
+//!
+//! These are the single-candidate cases. `dry_run_batch_test.rs` holds the
+//! properties of the pass itself, and `dry_run_parity_test.rs` the behavioural
+//! sweep across whole batches.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -350,11 +358,13 @@ async fn a_dry_run_deletion_reports_the_refusal_a_commit_would_earn() {
 // What a dry run still does
 // ---------------------------------------------------------------------------
 
-/// A dry run takes its turn in the write order — it reads committed state and
-/// answers a question about it, so it must not run beside a commit that has not
-/// landed — and then **rolls the claim back with everything else**. The
-/// persisted sequence is therefore where it started: a dry run leaves no trace,
-/// and the coordination row is not an exception to that.
+/// The write order is the write path's single serialization point, and a dry
+/// run never claims it. There is nothing for it to order against — it observes
+/// one snapshot and predicts against it — and a claim would hold every
+/// committing admission behind a question about hypothetical state for as long
+/// as the prediction ran. The persisted sequence is therefore exactly where it
+/// started; the coordination row is not an exception to "a dry run leaves no
+/// trace", it is part of the rule.
 #[tokio::test]
 async fn a_dry_run_leaves_the_entity_write_sequence_where_it_found_it() {
     let db = test_db().await;
@@ -373,12 +383,12 @@ async fn a_dry_run_leaves_the_entity_write_sequence_where_it_found_it() {
     assert_eq!(
         entity_write_sequence(&db).await,
         before,
-        "the claim was taken inside the transaction the dry run then discarded",
+        "a dry run must not advance the write path's serialization point",
     );
 }
 
 /// And a committing pass in the same database still advances it, so the test
-/// above is about the rollback rather than about the claim never happening.
+/// above is about the dry run rather than about a claim nothing ever makes.
 #[tokio::test]
 async fn a_committing_pass_still_advances_the_entity_write_sequence() {
     let db = test_db().await;
@@ -396,35 +406,9 @@ async fn a_committing_pass_still_advances_the_entity_write_sequence() {
     assert_eq!(entity_write_sequence(&db).await - before, 1);
 }
 
-/// The mode is part of the request fingerprint, so one key cannot serve both.
-#[tokio::test]
-async fn one_key_cannot_serve_a_dry_run_and_then_a_commit() {
-    let db = test_db().await;
-
-    submit(
-        &db,
-        "one-key",
-        OperationKind::Registration,
-        true,
-        vec![creation(FRESH, schema(FRESH, "hypothetical"))],
-    )
-    .await
-    .expect("the dry run is accepted");
-
-    let conflict = submit(
-        &db,
-        "one-key",
-        OperationKind::Registration,
-        false,
-        vec![creation(FRESH, schema(FRESH, "hypothetical"))],
-    )
-    .await;
-
-    assert!(
-        matches!(conflict, Err(AcceptanceError::FingerprintConflict { .. })),
-        "a commit is not a replay of the dry run that preceded it: {conflict:?}",
-    );
-}
+// The mode is part of the request fingerprint, so one key cannot serve both.
+// Covered by `operation_idempotency_test::a_dry_run_and_a_commit_cannot_share_one_idempotency_key`,
+// which makes the same assertion and also checks what was dispatched.
 
 /// A dry run is still an operation, so a redelivered pass reports its stored
 /// outcome and does not re-run the checks.

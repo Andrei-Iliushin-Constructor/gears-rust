@@ -153,18 +153,33 @@ impl From<WorkerError> for CanonicalError {
                 &format!("operation item {item_id} carries no request payload"),
                 "admission",
             ),
+            WorkerError::MissingItemWrite { item_id } => opaque_internal(
+                &format!(
+                    "the commit path for operation item {item_id} recorded no terminal item write"
+                ),
+                "admission",
+            ),
+            WorkerError::MissingPrediction { item_id } => opaque_internal(
+                &format!("the dry-run pass left operation item {item_id} without a prediction"),
+                "admission",
+            ),
+            // Corruption, not input: acceptance canonicalized this identifier
+            // before the row was written.
+            WorkerError::StoredIdentifierUnparsable {
+                item_id,
+                gts_id,
+                reason,
+            } => opaque_internal(
+                &format!(
+                    "operation item {item_id} holds an unparsable stored identifier '{gts_id}': {reason}"
+                ),
+                "admission",
+            ),
             // Kept only for exhaustiveness: `run_operation` catches this one and
             // reports the outcome the winning pass recorded, so it does not reach a
             // handler. If it ever does, it is a worker bug and not a client's.
             WorkerError::ItemAlreadyTerminal { item_id } => opaque_internal(
                 &format!("operation item {item_id} was terminalized by another pass"),
-                "admission",
-            ),
-            // Same reason: the dry-run path unwraps this immediately to get the
-            // result out through the rollback. Reaching a handler means the
-            // unwrap was skipped, which is a worker bug.
-            WorkerError::DryRunRolledBack(_) => opaque_internal(
-                &"a dry run's rolled-back result escaped the pass that asked for it",
                 "admission",
             ),
             WorkerError::StoreBuild(inner) => opaque_internal(&inner, "transient store build"),
@@ -357,7 +372,8 @@ impl From<AcceptanceError> for CanonicalError {
                 gts_id,
                 vf::EXPECTED_RESOURCE_VERSION,
                 format!(
-                    "deleting '{gts_id}' requires a positive expected_resource_version;                      an absent one is not a request to delete whatever is there"
+                    "deleting '{gts_id}' requires a positive expected_resource_version; \
+                     an absent one is not a request to delete whatever is there"
                 ),
                 field::VALIDATION_FAILED,
             ),

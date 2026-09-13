@@ -3,6 +3,8 @@
 Spec: [`SPEC.md`](./SPEC.md)
 Task list: [`todo.md`](./todo.md)
 
+Completed T20 correction: [dry-run implementation plan](./dry-run-plan.md), verified before T20a.
+
 > **Location note.** These three artifacts live with the gear they describe, in
 > `gears/system/types-registry/docs/p0/`, not in a repository-root `tasks/`. This is
 > deliberate: the monorepo holds many gears, and a shared root `tasks/` would collide
@@ -665,7 +667,7 @@ and T20:
    for the compatibility verdict, because `compatible` is not a refusal and has nowhere else to
    go.
 2. **A series that blends writes with non-writes is wrong.** `dry_run` becomes a label wherever
-   a series would otherwise mix a rollback-only pass with a commit, and `kind` wherever it would
+   a series would otherwise mix a dry run with a commit, and `kind` wherever it would
    mix a deletion with a registration. T20 does that sweep in one commit, across every instrument
    that exists by then, because it is the task that makes both distinctions real.
 3. **The admission reason vocabulary has one home, and it is compile-enforced.**

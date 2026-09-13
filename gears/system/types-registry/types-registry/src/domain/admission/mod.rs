@@ -14,18 +14,21 @@
 
 pub mod acceptance;
 mod bounds;
-pub mod deletion;
+mod deletion;
 mod drift;
 mod errors;
 mod reasons;
 mod unchanged;
 
 pub mod fingerprint;
-pub mod graph;
+mod graph;
+mod publish;
 pub mod refresh;
 pub mod revision;
+pub mod simulate;
 pub mod unit;
 pub mod vector;
+pub mod view;
 pub mod worker;
 
 pub use reasons::AdmissionFailureReason;

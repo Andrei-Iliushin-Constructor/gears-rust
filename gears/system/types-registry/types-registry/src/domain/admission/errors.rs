@@ -7,9 +7,7 @@ use toolkit_macros::domain_model;
 use uuid::Uuid;
 
 use super::AdmissionFailureReason;
-use super::deletion::DeletionCommit;
 use super::drift::VectorDrift;
-use super::revision::RevisionCommit;
 use crate::domain::gts_store::StoreBuildError;
 
 /// An infrastructure failure. Retryable by construction: nothing here is a
@@ -26,6 +24,21 @@ pub enum WorkerError {
     OperationNotFound { operation_id: Uuid },
     #[error("operation item {item_id} carries no request payload")]
     MissingPayload { item_id: i64 },
+    /// A commit path reported success and left no terminal item write behind.
+    ///
+    /// Distinct from [`Self::MissingPayload`]: the request was well formed and the
+    /// candidate was admitted, so an operator reading "carries no request payload"
+    /// would be sent to the wrong table. Only the dry-run pass can observe it,
+    /// because only it reads the write back out of the overlay.
+    #[error("the commit path for operation item {item_id} recorded no terminal item write")]
+    MissingItemWrite { item_id: i64 },
+    /// The dry-run pass left a prediction slot unfilled.
+    ///
+    /// `order_batch` partitions a batch into the ordered and the cyclic, so every
+    /// position is written exactly once. Reaching this means the partition no
+    /// longer holds, which is a worker bug rather than anything about the request.
+    #[error("the dry-run pass left operation item {item_id} without a prediction")]
+    MissingPrediction { item_id: i64 },
     /// Not a fault, and never reaches a caller: the worker catches it and reports
     /// the outcome the other pass recorded. It exists as an error because rolling
     /// the commit transaction back is the only way to *not* write an entity behind
@@ -59,6 +72,20 @@ pub enum WorkerError {
     /// projection is missing behind an entity that is still there.
     #[error("entity '{gts_id}' (id {entity_id}) vanished mid-transaction")]
     EntityVanished { gts_id: String, entity_id: i64 },
+    /// A stored `gts_id` no longer parses.
+    ///
+    /// Acceptance canonicalized every identifier through `GtsId::try_new` before
+    /// the row was written, so one that fails to parse now is a corrupt row rather
+    /// than a bad request. Raised rather than absorbed: the Registry Reference is
+    /// derived from this identifier, and answering a terminal success without one
+    /// is exactly what ADR-0012 forbids. `plan_evaluation` refuses the same
+    /// condition on the evaluating path.
+    #[error("operation item {item_id} holds an unparsable stored identifier '{gts_id}': {reason}")]
+    StoredIdentifierUnparsable {
+        item_id: i64,
+        gts_id: String,
+        reason: String,
+    },
     /// Invalid JSON in a stored baseline indicates corruption, not a candidate refusal.
     #[error("the stored baseline document for '{gts_id}' is not valid JSON: {source}")]
     BaselineUnparsable {
@@ -78,14 +105,6 @@ pub enum WorkerError {
     /// rolls the already-executed resource-version CAS back on this error.
     #[error("entity '{gts_id}' cannot allocate a revision after i32::MAX")]
     RevisionNumberExhausted { gts_id: String },
-    /// **Not a failure.** A dry run runs the real commit path and then refuses
-    /// to commit it, and returning an error is the only way to make the
-    /// transaction roll back — so the result it computed travels out in the
-    /// error position and the caller unwraps it immediately. `retryable_db_err`
-    /// answers `None` for it, so the retry loop short-circuits rather than
-    /// running the pass again.
-    #[error("a dry run's transaction was rolled back, as every dry run's is")]
-    DryRunRolledBack(Box<DryRunResult>),
     /// A candidate refusal discovered after the commit transaction began writing.
     #[error("the revision was refused after its writes began: {0}")]
     RefusedAfterWrite(ItemFailure),
@@ -160,15 +179,4 @@ impl ItemFailure {
             ),
         }
     }
-}
-
-/// What a rolled-back dry-run transaction computed before it was discarded.
-///
-/// One enum rather than two error variants: the two commit paths differ in what
-/// they produce, and the caller of each already knows which it asked for.
-#[domain_model]
-#[derive(Clone, Debug)]
-pub enum DryRunResult {
-    Revision(Result<RevisionCommit, ItemFailure>),
-    Deletion(Result<DeletionCommit, ItemFailure>),
 }

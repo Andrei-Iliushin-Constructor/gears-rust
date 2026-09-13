@@ -876,6 +876,42 @@ async fn an_unknown_operation_is_an_error() {
     );
 }
 
+/// A terminal success owes its Registry Reference, which is derived from the
+/// stored identifier. Acceptance canonicalized that identifier before the row was
+/// written, so one that no longer parses is a corrupt row: the redelivered pass
+/// says so instead of answering a success with the field left out, which is the
+/// one shape ADR-0012 rules out.
+#[tokio::test]
+async fn a_terminal_item_whose_stored_identifier_does_not_parse_is_an_error() {
+    let db = test_db().await;
+    let operation_id = {
+        let conn = db.conn().expect("conn");
+        common::seed_completed_operation_item(&conn, "not a gts identifier", 1, NOW)
+            .await
+            .0
+    };
+
+    let err = run_operation(
+        &stores(),
+        &worker_provider(&db),
+        &allow_all(),
+        Tuning {
+            limits: &common::limits(),
+            worker: &common::worker_settings(),
+            metrics: &common::metrics(),
+            allow_compatibility_force: false,
+        },
+        operation_id,
+        LATER,
+    )
+    .await
+    .expect_err("a corrupt stored identifier must not be reported as a success");
+    assert!(
+        matches!(err, WorkerError::StoredIdentifierUnparsable { .. }),
+        "got {err}"
+    );
+}
+
 /// Evaluation happens with no transaction open, and the transaction holds only the
 /// rechecks and the writes. Observable through its consequence: an item whose
 /// *evaluation* fails leaves the operation completed and the item terminal, with no

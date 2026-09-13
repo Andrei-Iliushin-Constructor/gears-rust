@@ -28,7 +28,7 @@ use super::errors::{ItemFailure, WorkerError};
 use crate::config::Limits;
 use crate::domain::admission::AdmissionFailureReason;
 use crate::domain::enums::LifecycleStatus;
-use crate::domain::ports::Stores;
+use crate::domain::ports::{ItemSuccess, Stores};
 use crate::observability;
 
 /// What committing a deletion produced.
@@ -44,16 +44,47 @@ pub struct DeletionCommit {
     pub resource_version: i64,
 }
 
+impl DeletionCommit {
+    /// What a deletion's item write records.
+    ///
+    /// One function rather than the same decision on the committing and the
+    /// predicting path, which is how those two come to disagree.
+    #[must_use]
+    pub const fn item_outcome(&self, dry_run: bool) -> ItemSuccess {
+        ItemSuccess::deletion(dry_run, self.resource_version)
+    }
+}
+
 /// Tombstone one entity, or report why it cannot be.
 ///
 /// Runs entirely inside the caller's commit transaction. Every question it asks
 /// is about committed state, and every one of them is asked **after** the write
 /// order is claimed.
 ///
+/// # No authority check, and where that is recorded
+///
+/// Lifecycle, the version precondition and live registered dependants are the
+/// only gates here, and none of them asks *who* is deleting. Acceptance step 3
+/// does not cover this path either: the registration policy governs which regions
+/// gain members, so a deletion bypasses it by design, and
+/// `DeletionRequiresVersion` means a deletion candidate never carries the
+/// `MustNotExist` precondition the gate keys on. A caller that reaches the submit
+/// route can therefore tombstone any entity without a live dependant, a
+/// platform-seeded `cf.core.*` schema included.
+///
+/// ponytail: ceiling C6, the same one the revision path sits on — P0 has no
+/// identity-to-permission binding to check an owner or principal against, and the
+/// bound in the meantime is transport rather than policy (the mutation routes are
+/// internal-only, C8). SPEC's C6 row names both paths and the order the controls
+/// land in.
+///
 /// # Errors
 /// [`WorkerError`] for an infrastructure failure. A refusal is an
 /// [`ItemFailure`] in the `Ok(Err(..))` position: an outcome, not a fault.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the eight are the commit transaction's context: stores, tx, scope, the target and its precondition, limits, span and clock. Bundling them into a struct would rename the same values without removing one"
+)]
 pub async fn commit_deletion(
     stores: &dyn Stores,
     tx: &DbTx<'_>,

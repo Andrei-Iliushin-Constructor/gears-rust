@@ -320,6 +320,126 @@ pub enum ReverseImpact {
     OverBound { at_least: usize, bound: usize },
 }
 
+/// One stored `dependency` row, and — because those three columns are the
+/// relation's primary key — also the cursor of a page of them.
+#[domain_model]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DependencyEdgeRow {
+    pub from_entity_id: i64,
+    pub kind: DependencyKind,
+    pub to_entity_id: i64,
+}
+
+/// One stored edge between two entities the caller already holds, as
+/// [`Stores::edges_within`] reports it.
+///
+/// Named rather than an `(i64, i64)` pair: the direction is what the deletion
+/// order reads, and an implementation returning the endpoints the other way
+/// round would compile and quietly reverse that order. Ordered `from` then `to`,
+/// which is the sort the callers already apply.
+#[domain_model]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EntityEdge {
+    /// The dependant: what must be deleted before the other end can be.
+    pub from_entity_id: i64,
+    /// What that dependant consumes.
+    pub to_entity_id: i64,
+}
+
+/// What a `succeeded` item write records.
+///
+/// The three shapes `ck_tr_operation_item_state` admits, and nothing else. Two
+/// independent `Option`s gave four combinations, so a wrong pair surfaced as a
+/// constraint violation at runtime and every call site re-derived the rule for
+/// itself. The decision lives here instead, and the constructors are what the
+/// commit paths call.
+#[domain_model]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemSuccess {
+    /// A committing registration: it allocated a revision and moved the version.
+    Registered {
+        revision_no: i32,
+        resource_version: i64,
+    },
+    /// A committing deletion. No revision, because a deletion allocates none
+    /// (ADR-0005); the version is the one the tombstone now carries.
+    Deleted { resource_version: i64 },
+    /// A dry run of either kind. Nothing moved, so neither column is recorded.
+    /// The commit path decides this against the `AdmissionView` rather than the
+    /// database, and the pass publishes what it decided to the real row once its
+    /// snapshot is released — so this is the shape `ck_tr_operation_item_state`
+    /// eventually checks, not a value that is discarded.
+    Predicted,
+}
+
+impl ItemSuccess {
+    /// The two nullable result columns, in the order the repository writes them.
+    #[must_use]
+    pub const fn columns(self) -> (Option<i32>, Option<i64>) {
+        match self {
+            Self::Registered {
+                revision_no,
+                resource_version,
+            } => (Some(revision_no), Some(resource_version)),
+            Self::Deleted { resource_version } => (None, Some(resource_version)),
+            Self::Predicted => (None, None),
+        }
+    }
+
+    /// What a registration records, dry run or not.
+    #[must_use]
+    pub const fn registration(dry_run: bool, revision_no: i32, resource_version: i64) -> Self {
+        if dry_run {
+            Self::Predicted
+        } else {
+            Self::Registered {
+                revision_no,
+                resource_version,
+            }
+        }
+    }
+
+    /// What a deletion records, dry run or not.
+    #[must_use]
+    pub const fn deletion(dry_run: bool, resource_version: i64) -> Self {
+        if dry_run {
+            Self::Predicted
+        } else {
+            Self::Deleted { resource_version }
+        }
+    }
+}
+
+/// Which end of the dependency relation an edge page is keyed on.
+#[domain_model]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeSide {
+    /// `from_entity_id IN (…)` — what the named entities consume.
+    Outgoing,
+    /// `to_entity_id IN (…)` — what consumes them.
+    Incoming,
+}
+
+/// The most entity ids one [`DependencyStore::edge_page`] call may name.
+///
+/// One statement's worth: a keyset page has to come from a single query, so a
+/// caller with a larger frontier pages each group of this size separately.
+pub const EDGE_PAGE_IDS: usize = 128;
+
+/// How many edge rows one page carries.
+///
+/// Small enough that a walk over a high-fan-in entity holds little, large enough
+/// that an ordinary closure finishes in one round trip.
+pub const EDGE_PAGE_ROWS: usize = 256;
+
+/// The maximum number of entities one dependency closure may reach.
+///
+/// A property of the port rather than of the adapter that walks it: the dry-run
+/// admission view walks the same relation over an overlay, and a second bound
+/// would be a second definition of how large a closure may be. Independent of
+/// `limits.activation_write_set`, which bounds refreshed rows rather than reads.
+pub const CLOSURE_BOUND: usize = 512;
+
 /// The result of a dependency-closure read.
 #[domain_model]
 #[derive(Clone, Debug)]
@@ -515,6 +635,20 @@ pub trait EntityWriteOrderStore: Send + Sync {
 /// The version family: the lock the family-wide rules are serialized by.
 #[async_trait]
 pub trait VersionFamilyStore: Send + Sync {
+    /// Exact read by family key, writing nothing.
+    ///
+    /// [`Self::create_or_get`] answers the same question, but only by being
+    /// prepared to insert. A caller that must not write — the dry-run admission
+    /// view — needs the question without the answer's side effect, and needs it
+    /// to distinguish a family this batch would found from one that already
+    /// holds members, because the kind rule is skipped only for the former.
+    async fn find_family_by_key(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        family_key: &FamilyKey,
+    ) -> Result<Option<VersionFamilyRow>, ScopeError>;
+
     /// Take the family, creating it if this is its first member. The `bool` is
     /// `true` when this call created it.
     async fn create_or_get(
@@ -546,6 +680,18 @@ pub trait EntityStore: Send + Sync {
         tx: &DbTx<'_>,
         scope: &AccessScope,
         gts_ids: &[String],
+    ) -> Result<Vec<EntityRow>, ScopeError>;
+
+    /// Batch exact read by primary key.
+    ///
+    /// The inverse of [`Self::find_by_gts_ids`], for a caller holding the result
+    /// of a graph walk: edges name entity ids, and turning them back into rows
+    /// through identifiers would need the rows the walk does not have.
+    async fn find_by_ids(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_ids: &[i64],
     ) -> Result<Vec<EntityRow>, ScopeError>;
 
     /// Exact read by Registry Reference.
@@ -781,17 +927,15 @@ pub trait OperationStore: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError>;
 
-    /// Both results are optional, and `ck_tr_operation_item_state` says exactly
-    /// when each is present: a revision number only for a committing
-    /// registration, and a resource version only for a pass that wrote. A
-    /// deletion allocates no revision; a dry run moves no version.
+    /// Which result columns a success carries is [`ItemSuccess`]'s to say, not the
+    /// caller's: `ck_tr_operation_item_state` admits three shapes and two
+    /// independent `Option`s offer four.
     async fn mark_item_succeeded(
         &self,
         tx: &DbTx<'_>,
         scope: &AccessScope,
         item_id: i64,
-        revision_no: Option<i32>,
-        resource_version: Option<i64>,
+        outcome: ItemSuccess,
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError>;
 
@@ -840,14 +984,65 @@ pub trait DependencyStore: Send + Sync {
         bound: usize,
     ) -> Result<usize, ScopeError>;
 
-    /// The stored edges between the given entities, as `(from, to)` pairs, for
-    /// the deletion order (T20). Edges leaving the set are dropped.
+    /// One **page** of the stored edges on one side of the relation.
+    ///
+    /// The dry-run admission view walks the dependency relation itself, because
+    /// an overlay can replace one entity's outgoing set and a transitive read
+    /// would then follow edges the batch has removed. A walk needs single hops,
+    /// and a single hop on the incoming side has unbounded fan-in — one Type
+    /// Schema may have any number of dependants — so the read is paged rather
+    /// than materialized: the caller stops when the *distinct entities* it has
+    /// collected pass its own bound, having held at most one page at a time.
+    ///
+    /// Rows come back in `(from_entity_id, kind, to_entity_id)` order, which is
+    /// the relation's primary key and therefore a total order; `after` resumes
+    /// strictly past a row the caller has already seen. A short page is the last
+    /// one.
+    ///
+    /// `entity_ids` must hold at most [`EDGE_PAGE_IDS`] entries — one statement's
+    /// worth, because the keyset order has to be a single query's. An oversized
+    /// list is refused rather than chunked: chunking would silently restart the
+    /// ordering and hand the caller overlapping pages.
+    async fn edge_page(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_ids: &[i64],
+        side: EdgeSide,
+        after: Option<&DependencyEdgeRow>,
+        limit: usize,
+    ) -> Result<Vec<DependencyEdgeRow>, ScopeError>;
+
+    /// Up to `limit` distinct **live** entities holding a direct edge into
+    /// `entity_id`, optionally of one kind, ordered by entity id.
+    ///
+    /// The identity-bearing form of [`Self::live_direct_dependents`] and
+    /// [`Self::has_live_direct_instances`], bounded by `limit` in the statement.
+    /// The dry-run view needs identities rather than a count or a flag: a
+    /// candidate the same batch is admitting may add or remove a dependant, and
+    /// adjusting a number requires knowing whether the stored answer already
+    /// counted the one being adjusted. `limit` is the caller's own bound plus the
+    /// size of the bounded set it has to reason about, so the read stays as small
+    /// as the question.
+    ///
+    /// Identities do not reach a refusal message: T20 reports a count.
+    async fn live_direct_dependent_ids(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_id: i64,
+        kind: Option<DependencyKind>,
+        limit: usize,
+    ) -> Result<Vec<i64>, ScopeError>;
+
+    /// The stored edges between the given entities, for the deletion order (T20).
+    /// Edges leaving the set are dropped.
     async fn edges_within(
         &self,
         tx: &DbTx<'_>,
         scope: &AccessScope,
         entity_ids: &[i64],
-    ) -> Result<Vec<(i64, i64)>, ScopeError>;
+    ) -> Result<Vec<EntityEdge>, ScopeError>;
 
     /// The roots plus everything they transitively consume.
     async fn closure(

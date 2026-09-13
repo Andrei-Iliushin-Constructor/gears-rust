@@ -36,18 +36,20 @@ use std::time::Instant;
 
 use time::OffsetDateTime;
 use toolkit_db::secure::{AccessScope, ScopeError};
-use toolkit_db::{DBProvider, DbError};
+use toolkit_db::{DBProvider, DbError, DbTx};
 use toolkit_macros::domain_model;
 use tracing::{Instrument, Span};
 use uuid::Uuid;
 
 use super::deletion;
-pub use super::errors::{DryRunResult, ItemFailure, WorkerError};
+pub use super::errors::{ItemFailure, WorkerError};
 use super::graph::{
     BatchCandidate, BatchOrder, BlockKind, Blocker, DependencyLink, order_batch,
     order_deletion_batch,
 };
+use super::publish;
 use super::revision::{CommittedUnit, RevisionCommit};
+use super::simulate::{self, Predicted};
 use super::unchanged;
 use super::unit::{EvaluationTarget, PreparedUnit, commit_creation, commit_revision, evaluate};
 use super::vector::VectorDrift;
@@ -140,13 +142,16 @@ async fn run_operation_inner(
     // after changes nothing — and it makes the pair consistent, which two
     // separately-snapshotted reads would not be.
     let (operation, items) = read_operation(stores, db, scope, operation_id).await?;
+    // Shared rather than copied from here on: both passes hand the slice to a
+    // `'static` transaction closure, and every row carries its authored document.
+    let items: Arc<[OperationItemRow]> = items.into();
     observability::record_operation_facts(&Span::current(), operation.kind, operation.dry_run);
 
     // A redelivered message finds the operation terminal and reports the stored
     // outcomes. Delivery is at-least-once (T21), so this is the shape that makes
     // duplicate delivery a no-op rather than a second admission.
     if operation.status == OperationStatus::Completed {
-        return Ok(already_terminal(operation_id, &items));
+        return already_terminal(operation_id, &items);
     }
 
     if !mark_running(stores, db, scope, operation_id, now).await? {
@@ -156,13 +161,36 @@ async fn run_operation_inner(
         );
     }
 
+    // A dry run of either kind is predicted whole — one snapshot, one overlay,
+    // no entity-state write — and its outcomes are published afterwards.
+    if operation.dry_run {
+        return dry_run_pass(stores, db, scope, tuning, &operation, &items, now).await;
+    }
+
+    commit_pass(stores, db, scope, tuning, &operation, &items, now).await
+}
+
+/// Order a batch, admit it candidate by candidate and complete the operation.
+///
+/// Split from [`run_operation_inner`], which now reads the operation, decides
+/// which pass it is, and nothing else.
+async fn commit_pass(
+    stores: &Arc<dyn Stores>,
+    db: &DBProvider<WorkerError>,
+    scope: &AccessScope,
+    tuning: Tuning<'_>,
+    operation: &OperationRow,
+    items: &[OperationItemRow],
+    now: OffsetDateTime,
+) -> Result<OperationOutcome, WorkerError> {
+    let operation_id = operation.id;
     // Steps 1–2: order the batch before touching any candidate. One candidate is
     // one unit, but *which* unit runs next is a property of the whole batch —
     // and the two kinds order by opposite relations. A registration puts what it
     // consumes first; a deletion puts what consumes **it** first, or the target
     // is refused for a dependant the same batch was about to remove.
     let order = if operation.kind == OperationKind::Deletion {
-        deletion_order(stores, db, scope, &items).await?
+        deletion_order(stores, db, scope, items).await?
     } else {
         let batch: Vec<BatchCandidate> = items.iter().map(batch_candidate).collect();
         order_batch(&batch)
@@ -183,19 +211,23 @@ async fn run_operation_inner(
 
     for &index in order.order() {
         let item = &items[index];
-        outcomes[index] = Some(match blocked_by(&order, index, &outcomes) {
-            Some(blocker) => {
-                let failure = blocked_failure(blocker, &items[blocker.index].gts_id);
-                refuse_unevaluated(stores, db, scope, tuning, operation_id, item, failure, now)
-                    .await?
-            }
-            // Instrument each item without splitting `process_item` to own the span.
-            None => {
-                process_item(stores, db, scope, tuning, operation_id, item, now)
-                    .instrument(unit_span(operation_id, item))
-                    .await?
-            }
-        });
+        outcomes[index] = Some(
+            match blocked_by(&order, index, |i| {
+                outcomes[i].as_ref().map(|outcome| outcome.status)
+            }) {
+                Some(blocker) => {
+                    let failure = blocked_failure(blocker, &items[blocker.index].gts_id);
+                    refuse_unevaluated(stores, db, scope, tuning, operation_id, item, failure, now)
+                        .await?
+                }
+                // Instrument each item without splitting `process_item` to own the span.
+                None => {
+                    process_item(stores, db, scope, tuning, operation_id, item, now)
+                        .instrument(unit_span(operation_id, item))
+                        .await?
+                }
+            },
+        );
     }
 
     mark_completed(stores, db, scope, operation_id, now).await?;
@@ -209,15 +241,79 @@ async fn run_operation_inner(
         items: items
             .iter()
             .zip(outcomes)
-            .map(|(item, outcome)| outcome.unwrap_or_else(|| stored_outcome(item)))
-            .collect(),
+            .map(|(item, outcome)| outcome.map_or_else(|| stored_outcome(item), Ok))
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+/// Predict one dry-run batch and record what it predicted.
+///
+/// Split out of [`run_operation_inner`] because it shares only its inputs with
+/// the committing path: there is no ordering loop here, no commit transaction
+/// and no separate completion — publication does all three of the last one's
+/// jobs at once (see [`publish`]).
+async fn dry_run_pass(
+    stores: &Arc<dyn Stores>,
+    db: &DBProvider<WorkerError>,
+    scope: &AccessScope,
+    tuning: Tuning<'_>,
+    operation: &OperationRow,
+    items: &Arc<[OperationItemRow]>,
+    now: OffsetDateTime,
+) -> Result<OperationOutcome, WorkerError> {
+    let operation_id = operation.id;
+    let predictions =
+        simulate::simulate_batch(stores, db, scope, tuning, operation, Arc::clone(items), now)
+            .await?;
+    let published =
+        publish::publish(stores, db, scope, operation_id, items, &predictions, now).await?;
+    // A lost compare-and-swap means an overlapping pass terminalized the item
+    // first; its stored outcome stands, as it does on the real path. All of them
+    // are in the same post-publication state, so read the items once instead of
+    // once per lost item, which was one transaction and one full item scan each.
+    let terminalized: HashMap<i64, OperationItemRow> = if published.recorded.contains(&false) {
+        read_operation(stores, db, scope, operation_id)
+            .await?
+            .1
+            .into_iter()
+            .map(|row| (row.id, row))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    let mut outcomes = Vec::with_capacity(items.len());
+    for ((item, prediction), won) in items.iter().zip(&predictions).zip(published.recorded) {
+        if !won {
+            let row = terminalized
+                .get(&item.id)
+                .ok_or(WorkerError::OperationNotFound { operation_id })?;
+            outcomes.push(stored_outcome(row)?);
+            continue;
+        }
+        let reported = publish::published_outcome(operation_id, item, prediction, tuning.metrics);
+        outcomes.push(ItemOutcome {
+            gts_id: item.gts_id.clone(),
+            status: reported.status,
+            gts_uuid: reported.gts_uuid,
+            resource_version: reported.resource_version,
+            revision_no: reported.revision_no,
+            failure: match prediction {
+                Predicted::Refused(failure) => Some(failure.clone()),
+                Predicted::Terminal { .. } => None,
+            },
+        });
+    }
+    Ok(OperationOutcome {
+        operation_id,
+        already_terminal: false,
+        items: outcomes,
     })
 }
 
 /// The ordering's view of one stored item. An unparsable payload yields no
 /// content and therefore no edge — the item's own evaluation refuses it with
 /// `invalid_document`, which is a better message than anything this layer has.
-fn batch_candidate(item: &OperationItemRow) -> BatchCandidate {
+pub(super) fn batch_candidate(item: &OperationItemRow) -> BatchCandidate {
     BatchCandidate {
         gts_id: item.gts_id.clone(),
         content: item
@@ -244,33 +340,45 @@ async fn deletion_order(
     scope: &AccessScope,
     items: &[OperationItemRow],
 ) -> Result<BatchOrder, WorkerError> {
-    let gts_ids: Vec<String> = items.iter().map(|item| item.gts_id.clone()).collect();
     let stores_tx = Arc::clone(stores);
     let scope_tx = scope.clone();
-    let read_ids = gts_ids.clone();
-    let links = db
-        .transaction_with_config(snapshot_read(&db.db()), move |tx| {
-            Box::pin(async move {
-                let rows = stores_tx.find_by_gts_ids(tx, &scope_tx, &read_ids).await?;
-                let entity_ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
-                let named: HashMap<i64, String> =
-                    rows.into_iter().map(|row| (row.id, row.gts_id)).collect();
-                let edges = stores_tx
-                    .edges_within(tx, &scope_tx, &entity_ids)
-                    .await?
-                    .into_iter()
-                    .filter_map(|(from, to)| {
-                        Some(DependencyLink {
-                            dependant: named.get(&from)?.clone(),
-                            target: named.get(&to)?.clone(),
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                Ok(edges)
+    // Only the identifiers cross into the closure: `order_deletions` reads
+    // nothing else from an item, and the rows carry the authored documents.
+    let gts_ids: Vec<String> = items.iter().map(|item| item.gts_id.clone()).collect();
+    db.transaction_with_config(snapshot_read(&db.db()), move |tx| {
+        Box::pin(async move { order_deletions(stores_tx.as_ref(), tx, &scope_tx, &gts_ids).await })
+    })
+    .await
+}
+
+/// [`deletion_order`] against a transaction the caller already holds.
+///
+/// The dry-run pass has one open for the whole batch, and the order has to be
+/// read through it like everything else the pass decides on.
+///
+/// # Errors
+/// Propagates the two reads.
+pub(super) async fn order_deletions(
+    stores: &dyn Stores,
+    tx: &DbTx<'_>,
+    scope: &AccessScope,
+    gts_ids: &[String],
+) -> Result<BatchOrder, WorkerError> {
+    let rows = stores.find_by_gts_ids(tx, scope, gts_ids).await?;
+    let entity_ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
+    let named: HashMap<i64, String> = rows.into_iter().map(|row| (row.id, row.gts_id)).collect();
+    let links = stores
+        .edges_within(tx, scope, &entity_ids)
+        .await?
+        .into_iter()
+        .filter_map(|edge| {
+            Some(DependencyLink {
+                dependant: named.get(&edge.from_entity_id)?.clone(),
+                target: named.get(&edge.to_entity_id)?.clone(),
             })
         })
-        .await?;
-    Ok(order_deletion_batch(&gts_ids, &links))
+        .collect::<Vec<_>>();
+    Ok(order_deletion_batch(gts_ids, &links))
 }
 
 fn unit_span(operation_id: Uuid, item: &OperationItemRow) -> Span {
@@ -283,7 +391,10 @@ fn unit_span(operation_id: Uuid, item: &OperationItemRow) -> Span {
 /// An item an earlier pass already decided is left alone: `record_failure`'s CAS
 /// reports the stored outcome instead, which is the same rule an evaluated
 /// refusal follows.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "same context as `commit_pass`, plus the item and the failure it is being terminalized with"
+)]
 async fn refuse_unevaluated(
     stores: &Arc<dyn Stores>,
     db: &DBProvider<WorkerError>,
@@ -295,7 +406,7 @@ async fn refuse_unevaluated(
     now: OffsetDateTime,
 ) -> Result<ItemOutcome, WorkerError> {
     if item.status != OperationItemStatus::Pending && item.status != OperationItemStatus::Running {
-        return Ok(stored_outcome(item));
+        return stored_outcome(item);
     }
     record_failure(
         stores,
@@ -319,20 +430,20 @@ async fn refuse_unevaluated(
 /// blocker is decided before this candidate — cycle members up front, the rest by
 /// the topological order — so a `None` outcome here means the blocker is this
 /// candidate itself, which only a cycle member has.
-fn blocked_by(
+pub(super) fn blocked_by(
     order: &BatchOrder,
     index: usize,
-    outcomes: &[Option<ItemOutcome>],
+    decided: impl Fn(usize) -> Option<OperationItemStatus>,
 ) -> Option<Blocker> {
-    order.blockers(index).iter().copied().find(|blocker| {
-        outcomes[blocker.index]
-            .as_ref()
-            .is_some_and(|outcome| outcome.status == OperationItemStatus::Failed)
-    })
+    order
+        .blockers(index)
+        .iter()
+        .copied()
+        .find(|blocker| decided(blocker.index) == Some(OperationItemStatus::Failed))
 }
 
 /// The refusal a blocked candidate carries, naming the candidate that blocked it.
-fn blocked_failure(blocker: Blocker, target: &str) -> ItemFailure {
+pub(super) fn blocked_failure(blocker: Blocker, target: &str) -> ItemFailure {
     let edge = match blocker.kind {
         BlockKind::Predecessor => "the preceding minor",
         BlockKind::Dependency => "the selected dependency",
@@ -445,10 +556,6 @@ async fn commit_prepared(
     let tx_metrics = Arc::clone(metrics);
     // Copy limits into the `'static` retry closure.
     let tx_limits = limits;
-    // A dry run runs the whole commit — every recheck, every write — and then
-    // discards it. Everything above is real work against real state; the only
-    // difference is that the transaction ends in a rollback.
-    let dry_run = item.dry_run;
     db.db()
         .transaction_with_retry(commit_write(&db.db()), retryable_db_err, |tx| {
             let prepared = prepared.clone();
@@ -458,19 +565,18 @@ async fn commit_prepared(
             Box::pin(async move {
                 let unit = match &prepared {
                     PreparedUnit::Unchanged(candidate) => {
-                        let committed =
-                            unchanged::commit(tx_stores.as_ref(), tx, &tx_scope, candidate, now)
-                                .await;
-                        return match committed {
-                            Ok(result) if dry_run => Err(WorkerError::DryRunRolledBack(Box::new(
-                                DryRunResult::Revision(result),
-                            ))),
-                            other => other,
-                        };
+                        return unchanged::commit(
+                            tx_stores.as_ref(),
+                            tx,
+                            &tx_scope,
+                            candidate,
+                            now,
+                        )
+                        .await;
                     }
                     PreparedUnit::Evaluated(unit) => unit,
                 };
-                let committed = match precondition {
+                match precondition {
                     Precondition::MustNotExist => {
                         commit_creation(tx_stores.as_ref(), tx, &tx_scope, unit, &tx_limits, now)
                             .await
@@ -489,12 +595,6 @@ async fn commit_prepared(
                         )
                         .await
                     }
-                };
-                match committed {
-                    Ok(result) if dry_run => Err(WorkerError::DryRunRolledBack(Box::new(
-                        DryRunResult::Revision(result),
-                    ))),
-                    other => other,
                 }
             })
         })
@@ -543,9 +643,6 @@ async fn process_deletion(
     let tx_limits = *tuning.limits;
     let gts_id = item.gts_id.clone();
     let span = Span::current();
-    // A dry-run deletion runs every check — including the dependants recheck,
-    // which is the one it exists to ask — and then discards the tombstone.
-    let dry_run = item.dry_run;
     let committed = db
         .db()
         .transaction_with_retry(commit_write(&db.db()), retryable_db_err, |tx| {
@@ -554,7 +651,7 @@ async fn process_deletion(
             let gts_id = gts_id.clone();
             let span = span.clone();
             Box::pin(async move {
-                let committed = deletion::commit_deletion(
+                deletion::commit_deletion(
                     tx_stores.as_ref(),
                     tx,
                     &tx_scope,
@@ -564,28 +661,13 @@ async fn process_deletion(
                     &span,
                     now,
                 )
-                .await;
-                match committed {
-                    Ok(result) if dry_run => Err(WorkerError::DryRunRolledBack(Box::new(
-                        DryRunResult::Deletion(result),
-                    ))),
-                    other => other,
-                }
+                .await
             })
         })
         .await;
 
     let committed = match committed {
         Ok(committed) => committed,
-        // The expected end of a dry run: the rollback carried the result out.
-        Err(WorkerError::DryRunRolledBack(result)) => match *result {
-            DryRunResult::Deletion(committed) => committed,
-            // This path only ever wraps a deletion; see the mirror of this arm
-            // in `process_item`.
-            revision @ DryRunResult::Revision(_) => {
-                return Err(WorkerError::DryRunRolledBack(Box::new(revision)));
-            }
-        },
         // Another pass terminalized the item; this pass rolled back.
         Err(WorkerError::ItemAlreadyTerminal { item_id }) => {
             return stored_item(stores, db, scope, operation_id, item_id).await;
@@ -608,14 +690,15 @@ async fn process_deletion(
             tuning
                 .metrics
                 .candidate_terminalized(TerminalStatus::Succeeded, item.pass_labels());
+            // A deletion allocates no revision (ADR-0005); the version is the
+            // one the tombstone now carries.
+            let (revision_no, resource_version) = commit.item_outcome(item.dry_run).columns();
             Ok(ItemOutcome {
                 gts_id: item.gts_id.clone(),
                 status: OperationItemStatus::Succeeded,
                 gts_uuid: Some(commit.gts_uuid),
-                resource_version: (!item.dry_run).then_some(commit.resource_version),
-                // A deletion allocates no revision (ADR-0005), and a dry run
-                // moved no version.
-                revision_no: None,
+                resource_version,
+                revision_no,
                 failure: None,
             })
         }
@@ -652,13 +735,11 @@ async fn terminalize_deletion(
     let tx_stores = Arc::clone(stores);
     let tx_scope = scope.clone();
     let item_id = item.id;
-    // `ck_tr_operation_item_state`: a succeeded dry run records no version,
-    // because it moved none.
-    let resource_version = (!item.dry_run).then_some(commit.resource_version);
+    let outcome = commit.item_outcome(item.dry_run);
     db.transaction(move |tx| {
         Box::pin(async move {
             Ok(tx_stores
-                .mark_item_succeeded(tx, &tx_scope, item_id, None, resource_version, now)
+                .mark_item_succeeded(tx, &tx_scope, item_id, outcome, now)
                 .await?)
         })
     })
@@ -677,7 +758,7 @@ async fn process_item(
     now: OffsetDateTime,
 ) -> Result<ItemOutcome, WorkerError> {
     if item.status != OperationItemStatus::Pending && item.status != OperationItemStatus::Running {
-        return Ok(stored_outcome(item));
+        return stored_outcome(item);
     }
 
     // A deletion has no document, so it has nothing to evaluate: no store build,
@@ -758,18 +839,6 @@ async fn process_item(
         .await
         {
             Ok(committed) => committed,
-            // The expected end of a dry run: the transaction rolled back and
-            // carried its result out here. The item is written below, outside
-            // the transaction that refused to keep anything.
-            Err(WorkerError::DryRunRolledBack(result)) => match *result {
-                DryRunResult::Revision(committed) => committed,
-                // This path only ever wraps a revision. Propagated rather than
-                // renamed: a deletion arriving here is a worker bug, and the
-                // error already says which invariant broke.
-                deletion @ DryRunResult::Deletion(_) => {
-                    return Err(WorkerError::DryRunRolledBack(Box::new(deletion)));
-                }
-            },
             // Another pass terminalized the item; this pass rolled back.
             Err(WorkerError::ItemAlreadyTerminal { item_id }) => {
                 return stored_item(stores, db, scope, operation_id, item_id).await;
@@ -807,22 +876,13 @@ async fn process_item(
         };
 
         return match committed {
-            Ok(commit) => {
-                // A dry run's own item write rolled back with the rest of the
-                // transaction, so it is made here, where nothing can discard it.
-                if item.dry_run
-                    && !terminalize_dry_run(stores, db, scope, item, commit, now).await?
-                {
-                    return stored_item(stores, db, scope, operation_id, item.id).await;
-                }
-                Ok(committed_outcome(
-                    operation_id,
-                    item,
-                    commit,
-                    attempt,
-                    tuning.metrics,
-                ))
-            }
+            Ok(commit) => Ok(committed_outcome(
+                operation_id,
+                item,
+                commit,
+                attempt,
+                tuning.metrics,
+            )),
             Err(failure) => {
                 record_failure(
                     stores,
@@ -861,49 +921,6 @@ async fn process_item(
         now,
         tuning.metrics,
     )
-    .await
-}
-
-/// Write a dry run's terminal outcome, outside the transaction that discarded
-/// everything else it did.
-///
-/// `false` means an overlapping pass terminalized the item first; its outcome
-/// stands, exactly as it does for a committing pass.
-///
-/// `unchanged` is the one dry-run outcome that still reports a version: it names
-/// the version that did **not** move, which is a fact about committed state
-/// rather than about this pass. `ck_tr_operation_item_state` encodes precisely
-/// that distinction.
-async fn terminalize_dry_run(
-    stores: &Arc<dyn Stores>,
-    db: &DBProvider<WorkerError>,
-    scope: &AccessScope,
-    item: &OperationItemRow,
-    commit: RevisionCommit,
-    now: OffsetDateTime,
-) -> Result<bool, WorkerError> {
-    let tx_stores = Arc::clone(stores);
-    let tx_scope = scope.clone();
-    let item_id = item.id;
-    db.transaction(move |tx| {
-        Box::pin(async move {
-            let recorded = match commit {
-                RevisionCommit::Admitted(_) => {
-                    tx_stores
-                        .mark_item_succeeded(tx, &tx_scope, item_id, None, None, now)
-                        .await?
-                }
-                RevisionCommit::Unchanged {
-                    resource_version, ..
-                } => {
-                    tx_stores
-                        .mark_item_unchanged(tx, &tx_scope, item_id, resource_version, now)
-                        .await?
-                }
-            };
-            Ok(recorded)
-        })
-    })
     .await
 }
 
@@ -1041,17 +1058,23 @@ async fn record_failure(
 }
 
 /// The outcome a redelivered pass reports: every stored item, nothing written.
-fn already_terminal(operation_id: Uuid, items: &[OperationItemRow]) -> OperationOutcome {
+fn already_terminal(
+    operation_id: Uuid,
+    items: &[OperationItemRow],
+) -> Result<OperationOutcome, WorkerError> {
     tracing::debug!(
         %operation_id,
         "types_registry operation was already terminal; the redelivered pass reports \
          the stored outcomes"
     );
-    OperationOutcome {
+    Ok(OperationOutcome {
         operation_id,
         already_terminal: true,
-        items: items.iter().map(stored_outcome).collect(),
-    }
+        items: items
+            .iter()
+            .map(stored_outcome)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
 }
 
 /// The outcome the store holds for one item, re-read outside any transaction this
@@ -1067,8 +1090,8 @@ async fn stored_item(
     fresh
         .iter()
         .find(|row| row.id == item_id)
-        .map(stored_outcome)
         .ok_or(WorkerError::OperationNotFound { operation_id })
+        .and_then(stored_outcome)
 }
 
 /// Read the operation and its items under one snapshot.
@@ -1156,18 +1179,45 @@ async fn mark_completed(
 }
 
 /// Read an already-terminal item's stored outcome back out.
-fn stored_outcome(item: &OperationItemRow) -> ItemOutcome {
-    ItemOutcome {
+///
+/// `gts_uuid` is **not** stored on the item — `database.sql` keeps it on the
+/// entity, because it is a function of `gts_id`. It is asked of `gts-rust` here
+/// rather than reconstructed: `GtsId::to_uuid` is the derivation, and calling it
+/// is the same delegation `evaluate` makes, not a second implementation of it.
+///
+/// Without this a redelivered or overlapping pass reports a terminal success
+/// with no Registry Reference while the first pass reports one, and ADR-0012
+/// says a terminal success always carries it. A refusal carries none either way.
+fn stored_outcome(item: &OperationItemRow) -> Result<ItemOutcome, WorkerError> {
+    let terminal_success = matches!(
+        item.status,
+        OperationItemStatus::Succeeded | OperationItemStatus::Unchanged
+    );
+    // Not `.ok()`: a terminal success owes its Registry Reference, so an
+    // identifier that no longer parses is a corrupt row and has to say so.
+    // Swallowing it answered `gts_uuid: None`, which is the one shape ADR-0012
+    // rules out, and left no trace of why.
+    let gts_uuid = if terminal_success {
+        Some(
+            gts::GtsId::try_new(&item.gts_id)
+                .map_err(|reason| WorkerError::StoredIdentifierUnparsable {
+                    item_id: item.id,
+                    gts_id: item.gts_id.clone(),
+                    reason: reason.to_string(),
+                })?
+                .to_uuid(),
+        )
+    } else {
+        None
+    };
+    Ok(ItemOutcome {
         gts_id: item.gts_id.clone(),
         status: item.status,
-        // `gts_uuid` is not stored on the item — it derives from `gts_id`
-        // (`database.sql`), and deriving it here would duplicate a GTS rule. The
-        // caller that needs it has the identifier.
-        gts_uuid: None,
+        gts_uuid,
         resource_version: item.result_resource_version,
         revision_no: item.result_revision_no,
         failure: item.error_payload.as_deref().map(ItemFailure::from_payload),
-    }
+    })
 }
 
 #[cfg(test)]

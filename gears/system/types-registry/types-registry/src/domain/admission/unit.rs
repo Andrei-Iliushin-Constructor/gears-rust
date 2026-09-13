@@ -45,8 +45,8 @@ use crate::domain::family::{FamilyKey, admits_new_member, family_key};
 use crate::domain::gts_store::{CommittedSchema, UnitDocument, UnitStore, load_unit_store};
 use crate::domain::ports::metrics::{AdmissionMetrics, PassLabels};
 use crate::domain::ports::{
-    NewCurrentInstance, NewCurrentTypeSchema, NewEntity, NewInstanceRevision, NewRevision,
-    OperationItemRow, Stores, snapshot_read,
+    ItemSuccess, NewCurrentInstance, NewCurrentTypeSchema, NewEntity, NewInstanceRevision,
+    NewRevision, OperationItemRow, Stores, snapshot_read,
 };
 use crate::observability::{self, CompatFacts};
 
@@ -276,6 +276,255 @@ pub struct EvaluationTarget<'a> {
     pub labels: PassLabels,
 }
 
+/// Everything an evaluation decides before it reads anything.
+///
+/// Pulled out of [`evaluate`] so the same decisions serve both entry points: the
+/// committing path, which opens its own snapshot, and the dry-run pass, which
+/// already has one open and must not start a second. Splitting the *decisions*
+/// from the *reads* is what keeps those two from drifting — there is one plan,
+/// one snapshot body and one validation, whichever way in the caller came.
+#[domain_model]
+#[derive(Clone, Debug)]
+struct EvaluationPlan {
+    id: GtsId,
+    candidate_id: String,
+    canonical_body: String,
+    baseline_choice: Baseline,
+    /// The preceding minor, when there is one: an entity no candidate names, so
+    /// its own bases and stored `$ref` targets reach the store only as an extra
+    /// closure root.
+    baseline_roots: Vec<String>,
+    conforming_type: Option<String>,
+    precondition: Precondition,
+    operation_item_id: i64,
+    force: bool,
+    labels: PassLabels,
+}
+
+/// Decide the plan, or refuse the candidate on what its identifier alone says.
+fn plan_evaluation(target: EvaluationTarget<'_>) -> Result<EvaluationPlan, ItemFailure> {
+    let EvaluationTarget {
+        gts_id,
+        canonical_body,
+        operation_item_id,
+        precondition,
+        force,
+        labels,
+    } = target;
+    let id = match GtsId::try_new(gts_id) {
+        Ok(id) => id,
+        // Acceptance already refused a non-canonical identifier, so reaching here
+        // means the stored row disagrees with the rules that admitted it.
+        Err(e) => {
+            return Err(ItemFailure::new(
+                AdmissionFailureReason::InvalidIdentifier,
+                format!("stored identifier '{gts_id}' does not parse: {e}"),
+            ));
+        }
+    };
+    // Select from the identifier and accepted precondition before reading storage.
+    let baseline_choice = match compat::select_baseline(&id, precondition) {
+        Ok(choice) => choice,
+        // Acceptance rejects unreadable versions; fail closed if a stored row contains one.
+        Err(unreadable) => {
+            return Err(ItemFailure::new(
+                compat::UnreadableVersion::REASON,
+                unreadable.to_string(),
+            ));
+        }
+    };
+    let baseline_roots: Vec<String> = match &baseline_choice {
+        Baseline::PrecedingMinor { gts_id } => vec![gts_id.clone()],
+        _ => Vec::new(),
+    };
+    // The conforming type's `(entity_id, revision_no)` is read in the same snapshot as
+    // the store: the recorded revision must be the one that validated the value.
+    let conforming_type = (!id.is_type()).then(|| id.get_type_id()).flatten();
+    let candidate_id = id.id().to_owned();
+    Ok(EvaluationPlan {
+        id,
+        candidate_id,
+        canonical_body: canonical_body.to_owned(),
+        baseline_choice,
+        baseline_roots,
+        conforming_type,
+        precondition,
+        operation_item_id,
+        force,
+        labels,
+    })
+}
+
+/// Everything one evaluation reads, from one snapshot.
+///
+/// Takes the transaction rather than opening one: the committing path hands it
+/// the read-only transaction it just opened, and the dry-run pass hands it the
+/// one the whole batch is being predicted against. Neither can reach for a
+/// second, which is what makes "one coherent base" checkable rather than hoped
+/// for.
+async fn read_evaluation_snapshot(
+    stores: &dyn Stores,
+    tx: &DbTx<'_>,
+    scope: &AccessScope,
+    plan: &EvaluationPlan,
+    probe_item: Option<&OperationItemRow>,
+    limits: &Limits,
+) -> Result<Result<EvaluationSnapshot, ItemFailure>, WorkerError> {
+    if let Some(item) = probe_item
+        && let Some(candidate) =
+            unchanged::probe(stores, tx, scope, item, &plan.canonical_body).await?
+    {
+        return Ok(Ok(EvaluationSnapshot::Unchanged(candidate)));
+    }
+    let content: Value = match serde_json::from_str(&plan.canonical_body) {
+        Ok(content) => content,
+        Err(e) => {
+            return Ok(Err(ItemFailure::new(
+                AdmissionFailureReason::InvalidDocument,
+                format!("stored request payload is not valid JSON: {e}"),
+            )));
+        }
+    };
+
+    // Extract only after a probe miss, before loading the dependency store.
+    let edges = match extract_edges(&plan.id, &content) {
+        Ok(edges) => edges,
+        Err(e) => {
+            return Ok(Err(ItemFailure::new(
+                AdmissionFailureReason::InvalidSchema,
+                e.to_string(),
+            )));
+        }
+    };
+
+    // SPEC §8.1 step 7: quarantine the extracted dependency edges before loading
+    // targets. Their identifiers suffice; unchanged content never reaches this check.
+    if let Err(breach) = compat::quarantine(&plan.id, &edges) {
+        return Ok(Err(ItemFailure::new(breach.reason(), breach.to_string())));
+    }
+
+    let candidates = vec![UnitDocument {
+        gts_id: plan.candidate_id.clone(),
+        content: content.clone(),
+    }];
+    let store = load_unit_store(stores, tx, scope, candidates, &plan.baseline_roots)
+        .await
+        .map_err(WorkerError::StoreBuild)?;
+    // Looked up before the await: `UnitStore` is not `Sync`, so the
+    // borrow must end before the future may be sent.
+    let loaded = match &plan.baseline_choice {
+        Baseline::PrecedingMinor { gts_id } => store.committed_schema(gts_id).cloned(),
+        Baseline::Exempt(_) | Baseline::CurrentRevision => None,
+    };
+    let baseline = match read_baseline(
+        stores,
+        tx,
+        scope,
+        &plan.candidate_id,
+        plan.precondition,
+        &plan.baseline_choice,
+        loaded,
+    )
+    .await?
+    {
+        Ok(baseline) => baseline,
+        Err(failure) => return Ok(Err(failure)),
+    };
+    let pair = match &plan.conforming_type {
+        Some(type_id) => {
+            let entity = stores.find_by_gts_id(tx, scope, type_id).await?;
+            match entity {
+                Some(row) => stores
+                    .current_schema_projections(tx, scope, &[row.id])
+                    .await?
+                    .into_iter()
+                    .find(|current| current.entity_id == row.id)
+                    .map(|current| (row.id, current.cas.revision_no)),
+                None => None,
+            }
+        }
+        None => None,
+    };
+    // Derive the vector from the same snapshot as the validated documents (D4).
+    let vector = vector::derive_from(
+        stores,
+        tx,
+        scope,
+        &plan.candidate_id,
+        store.roots(),
+        store.closure_entities(),
+        limits.activation_write_set,
+    )
+    .await?;
+    let vector = match vector {
+        Ok(vector) => vector,
+        Err(failure) => return Ok(Err(failure)),
+    };
+    Ok(Ok(EvaluationSnapshot::Loaded {
+        store: Box::new(store),
+        schema_pair: pair,
+        vector,
+        edges,
+        content,
+        baseline: Box::new(baseline),
+    }))
+}
+
+/// Validate and materialize, away from the executor.
+///
+/// No transaction is open on [`evaluate`]'s path: it closes its snapshot before
+/// calling this. [`evaluate_in`] is the exception, and deliberately so — see its
+/// documentation for what that costs and why the pass cannot avoid it.
+async fn finish_evaluation(
+    plan: EvaluationPlan,
+    snapshot: EvaluationSnapshot,
+    limits: Limits,
+    metrics: &Arc<dyn AdmissionMetrics>,
+) -> Result<Result<PreparedUnit, ItemFailure>, WorkerError> {
+    let (store, schema_pair, vector, edges, content, baseline) = match snapshot {
+        EvaluationSnapshot::Loaded {
+            store,
+            schema_pair,
+            vector,
+            edges,
+            content,
+            baseline,
+        } => (store, schema_pair, vector, edges, content, baseline),
+        EvaluationSnapshot::Unchanged(candidate) => {
+            return Ok(Ok(PreparedUnit::Unchanged(Arc::new(candidate))));
+        }
+    };
+
+    // Capture the unit span before `spawn_blocking`, which does not inherit it.
+    let span = Span::current();
+    let metrics = Arc::clone(metrics);
+    tokio::task::spawn_blocking(move || {
+        evaluate_loaded(
+            *store,
+            &plan.id,
+            plan.conforming_type.clone(),
+            schema_pair,
+            plan.canonical_body,
+            &content,
+            &baseline,
+            CompatReporting::new(
+                &span,
+                metrics.as_ref(),
+                &plan.baseline_choice,
+                plan.force,
+                plan.labels,
+            ),
+            plan.operation_item_id,
+            edges,
+            vector,
+            &limits,
+        )
+    })
+    .await
+    .map_err(WorkerError::EvaluationTask)?
+    .map(|result| result.map(|unit| PreparedUnit::Evaluated(Arc::new(unit))))
+}
+
 /// Probe once when requested, then evaluate a miss from the same snapshot.
 /// Validation and artifact materialization run after the snapshot closes.
 ///
@@ -290,7 +539,6 @@ pub struct EvaluationTarget<'a> {
 /// [`WorkerError`] for an infrastructure failure, which the outbox handler must
 /// retry. A content failure is an [`ItemFailure`] in the `Ok(Err(..))` position: an
 /// *outcome*, not a fault, and retrying it would answer the same forever.
-#[allow(clippy::too_many_arguments)]
 pub async fn evaluate(
     stores: &Arc<dyn Stores>,
     db: &DBProvider<WorkerError>,
@@ -300,200 +548,79 @@ pub async fn evaluate(
     metrics: &Arc<dyn AdmissionMetrics>,
     probe_item: Option<&OperationItemRow>,
 ) -> Result<Result<PreparedUnit, ItemFailure>, WorkerError> {
-    let EvaluationTarget {
-        gts_id,
-        canonical_body,
-        operation_item_id,
-        precondition,
-        force,
-        labels,
-    } = target;
+    let plan = match plan_evaluation(target) {
+        Ok(plan) => plan,
+        Err(failure) => return Ok(Err(failure)),
+    };
     let limits = *limits;
-    let id = match GtsId::try_new(gts_id) {
-        Ok(id) => id,
-        // Acceptance already refused a non-canonical identifier, so reaching here
-        // means the stored row disagrees with the rules that admitted it.
-        Err(e) => {
-            return Ok(Err(ItemFailure::new(
-                AdmissionFailureReason::InvalidIdentifier,
-                format!("stored identifier '{gts_id}' does not parse: {e}"),
-            )));
-        }
-    };
-    // Select from the identifier and accepted precondition before reading storage.
-    let baseline_choice = match compat::select_baseline(&id, precondition) {
-        Ok(choice) => choice,
-        // Acceptance rejects unreadable versions; fail closed if a stored row contains one.
-        Err(unreadable) => {
-            return Ok(Err(ItemFailure::new(
-                compat::UnreadableVersion::REASON,
-                unreadable.to_string(),
-            )));
-        }
-    };
-    // The preceding minor is an entity no candidate names, so its own bases and
-    // stored `$ref` targets reach the store only as an extra closure root.
-    let baseline_roots: Vec<String> = match &baseline_choice {
-        Baseline::PrecedingMinor { gts_id } => vec![gts_id.clone()],
-        _ => Vec::new(),
-    };
-    // The conforming type's `(entity_id, revision_no)` is read in the same snapshot as
-    // the store: the recorded revision must be the one that validated the value.
-    let conforming_type = (!id.is_type()).then(|| id.get_type_id()).flatten();
-    let candidate_id = id.id().to_owned();
     let snapshot = {
         let stores = Arc::clone(stores);
         let scope = scope.clone();
-        let conforming_type = conforming_type.clone();
+        let plan = plan.clone();
         let probe_item = probe_item.cloned();
-        let canonical_body = canonical_body.to_owned();
-        let id = id.clone();
-        let baseline_choice = baseline_choice.clone();
-        let baseline_id = candidate_id.clone();
         db.transaction_with_config(snapshot_read(&db.db()), move |tx| {
             Box::pin(async move {
-                if let Some(item) = probe_item
-                    && let Some(candidate) =
-                        unchanged::probe(stores.as_ref(), tx, &scope, &item, &canonical_body)
-                            .await?
-                {
-                    return Ok(Ok(EvaluationSnapshot::Unchanged(candidate)));
-                }
-                let content: Value = match serde_json::from_str(&canonical_body) {
-                    Ok(content) => content,
-                    Err(e) => {
-                        return Ok(Err(ItemFailure::new(
-                            AdmissionFailureReason::InvalidDocument,
-                            format!("stored request payload is not valid JSON: {e}"),
-                        )));
-                    }
-                };
-
-                // Extract only after a probe miss, before loading the dependency store.
-                let edges = match extract_edges(&id, &content) {
-                    Ok(edges) => edges,
-                    Err(e) => {
-                        return Ok(Err(ItemFailure::new(
-                            AdmissionFailureReason::InvalidSchema,
-                            e.to_string(),
-                        )));
-                    }
-                };
-
-                // SPEC §8.1 step 7: quarantine the extracted dependency edges before loading
-                // targets. Their identifiers suffice; unchanged content never reaches this check.
-                if let Err(breach) = compat::quarantine(&id, &edges) {
-                    return Ok(Err(ItemFailure::new(breach.reason(), breach.to_string())));
-                }
-
-                let candidates = vec![UnitDocument {
-                    gts_id: id.id().to_owned(),
-                    content: content.clone(),
-                }];
-                let store =
-                    load_unit_store(stores.as_ref(), tx, &scope, candidates, &baseline_roots)
-                        .await
-                        .map_err(WorkerError::StoreBuild)?;
-                // Looked up before the await: `UnitStore` is not `Sync`, so the
-                // borrow must end before the future may be sent.
-                let loaded = match &baseline_choice {
-                    Baseline::PrecedingMinor { gts_id } => store.committed_schema(gts_id).cloned(),
-                    _ => None,
-                };
-                let baseline = match read_baseline(
+                read_evaluation_snapshot(
                     stores.as_ref(),
                     tx,
                     &scope,
-                    &baseline_id,
-                    precondition,
-                    &baseline_choice,
-                    loaded,
+                    &plan,
+                    probe_item.as_ref(),
+                    &limits,
                 )
-                .await?
-                {
-                    Ok(baseline) => baseline,
-                    Err(failure) => return Ok(Err(failure)),
-                };
-                let pair = match conforming_type {
-                    Some(type_id) => {
-                        let entity = stores.find_by_gts_id(tx, &scope, &type_id).await?;
-                        match entity {
-                            Some(row) => stores
-                                .current_schema_projections(tx, &scope, &[row.id])
-                                .await?
-                                .into_iter()
-                                .find(|current| current.entity_id == row.id)
-                                .map(|current| (row.id, current.cas.revision_no)),
-                            None => None,
-                        }
-                    }
-                    None => None,
-                };
-                // Derive the vector from the same snapshot as the validated documents (D4).
-                let vector = vector::derive_from(
-                    stores.as_ref(),
-                    tx,
-                    &scope,
-                    &candidate_id,
-                    store.roots(),
-                    store.closure_entities(),
-                    limits.activation_write_set,
-                )
-                .await?;
-                let vector = match vector {
-                    Ok(vector) => vector,
-                    Err(failure) => return Ok(Err(failure)),
-                };
-                Ok(Ok(EvaluationSnapshot::Loaded {
-                    store: Box::new(store),
-                    schema_pair: pair,
-                    vector,
-                    edges,
-                    content,
-                    baseline: Box::new(baseline),
-                }))
+                .await
             })
         })
         .await?
     };
-    let (store, schema_pair, vector, edges, content, baseline) = match snapshot {
-        Ok(EvaluationSnapshot::Loaded {
-            store,
-            schema_pair,
-            vector,
-            edges,
-            content,
-            baseline,
-        }) => (store, schema_pair, vector, edges, content, baseline),
-        Ok(EvaluationSnapshot::Unchanged(candidate)) => {
-            return Ok(Ok(PreparedUnit::Unchanged(Arc::new(candidate))));
-        }
+    match snapshot {
+        Ok(snapshot) => finish_evaluation(plan, snapshot, limits, metrics).await,
+        Err(failure) => Ok(Err(failure)),
+    }
+}
+
+/// [`evaluate`] against a transaction the caller already holds.
+///
+/// The dry-run pass's entry point: one snapshot covers the whole batch, so the
+/// evaluation of each candidate must read through it rather than open its own.
+/// Everything else — the plan, the snapshot body, the validation — is the same
+/// code the committing path runs.
+///
+/// # The connection is held across validation, and that is the design
+///
+/// [`evaluate`] closes its snapshot before `finish_evaluation`, so its
+/// `spawn_blocking` validation holds no connection. This path cannot do the
+/// same: a dry run's candidates are evaluated against an overlay each one writes
+/// into, so candidate *n + 1* must see what candidate *n* committed virtually,
+/// and evaluation and commit therefore interleave inside the single snapshot.
+/// Hoisting the validations out of it would evaluate every candidate against
+/// base state and predict a different batch.
+///
+/// The cost is one pooled connection pinned for the pass, spanning
+/// `limits.batch_candidates` validations rather than a single one. That is
+/// bounded by the same limit acceptance enforces on the request (100 by
+/// default), which is what keeps it a batch-shaped hold rather than an unbounded
+/// one.
+///
+/// # Errors
+/// As [`evaluate`].
+pub async fn evaluate_in(
+    stores: &dyn Stores,
+    tx: &DbTx<'_>,
+    scope: &AccessScope,
+    target: EvaluationTarget<'_>,
+    limits: &Limits,
+    metrics: &Arc<dyn AdmissionMetrics>,
+    probe_item: Option<&OperationItemRow>,
+) -> Result<Result<PreparedUnit, ItemFailure>, WorkerError> {
+    let plan = match plan_evaluation(target) {
+        Ok(plan) => plan,
         Err(failure) => return Ok(Err(failure)),
     };
-
-    let canonical_body = canonical_body.to_owned();
-    // Capture the unit span before `spawn_blocking`, which does not inherit it.
-    let span = Span::current();
-    let metrics = Arc::clone(metrics);
-    tokio::task::spawn_blocking(move || {
-        evaluate_loaded(
-            *store,
-            &id,
-            conforming_type,
-            schema_pair,
-            canonical_body,
-            &content,
-            &baseline,
-            CompatReporting::new(&span, metrics.as_ref(), &baseline_choice, force, labels),
-            operation_item_id,
-            edges,
-            vector,
-            &limits,
-        )
-    })
-    .await
-    .map_err(WorkerError::EvaluationTask)?
-    .map(|result| result.map(|unit| PreparedUnit::Evaluated(Arc::new(unit))))
+    match read_evaluation_snapshot(stores, tx, scope, &plan, probe_item, limits).await? {
+        Ok(snapshot) => finish_evaluation(plan, snapshot, *limits, metrics).await,
+        Err(failure) => Ok(Err(failure)),
+    }
 }
 
 /// Run the CPU-heavy `gts-rust` validation and artifact materialization away from
@@ -1052,12 +1179,12 @@ pub async fn commit_creation(
             tx,
             scope,
             unit.operation_item_id,
-            // A dry run's transaction is rolled back, but its statements still
-            // execute — and `ck_tr_operation_item_state` fires at statement
-            // time, not at commit. So the values have to be the dry-run ones
-            // here too, even though this write is about to be discarded.
-            (!unit.labels.dry_run).then_some(revision_no),
-            (!unit.labels.dry_run).then_some(entity.resource_version),
+            // On the dry-run path `stores` is the `AdmissionView`, so this
+            // write issues no SQL: the overlay keeps it and the pass publishes
+            // it to the real row afterwards. The shape still has to be the
+            // dry-run one, because that is the row publication writes and
+            // `ck_tr_operation_item_state` checks.
+            ItemSuccess::registration(unit.labels.dry_run, revision_no, entity.resource_version),
             now,
         )
         .await?
@@ -1327,10 +1454,9 @@ pub async fn commit_revision(
             tx,
             scope,
             unit.operation_item_id,
-            // See `commit_creation`: a dry run's discarded write must still
-            // satisfy the item CHECK.
-            (!unit.labels.dry_run).then_some(revision_no),
-            (!unit.labels.dry_run).then_some(resource_version),
+            // See `commit_creation`: the shape a dry run records is the one
+            // publication will write, so it must satisfy the item CHECK.
+            ItemSuccess::registration(unit.labels.dry_run, revision_no, resource_version),
             now,
         )
         .await?

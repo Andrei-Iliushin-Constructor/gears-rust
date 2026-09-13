@@ -653,8 +653,9 @@ async fn a_dry_run_is_accepted_and_writes_nothing() {
     body["dry_run"] = json!(true);
 
     let accepted = call(&router, submit(Some("dry-run-key"), &body)).await;
-    assert!(
-        accepted.status == StatusCode::ACCEPTED || accepted.status == StatusCode::OK,
+    assert_eq!(
+        accepted.status,
+        StatusCode::ACCEPTED,
         "a dry run is accepted like any other request: {:?}",
         accepted.body,
     );

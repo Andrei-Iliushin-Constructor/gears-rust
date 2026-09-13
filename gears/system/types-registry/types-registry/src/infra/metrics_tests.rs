@@ -616,7 +616,7 @@ fn label_values_of(exporter: &InMemoryMetricExporter, name: &str, key: &str) -> 
     values
 }
 
-/// A rollback-only pass must not be indistinguishable from one that wrote. This
+/// A dry-run pass must not be indistinguishable from one that wrote. This
 /// is the whole point of the label: "how many registrations succeeded today"
 /// must not answer with a number that includes dry runs.
 #[test]
@@ -724,7 +724,7 @@ fn the_two_new_label_keys_carry_closed_vocabularies() {
         assert_eq!(
             label_values_of(&exporter, series, "dry_run"),
             vec!["false", "true"],
-            "{series} must distinguish a rollback-only pass from a committing one",
+            "{series} must distinguish a dry-run pass from a committing one",
         );
     }
 }
@@ -771,7 +771,7 @@ fn a_dry_run_write_set_is_not_observed() {
     assert_eq!(
         histogram_count(&exporter, "types_registry_activation_write_set"),
         0,
-        "a rollback-only pass records no write set",
+        "a dry-run pass records no write set",
     );
 
     metrics.observe_activation_write_set(7, PassLabels::new(OperationKind::Registration, false));

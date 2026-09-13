@@ -282,19 +282,24 @@ pub fn validate(
 
         // --- step 3: registration policy ---------------------------------
         // **Creations only** (SPEC §8.1 step 3, DESIGN §3.2). The policy governs
-        // what may *appear* in a region; applying it to a revision would let closing
-        // a region freeze the entities already inside it, which is a different — and
-        // unasked-for — power.
+        // what may *appear* in a region; applying it to a revision or a deletion
+        // would let closing a region freeze the entities already inside it — for a
+        // deletion, by forbidding their removal — which is a different, and
+        // unasked-for, power. A deletion never reaches this gate for a second
+        // reason as well: `DeletionRequiresVersion` above makes every deletion
+        // carry a version, so `expected` is never `MustNotExist` on that path.
         //
         // Safe only because the declared kind is enforced downstream: a revision
         // naming a version for an identifier the registry does not hold is refused
-        // terminally by `commit_revision`, having created nothing. Without that, the
-        // bypass would be a way past the deployment allowlist.
+        // terminally by `commit_revision`, having created nothing, and a deletion
+        // of one is refused by `commit_deletion`. Without that, the bypass would be
+        // a way past the deployment allowlist.
         //
-        // ponytail: ceiling C6 — the bypass leaves **no** authorization on the
-        // revision path. The right control is an owner or principal check, which P0
-        // has nothing to check against. The residual exposure is recorded on
-        // `unit::commit_revision`.
+        // ponytail: ceiling C6 — the bypass leaves **no** authorization on either
+        // the revision or the deletion path. The right control is an owner or
+        // principal check, which P0 has nothing to check against. The residual
+        // exposure is recorded on `unit::commit_revision` and on
+        // `deletion::commit_deletion`.
         if expected == Precondition::MustNotExist {
             ctx.policy
                 .admits(&id, OwnershipScope::Global)

@@ -74,7 +74,7 @@ impl TryFrom<OperationItemStatus> for TerminalStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PassLabels {
     pub kind: OperationKind,
-    /// `true` for a rollback-only pass, which writes nothing.
+    /// `true` for a dry-run pass, which writes no entity state.
     pub dry_run: bool,
 }
 
@@ -124,8 +124,8 @@ pub trait AdmissionMetrics: std::fmt::Debug + Send + Sync {
     ///
     /// **A dry run records nothing**, and that is decided here rather than left to
     /// the caller: this histogram answers how close a deployment runs to
-    /// `limits.activation_write_set`, and a rollback-only pass rewrote no
-    /// dependents, so its hypothetical set is not a data point about that pressure.
+    /// `limits.activation_write_set`, and a dry-run pass rewrote no dependents,
+    /// so its hypothetical set is not a data point about that pressure.
     /// The case that matters stays visible — exceeding the bound is a refusal, and
     /// refusals carry `dry_run`.
     fn observe_activation_write_set(&self, refreshed: usize, labels: PassLabels);

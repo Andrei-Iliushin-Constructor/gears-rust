@@ -86,6 +86,19 @@ pub async fn test_db_file(path: &std::path::Path) -> Arc<DBProvider<DbError>> {
     provider_for(&dsn, 4).await
 }
 
+/// File-backed `SQLite` in **WAL** journal mode.
+///
+/// The difference that matters: in the default rollback journal a writer cannot
+/// commit while any reader holds a transaction open, so a test that needs a
+/// commit to land *underneath* an open read snapshot cannot express one. In WAL
+/// a reader's snapshot is fixed at its first read and writers commit past it,
+/// which is the behaviour `PostgreSQL` and `MySQL` give at `REPEATABLE READ` —
+/// so a snapshot-coherence case written here runs unchanged on those backends.
+pub async fn test_db_file_wal(path: &std::path::Path) -> Arc<DBProvider<DbError>> {
+    let dsn = format!("sqlite://{}?mode=rwc&journal_mode=wal", path.display());
+    provider_for(&dsn, 4).await
+}
+
 /// Any DSN with the managed-state migration applied. The `integration` suite
 /// hands this a container DSN so the `PostgreSQL` and `MySQL` repository tests
 /// exercise the same code path as the `SQLite` ones.
@@ -168,6 +181,19 @@ pub async fn seed_operation_item(
     revision_no: i32,
     now: OffsetDateTime,
 ) -> i64 {
+    seed_completed_operation_item(runner, gts_id, revision_no, now)
+        .await
+        .1
+}
+
+/// [`seed_operation_item`], also handing back the operation id — for a test that
+/// drives the worker over the seeded operation rather than only over its item.
+pub async fn seed_completed_operation_item(
+    runner: &impl DBRunner,
+    gts_id: &str,
+    revision_no: i32,
+    now: OffsetDateTime,
+) -> (Uuid, i64) {
     let scope = allow_all();
     let op_id = Uuid::new_v4();
     secure_insert::<operation::Entity>(
@@ -179,8 +205,11 @@ pub async fn seed_operation_item(
             tenant_id: Set(None),
             principal_id: Set(Uuid::from_u128(0xB1)),
             idempotency_key: Set(format!("idem-{op_id}")),
-            idempotency_scope_hash: Set(vec![0x01]),
-            request_fingerprint: Set(vec![0x02]),
+            // 32 bytes, as the columns are declared: a shorter value stores fine
+            // but fails on the way back out, which only shows up once a test reads
+            // the operation row rather than only its item.
+            idempotency_scope_hash: Set(vec![0x01; 32]),
+            request_fingerprint: Set(vec![0x02; 32]),
             status: Set(OperationStatus::Completed),
             created_at: Set(now),
             started_at: Set(Some(now)),
@@ -215,7 +244,7 @@ pub async fn seed_operation_item(
     )
     .await
     .expect("insert operation item");
-    item.id
+    (op_id, item.id)
 }
 
 /// A **pending** item naming a positive `expected_resource_version`: the input a
@@ -302,6 +331,7 @@ pub async fn seed_pending_deletion_item(
     runner: &impl DBRunner,
     gts_id: &str,
     expected_resource_version: i64,
+    dry_run: bool,
     now: OffsetDateTime,
 ) -> (Uuid, i64) {
     let scope = allow_all();
@@ -310,7 +340,7 @@ pub async fn seed_pending_deletion_item(
         operation::ActiveModel {
             id: Set(op_id),
             kind: Set(OperationKind::Deletion),
-            dry_run: Set(false),
+            dry_run: Set(dry_run),
             plane: Set(Plane::Platform),
             tenant_id: Set(None),
             principal_id: Set(Uuid::from_u128(0xB1)),
@@ -333,7 +363,7 @@ pub async fn seed_pending_deletion_item(
             operation_id: Set(op_id),
             item_no: Set(0),
             gts_id: Set(gts_id.to_owned()),
-            dry_run: Set(false),
+            dry_run: Set(dry_run),
             kind: Set(OperationKind::Deletion),
             expected_resource_version: Set(expected_resource_version),
             compat_forced: Set(false),

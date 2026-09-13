@@ -281,6 +281,9 @@ async fn within(db: &Provider, ids: &[i64]) -> Vec<(i64, i64)> {
     DependencyRepo::edges_within(&conn, &allow_all(), ids)
         .await
         .expect("edges within")
+        .into_iter()
+        .map(|edge| (edge.from_entity_id, edge.to_entity_id))
+        .collect()
 }
 
 /// An edge whose far end is outside the set is dropped. That dependant survives

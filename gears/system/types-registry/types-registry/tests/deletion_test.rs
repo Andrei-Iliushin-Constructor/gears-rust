@@ -334,6 +334,14 @@ async fn a_transitive_dependant_does_not_block() {
     // `HOLDER` depends on `TARGET` only transitively, through `MIDDLE`.
     let item = delete(&db, "del-target", TARGET, 1).await;
     refused(&item, &AdmissionFailureReason::HasRegisteredDependents);
+    // `MIDDLE` alone explains this refusal. Asserting the *count* is what
+    // separates the two readings: a blocking rule that walked the closure would
+    // report both `MIDDLE` and `HOLDER`, and `1` would fail.
+    let message = &item.failure.as_ref().expect("failure").message;
+    assert!(
+        message.contains("has 1 live direct registered dependants"),
+        "only the direct dependant is counted, not the transitive one: {message}",
+    );
 }
 
 /// `x-gts-ref` is an instance-value constraint and creates no edge (T18), so
@@ -697,7 +705,7 @@ async fn a_stored_deletion_item_with_no_version_is_refused_rather_than_obeyed() 
     // `0` is storage's spelling of must-not-exist, which no deletion can mean.
     let op = {
         let conn = db.conn().expect("conn");
-        common::seed_pending_deletion_item(&conn, TARGET, 0, NOW)
+        common::seed_pending_deletion_item(&conn, TARGET, 0, false, NOW)
             .await
             .0
     };
@@ -722,5 +730,43 @@ async fn a_stored_deletion_item_with_no_version_is_refused_rather_than_obeyed() 
         entity_of(&db, TARGET).await.expect("row").lifecycle_status,
         LifecycleStatus::Active,
         "a contradictory stored item deletes nothing",
+    );
+}
+
+/// The dry-run twin of the refusal above. `predict_deletion` carries its own copy
+/// of the rule, so the committing test does not cover it: nothing but this case
+/// would notice the prediction path answering something else, or deleting.
+#[tokio::test]
+async fn a_dry_run_over_a_stored_deletion_item_with_no_version_is_refused_too() {
+    let db = test_db().await;
+    register(&db, "reg", TARGET, schema(TARGET)).await;
+
+    let op = {
+        let conn = db.conn().expect("conn");
+        common::seed_pending_deletion_item(&conn, TARGET, 0, true, NOW)
+            .await
+            .0
+    };
+
+    let outcome = run(&db, op).await;
+
+    refused(
+        &outcome.items[0],
+        &AdmissionFailureReason::PreconditionFailed,
+    );
+    assert!(
+        outcome.items[0]
+            .failure
+            .as_ref()
+            .expect("failure")
+            .message
+            .contains("no expected_resource_version"),
+        "{:?}",
+        outcome.items[0].failure,
+    );
+    assert_eq!(
+        entity_of(&db, TARGET).await.expect("row").lifecycle_status,
+        LifecycleStatus::Active,
+        "and a dry run writes nothing either way",
     );
 }

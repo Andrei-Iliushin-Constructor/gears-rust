@@ -1,0 +1,364 @@
+//! The dry-run pass: predict a whole batch against one snapshot, write nothing.
+//!
+//! The shape is the committing pass's, with two substitutions. The store is an
+//! [`AdmissionView`] rather than the database, so a candidate's writes are
+//! virtual and the next candidate sees them; and there is no commit transaction,
+//! so the outcomes are carried out and published afterwards, once the snapshot is
+//! released.
+//!
+//! Everything else is the same code. The batch is ordered by the same
+//! [`order_batch`], cycle members and blocked candidates are refused by the same
+//! two helpers, and each candidate is evaluated by the same `evaluate_in` and
+//! committed by the same `commit_creation` / `commit_revision` /
+//! `unchanged::commit`. A dry run that ran its own checks would predict its own
+//! behaviour rather than the operation's.
+//!
+//! # No retry loop
+//!
+//! `process_item` revalidates when the state it evaluated against moves under it.
+//! Nothing moves here: the base is a fixed snapshot and the overlay is written
+//! only by the candidate currently running, so the revision-vector guard
+//! re-derives exactly what evaluation recorded. Drift would mean the view had
+//! answered two reads of one state differently, which is a fault rather than
+//! contention — so it propagates instead of being retried.
+
+use std::sync::Arc;
+
+use time::OffsetDateTime;
+use toolkit_db::DBProvider;
+use toolkit_db::secure::AccessScope;
+use toolkit_macros::domain_model;
+use tracing::Instrument;
+use uuid::Uuid;
+
+use super::deletion;
+use super::errors::{ItemFailure, WorkerError};
+use super::graph::{BatchCandidate, BatchOrder};
+use super::revision::RevisionCommit;
+use super::unchanged;
+use super::unit::{EvaluationTarget, PreparedUnit, commit_creation, commit_revision, evaluate_in};
+use super::view::{AdmissionView, ItemOutcomeWrite};
+use super::worker::{Tuning, batch_candidate, blocked_by, blocked_failure, order_deletions};
+use crate::domain::admission::graph::order_batch;
+use crate::domain::admission::{AdmissionFailureReason, Precondition};
+use crate::domain::enums::{OperationItemStatus, OperationKind};
+use crate::domain::ports::{OperationItemRow, OperationRow, Stores, snapshot_read};
+use crate::observability;
+
+/// What the pass predicts for one candidate.
+///
+/// A success carries the commit path's **own** terminal item write rather than a
+/// re-derivation of it: `commit_creation` already decides that a dry run records
+/// neither revision nor resource version, because `ck_tr_operation_item_state`
+/// says so, and deciding it a second time here is how the two come to disagree.
+#[domain_model]
+#[derive(Clone, Debug)]
+pub enum Predicted {
+    Terminal {
+        gts_uuid: Uuid,
+        write: ItemOutcomeWrite,
+    },
+    Refused(ItemFailure),
+}
+
+impl Predicted {
+    /// The status this prediction will be published under — the input the
+    /// dependency-blocking rule reads.
+    pub(super) const fn status(&self) -> OperationItemStatus {
+        match self {
+            Self::Terminal {
+                write: ItemOutcomeWrite::Succeeded(_),
+                ..
+            } => OperationItemStatus::Succeeded,
+            Self::Terminal {
+                write: ItemOutcomeWrite::Unchanged { .. },
+                ..
+            } => OperationItemStatus::Unchanged,
+            Self::Refused(_) => OperationItemStatus::Failed,
+        }
+    }
+}
+
+/// One candidate's predicted commit.
+///
+/// `write` is `None` when the commit path recorded the item write itself — every
+/// registration — and `Some` for a deletion, whose committing counterpart writes
+/// the item outside its transaction and therefore not through the view.
+struct PredictedCommit {
+    gts_uuid: Uuid,
+    write: Option<ItemOutcomeWrite>,
+}
+
+/// Predict one batch, in submission order, writing no entity state.
+///
+/// The whole batch runs inside one read-only transaction, so every base read
+/// belongs to one snapshot; the transaction is closed before this returns, so the
+/// caller publishes the outcomes on a connection this pass is no longer holding.
+///
+/// # Errors
+/// [`WorkerError`] for an infrastructure failure. A candidate-level refusal is a
+/// [`Predicted::Refused`], not an error.
+pub(super) async fn simulate_batch(
+    stores: &Arc<dyn Stores>,
+    db: &DBProvider<WorkerError>,
+    scope: &AccessScope,
+    tuning: Tuning<'_>,
+    operation: &OperationRow,
+    items: Arc<[OperationItemRow]>,
+    now: OffsetDateTime,
+) -> Result<Vec<Predicted>, WorkerError> {
+    // Owned handles for the `'static` transaction closure. The items are shared
+    // rather than copied: a full batch's authored documents run to megabytes and
+    // the caller holds them for the whole pass anyway.
+    let stores = Arc::clone(stores);
+    let scope = scope.clone();
+    let limits = *tuning.limits;
+    let metrics = Arc::clone(tuning.metrics);
+    let allow_force = tuning.allow_compatibility_force;
+    let operation_id = operation.id;
+    // The operation row, not the first item: the committing pass reads the same
+    // field, and an empty batch has no first item to read a kind from.
+    let kind = operation.kind;
+
+    db.transaction_with_config(snapshot_read(&db.db()), move |tx| {
+        Box::pin(async move {
+            let view = AdmissionView::new(Arc::clone(&stores));
+            // The two kinds order by opposite relations, exactly as the
+            // committing pass orders them — and a deletion's edges are read
+            // through this batch's own snapshot rather than a second one.
+            let order: BatchOrder = if kind == OperationKind::Deletion {
+                let gts_ids: Vec<String> = items.iter().map(|item| item.gts_id.clone()).collect();
+                order_deletions(&view, tx, &scope, &gts_ids).await?
+            } else {
+                let batch: Vec<BatchCandidate> = items.iter().map(batch_candidate).collect();
+                order_batch(&batch)
+            };
+            let mut predictions: Vec<Option<Predicted>> = vec![None; items.len()];
+
+            // A cycle member has no resolved form, so there is nothing to
+            // evaluate it against — the committing pass's reason, unchanged.
+            for member in order.cyclic() {
+                predictions[member.index] = Some(Predicted::Refused(ItemFailure::new(
+                    AdmissionFailureReason::InvalidSchema,
+                    member.message(),
+                )));
+            }
+
+            for &index in order.order() {
+                let item = &items[index];
+                let blocker = blocked_by(&order, index, |i| {
+                    predictions[i].as_ref().map(Predicted::status)
+                });
+                predictions[index] = Some(match blocker {
+                    Some(blocker) => {
+                        Predicted::Refused(blocked_failure(blocker, &items[blocker.index].gts_id))
+                    }
+                    None => {
+                        simulate_item(&view, tx, &scope, &limits, &metrics, allow_force, item, now)
+                            .instrument(observability::unit_span(
+                                operation_id,
+                                &item.gts_id,
+                                item.kind,
+                                item.dry_run,
+                                item.id,
+                            ))
+                            .await?
+                    }
+                });
+            }
+
+            // `order_batch` partitions the batch into the ordered and the cyclic,
+            // so every position is filled.
+            items
+                .iter()
+                .zip(predictions)
+                .map(|(item, prediction)| {
+                    prediction.ok_or(WorkerError::MissingPrediction { item_id: item.id })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+    })
+    .await
+}
+
+/// Predict one candidate inside its own tentative layer.
+///
+/// The layer is kept on success and discarded on anything else — a refusal, a
+/// refusal discovered after the candidate's virtual writes began, or an
+/// infrastructure fault. That last case matters: the pass may still fail as a
+/// whole, and leaving half a candidate in the overlay would corrupt the
+/// prediction of every candidate after it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors `predict_commit`'s parameter list one for one; a shared context struct would have to be threaded through both and saves nothing"
+)]
+async fn simulate_item(
+    view: &AdmissionView,
+    tx: &toolkit_db::DbTx<'_>,
+    scope: &AccessScope,
+    limits: &crate::config::Limits,
+    metrics: &Arc<dyn crate::domain::ports::metrics::AdmissionMetrics>,
+    allow_compatibility_force: bool,
+    item: &OperationItemRow,
+    now: OffsetDateTime,
+) -> Result<Predicted, WorkerError> {
+    let layer = view.begin_candidate().await;
+    let committed = predict_commit(
+        view,
+        tx,
+        scope,
+        limits,
+        metrics,
+        allow_compatibility_force,
+        item,
+        now,
+    )
+    .await;
+    let refusal = match committed {
+        Ok(Ok(commit)) => {
+            let recorded = match commit.write {
+                Some(write) => Some(write),
+                None => view.item_write(item.id).await,
+            };
+            let Some(write) = recorded else {
+                view.discard_candidate(layer).await;
+                return Err(WorkerError::MissingItemWrite { item_id: item.id });
+            };
+            view.keep_candidate(layer);
+            tracing::debug!(
+                operation_item_id = item.id,
+                gts_id = %item.gts_id,
+                "types_registry predicted a candidate would be admitted"
+            );
+            return Ok(Predicted::Terminal {
+                gts_uuid: commit.gts_uuid,
+                write,
+            });
+        }
+        // The second arm is a refusal the commit path found *after* it had
+        // begun writing. Its real counterpart rolls the transaction back; here
+        // the layer is discarded, which must also undo the dependent refresh
+        // that ran before it — so the two are one case.
+        Ok(Err(failure)) | Err(WorkerError::RefusedAfterWrite(failure)) => failure,
+        Err(error) => {
+            view.discard_candidate(layer).await;
+            return Err(error);
+        }
+    };
+    view.discard_candidate(layer).await;
+    Ok(Predicted::Refused(refusal))
+}
+
+/// Evaluate and commit one candidate against the view.
+///
+/// The mirror of `process_item`'s body without its revalidation loop, and with
+/// the same rule choosing the commit: the item's **stored precondition**, never
+/// the candidate's shape.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the evaluation context the committing `process_item` also takes; the two are read side by side and keeping the shapes identical is the point"
+)]
+async fn predict_commit(
+    view: &AdmissionView,
+    tx: &toolkit_db::DbTx<'_>,
+    scope: &AccessScope,
+    limits: &crate::config::Limits,
+    metrics: &Arc<dyn crate::domain::ports::metrics::AdmissionMetrics>,
+    allow_compatibility_force: bool,
+    item: &OperationItemRow,
+    now: OffsetDateTime,
+) -> Result<Result<PredictedCommit, ItemFailure>, WorkerError> {
+    if item.kind == OperationKind::Deletion {
+        return predict_deletion(view, tx, scope, limits, item, now).await;
+    }
+    let payload = item
+        .request_payload
+        .as_deref()
+        .ok_or(WorkerError::MissingPayload { item_id: item.id })?;
+
+    let prepared = evaluate_in(
+        view,
+        tx,
+        scope,
+        EvaluationTarget {
+            gts_id: &item.gts_id,
+            canonical_body: payload,
+            operation_item_id: item.id,
+            precondition: item.precondition,
+            // The deployment waiver applies to a prediction exactly as it does to
+            // the commit it predicts; a dry run waives nothing of its own.
+            force: item.compat_forced && allow_compatibility_force,
+            labels: item.pass_labels(),
+        },
+        limits,
+        metrics,
+        Some(item),
+    )
+    .await?;
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(failure) => return Ok(Err(failure)),
+    };
+    let hit = matches!(&prepared, PreparedUnit::Unchanged(_));
+    metrics.unchanged_probe(hit);
+
+    let committed = match &prepared {
+        PreparedUnit::Unchanged(candidate) => {
+            unchanged::commit(view, tx, scope, candidate, now).await
+        }
+        PreparedUnit::Evaluated(unit) => match item.precondition {
+            Precondition::MustNotExist => commit_creation(view, tx, scope, unit, limits, now)
+                .await
+                .map(|result| result.map(RevisionCommit::Admitted)),
+            Precondition::Version(expected) => {
+                commit_revision(view, tx, scope, unit, expected, limits, now, metrics).await
+            }
+        },
+    }?;
+    // The commit path recorded the item write itself; a registration's terminal
+    // values are its to decide.
+    Ok(committed.map(|commit| PredictedCommit {
+        gts_uuid: commit.gts_uuid(),
+        write: None,
+    }))
+}
+
+/// Predict one deletion.
+///
+/// A deletion has no document, so there is nothing to evaluate: it is the commit
+/// transaction and nothing else, and `commit_deletion` runs against the view
+/// unchanged. The one difference from a registration is where the item write
+/// comes from — the committing path makes it *outside* its transaction, in
+/// `terminalize_deletion`, because a tombstone is already durable by then and
+/// there is no revision to roll back. There is nothing to write here either, so
+/// the prediction carries the same two values that call would have passed.
+async fn predict_deletion(
+    view: &AdmissionView,
+    tx: &toolkit_db::DbTx<'_>,
+    scope: &AccessScope,
+    limits: &crate::config::Limits,
+    item: &OperationItemRow,
+    now: OffsetDateTime,
+) -> Result<Result<PredictedCommit, ItemFailure>, WorkerError> {
+    let Precondition::Version(expected) = item.precondition else {
+        // Acceptance refuses an absent version for a deletion, so a stored item
+        // in this shape disagrees with the rules that admitted it.
+        return Ok(Err(ItemFailure::new(
+            AdmissionFailureReason::PreconditionFailed,
+            format!(
+                "stored deletion item {} carries no expected_resource_version",
+                item.id
+            ),
+        )));
+    };
+    let span = tracing::Span::current();
+    let committed =
+        deletion::commit_deletion(view, tx, scope, &item.gts_id, expected, limits, &span, now)
+            .await?;
+    Ok(committed.map(|commit| PredictedCommit {
+        gts_uuid: commit.gts_uuid,
+        write: Some(ItemOutcomeWrite::Succeeded(
+            commit.item_outcome(item.dry_run),
+        )),
+    }))
+}

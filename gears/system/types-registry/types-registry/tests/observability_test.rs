@@ -1723,7 +1723,7 @@ async fn a_dry_run_revision_records_no_activation_write_set() {
     assert_eq!(
         histogram_count("types_registry_activation_write_set"),
         0,
-        "a rollback-only pass observes no write set",
+        "a dry-run pass observes no write set",
     );
 }
 

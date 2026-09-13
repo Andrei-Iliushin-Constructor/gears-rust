@@ -27,9 +27,10 @@ use crate::domain::enums::{DependencyKind, EntityKind, OwnershipScope};
 use crate::domain::family::FamilyKey;
 use crate::domain::ports::{
     CurrentDocument, CurrentInstanceRow, CurrentInstanceValue, CurrentSchemaCas,
-    CurrentSchemaProjection, CurrentTypeSchemaRow, DependencyClosure, DependencyStore, EntityRow,
-    EntityStore, EntityWriteOrderStore, InstanceStore, NewCurrentInstance, NewCurrentTypeSchema,
-    NewEntity, NewInstanceRevision, NewOperation, NewOperationItem, NewRevision, OperationItemRow,
+    CurrentSchemaProjection, CurrentTypeSchemaRow, DependencyClosure, DependencyEdgeRow,
+    DependencyStore, EdgeSide, EntityEdge, EntityRow, EntityStore, EntityWriteOrderStore,
+    InstanceStore, ItemSuccess, NewCurrentInstance, NewCurrentTypeSchema, NewEntity,
+    NewInstanceRevision, NewOperation, NewOperationItem, NewRevision, OperationItemRow,
     OperationRow, OperationStore, ReverseImpact, TypeSchemaStore, VersionFamilyRow,
     VersionFamilyStore,
 };
@@ -58,6 +59,15 @@ impl EntityWriteOrderStore for Repos {
 
 #[async_trait]
 impl VersionFamilyStore for Repos {
+    async fn find_family_by_key(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        family_key: &FamilyKey,
+    ) -> Result<Option<VersionFamilyRow>, ScopeError> {
+        VersionFamilyRepo::find_by_key(tx, scope, family_key.as_str()).await
+    }
+
     async fn create_or_get(
         &self,
         tx: &DbTx<'_>,
@@ -97,6 +107,15 @@ impl EntityStore for Repos {
         gts_ids: &[String],
     ) -> Result<Vec<EntityRow>, ScopeError> {
         EntityRepo::find_by_gts_ids(tx, scope, gts_ids).await
+    }
+
+    async fn find_by_ids(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_ids: &[i64],
+    ) -> Result<Vec<EntityRow>, ScopeError> {
+        EntityRepo::find_by_ids(tx, scope, entity_ids).await
     }
 
     async fn find_by_gts_uuid(
@@ -336,12 +355,10 @@ impl OperationStore for Repos {
         tx: &DbTx<'_>,
         scope: &AccessScope,
         item_id: i64,
-        revision_no: Option<i32>,
-        resource_version: Option<i64>,
+        outcome: ItemSuccess,
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError> {
-        OperationRepo::mark_item_succeeded(tx, scope, item_id, revision_no, resource_version, now)
-            .await
+        OperationRepo::mark_item_succeeded(tx, scope, item_id, outcome, now).await
     }
 
     async fn mark_item_unchanged(
@@ -388,12 +405,35 @@ impl DependencyStore for Repos {
         DependencyRepo::live_direct_dependents(tx, scope, entity_id, bound).await
     }
 
+    async fn edge_page(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_ids: &[i64],
+        side: EdgeSide,
+        after: Option<&DependencyEdgeRow>,
+        limit: usize,
+    ) -> Result<Vec<DependencyEdgeRow>, ScopeError> {
+        DependencyRepo::edge_page(tx, scope, entity_ids, side, after, limit).await
+    }
+
+    async fn live_direct_dependent_ids(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_id: i64,
+        kind: Option<DependencyKind>,
+        limit: usize,
+    ) -> Result<Vec<i64>, ScopeError> {
+        DependencyRepo::live_direct_dependent_ids(tx, scope, entity_id, kind, limit).await
+    }
+
     async fn edges_within(
         &self,
         tx: &DbTx<'_>,
         scope: &AccessScope,
         entity_ids: &[i64],
-    ) -> Result<Vec<(i64, i64)>, ScopeError> {
+    ) -> Result<Vec<EntityEdge>, ScopeError> {
         DependencyRepo::edges_within(tx, scope, entity_ids).await
     }
 
