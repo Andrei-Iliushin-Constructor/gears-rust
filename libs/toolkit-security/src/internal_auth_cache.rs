@@ -65,6 +65,19 @@ pub const MAX_TOKEN_REVIEW_CACHE_TTL: Duration = Duration::from_mins(5);
 /// tokens, not to widen any acceptance window.
 const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(1);
 
+/// How long a single backend validation may take before it is abandoned.
+///
+/// The backend call happens while the per-token single-flight lock is held, so
+/// a backend that never answers would otherwise park every caller presenting
+/// that token for as long as it stays unresponsive — with no deadline, since
+/// the waiters are blocked on the lock rather than on the call. Bounding the
+/// call converts an indefinite hang into an `Unavailable` a caller can act on.
+///
+/// This is a request deadline, deliberately unrelated to the cache TTL: it is
+/// sized for how long a `TokenReview` round-trip may reasonably take, not for
+/// how long its answer stays usable.
+pub const TOKEN_REVIEW_BACKEND_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Amortizes the expired-entry sweep: a full scan of the cache runs only
 /// every `SWEEP_INTERVAL`-th insert rather than on every single one.
 const SWEEP_INTERVAL: u32 = 32;
@@ -112,38 +125,81 @@ enum CacheLookup {
     Miss,
 }
 
+/// What a credential's `exp` claim says, if anything.
+///
+/// An `Option<u64>` collapsed two different answers onto `None`: a credential
+/// carrying no `exp` because it is not a JWT, and a JWT whose `exp` could not
+/// be read. The first is cacheable for the full TTL; the second is not, because
+/// the one thing known about it is that it declares an expiry we cannot honour.
+enum ExpClaim {
+    /// Not a JWT (e.g. a shared secret). Nothing to clamp against.
+    NotJwt,
+    /// A JWT declaring this expiry, in seconds since the Unix epoch.
+    Expires(u64),
+    /// Shaped like a JWT, but `exp` is absent, not a number, or the payload did
+    /// not decode.
+    Unreadable,
+}
+
 /// Best-effort extraction of the `exp` (seconds since the Unix epoch) claim
 /// from a JWT, without verifying the signature.
 ///
 /// The caller has already had the token's signature verified by the
 /// authentication backend (e.g. Kubernetes `TokenReview`); this is a plain
 /// base64 decode of the already-trusted payload, used only to avoid caching a
-/// validation past the credential's own expiry. Returns `None` for a
-/// non-JWT credential (e.g. a shared secret), which simply skips the clamp.
-fn jwt_exp_claim(token: &str) -> Option<u64> {
-    let payload_b64 = token.split('.').nth(1)?;
-    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload_b64)
-        .ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-    value.get("exp")?.as_u64()
+/// validation past the credential's own expiry.
+fn jwt_exp_claim(token: &str) -> ExpClaim {
+    // Three dot-separated parts is what makes this a JWT rather than an opaque
+    // credential, and an opaque credential has no expiry to honour.
+    let mut parts = token.split('.');
+    let (Some(_header), Some(payload_b64), Some(_signature), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return ExpClaim::NotJwt;
+    };
+
+    let Ok(payload) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload_b64) else {
+        return ExpClaim::Unreadable;
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+        return ExpClaim::Unreadable;
+    };
+    match value.get("exp").and_then(serde_json::Value::as_u64) {
+        Some(exp) => ExpClaim::Expires(exp),
+        None => ExpClaim::Unreadable,
+    }
 }
 
 /// The instant a freshly validated `token` should stop being trusted from
 /// cache: whichever is sooner of `now + ttl` and the token's own `exp` claim
 /// (when present).
+///
+/// Every arithmetic step is checked. `exp` comes out of a base64 payload with
+/// no bound on its value, and both `SystemTime + Duration` and
+/// `Instant + Duration` panic on overflow — which would take down the platform
+/// authentication path rather than skip a clamp.
 fn clamped_expiry(token: &str, now: Instant, ttl: Duration) -> Instant {
-    let ttl_expiry = now + ttl;
-    let Some(exp_secs) = jwt_exp_claim(token) else {
+    let ttl_expiry = now.checked_add(ttl).unwrap_or(now);
+    let exp_secs = match jwt_exp_claim(token) {
+        ExpClaim::NotJwt => return ttl_expiry,
+        // A declared-but-unreadable expiry is not a licence to cache for the
+        // full TTL: expire immediately and re-validate on the next call.
+        ExpClaim::Unreadable => return now,
+        ExpClaim::Expires(exp) => exp,
+    };
+
+    let Some(exp_at) = UNIX_EPOCH.checked_add(Duration::from_secs(exp_secs)) else {
+        // An `exp` too far in the future to fit a `SystemTime` says nothing
+        // useful about when to stop trusting the token; fall back to the TTL.
         return ttl_expiry;
     };
-    let exp_at = UNIX_EPOCH + Duration::from_secs(exp_secs);
     let Ok(remaining) = exp_at.duration_since(SystemTime::now()) else {
         // The token's own claim says it is already expired; do not extend
         // trust in it at all.
         return now;
     };
-    ttl_expiry.min(now + remaining)
+    let exp_expiry = now.checked_add(remaining).unwrap_or(ttl_expiry);
+    ttl_expiry.min(exp_expiry)
 }
 
 /// Wraps an [`InternalAuthenticator`] with a short-lived cache of both
@@ -370,7 +426,22 @@ impl<A: InternalAuthenticator> CachingInternalAuthenticator<A> {
             CacheLookup::Miss => {}
         }
 
-        let result = self.inner.authenticate(token).await;
+        // Bounded: `_guard` is held across this await, so an unresponsive
+        // backend would otherwise block every caller presenting this token
+        // indefinitely — they are parked on the lock, not on a call that could
+        // time out on its own.
+        let result = match tokio::time::timeout(
+            TOKEN_REVIEW_BACKEND_TIMEOUT,
+            self.inner.authenticate(token),
+        )
+        .await
+        {
+            Ok(result) => result,
+            // Not cached either way: a timeout says nothing about whether the
+            // credential is valid, and caching it would turn one slow call into
+            // a fixed window of denials.
+            Err(_elapsed) => return Err(InternalAuthNError::Unavailable),
+        };
         // Re-sampled *after* the backend round-trip: sampling before it would
         // shrink the effective TTL by however long the call took.
         let stored_at = Instant::now();
@@ -472,6 +543,49 @@ mod tests {
                 Mode::Invalid => Err(InternalAuthNError::InvalidToken),
             }
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_backend_times_out_rather_than_parking_every_caller() {
+        let cached =
+            CachingInternalAuthenticator::new(CountingAuth::new(), Duration::from_mins(1)).unwrap();
+        // Longer than the deadline, i.e. a backend that never answers.
+        cached
+            .inner
+            .set_delay(TOKEN_REVIEW_BACKEND_TIMEOUT * 2);
+
+        let err = cached
+            .authenticate("tok")
+            .await
+            .expect_err("a backend that outlasts the deadline must not resolve");
+        assert!(
+            matches!(err, InternalAuthNError::Unavailable),
+            "a timeout is a backend availability problem, not a verdict on the credential"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_validation_is_not_cached() {
+        let cached =
+            CachingInternalAuthenticator::new(CountingAuth::new(), Duration::from_mins(1)).unwrap();
+        cached
+            .inner
+            .set_delay(TOKEN_REVIEW_BACKEND_TIMEOUT * 2);
+        drop(cached.authenticate("tok").await);
+
+        // The backend recovers; the next call must reach it rather than serve a
+        // cached failure, or one slow call would deny the token for a full TTL.
+        cached.inner.set_delay(Duration::ZERO);
+        let identity = cached
+            .authenticate("tok")
+            .await
+            .expect("a recovered backend must be consulted again");
+        assert_eq!(identity.peer_name(), "tok");
+        assert_eq!(
+            cached.inner.calls(),
+            2,
+            "the timed-out attempt must not have been cached"
+        );
     }
 
     #[tokio::test]
@@ -872,14 +986,91 @@ mod tests {
         );
     }
 
+    /// Build `header.payload.signature` around a base64url payload.
+    fn jwt_with_payload(payload: &[u8]) -> String {
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
+        format!("h.{encoded}.s")
+    }
+
     #[test]
     fn jwt_exp_claim_extracts_and_ignores_non_jwt() {
-        // header.payload.signature, payload = {"exp":123} base64url (no padding).
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"exp":123}"#);
-        let token = format!("h.{payload}.s");
-        assert_eq!(jwt_exp_claim(&token), Some(123));
+        let token = jwt_with_payload(br#"{"exp":123}"#);
+        assert!(matches!(jwt_exp_claim(&token), ExpClaim::Expires(123)));
 
-        assert_eq!(jwt_exp_claim("not-a-jwt"), None);
-        assert_eq!(jwt_exp_claim("shared-secret-token"), None);
+        assert!(matches!(jwt_exp_claim("not-a-jwt"), ExpClaim::NotJwt));
+        assert!(matches!(
+            jwt_exp_claim("shared-secret-token"),
+            ExpClaim::NotJwt
+        ));
+    }
+
+    #[test]
+    fn jwt_exp_claim_separates_unreadable_from_absent() {
+        // The distinction that matters: a credential with no expiry to honour
+        // is cacheable for the full TTL, one that declares an unreadable expiry
+        // is not.
+        assert!(matches!(
+            jwt_exp_claim(&jwt_with_payload(br"{}")),
+            ExpClaim::Unreadable
+        ));
+        assert!(matches!(
+            jwt_exp_claim(&jwt_with_payload(br#"{"exp":"soon"}"#)),
+            ExpClaim::Unreadable
+        ));
+        assert!(matches!(
+            jwt_exp_claim(&jwt_with_payload(br#"{"exp":1.5}"#)),
+            ExpClaim::Unreadable
+        ));
+        assert!(matches!(
+            jwt_exp_claim(&jwt_with_payload(br"not json")),
+            ExpClaim::Unreadable
+        ));
+        assert!(matches!(
+            jwt_exp_claim("h.!!!not-base64!!!.s"),
+            ExpClaim::Unreadable
+        ));
+    }
+
+    #[test]
+    fn unreadable_exp_is_not_cached_for_the_full_ttl() {
+        let now = Instant::now();
+        let ttl = Duration::from_mins(5);
+
+        // No expiry declared at all: the TTL applies.
+        assert_eq!(
+            clamped_expiry("shared-secret-token", now, ttl),
+            now + ttl,
+            "an opaque credential has no expiry to clamp against"
+        );
+
+        // An expiry we cannot read: expire immediately rather than trust it for
+        // five minutes.
+        let unreadable = jwt_with_payload(br#"{"exp":"soon"}"#);
+        assert_eq!(
+            clamped_expiry(&unreadable, now, ttl),
+            now,
+            "a declared-but-unreadable expiry must not be cached for the full TTL"
+        );
+    }
+
+    #[test]
+    fn absurd_exp_claims_do_not_panic() {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(30);
+
+        // `SystemTime + Duration` and `Instant + Duration` both panic on
+        // overflow, and `exp` is attacker-influenced.
+        for payload in [
+            format!(r#"{{"exp":{}}}"#, u64::MAX),
+            format!(r#"{{"exp":{}}}"#, i64::MAX),
+            r#"{"exp":0}"#.to_owned(),
+        ] {
+            let token = jwt_with_payload(payload.as_bytes());
+            let expiry = clamped_expiry(&token, now, ttl);
+            assert!(
+                expiry <= now + ttl,
+                "the clamp must never extend trust beyond the configured TTL"
+            );
+        }
     }
 }
