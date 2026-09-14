@@ -249,7 +249,11 @@ mod tests {
     #[test]
     fn dyn_bearer_debug_is_non_exhaustive() {
         let auth = DynBearerAuthenticator::new(FakeBearer);
-        assert!(format!("{auth:?}").contains("DynBearerAuthenticator"));
+        // The whole rendering, not just the struct name: the name alone can
+        // only fail on a rename, while what this is guarding is that the
+        // wrapped authenticator -- which may hold a secret -- stays out of the
+        // output, and that the `..` marker says so.
+        assert_eq!(format!("{auth:?}"), "DynBearerAuthenticator { .. }");
     }
 
     #[tokio::test]
@@ -279,6 +283,8 @@ mod tests {
     #[test]
     fn dyn_internal_debug_is_non_exhaustive() {
         let auth = DynInternalAuthenticator::new(FakeInternal);
-        assert!(format!("{auth:?}").contains("DynInternalAuthenticator"));
+        // As above: the platform-plane authenticator this wraps holds the
+        // shared secret, so the assertion is that nothing of it is rendered.
+        assert_eq!(format!("{auth:?}"), "DynInternalAuthenticator { .. }");
     }
 }

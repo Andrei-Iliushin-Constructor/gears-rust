@@ -208,6 +208,7 @@ impl InternalAuthConfig {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::internal_auth::{InternalAuthNError, InternalAuthenticator, PlatformIdentity};
     use secrecy::ExposeSecret;
 
     #[test]
@@ -264,8 +265,8 @@ mod tests {
         assert!(json.contains("/var/run/secrets/tokens/t"));
     }
 
-    #[test]
-    fn deserializes_shared_secret_with_default_peer_name() {
+    #[tokio::test]
+    async fn deserializes_shared_secret_with_default_peer_name() {
         let cfg: InternalAuthConfig = serde_json::from_value(serde_json::json!({
             "provider": "shared_secret",
             "secret": "s"
@@ -278,8 +279,29 @@ mod tests {
             }
             InternalAuthConfig::Kube { .. } => panic!("expected shared_secret"),
         }
-        assert!(cfg.build_authenticator().is_some());
         assert!(!cfg.is_kube());
+
+        // Authenticate through what was built, rather than asserting only that
+        // something was: `is_some()` passes even if `secret` and `peer_name`
+        // were wired to the authenticator the wrong way round.
+        let authenticator = cfg.build_authenticator().expect("shared_secret builds");
+        let identity = authenticator
+            .authenticate("s")
+            .await
+            .expect("the configured secret must authenticate");
+        assert_eq!(
+            identity,
+            PlatformIdentity::Shared {
+                name: DEFAULT_INTERNAL_PEER_NAME.to_owned()
+            },
+            "the caller must be labelled with the configured peer name"
+        );
+
+        let rejected = authenticator.authenticate("not-the-secret").await;
+        assert!(
+            matches!(rejected, Err(InternalAuthNError::InvalidToken)),
+            "a wrong secret must be rejected, got {rejected:?}"
+        );
     }
 
     #[test]
@@ -302,6 +324,39 @@ mod tests {
         // Kube inbound validator is built elsewhere (needs kube).
         assert!(cfg.build_authenticator().is_none());
         assert!(cfg.shared_secret().is_none());
+    }
+
+    #[test]
+    fn deserializes_kube_with_only_a_provider() {
+        // The inbound-only shape, and the one the documented defaults produce.
+        // Only the fully-populated form was covered, so nothing pinned what
+        // omitting these fields actually yields.
+        let cfg: InternalAuthConfig =
+            serde_json::from_value(serde_json::json!({ "provider": "kube" })).unwrap();
+
+        assert!(cfg.is_kube());
+        assert_eq!(
+            cfg.kube_audiences(),
+            Some(&[][..]),
+            "an omitted audience list is empty, not absent"
+        );
+        assert_eq!(
+            cfg.kube_token_path(),
+            None,
+            "no token path means inbound-only: nothing is minted outbound"
+        );
+    }
+
+    #[test]
+    fn rejects_an_unknown_provider() {
+        // A typo in `provider` must fail the config rather than silently
+        // selecting a default plane.
+        let result: Result<InternalAuthConfig, _> =
+            serde_json::from_value(serde_json::json!({ "provider": "kubernetes" }));
+        assert!(
+            result.is_err(),
+            "an unrecognised provider must not deserialize"
+        );
     }
 
     #[test]

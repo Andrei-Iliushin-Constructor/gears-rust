@@ -253,18 +253,27 @@ mod tests {
     }
 
     #[test]
-    fn test_security_context_builder_chaining() {
-        let subject_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap();
+    fn test_security_context_builder_keeps_the_last_value_set() {
+        // `test_security_context_builder_full` already covers a plain chain
+        // with more assertions than this did. What nothing covered is a setter
+        // called twice: a builder that accumulated instead of replacing would
+        // pass every other test here.
+        let first = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap();
+        let second = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440003").unwrap();
         let subject_tenant_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440002").unwrap();
 
         let ctx = SecurityContext::builder()
-            .subject_id(subject_id)
+            .subject_id(first)
             .subject_type("user")
+            .subject_id(second)
             .subject_tenant_id(subject_tenant_id)
+            .token_scopes(vec!["read".to_owned()])
+            .token_scopes(vec!["write".to_owned()])
             .build()
             .unwrap();
 
-        assert_eq!(ctx.subject_id(), subject_id);
+        assert_eq!(ctx.subject_id(), second);
+        assert_eq!(ctx.token_scopes(), ["write".to_owned()]);
     }
 
     #[test]
@@ -320,15 +329,39 @@ mod tests {
 
     #[test]
     fn test_security_context_bearer_token_not_serialized() {
-        let ctx = SecurityContext::anonymous();
+        // Built *with* a token: `anonymous()` has none, so asserting on it only
+        // checked that an absent value stays absent -- which keeps passing if
+        // `#[serde(skip)]` is replaced by anything that skips `None` but writes
+        // a real token, the exact case this guards.
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::from_u128(1))
+            .subject_tenant_id(Uuid::from_u128(2))
+            .bearer_token("super-secret-token")
+            .build()
+            .unwrap();
+        assert!(ctx.bearer_token().is_some(), "guard: the token is set");
 
         let serialized = serde_json::to_string(&ctx).unwrap();
-        assert!(!serialized.contains("bearer_token"));
+        assert!(
+            !serialized.contains("bearer_token"),
+            "the field name must not appear: {serialized}"
+        );
+        assert!(
+            !serialized.contains("super-secret-token"),
+            "the token value must not appear: {serialized}"
+        );
     }
 
     #[test]
     fn test_security_context_empty_scopes() {
-        let ctx = SecurityContext::anonymous();
+        // `anonymous()` is covered by `test_security_context_anonymous`; the
+        // case no other test reaches is a builder-supplied empty scope list.
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::from_u128(1))
+            .subject_tenant_id(Uuid::from_u128(2))
+            .token_scopes(Vec::new())
+            .build()
+            .unwrap();
 
         assert!(ctx.token_scopes().is_empty());
     }

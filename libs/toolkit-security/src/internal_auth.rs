@@ -276,15 +276,20 @@ mod tests {
     }
 
     #[test]
-    fn platform_security_context_wraps_identity() {
-        let identity = PlatformIdentity::KubernetesServiceAccount {
-            namespace: "toolkit".to_owned(),
-            service_account: "directory-service".to_owned(),
-            pod: None,
-        };
-        let ctx = PlatformSecurityContext::new(identity.clone());
-        assert_eq!(ctx.identity(), &identity);
-        assert_eq!(ctx.into_identity(), identity);
+    fn an_unrecognised_identity_tag_decodes_to_unknown() {
+        // `#[serde(other)]` is what keeps a peer running a newer build from
+        // failing to decode here, and nothing exercised it: a payload whose
+        // `type` this build does not know must land on `Unknown` and report
+        // `<unknown>` rather than deserializing into some known variant.
+        let identity: PlatformIdentity =
+            serde_json::from_str(r#"{"type":"future_method"}"#).unwrap();
+
+        assert_eq!(identity, PlatformIdentity::Unknown);
+        assert_eq!(
+            identity.peer_name(),
+            "<unknown>",
+            "an unrecognised identity must not resolve to a usable caller name"
+        );
     }
 
     #[test]
