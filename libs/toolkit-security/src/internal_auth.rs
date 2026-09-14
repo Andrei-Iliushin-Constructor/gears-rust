@@ -236,6 +236,13 @@ pub trait InternalAuthenticator: Send + Sync {
     /// Authenticate the raw `X-ToolKit-Internal-Token` value and resolve the
     /// caller's [`PlatformIdentity`].
     ///
+    /// cancel-safe: this future is dropped mid-flight when a client
+    /// disconnects — it runs from middleware on an abortable task — and also
+    /// when a caller bounds it with `tokio::time::timeout`, as the caching
+    /// wrapper in this crate does. An implementation must hold no state across
+    /// the await that would be corrupted by never resuming: an abandoned call
+    /// must leave the authenticator exactly as it found it.
+    ///
     /// # Errors
     ///
     /// Returns [`InternalAuthNError`] if the credential is invalid, the backend

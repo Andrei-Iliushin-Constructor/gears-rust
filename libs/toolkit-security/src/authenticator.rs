@@ -53,6 +53,14 @@ pub enum AuthNError {
 pub trait BearerAuthenticator: Send + Sync {
     /// Validate `token` and reconstruct the corresponding [`SecurityContext`].
     ///
+    /// cancel-safe: this future is dropped mid-flight whenever a client
+    /// disconnects, because it runs from Axum/Tower middleware on a task the
+    /// server aborts. An implementation must therefore hold no state across the
+    /// await that would be corrupted by never resuming — an abandoned call must
+    /// leave the authenticator exactly as it found it. Losing in-flight work
+    /// (a cache insert, a single-flight slot) is fine; a half-applied mutation
+    /// is not.
+    ///
     /// # Errors
     ///
     /// Returns [`AuthNError`] if the token is invalid, the backend is
@@ -101,14 +109,11 @@ impl DynBearerAuthenticator {
     /// Wrap an already-`Arc`'d [`BearerAuthenticator`] in the object-safe adapter.
     #[must_use]
     pub fn from_arc<A: BearerAuthenticator + 'static>(authenticator: Arc<A>) -> Self {
-        // Adapt Arc<A> to Arc<dyn ErasedBearer> via a thin wrapper.
-        struct W<A>(Arc<A>);
-        impl<A: BearerAuthenticator> ErasedBearer for W<A> {
-            fn authenticate<'a>(&'a self, token: &'a str) -> BearerFuture<'a> {
-                Box::pin(BearerAuthenticator::authenticate(&*self.0, token))
-            }
-        }
-        Self(Arc::new(W(authenticator)))
+        // The blanket `impl<A: BearerAuthenticator> ErasedBearer for A` means
+        // `Arc<A>` unsizes to `Arc<dyn ErasedBearer>` directly. An adapter
+        // struct here would allocate a second `Arc` purely to hold the first,
+        // and cost an extra pointer hop on every authenticate call.
+        Self(authenticator)
     }
 }
 
@@ -161,13 +166,9 @@ impl DynInternalAuthenticator {
     /// Wrap an already-`Arc`'d [`InternalAuthenticator`] in the object-safe adapter.
     #[must_use]
     pub fn from_arc<A: InternalAuthenticator + 'static>(authenticator: Arc<A>) -> Self {
-        struct W<A>(Arc<A>);
-        impl<A: InternalAuthenticator> ErasedInternal for W<A> {
-            fn authenticate<'a>(&'a self, token: &'a str) -> InternalFuture<'a> {
-                Box::pin(InternalAuthenticator::authenticate(&*self.0, token))
-            }
-        }
-        Self(Arc::new(W(authenticator)))
+        // As in `DynBearerAuthenticator::from_arc`: the blanket impl lets
+        // `Arc<A>` unsize directly, so no adapter allocation is needed.
+        Self(authenticator)
     }
 }
 

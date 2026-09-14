@@ -65,6 +65,14 @@ impl InternalAuthenticator for SharedSecretInternalAuthenticator {
                 name: self.peer_name.clone(),
             })
         } else {
+            // A rejected platform-plane credential left no trace at all, so a
+            // peer configured with the wrong secret looked identical to one
+            // that was never configured. The peer name is the configured label,
+            // not anything the caller supplied, and the token never appears.
+            tracing::warn!(
+                peer_name = %self.peer_name,
+                "platform-plane authentication rejected: shared secret did not match"
+            );
             Err(InternalAuthNError::InvalidToken)
         }
     }

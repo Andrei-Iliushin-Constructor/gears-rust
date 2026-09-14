@@ -37,7 +37,7 @@
 //!   distinct, individually-valid credentials — does it evict the entry
 //!   expiring soonest, rather than growing unbounded.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -64,6 +64,21 @@ pub const MAX_TOKEN_REVIEW_CACHE_TTL: Duration = Duration::from_mins(5);
 /// non-configurable: it exists only to blunt a hot loop of fresh invalid
 /// tokens, not to widen any acceptance window.
 const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(1);
+
+/// Longest credential this cache will hold as a key.
+///
+/// [`MAX_CACHE_ENTRIES`] bounds how *many* entries exist, but not how large any
+/// one of them is, and a rejected credential is attacker-supplied in full. A
+/// stream of distinct oversized junk tokens could therefore pin
+/// `MAX_CACHE_ENTRIES` header-sized strings at once, with the only real bound
+/// being whatever limit the transport happened to enforce.
+///
+/// Comfortably above any real JWT — those run to a few kilobytes even with
+/// generous claims — so this bounds abuse without turning a legitimate
+/// credential away. A token over the limit is not rejected, it simply bypasses
+/// the cache: the memory stays bounded and the verdict still comes from the
+/// backend.
+const MAX_CACHEABLE_TOKEN_LEN: usize = 16 * 1024;
 
 /// How long a single backend validation may take before it is abandoned.
 ///
@@ -123,6 +138,83 @@ enum CacheLookup {
     Valid(PlatformIdentity),
     Rejected,
     Miss,
+}
+
+/// The cache map, paired with an index of its entries ordered by expiry.
+///
+/// The index exists so that neither reclaiming expired entries nor choosing an
+/// eviction victim has to scan the map. That matters because every one of those
+/// operations runs under the cache mutex, on the authentication hot path: the
+/// previous whole-map `min_by_key` scan ran on *every* insert for as long as the
+/// cache stayed full of still-valid entries, which is exactly the sustained-load
+/// case, and it blocked every concurrent lookup while it ran.
+///
+/// The two collections are only consistent if they are updated together, so the
+/// map is private and every mutation goes through a method here.
+struct ExpiringCache {
+    entries: HashMap<String, CacheEntry>,
+    /// `(expires_at, token)` for every entry in `entries`. Ordered, so the
+    /// soonest-to-expire is the first element and expired entries are a prefix.
+    by_expiry: BTreeSet<(Instant, String)>,
+}
+
+impl ExpiringCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            by_expiry: BTreeSet::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn contains_key(&self, token: &str) -> bool {
+        self.entries.contains_key(token)
+    }
+
+    fn get(&self, token: &str) -> Option<&CacheEntry> {
+        self.entries.get(token)
+    }
+
+    fn insert(&mut self, token: String, entry: CacheEntry) {
+        let expires_at = entry.expires_at();
+        if let Some(previous) = self.entries.insert(token.clone(), entry) {
+            self.by_expiry.remove(&(previous.expires_at(), token.clone()));
+        }
+        self.by_expiry.insert((expires_at, token));
+    }
+
+    fn remove(&mut self, token: &str) {
+        if let Some(entry) = self.entries.remove(token) {
+            self.by_expiry.remove(&(entry.expires_at(), token.to_owned()));
+        }
+    }
+
+    /// Drop every entry that has expired by `now`. Touches only the entries it
+    /// removes: they are a prefix of the index.
+    fn sweep_expired(&mut self, now: Instant) {
+        // `Instant` has no "minimum", so split at `now` instead: everything
+        // ordered before `(now, "")` expired at or before it.
+        let live = self.by_expiry.split_off(&(now, String::new()));
+        let expired = std::mem::replace(&mut self.by_expiry, live);
+        for (_, token) in expired {
+            self.entries.remove(&token);
+        }
+    }
+
+    /// Drop the entry that expires soonest, which is the one needing
+    /// re-validation soonest anyway. `O(log n)`, no scan.
+    fn evict_soonest(&mut self) {
+        if let Some((expires_at, token)) = self.by_expiry.pop_first() {
+            self.entries.remove(&token);
+            debug_assert!(
+                !self.entries.contains_key(&token),
+                "index and map disagreed about {token} at {expires_at:?}"
+            );
+        }
+    }
 }
 
 /// What a credential's `exp` claim says, if anything.
@@ -228,7 +320,7 @@ fn clamped_expiry(token: &str, now: Instant, ttl: Duration) -> Instant {
 pub struct CachingInternalAuthenticator<A> {
     inner: A,
     ttl: Duration,
-    cache: Mutex<HashMap<String, CacheEntry>>,
+    cache: Mutex<ExpiringCache>,
     /// Per-token single-flight locks: concurrent misses for the same token
     /// serialize here instead of each issuing a backend call.
     inflight: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
@@ -258,7 +350,7 @@ impl<A> CachingInternalAuthenticator<A> {
         Ok(Self {
             inner,
             ttl,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(ExpiringCache::new()),
             inflight: Mutex::new(HashMap::new()),
             sweep_counter: AtomicU32::new(0),
         })
@@ -270,7 +362,7 @@ impl<A> CachingInternalAuthenticator<A> {
         Self {
             inner,
             ttl: DEFAULT_TOKEN_REVIEW_CACHE_TTL,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(ExpiringCache::new()),
             inflight: Mutex::new(HashMap::new()),
             sweep_counter: AtomicU32::new(0),
         }
@@ -297,42 +389,36 @@ impl<A> CachingInternalAuthenticator<A> {
     }
 
     /// Insert `entry` under `token`, amortizing the expired-entry sweep over
-    /// [`SWEEP_INTERVAL`] inserts instead of scanning the whole map every
-    /// time, and enforcing [`MAX_CACHE_ENTRIES`] when a new token would
-    /// exceed it.
+    /// [`SWEEP_INTERVAL`] inserts and enforcing [`MAX_CACHE_ENTRIES`] when a
+    /// new token would exceed it.
     ///
-    /// When full, expired entries are reclaimed with a single `retain` sweep
-    /// first — one scan typically frees room for many subsequent inserts, so
-    /// the following misses take the cheap path. Only if that sweep frees
-    /// nothing (a fleet of simultaneously-valid tokens) does it fall back to
-    /// the O(n) soonest-to-expire scan, so the whole-map scan is no longer
-    /// paid on every miss while the cache stays full.
+    /// Both the sweep and the eviction go through [`ExpiringCache`]'s expiry
+    /// index, so each touches only the entries it actually removes. Under
+    /// sustained load with a cache full of still-valid entries — the case that
+    /// matters, since TTL expiry alone never reclaims anything there — this is
+    /// the difference between a whole-map scan per insert and an `O(log n)`
+    /// lookup, all of it under the mutex every concurrent lookup needs.
     fn insert(&self, token: String, entry: CacheEntry, now: Instant) {
         let mut cache = self.cache.lock();
         let count = self.sweep_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        let swept = count.is_multiple_of(SWEEP_INTERVAL);
-        if swept {
-            cache.retain(|_, e| e.expires_at() > now);
+        if count.is_multiple_of(SWEEP_INTERVAL) {
+            cache.sweep_expired(now);
         }
         if cache.len() >= MAX_CACHE_ENTRIES && !cache.contains_key(&token) {
-            // Reclaim expired entries before scanning for a victim: a single
-            // sweep amortizes across the many inserts it makes room for,
-            // whereas the min_by_key scan below would otherwise run on every
-            // miss for as long as the cache stayed full.
-            if !swept {
-                cache.retain(|_, e| e.expires_at() > now);
-            }
+            // Reclaim what has expired before evicting anything still valid.
+            cache.sweep_expired(now);
             if cache.len() >= MAX_CACHE_ENTRIES {
-                // Sweep freed nothing (every entry still valid): fall back to
-                // evicting the soonest-to-expire, which needs re-validation
-                // soonest regardless. No extra bookkeeping for real LRU order.
-                if let Some(victim) = cache
-                    .iter()
-                    .min_by_key(|(_, e)| e.expires_at())
-                    .map(|(k, _)| k.clone())
-                {
-                    cache.remove(&victim);
-                }
+                // Every entry is still valid, so caching is now costing us a
+                // live entry per insert and the backend sees a call for each
+                // one evicted. Nothing else reports that, and the symptom
+                // downstream is a surge of TokenReview traffic that looks like
+                // a backend problem rather than cache saturation.
+                tracing::warn!(
+                    entries = cache.len(),
+                    max_entries = MAX_CACHE_ENTRIES,
+                    "internal-auth cache is full of unexpired entries; evicting a live entry"
+                );
+                cache.evict_soonest();
             }
         }
         cache.insert(token, entry);
@@ -398,6 +484,13 @@ impl<A: InternalAuthenticator> CachingInternalAuthenticator<A> {
         token: &str,
         now: Instant,
     ) -> Result<PlatformIdentity, InternalAuthNError> {
+        // Oversized credentials never enter the map, in either direction: the
+        // key is attacker-supplied and only the entry *count* is bounded. They
+        // still get a verdict, just not a cached one.
+        if token.len() > MAX_CACHEABLE_TOKEN_LEN {
+            return self.inner.authenticate(token).await;
+        }
+
         match self.lookup(token, now) {
             CacheLookup::Valid(identity) => return Ok(identity),
             CacheLookup::Rejected => return Err(InternalAuthNError::InvalidToken),
@@ -484,7 +577,6 @@ impl<A: InternalAuthenticator> InternalAuthenticator for CachingInternalAuthenti
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
@@ -543,6 +635,76 @@ mod tests {
                 Mode::Invalid => Err(InternalAuthNError::InvalidToken),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn an_oversized_token_never_enters_the_cache() {
+        let cached =
+            CachingInternalAuthenticator::new(CountingAuth::new(), Duration::from_mins(1)).unwrap();
+        let huge = "x".repeat(MAX_CACHEABLE_TOKEN_LEN + 1);
+
+        // Still authenticated, twice, because nothing was cached.
+        cached.authenticate(&huge).await.unwrap();
+        cached.authenticate(&huge).await.unwrap();
+
+        assert_eq!(
+            cached.cache.lock().len(),
+            0,
+            "an oversized token must not become a cache key: the key is \
+             attacker-supplied and only the entry count is bounded"
+        );
+        assert_eq!(
+            cached.inner.calls(),
+            2,
+            "bypassing the cache means every call reaches the backend"
+        );
+    }
+
+    #[test]
+    fn the_expiry_index_tracks_the_map_through_overwrites_and_removals() {
+        // The map and its index are only useful if they agree; an entry left in
+        // the index after its map entry is gone would evict the wrong token.
+        let mut cache = ExpiringCache::new();
+        let now = Instant::now();
+
+        cache.insert("a".to_owned(), valid_entry("a", now + Duration::from_secs(30)));
+        cache.insert("b".to_owned(), valid_entry("b", now + Duration::from_secs(10)));
+        // Overwrite `a` with a *sooner* expiry: the stale index entry must go,
+        // or `a` would look like it expires at the original, later instant.
+        cache.insert("a".to_owned(), valid_entry("a", now + Duration::from_secs(5)));
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.by_expiry.len(), 2, "index must not keep a stale entry");
+
+        cache.evict_soonest();
+        assert!(!cache.contains_key("a"), "`a` now expires soonest");
+        assert!(cache.contains_key("b"));
+        assert_eq!(cache.by_expiry.len(), 1);
+
+        cache.remove("b");
+        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.by_expiry.len(), 0);
+    }
+
+    #[test]
+    fn sweeping_removes_exactly_the_expired() {
+        let mut cache = ExpiringCache::new();
+        let now = Instant::now();
+
+        cache.insert(
+            "expired".to_owned(),
+            valid_entry("expired", now.checked_sub(Duration::from_secs(1)).unwrap()),
+        );
+        cache.insert("live".to_owned(), valid_entry("live", now + Duration::from_mins(1)));
+
+        cache.sweep_expired(now);
+
+        assert!(!cache.contains_key("expired"));
+        assert!(cache.contains_key("live"));
+        assert_eq!(
+            cache.by_expiry.len(),
+            1,
+            "the index must shrink with the map"
+        );
     }
 
     #[tokio::test(start_paused = true)]
