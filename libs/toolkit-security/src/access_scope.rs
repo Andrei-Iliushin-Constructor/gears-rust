@@ -134,6 +134,11 @@ pub mod rg_tables {
 /// **Note:** This table is canonical to the Account Management gear's
 /// database. `InTenantSubtree` predicates are only executable in gears
 /// that share the AM database (or replicate `tenant_closure` from it).
+///
+/// Nothing here can verify these names still match that schema: the migrations
+/// that create `tenant_closure` live in a gear that depends on this crate, so a
+/// rename on the migration side is a runtime failure rather than a build one.
+/// The assertion belongs with the migration that owns the table.
 pub mod tenant_tables {
     /// Closure table for tenant hierarchy.
     pub const CLOSURE_TABLE: &str = "tenant_closure";
@@ -516,6 +521,24 @@ impl ScopeFilter {
             Self::InGroup(_) | Self::InGroupSubtree(_) | Self::InTenantSubtree(_) => {
                 ScopeFilterValues::Multiple(&[])
             }
+        }
+    }
+
+    /// Whether this filter can be decided from its values alone.
+    ///
+    /// `false` for the three subquery variants, whose matching happens in SQL.
+    /// [`ScopeFilter::values`] returns an empty view for those, which is
+    /// indistinguishable from an `In` filter that genuinely has no values — so
+    /// a caller deciding membership in memory reads "no match" for a filter
+    /// that does grant access.
+    ///
+    /// Check this first: a filter that is not representable in memory has to be
+    /// resolved against the database, not treated as a negative.
+    #[must_use]
+    pub fn is_representable_in_memory(&self) -> bool {
+        match self {
+            Self::Eq(_) | Self::In(_) => true,
+            Self::InGroup(_) | Self::InGroupSubtree(_) | Self::InTenantSubtree(_) => false,
         }
     }
 
@@ -1044,11 +1067,16 @@ mod tests {
     // --- ScopeFilter::Eq ---
 
     #[test]
-    fn scope_filter_eq_constructor() {
+    fn scope_filter_eq_exposes_exactly_one_value() {
         let f = ScopeFilter::eq(pep_properties::OWNER_TENANT_ID, uid(T1));
         assert_eq!(f.property(), pep_properties::OWNER_TENANT_ID);
         assert!(matches!(f, ScopeFilter::Eq(_)));
-        assert!(f.values().contains(&ScopeValue::Uuid(uid(T1))));
+
+        // The behaviour worth pinning is what an `Eq` filter yields, not that
+        // the constructor stored what it was handed: exactly one value, and one
+        // that parses back to the UUID it was built from.
+        assert_eq!(f.values().iter().count(), 1);
+        assert_eq!(f.uuid_values(), vec![uid(T1)]);
     }
 
     #[test]
@@ -1110,6 +1138,34 @@ mod tests {
             !scope.contains_value("some_other_property", &ScopeValue::Uuid(uid(T1))),
             "a match on the value alone is not a match: the property must agree too"
         );
+    }
+
+    #[test]
+    fn a_subquery_filter_reports_that_it_cannot_be_decided_in_memory() {
+        // An empty value view means two different things, and only this
+        // predicate separates them: an `In` filter with no values genuinely
+        // matches nothing, while a subquery filter matches whatever the
+        // database says and simply cannot answer here.
+        let empty_in = ScopeFilter::r#in(pep_properties::OWNER_TENANT_ID, vec![]);
+        assert_eq!(empty_in.values().iter().count(), 0);
+        assert!(
+            empty_in.is_representable_in_memory(),
+            "an In filter with no values is a real, decidable negative"
+        );
+
+        for subquery in [
+            ScopeFilter::in_group(pep_properties::RESOURCE_ID, vec![ScopeValue::Uuid(uid(T1))]),
+            ScopeFilter::in_group_subtree(
+                pep_properties::RESOURCE_ID,
+                vec![ScopeValue::Uuid(uid(T1))],
+            ),
+        ] {
+            assert_eq!(subquery.values().iter().count(), 0);
+            assert!(
+                !subquery.is_representable_in_memory(),
+                "a subquery filter's empty value view is not a negative"
+            );
+        }
     }
 
     #[test]
@@ -1448,15 +1504,30 @@ mod tests {
 
     #[test]
     fn in_tenant_subtree_scope_filter_carries_descendant_status() {
-        let f = InTenantSubtreeScopeFilter::with_descendant_status(
-            pep_properties::OWNER_TENANT_ID,
-            ScopeValue::Uuid(uid(T1)),
-            true,
-            vec![ScopeValue::Int(1), ScopeValue::Int(2)],
+        let filter = ScopeFilter::InTenantSubtree(
+            InTenantSubtreeScopeFilter::with_descendant_status(
+                pep_properties::OWNER_TENANT_ID,
+                ScopeValue::Uuid(uid(T1)),
+                true,
+                vec![ScopeValue::Int(1), ScopeValue::Int(2)],
+            ),
         );
-        assert_eq!(f.descendant_status().len(), 2);
-        assert_eq!(f.descendant_status()[0], ScopeValue::Int(1));
-        assert_eq!(f.descendant_status()[1], ScopeValue::Int(2));
+
+        // The status list must survive into the filter...
+        let ScopeFilter::InTenantSubtree(inner) = &filter else {
+            panic!("constructed as InTenantSubtree");
+        };
+        assert_eq!(
+            inner.descendant_status(),
+            &[ScopeValue::Int(1), ScopeValue::Int(2)]
+        );
+
+        // ...while `values()` stays empty, because this variant resolves as a
+        // subquery in SQL and exposes nothing to match against in memory. That
+        // pairing is what the filter promises; reading the field back alone
+        // would pass even if the variant started leaking values.
+        assert_eq!(filter.values().iter().count(), 0);
+        assert!(!filter.is_representable_in_memory());
     }
 
     #[test]
@@ -1478,13 +1549,14 @@ mod tests {
         assert!(!f.respect_barriers());
     }
 
-    #[test]
-    fn tenant_tables_constants_are_stable() {
-        assert_eq!(tenant_tables::CLOSURE_TABLE, "tenant_closure");
-        assert_eq!(tenant_tables::CLOSURE_ANCESTOR_ID, "ancestor_id");
-        assert_eq!(tenant_tables::CLOSURE_DESCENDANT_ID, "descendant_id");
-        assert_eq!(tenant_tables::CLOSURE_BARRIER, "barrier");
-    }
+    // `tenant_tables_constants_are_stable` used to live here, comparing each
+    // constant to the literal it is defined as a few hundred lines above. That
+    // can only fail if someone edits one and forgets the other, which is not
+    // the risk: the risk is these names drifting from the `tenant_closure`
+    // schema they mirror. That schema is owned by the account-management gear,
+    // which depends on this crate, so the assertion cannot be made from here
+    // without a dependency cycle -- it belongs to the migration that owns the
+    // table. See the `tenant_tables` module documentation.
 
     // --- contains_uuid string matching ---
 

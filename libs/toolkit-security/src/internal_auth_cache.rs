@@ -847,6 +847,7 @@ mod tests {
         let cached =
             CachingInternalAuthenticator::new(CountingAuth::new(), Duration::from_mins(1)).unwrap();
         cached.inner.set_mode(Mode::Invalid);
+        let t0 = Instant::now();
 
         let err = cached.authenticate("bad").await.unwrap_err();
         assert!(matches!(err, InternalAuthNError::InvalidToken));
@@ -860,9 +861,15 @@ mod tests {
             "a cached rejection must not re-hit the backend"
         );
 
-        tokio::time::sleep(NEGATIVE_CACHE_TTL + Duration::from_millis(50)).await;
+        // Step past the negative-cache window with the injected instant rather
+        // than a real sleep: this cache keys off `std::time::Instant`, which
+        // `tokio::time::pause` cannot virtualize, so a sleep here would burn a
+        // real second and still drift on a loaded runner.
         cached.inner.set_mode(Mode::Succeed);
-        let identity = cached.authenticate("bad").await.unwrap();
+        let identity = cached
+            .authenticate_at("bad", t0 + NEGATIVE_CACHE_TTL + Duration::from_millis(1))
+            .await
+            .unwrap();
         assert_eq!(
             identity.peer_name(),
             "bad",
@@ -1056,8 +1063,16 @@ mod tests {
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{exp}}}"#));
         let token = format!("h.{payload}.s");
         let expiry = clamped_expiry(&token, now, Duration::from_mins(5));
+
+        // Bounded from both sides. An upper bound alone holds for any value
+        // below the ttl, `now` included, so a clamp that collapsed to zero --
+        // disabling positive caching entirely -- would still pass.
         assert!(
-            expiry < now + Duration::from_mins(5),
+            expiry > now + Duration::from_secs(1),
+            "the token has ~2s of life left; clamping to less would disable caching"
+        );
+        assert!(
+            expiry <= now + Duration::from_secs(2),
             "a JWT with less remaining life than the configured ttl must clamp to the JWT's expiry"
         );
     }
