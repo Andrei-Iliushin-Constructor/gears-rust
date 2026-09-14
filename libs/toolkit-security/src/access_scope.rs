@@ -655,10 +655,49 @@ pub struct ScopeConstraint {
     filters: Vec<ScopeFilter>,
 }
 
+/// A [`ScopeConstraint`] was built with no filters.
+///
+/// A constraint is a conjunction, so an empty one is an AND over nothing: it
+/// matches every row. As one disjunct of an [`AccessScope`] that makes the whole
+/// scope allow-all, while `is_unconstrained()` and `is_deny_all()` both still
+/// answer `false` — so the scope looks constrained to every caller that asks.
+/// `toolkit-db` compiled exactly this shape to an unconditional `WHERE true`.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("a scope constraint must carry at least one filter; an empty one matches every row")]
+pub struct EmptyScopeConstraint;
+
 impl ScopeConstraint {
-    /// Create a new scope constraint from a list of filters.
+    /// Create a new scope constraint from a non-empty list of filters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmptyScopeConstraint`] if `filters` is empty. Rejecting here is
+    /// what keeps a predicate-free constraint from reaching a consumer at all:
+    /// the policy compiler builds one of these from whatever predicates a PDP
+    /// returned, and a decision that produced none would otherwise widen into
+    /// an allow-all grant instead of failing closed.
+    pub fn try_new(filters: Vec<ScopeFilter>) -> Result<Self, EmptyScopeConstraint> {
+        if filters.is_empty() {
+            return Err(EmptyScopeConstraint);
+        }
+        Ok(Self { filters })
+    }
+
+    /// Create a new scope constraint from a list of filters known to be
+    /// non-empty.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `filters` is empty. Prefer [`ScopeConstraint::try_new`]
+    /// wherever the list is derived from input rather than written out in
+    /// place; this exists for literals and test fixtures, where an empty list
+    /// is a bug in the caller rather than a condition to handle.
     #[must_use]
     pub fn new(filters: Vec<ScopeFilter>) -> Self {
+        assert!(
+            !filters.is_empty(),
+            "a scope constraint must carry at least one filter; an empty one matches every row"
+        );
         Self { filters }
     }
 
@@ -1202,6 +1241,36 @@ mod tests {
             ),
             "an allow-all scope permits any value"
         );
+    }
+
+    #[test]
+    fn an_empty_constraint_is_refused() {
+        // An AND over no filters is TRUE, so this shape is an allow-all
+        // disjunct -- while the scope carrying it still reports itself as
+        // neither unconstrained nor deny-all, so nothing downstream sees that
+        // it grants everything.
+        assert_eq!(
+            ScopeConstraint::try_new(vec![]).unwrap_err(),
+            EmptyScopeConstraint
+        );
+
+        assert!(
+            ScopeConstraint::try_new(vec![ScopeFilter::eq(
+                pep_properties::OWNER_TENANT_ID,
+                uid(T1)
+            )])
+            .is_ok(),
+            "one filter is enough to narrow"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "must carry at least one filter")]
+    fn the_infallible_constructor_refuses_an_empty_list_too() {
+        // `new` is for literals, where an empty list is a bug in the caller
+        // rather than a condition to handle -- but it must not quietly produce
+        // the allow-all shape either.
+        drop(ScopeConstraint::new(vec![]));
     }
 
     #[test]

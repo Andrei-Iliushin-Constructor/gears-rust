@@ -389,7 +389,15 @@ where
     E::Column: ColumnTrait + Copy,
 {
     if constraint.is_empty() {
-        return Ok(Some(Condition::all()));
+        // An AND over no filters is `TRUE`, so honouring it here would emit an
+        // unconditional `WHERE true` and hand back every row in the table --
+        // while the scope still reports itself as constrained, so nothing
+        // upstream would notice. `ScopeConstraint` refuses to build this shape
+        // now; this is the second line, for a value that reached us some other
+        // way (an older serialized scope, a future constructor).
+        return Err(ScopeError::Denied(
+            "scope constraint has no filters, which would match every row",
+        ));
     }
     let mut and_cond = Condition::all();
     for (filter_index, filter) in constraint.filters().iter().enumerate() {

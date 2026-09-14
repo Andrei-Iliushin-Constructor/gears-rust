@@ -58,9 +58,9 @@ pub mod prelude;
 pub mod shared_secret;
 
 pub use access_scope::{
-    AccessScope, EqScopeFilter, InGroupScopeFilter, InGroupSubtreeScopeFilter, InScopeFilter,
-    InTenantSubtreeScopeFilter, ScopeConstraint, ScopeFilter, ScopeValue, pep_properties,
-    rg_tables, tenant_tables,
+    AccessScope, EmptyScopeConstraint, EqScopeFilter, InGroupScopeFilter,
+    InGroupSubtreeScopeFilter, InScopeFilter, InTenantSubtreeScopeFilter, ScopeConstraint,
+    ScopeFilter, ScopeValue, pep_properties, rg_tables, tenant_tables,
 };
 pub use authenticator::{
     AuthNError, BearerAuthenticator, DynBearerAuthenticator, DynInternalAuthenticator,
