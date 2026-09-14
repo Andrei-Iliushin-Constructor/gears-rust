@@ -1298,10 +1298,15 @@ async fn build_internal_authenticator(
         return Ok(None);
     };
 
-    // Shared-secret (and any future dependency-light provider) builds here.
-    if let Some(auth) = cfg.build_authenticator() {
-        tracing::info!("Initializing shared-secret platform-plane authenticator");
-        return Ok(Some(auth));
+    // Shared-secret (and any future dependency-light provider) builds here. An
+    // unusable secret fails the build rather than falling through to the kube
+    // branch, which would report the wrong problem.
+    match cfg.build_authenticator()? {
+        toolkit_security::BuiltAuthenticator::Built(auth) => {
+            tracing::info!("Initializing shared-secret platform-plane authenticator");
+            return Ok(Some(auth));
+        }
+        toolkit_security::BuiltAuthenticator::RequiresExternalBackend => {}
     }
 
     #[cfg(feature = "k8s-auth")]

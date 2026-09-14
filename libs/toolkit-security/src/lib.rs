@@ -75,8 +75,12 @@ pub use internal_auth_cache::{
     CachingInternalAuthenticator, DEFAULT_TOKEN_REVIEW_CACHE_TTL, InvalidCacheTtl,
     MAX_TOKEN_REVIEW_CACHE_TTL,
 };
-pub use internal_auth_config::{DEFAULT_INTERNAL_PEER_NAME, InternalAuthConfig};
-pub use shared_secret::SharedSecretInternalAuthenticator;
+pub use internal_auth_config::{
+    BuiltAuthenticator, DEFAULT_INTERNAL_PEER_NAME, InternalAuthConfig,
+};
+pub use shared_secret::{
+    InvalidSharedSecret, REDACTED_PLACEHOLDER, SharedSecretInternalAuthenticator,
+};
 
 pub use bin_codec::{
     SECCTX_BIN_VERSION, SecCtxDecodeError, SecCtxEncodeError, decode_bin, encode_bin,

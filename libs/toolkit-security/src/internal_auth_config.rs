@@ -33,7 +33,7 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 use crate::authenticator::DynInternalAuthenticator;
-use crate::shared_secret::SharedSecretInternalAuthenticator;
+use crate::shared_secret::{InvalidSharedSecret, SharedSecretInternalAuthenticator};
 
 /// Default caller label assigned to a validated shared-secret peer.
 pub const DEFAULT_INTERNAL_PEER_NAME: &str = "toolkit-internal";
@@ -64,7 +64,12 @@ pub enum InternalAuthConfig {
     /// docs](self).
     SharedSecret {
         /// The shared token accepted (inbound) and attached (outbound).
-        secret: String,
+        ///
+        /// A `SecretString` rather than a `String` so redaction is structural:
+        /// it zeroizes on drop and renders as `[REDACTED]` in any `{:?}` sink,
+        /// instead of depending on the hand-written `Debug` and `Serialize`
+        /// impls below staying correct as fields are added.
+        secret: SecretString,
         /// Caller label assigned to validated peers (inbound side only).
         #[serde(default = "default_peer_name")]
         peer_name: String,
@@ -147,25 +152,42 @@ impl Serialize for InternalAuthConfig {
     }
 }
 
+/// What [`InternalAuthConfig::build_authenticator`] could do with the config.
+///
+/// An `Option` conflated two unrelated answers on `None`: "this provider needs
+/// no validator" and "this provider's validator must be built by a layer that
+/// can depend on `kube`". Nothing in the type said which, so all three callers
+/// re-derived it with `is_kube()` afterwards and each had to remember to fail
+/// on the fallthrough — a caller that forgot would have run an unauthenticated
+/// platform plane.
+#[derive(Debug)]
+pub enum BuiltAuthenticator {
+    /// The validator was built here.
+    Built(DynInternalAuthenticator),
+    /// The provider needs a backend this crate cannot construct. Build it with
+    /// [`kube_audiences`](InternalAuthConfig::kube_audiences), via a layer that
+    /// depends on `kube` (e.g. `toolkit-k8s-auth`).
+    RequiresExternalBackend,
+}
+
 impl InternalAuthConfig {
     /// Build the **inbound** validator when it can be constructed without a
     /// heavier backend.
     ///
-    /// Returns `Some` for [`InternalAuthConfig::SharedSecret`]. Returns `None`
-    /// for [`InternalAuthConfig::Kube`], whose `TokenReview` validator must be
-    /// built by a layer that can depend on `kube` (e.g. `toolkit-k8s-auth`),
-    /// using [`kube_audiences`](Self::kube_audiences).
-    #[must_use]
-    pub fn build_authenticator(&self) -> Option<DynInternalAuthenticator> {
+    /// # Errors
+    ///
+    /// Returns [`InvalidSharedSecret`] when the configured shared secret is
+    /// unusable — empty, or the redaction placeholder from a serialized config.
+    pub fn build_authenticator(&self) -> Result<BuiltAuthenticator, InvalidSharedSecret> {
         match self {
             Self::SharedSecret { secret, peer_name } => {
-                let auth = SharedSecretInternalAuthenticator::new(
-                    SecretString::from(secret.clone()),
-                    peer_name.clone(),
-                );
-                Some(DynInternalAuthenticator::new(auth))
+                let auth =
+                    SharedSecretInternalAuthenticator::try_new(secret.clone(), peer_name.clone())?;
+                Ok(BuiltAuthenticator::Built(DynInternalAuthenticator::new(
+                    auth,
+                )))
             }
-            Self::Kube { .. } => None,
+            Self::Kube { .. } => Ok(BuiltAuthenticator::RequiresExternalBackend),
         }
     }
 
@@ -173,7 +195,7 @@ impl InternalAuthConfig {
     #[must_use]
     pub fn shared_secret(&self) -> Option<SecretString> {
         match self {
-            Self::SharedSecret { secret, .. } => Some(SecretString::from(secret.clone())),
+            Self::SharedSecret { secret, .. } => Some(secret.clone()),
             Self::Kube { .. } => None,
         }
     }
@@ -214,7 +236,7 @@ mod tests {
     #[test]
     fn debug_redacts_shared_secret_but_keeps_other_fields() {
         let cfg = InternalAuthConfig::SharedSecret {
-            secret: "super-secret-token".to_owned(),
+            secret: SecretString::from("super-secret-token"),
             peer_name: "hello".to_owned(),
         };
         let rendered = format!("{cfg:?}");
@@ -238,7 +260,7 @@ mod tests {
     #[test]
     fn serialize_redacts_shared_secret_but_keeps_other_fields() {
         let cfg = InternalAuthConfig::SharedSecret {
-            secret: "super-secret-token".to_owned(),
+            secret: SecretString::from("super-secret-token"),
             peer_name: "hello".to_owned(),
         };
         let json = serde_json::to_string(&cfg).expect("serialize");
@@ -274,7 +296,7 @@ mod tests {
         .unwrap();
         match &cfg {
             InternalAuthConfig::SharedSecret { secret, peer_name } => {
-                assert_eq!(secret, "s");
+                assert_eq!(secret.expose_secret(), "s");
                 assert_eq!(peer_name, DEFAULT_INTERNAL_PEER_NAME);
             }
             InternalAuthConfig::Kube { .. } => panic!("expected shared_secret"),
@@ -284,7 +306,11 @@ mod tests {
         // Authenticate through what was built, rather than asserting only that
         // something was: `is_some()` passes even if `secret` and `peer_name`
         // were wired to the authenticator the wrong way round.
-        let authenticator = cfg.build_authenticator().expect("shared_secret builds");
+        let BuiltAuthenticator::Built(authenticator) =
+            cfg.build_authenticator().expect("a valid secret")
+        else {
+            panic!("shared_secret builds its validator here");
+        };
         let identity = authenticator
             .authenticate("s")
             .await
@@ -321,8 +347,13 @@ mod tests {
             cfg.kube_token_path().map(Path::to_owned),
             Some(PathBuf::from("/var/run/secrets/tokens/toolkit-internal"))
         );
-        // Kube inbound validator is built elsewhere (needs kube).
-        assert!(cfg.build_authenticator().is_none());
+        // Kube inbound validator is built elsewhere (needs kube), and the type
+        // says so rather than returning a bare `None` the caller has to
+        // interpret.
+        assert!(matches!(
+            cfg.build_authenticator(),
+            Ok(BuiltAuthenticator::RequiresExternalBackend)
+        ));
         assert!(cfg.shared_secret().is_none());
     }
 
@@ -362,7 +393,7 @@ mod tests {
     #[test]
     fn shared_secret_accessors_return_none_for_kube_fields() {
         let cfg = InternalAuthConfig::SharedSecret {
-            secret: "s".to_owned(),
+            secret: SecretString::from("s"),
             peer_name: "hello".to_owned(),
         };
         // Outbound credential is the shared secret itself.
