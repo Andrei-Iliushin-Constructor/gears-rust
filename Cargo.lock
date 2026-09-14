@@ -2520,6 +2520,7 @@ dependencies = [
  "tonic",
  "tower",
  "tracing",
+ "tracing-test",
  "utoipa",
  "uuid",
 ]
