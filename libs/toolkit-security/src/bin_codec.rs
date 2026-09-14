@@ -57,6 +57,21 @@ pub fn encode_bin(ctx: &SecurityContext) -> Result<Vec<u8>, SecCtxEncodeError> {
 
 /// Decode `SecurityContext` from a versioned binary blob produced by `encode_bin()`.
 ///
+/// # This does not authenticate anything
+///
+/// The blob is neither signed nor encrypted, and the only check here is the
+/// version byte. Whoever produced these bytes chose the subject, the tenant and
+/// the scopes in the context that comes back — so calling this on input a peer
+/// supplied is letting that peer pick its own identity.
+///
+/// The precondition is that the peer was **already authenticated** and the
+/// transport is trusted: in-process, or a link where the sender was validated
+/// by other means. Never call it on inbound metadata from an unauthenticated
+/// caller, and strip `x-secctx-bin` at any boundary where callers are not
+/// already authenticated — a header from outside must never reach this
+/// function. ADR `cpt-cf-adr-two-plane-auth` keeps cross-process calls off this
+/// path entirely: they carry a re-validated bearer token instead.
+///
 /// # Errors
 /// Returns `SecCtxDecodeError::Empty` if the input is empty.
 /// Returns `SecCtxDecodeError::UnsupportedVersion` if the version byte is not supported.

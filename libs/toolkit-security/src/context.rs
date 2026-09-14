@@ -92,6 +92,20 @@ impl SecurityContext {
         &self.token_scopes
     }
 
+    /// Whether this context has no authenticated subject.
+    ///
+    /// Anonymity is encoded as a nil `subject_id` / `subject_tenant_id`, the
+    /// same fields a real subject uses, so there is nothing on the type that
+    /// separates the two. Every consumer that cared was re-deriving this by
+    /// hand — `ctx.subject_id().is_nil() || ctx.subject_tenant_id().is_nil()`,
+    /// written out identically in the ledger and pricing gears — and a caller
+    /// that forgets the check treats an unauthenticated request as a subject in
+    /// the nil tenant.
+    #[must_use]
+    pub fn is_anonymous(&self) -> bool {
+        self.subject_id.is_nil() || self.subject_tenant_id.is_nil()
+    }
+
     /// Whether the token carries `scope`.
     ///
     /// The wildcard `"*"` satisfies every scope: it is what a first-party
@@ -372,6 +386,27 @@ mod tests {
             !serialized.contains("super-secret-token"),
             "the token value must not appear: {serialized}"
         );
+    }
+
+    #[test]
+    fn is_anonymous_separates_an_unauthenticated_context_from_a_real_subject() {
+        assert!(SecurityContext::anonymous().is_anonymous());
+
+        let authenticated = SecurityContext::builder()
+            .subject_id(Uuid::from_u128(1))
+            .subject_tenant_id(Uuid::from_u128(2))
+            .build()
+            .unwrap();
+        assert!(!authenticated.is_anonymous());
+
+        // Either field being nil is enough: a subject with no tenant is not a
+        // subject this system can authorize.
+        let no_tenant = SecurityContext::builder()
+            .subject_id(Uuid::from_u128(1))
+            .subject_tenant_id(Uuid::nil())
+            .build()
+            .unwrap();
+        assert!(no_tenant.is_anonymous());
     }
 
     #[test]
