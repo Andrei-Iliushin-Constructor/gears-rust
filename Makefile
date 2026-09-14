@@ -214,7 +214,7 @@ setup: .setup-stamp py-env
 	@echo "Installing required development tools..."
 	rustup component add clippy
 	cargo install lychee
-	cargo install cargo-geigerfi
+	cargo install cargo-geiger
 	cargo install cargo-deny
 	cargo install cargo-gears
 	cargo install cargo-fuzz
