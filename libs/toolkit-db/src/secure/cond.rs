@@ -543,6 +543,16 @@ where
                     siblings,
                 )?;
             }
+            // A predicate this build does not know how to render. It is a
+            // restriction the PDP asked for, so emitting the query without it
+            // would drop a narrowing term and hand back rows the grant excluded.
+            // Refuse the query instead.
+            _ => {
+                return Err(ScopeError::Denied(
+                    "scope filter variant is not supported by this build; refusing to emit a \
+                     query that would ignore it",
+                ));
+            }
         }
     }
     Ok(Some(and_cond))

@@ -170,7 +170,15 @@ pub mod tenant_tables {
 /// - [`ScopeFilter::InGroup`] — group membership subquery
 /// - [`ScopeFilter::InGroupSubtree`] — group subtree subquery
 /// - [`ScopeFilter::InTenantSubtree`] — tenant subtree subquery on `tenant_closure`
+///
+/// `#[non_exhaustive]`: this mirrors the PDP's predicate set, which has already
+/// grown to five variants and will grow again. Without it, every new predicate
+/// is a breaking change for every downstream `match`. With it, a consumer must
+/// write a wildcard arm — and **that arm must fail closed**: a filter this build
+/// does not understand is a restriction it cannot apply, so treating it as
+/// "nothing to do" silently drops a narrowing term and widens the grant.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ScopeFilter {
     /// Equality: `property = value`.
     Eq(EqScopeFilter),
