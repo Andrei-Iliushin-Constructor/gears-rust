@@ -60,7 +60,7 @@ pub mod shared_secret;
 pub use access_scope::{
     AccessScope, EmptyScopeConstraint, EqScopeFilter, InGroupScopeFilter,
     InGroupSubtreeScopeFilter, InScopeFilter, InTenantSubtreeScopeFilter, ScopeConstraint,
-    ScopeFilter, ScopeValue, pep_properties, rg_tables, tenant_tables,
+    ScopeFilter, ScopeValue, pep_properties,
 };
 pub use authenticator::{
     AuthNError, BearerAuthenticator, DynBearerAuthenticator, DynInternalAuthenticator,
@@ -76,7 +76,7 @@ pub use internal_auth_cache::{
     MAX_TOKEN_REVIEW_CACHE_TTL,
 };
 pub use internal_auth_config::{
-    BuiltAuthenticator, DEFAULT_INTERNAL_PEER_NAME, InternalAuthConfig,
+    BuiltAuthenticator, DEFAULT_INTERNAL_PEER_NAME, InternalAuthConfig, InvalidInternalAuth,
 };
 pub use shared_secret::{
     InvalidSharedSecret, REDACTED_PLACEHOLDER, SharedSecretInternalAuthenticator,

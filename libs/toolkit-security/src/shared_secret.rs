@@ -83,10 +83,7 @@ impl SharedSecretInternalAuthenticator {
     /// comparison in [`InternalAuthenticator::authenticate`] is over bytes, and
     /// an empty secret matches an empty token — so anyone sending the internal
     /// header with no value would authenticate as `peer_name`.
-    pub fn try_new(
-        secret: SecretString,
-        peer_name: String,
-    ) -> Result<Self, InvalidSharedSecret> {
+    pub fn try_new(secret: SecretString, peer_name: String) -> Result<Self, InvalidSharedSecret> {
         match secret.expose_secret() {
             "" => Err(InvalidSharedSecret::Empty),
             REDACTED_PLACEHOLDER => Err(InvalidSharedSecret::RedactedPlaceholder),
@@ -142,11 +139,8 @@ mod tests {
         // token: anyone sending the internal header with no value would
         // authenticate. Refusing at construction is the only place to catch it.
         assert_eq!(
-            SharedSecretInternalAuthenticator::try_new(
-                SecretString::from(""),
-                "peer".to_owned()
-            )
-            .unwrap_err(),
+            SharedSecretInternalAuthenticator::try_new(SecretString::from(""), "peer".to_owned())
+                .unwrap_err(),
             InvalidSharedSecret::Empty
         );
     }
@@ -173,11 +167,8 @@ mod tests {
     }
 
     fn auth() -> SharedSecretInternalAuthenticator {
-        SharedSecretInternalAuthenticator::try_new(
-            SecretString::from("s3cr3t"),
-            "peer".to_owned(),
-        )
-        .expect("a non-empty secret")
+        SharedSecretInternalAuthenticator::try_new(SecretString::from("s3cr3t"), "peer".to_owned())
+            .expect("a non-empty secret")
     }
 
     #[tokio::test]

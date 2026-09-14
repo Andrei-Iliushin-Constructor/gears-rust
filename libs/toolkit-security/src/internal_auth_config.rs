@@ -183,6 +183,24 @@ impl Serialize for InternalAuthConfig {
     }
 }
 
+/// Why a platform-plane authenticator could not be built.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum InvalidInternalAuth {
+    /// The configured shared secret is unusable.
+    #[error(transparent)]
+    SharedSecret(#[from] InvalidSharedSecret),
+    /// `provider: kube` was configured with no audiences. An empty list
+    /// disables audience verification on both sides — nothing is sent to the
+    /// API server, and the client-side check against the response is skipped —
+    /// so any `ServiceAccount` token the cluster issues would authenticate.
+    #[error(
+        "internal_auth provider=kube requires a non-empty `audiences` list; an empty one \
+         disables audience verification and accepts any ServiceAccount token in the cluster"
+    )]
+    EmptyKubeAudiences,
+}
+
 /// What [`InternalAuthConfig::build_authenticator`] could do with the config.
 ///
 /// An `Option` conflated two unrelated answers on `None`: "this provider needs
@@ -207,9 +225,11 @@ impl InternalAuthConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidSharedSecret`] when the configured shared secret is
-    /// unusable — empty, or the redaction placeholder from a serialized config.
-    pub fn build_authenticator(&self) -> Result<BuiltAuthenticator, InvalidSharedSecret> {
+    /// Returns [`InvalidInternalAuth::SharedSecret`] when the configured shared
+    /// secret is unusable — empty, or the redaction placeholder from a
+    /// serialized config. Returns [`InvalidInternalAuth::EmptyKubeAudiences`]
+    /// when `provider: kube` has no configured audiences.
+    pub fn build_authenticator(&self) -> Result<BuiltAuthenticator, InvalidInternalAuth> {
         match self {
             Self::SharedSecret { secret, peer_name } => {
                 let auth =
@@ -217,6 +237,14 @@ impl InternalAuthConfig {
                 Ok(BuiltAuthenticator::Built(DynInternalAuthenticator::new(
                     auth,
                 )))
+            }
+            // Checked here as well as during deserialization. The variant's
+            // fields are public, so a config built in code never passes through
+            // serde — and every caller reaches this before it reads
+            // `kube_audiences`, which makes it the last point where an unbound
+            // validator can still be refused.
+            Self::Kube { audiences, .. } if audiences.is_empty() => {
+                Err(InvalidInternalAuth::EmptyKubeAudiences)
             }
             Self::Kube { .. } => Ok(BuiltAuthenticator::RequiresExternalBackend),
         }
@@ -389,15 +417,38 @@ mod tests {
     }
 
     #[test]
+    fn kube_built_in_code_with_no_audiences_is_refused() {
+        // The serde check does not cover this: the variant's fields are public,
+        // so a config constructed in code never passes through deserialization.
+        let unbound = InternalAuthConfig::Kube {
+            audiences: Vec::new(),
+            token_path: None,
+        };
+        assert!(matches!(
+            unbound.build_authenticator(),
+            Err(InvalidInternalAuth::EmptyKubeAudiences)
+        ));
+
+        // With an audience it is buildable again, by the layer that owns kube.
+        let bound = InternalAuthConfig::Kube {
+            audiences: vec!["toolkit-internal".to_owned()],
+            token_path: None,
+        };
+        assert!(matches!(
+            bound.build_authenticator(),
+            Ok(BuiltAuthenticator::RequiresExternalBackend)
+        ));
+    }
+
+    #[test]
     fn kube_without_audiences_is_refused() {
         // An omitted list used to default to empty, which disables audience
         // binding entirely -- any ServiceAccount token in the cluster would
         // authenticate as a platform peer. Refusing the config is the point:
         // failing to start beats starting unbound.
-        let err = serde_json::from_value::<InternalAuthConfig>(
-            serde_json::json!({ "provider": "kube" }),
-        )
-        .expect_err("kube without audiences must not deserialize");
+        let err =
+            serde_json::from_value::<InternalAuthConfig>(serde_json::json!({ "provider": "kube" }))
+                .expect_err("kube without audiences must not deserialize");
         assert!(
             err.to_string().contains("audiences"),
             "the error must name the field: {err}"
