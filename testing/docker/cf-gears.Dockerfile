@@ -39,7 +39,13 @@ RUN set -eux; \
     else \
         cargo build $RELEASE_FLAG --bin cf-gears-example-server --package=cf-gears-example-server; \
     fi; \
-    cp "/build/target/$OUTPUT_DIR/cf-gears-example-server" /tmp/cf-gears-example-server
+    cp "/build/target/$OUTPUT_DIR/cf-gears-example-server" /tmp/cf-gears-example-server; \
+    rm -rf /build/target
+# `rm` is part of the same RUN on purpose. A separate layer would only mask the
+# directory, leaving it in the diff; deleted inside the layer that created it,
+# it never enters the image at all. The builder stage is discarded anyway, but
+# its layers are still written to disk during the build - ~9.5 GB of them, on
+# runners where this repo already needs jlumbroso/free-disk-space elsewhere.
 
 # Stage 2: Runtime — must match the builder's base OS.
 FROM debian:13.3-slim@sha256:1d3c811171a08a5adaa4a163fbafd96b61b87aa871bbc7aa15431ac275d3d430
@@ -53,14 +59,16 @@ WORKDIR /app
 # e2e-local config uses file-parser.allowed_local_base_dir: data
 RUN mkdir -p /app/data
 
-COPY --from=builder /tmp/cf-gears-example-server /app/cf-gears-example-server
-COPY --from=builder /build/config /app/config
+# --chown on the COPY itself: a later `chown -R` would rewrite every byte of the
+# 580 MB binary into a second layer, doubling the runtime image for nothing.
+COPY --from=builder --chown=1000:1000 /tmp/cf-gears-example-server /app/cf-gears-example-server
+COPY --from=builder --chown=1000:1000 /build/config /app/config
 
 # Port that config/e2e-local.yaml binds (gears.api-gateway.config.bind_addr).
 EXPOSE 8086
 
 RUN useradd -U -u 1000 appuser && \
-    chown -R 1000:1000 /app
+    chown 1000:1000 /app /app/data
 
 # The shipped configs set `server.home_dir: "~/.cf-gears"`. A numeric USER does
 # not update HOME, so it stays /root — which uid 1000 cannot write, and the
