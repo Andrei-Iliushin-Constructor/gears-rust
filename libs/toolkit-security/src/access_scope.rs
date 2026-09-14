@@ -966,6 +966,21 @@ impl AccessScope {
     /// - Unconstrained scopes become deny-all (fail-closed).
     /// - Constraints that contain no `owner_tenant_id` filter are dropped entirely.
     /// - If all constraints are dropped, the result is deny-all.
+    ///
+    /// # This widens the grant, by design — check that you want it
+    ///
+    /// Filters on other properties are **removed from surviving constraints**,
+    /// and a constraint is a conjunction, so dropping one of its terms admits
+    /// everything that term excluded. `[owner_tenant_id = T, id IN (r1)]`
+    /// becomes `owner_tenant_id = T`: one resource turned into the whole tenant.
+    ///
+    /// That is correct for the case this exists for — re-targeting a scope at a
+    /// *different* entity, one with no `owner_id`/`id` column of its own, where
+    /// the removed terms never applied to the rows being filtered. It is wrong
+    /// if you are narrowing a scope for the same entity, and the resulting
+    /// scope must not be the only thing authorizing the access: mini-chat, for
+    /// example, checks the parent chat against the full scope first and only
+    /// then uses `tenant_only()` for its messages.
     #[must_use]
     pub fn tenant_only(&self) -> Self {
         self.retain_properties(&[pep_properties::OWNER_TENANT_ID])
@@ -977,7 +992,9 @@ impl AccessScope {
     /// resource-level constraints (e.g., reactions scoped to the acting user).
     ///
     /// - Unconstrained scopes become deny-all (fail-closed).
-    /// - Constraints that contain none of the retained properties are dropped.
+    /// - A constraint is kept only if **every** filter in it is on one of the
+    ///   two retained properties; one carrying anything else is dropped whole,
+    ///   for the reason given on [`AccessScope::tenant_only`].
     /// - If all constraints are dropped, the result is deny-all.
     #[must_use]
     pub fn tenant_and_owner(&self) -> Self {
@@ -1295,6 +1312,26 @@ mod tests {
         let tenant_scope = scope.tenant_only();
         assert!(tenant_scope.contains_uuid(pep_properties::OWNER_TENANT_ID, uid(T1)));
         assert!(!tenant_scope.has_property(pep_properties::OWNER_ID));
+    }
+
+    #[test]
+    fn tenant_only_widens_a_resource_scoped_grant_to_the_whole_tenant() {
+        // Pinning the sharp edge rather than the happy path: removing a term
+        // from a conjunction admits everything that term excluded. This is what
+        // makes `tenant_only()` safe only when re-targeting the scope at an
+        // entity the removed terms never applied to -- and unsafe as the sole
+        // authorization for the same entity.
+        let scope = AccessScope::single(ScopeConstraint::new(vec![
+            ScopeFilter::eq(pep_properties::OWNER_TENANT_ID, uid(T1)),
+            ScopeFilter::eq(pep_properties::RESOURCE_ID, uid(T2)),
+        ]));
+
+        let tenant_scope = scope.tenant_only();
+        assert!(
+            !tenant_scope.has_property(pep_properties::RESOURCE_ID),
+            "the resource narrowing is gone, so this grant now covers the tenant"
+        );
+        assert!(tenant_scope.contains_uuid(pep_properties::OWNER_TENANT_ID, uid(T1)));
     }
 
     #[test]
