@@ -86,14 +86,9 @@ pub async fn test_db_file(path: &std::path::Path) -> Arc<DBProvider<DbError>> {
     provider_for(&dsn, 4).await
 }
 
-/// File-backed `SQLite` in **WAL** journal mode.
-///
-/// The difference that matters: in the default rollback journal a writer cannot
-/// commit while any reader holds a transaction open, so a test that needs a
-/// commit to land *underneath* an open read snapshot cannot express one. In WAL
-/// a reader's snapshot is fixed at its first read and writers commit past it,
-/// which is the behaviour `PostgreSQL` and `MySQL` give at `REPEATABLE READ` —
-/// so a snapshot-coherence case written here runs unchanged on those backends.
+/// File-backed SQLite in WAL mode, allowing writers to commit during an open
+/// read snapshot. Matches the interleaving tested under PostgreSQL/MySQL
+/// `REPEATABLE READ`; rollback journaling would block the writer.
 pub async fn test_db_file_wal(path: &std::path::Path) -> Arc<DBProvider<DbError>> {
     let dsn = format!("sqlite://{}?mode=rwc&journal_mode=wal", path.display());
     provider_for(&dsn, 4).await

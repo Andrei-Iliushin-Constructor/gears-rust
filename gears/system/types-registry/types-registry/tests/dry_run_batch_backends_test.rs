@@ -1,22 +1,9 @@
-//! Whole-batch dry-run parity and snapshot coherence, on every backend.
+//! Whole-batch parity, snapshot coherence and atomic publication on all backends.
+//! Use SQLite WAL and PostgreSQL/MySQL `REPEATABLE READ` to commit a concurrent
+//! writer while prediction retains its original snapshot.
 //!
-//! The `SQLite` suite proves the semantics; this one proves they do not depend on
-//! the engine. Two things genuinely differ across backends and are therefore
-//! asserted here rather than only in memory:
-//!
-//! * **The read snapshot.** `REPEATABLE READ` on `PostgreSQL` and `MySQL`, and
-//!   nothing asked for on `SQLite` — where the isolation comes from the engine
-//!   itself, and a writer commits past an open read only in WAL mode, which is
-//!   the fixture used here. The coherence case below therefore means the same
-//!   thing on all three: the concurrent revision commits while the pass is held,
-//!   and the pass still predicts against the state it started from.
-//! * **The publication transaction.** Item writes plus the operation's
-//!   completion, atomically, against three different lock managers.
-//!
-//! Both modes are compared on the **same** database rather than on two copies:
-//! a dry run writes no entity state, so running it first leaves the committing
-//! run the initial state the contract names — and the table comparison in
-//! between is what proves that, rather than assuming it.
+//! Run dry run before commit on the same database, checking unchanged entity
+//! tables between them to establish identical initial state.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -253,12 +240,8 @@ async fn entity_state(db: &Provider) -> EntityState {
     ])
 }
 
-/// Predict the batch, prove it changed nothing, then commit the same batch and
-/// require the same per-candidate verdicts.
-///
-/// One database for both, which is the contract's "identical initial state with
-/// no intervening writer": the prediction leaves the state it observed, and the
-/// table comparison in between is the proof rather than the assumption.
+/// Predict, assert unchanged entity tables, then commit on the same database.
+/// Require matching per-candidate verdicts.
 async fn assert_parity(
     db: &Provider,
     kind: OperationKind,
@@ -346,14 +329,9 @@ async fn assert_deletion_batch_is_predicted(db: &Provider) {
     .await;
 }
 
-/// One coherent base under a writer that commits underneath it.
-///
-/// The pass is held inside its read snapshot after the first candidate's
-/// current-document read. A second connection then revises the *second*
-/// candidate's subject and **commits**, moving it past the version that
-/// candidate names. A pass reading each candidate through its own transaction
-/// would now see `resource_version 2` and predict `precondition_failed`;
-/// reading through one snapshot it still sees 1 and predicts the admission.
+/// Pause after reading candidate one, then commit a revision of candidate two's
+/// subject. The original snapshot still admits version 1; a fresh snapshot would
+/// see version 2 and refuse `precondition_failed`.
 async fn assert_snapshot_survives_a_concurrent_commit(db: &Provider) {
     for (key, gts_id) in [("one", SUBJECT_ONE), ("two", SUBJECT_TWO)] {
         seed(db, key, creation(gts_id, schema(gts_id, "first"))).await;

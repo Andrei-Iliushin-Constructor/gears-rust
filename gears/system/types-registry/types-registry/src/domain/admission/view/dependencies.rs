@@ -1,11 +1,5 @@
-//! Dependency edges, closure, reverse impact and dependant counts.
-//!
-//! The two walks live in [`super::walk`]. What is here is the edge write and the
-//! three questions answered as *the stored answer, corrected for the bounded set
-//! this pass could have changed*. That shape matters: the stored side of each is
-//! a bounded statement the database already knows how to run, and the correction
-//! is at most one entry per entity the batch has touched. Re-deriving them by
-//! walking the fan-in would be neither bounded nor the same query.
+//! Dependency writes and bounded stored reads corrected by overlay changes.
+//! Graph walks live in [`super::walk`]; corrections touch only batch-modified entities.
 
 use std::collections::HashSet;
 
@@ -21,12 +15,8 @@ use crate::domain::ports::{
 
 #[async_trait]
 impl DependencyStore for AdmissionView {
-    /// Stored answer, corrected for the bounded set this pass can have changed.
-    ///
-    /// `live_direct_dependent_ids` is asked for one more id than the overlay
-    /// could possibly disqualify, so if any stored Instance survives the
-    /// correction the read has already returned one: among `touched + 1` distinct
-    /// ids, at least one lies outside a set of size `touched`.
+    /// Correct the stored answer using the overlay. Read `touched + 1` distinct IDs:
+    /// at least one survives if the overlay cannot disqualify them all.
     async fn has_live_direct_instances(
         &self,
         tx: &DbTx<'_>,
@@ -58,13 +48,8 @@ impl DependencyStore for AdmissionView {
         }))
     }
 
-    /// The same correction, counted rather than tested.
-    ///
-    /// The stored read goes past the caller's bound by the size of the set the
-    /// correction may remove from it, so the point at which the statement
-    /// saturates is still above anything the correction can reach — and the
-    /// count this returns saturates at `bound + 1` exactly as the stored one
-    /// does, because T20 reports "more than `bound`" rather than a total.
+    /// Read beyond the bound by the overlay's possible removals, then correct.
+    /// Saturate at `bound + 1`, matching the stored count's contract.
     async fn live_direct_dependents(
         &self,
         tx: &DbTx<'_>,

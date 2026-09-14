@@ -1,34 +1,11 @@
-//! The admission worker: a plain function of `(operation_id, database)`.
+//! Admission worker entry point: [`run_operation`] (SPEC §8.1).
 //!
-//! **Not a task.** SPEC §8.1 puts it this way because §13's testing rules forbid a
-//! test that polls: an entry point that returns a result makes every concurrency
-//! case reachable in a plain `#[tokio::test]`. There is no `sleep`, no timer and no
-//! channel anywhere in this module. T21's outbox handler is a thin shell that calls
-//! [`run_operation`] and maps its return to `Ok` / `Retry` / `Reject`.
+//! Returns directly for deterministic tests; T21's outbox handler maps the result
+//! to `Ok` / `Retry` / `Reject`. Infrastructure faults return [`WorkerError`];
+//! candidate refusals are terminal [`ItemFailure`] outcomes.
 //!
-//! # The error boundary is the retry boundary
-//!
-//! [`WorkerError`] is for **infrastructure** failures — a dropped connection, a
-//! deadlock, a store that could not be built from committed rows. Those are worth
-//! retrying, and the outbox will.
-//!
-//! A candidate that is simply *wrong* — an unresolvable reference, a schema that
-//! fails its meta-schema, an identifier that already exists — is an
-//! [`ItemFailure`]: an **outcome** on the operation item, not a fault of the
-//! worker. Retrying it would burn the outbox's attempt budget on a decision that is
-//! already final. So the two travel in different positions: `Err(WorkerError)`
-//! versus `Ok(_)` with a failed item.
-//!
-//! # Current admission scope (through T19)
-//!
-//! Each item is its own unit, and the order those units run in is the batch's
-//! dependency order ([`super::graph`]), not its submission order. A candidate's
-//! in-batch dependencies are therefore committed by the time it is evaluated,
-//! which is what makes an in-batch reference resolve against the candidate rather
-//! than against whatever is committed under the same identifier; a dependency
-//! that failed instead blocks it, and everything downstream in turn. Creations and
-//! content revisions both land here — the item's stored precondition chooses which
-//! commit runs.
+//! Process items in dependency order. Failed dependencies block their downstream;
+//! independent candidates proceed. Stored preconditions select creation or revision.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -323,17 +300,8 @@ pub(super) fn batch_candidate(item: &OperationItemRow) -> BatchCandidate {
     }
 }
 
-/// Order a deletion batch from the edges already in `dependency`.
-///
-/// The read a registration does not need: a deletion submits no document, so
-/// the only place its `$ref`, derivation and conformance edges exist is the
-/// table. One snapshot, two statements — resolve the batch's identifiers to
-/// entity ids, then take the edges between them.
-///
-/// An identifier the registry does not hold resolves to no row and therefore to
-/// no edge. That is correct rather than lenient: its own commit refuses it with
-/// `precondition_failed`, and nothing in the batch waits on a deletion that was
-/// never going to happen.
+/// Read deletion order in one snapshot: resolve candidate IDs, then their edges.
+/// Missing entities contribute no edges; their commits fail `precondition_failed`.
 async fn deletion_order(
     stores: &Arc<dyn Stores>,
     db: &DBProvider<WorkerError>,
@@ -351,13 +319,10 @@ async fn deletion_order(
     .await
 }
 
-/// [`deletion_order`] against a transaction the caller already holds.
-///
-/// The dry-run pass has one open for the whole batch, and the order has to be
-/// read through it like everything else the pass decides on.
+/// [`deletion_order`] within the caller's snapshot, shared by the dry-run batch.
 ///
 /// # Errors
-/// Propagates the two reads.
+/// Propagates either read failure.
 pub(super) async fn order_deletions(
     stores: &dyn Stores,
     tx: &DbTx<'_>,
@@ -422,14 +387,9 @@ async fn refuse_unevaluated(
     .await
 }
 
-/// The first in-batch edge whose target failed, or `None` if this candidate is
-/// free to be evaluated.
-///
-/// Transitive without being computed transitively: a blocked candidate is itself
-/// `failed`, so everything downstream of it finds a failed blocker in turn. Every
-/// blocker is decided before this candidate — cycle members up front, the rest by
-/// the topological order — so a `None` outcome here means the blocker is this
-/// candidate itself, which only a cycle member has.
+/// Find the first failed in-batch blocker, or `None`.
+/// Blocking propagates through failed outcomes in topological order; cycle
+/// members are refused first. Only a self-blocker can have no outcome yet.
 pub(super) fn blocked_by(
     order: &BatchOrder,
     index: usize,
@@ -1178,16 +1138,9 @@ async fn mark_completed(
     .await
 }
 
-/// Read an already-terminal item's stored outcome back out.
-///
-/// `gts_uuid` is **not** stored on the item — `database.sql` keeps it on the
-/// entity, because it is a function of `gts_id`. It is asked of `gts-rust` here
-/// rather than reconstructed: `GtsId::to_uuid` is the derivation, and calling it
-/// is the same delegation `evaluate` makes, not a second implementation of it.
-///
-/// Without this a redelivered or overlapping pass reports a terminal success
-/// with no Registry Reference while the first pass reports one, and ADR-0012
-/// says a terminal success always carries it. A refusal carries none either way.
+/// Reconstruct a terminal outcome, deriving `gts_uuid` via `GtsId::to_uuid`.
+/// ADR-0012 requires the Registry Reference on success, including replay;
+/// refusals carry none.
 fn stored_outcome(item: &OperationItemRow) -> Result<ItemOutcome, WorkerError> {
     let terminal_success = matches!(
         item.status,

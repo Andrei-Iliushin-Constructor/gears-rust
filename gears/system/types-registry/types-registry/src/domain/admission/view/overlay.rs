@@ -1,29 +1,10 @@
-//! The virtual entity state one dry-run pass accumulates.
+//! Virtual changes to the base snapshot, bounded by the batch.
 //!
-//! Everything here is a **change** to the base snapshot, never a copy of it: the
-//! overlay holds only what a candidate wrote, and every read merges it over a
-//! base read that is still served from the database. That is what keeps this from
-//! becoming an in-memory registry — its size is a property of the batch, not of
-//! the data.
+//! Candidate checkpoints clone [`Arc`]-backed immutable rows and documents;
+//! discard restores the checkpoint without copying document contents.
 //!
-//! # Checkpointing copies pointers, not documents
-//!
-//! A candidate opens its tentative layer by cloning the overlay, and discards it
-//! by putting the clone back. That is atomic and needs no undo journal, but it
-//! would copy every authored and resolved document the batch has accumulated —
-//! once per candidate, so quadratic in the documents. The payloads are therefore
-//! shared and immutable: [`Arc`] around each row and each document, cloned as a
-//! pointer, replaced rather than edited. What a checkpoint copies is then one
-//! pointer per entity the batch has touched, which is what the batch is bounded
-//! by anyway.
-//!
-//! # Virtual ids count down
-//!
-//! `entity.id` and `version_family.id` are positive autoincrement columns, so a
-//! virtual row takes the negative side of the axis. Two things follow. A virtual
-//! id can never collide with a stored one, so a merged read needs no tagging; and
-//! if one ever escaped into an outcome or a stored row it would be a negative key,
-//! which is loud rather than plausible.
+//! Virtual entity and family IDs count down from negative values, avoiding stored
+//! positive autoincrement IDs. They must never escape into outcomes or storage.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -47,12 +28,7 @@ pub(super) type EdgeSet = Arc<[(DependencyKind, i64)]>;
 /// the text and its digest, shared.
 pub(super) type CarriedDocument = (Arc<str>, Arc<[u8]>);
 
-/// Why a current-row write found no document to point at: the revision is not one
-/// this pass wrote, and no current document was carried over either.
-///
-/// A named error rather than a bare `None`, so the two call sites do not each
-/// have to remember what an absent value meant — one turns it into a refusal, the
-/// other into a failed compare-and-swap.
+/// A current-row write has neither a virtual revision nor a carried-over document.
 #[domain_model]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error(
@@ -83,12 +59,8 @@ struct AuthoredInstance {
     type_schema_revision_no: i32,
 }
 
-/// One entity's virtual current Type Schema state: the pointer, the authored
-/// document behind it and the materialized artifacts beside it.
-///
-/// One struct rather than three maps, because `current_documents`,
-/// `current_schema_projections` and `find_current_schema` are three projections of
-/// one row, and splitting them is how two of them come to disagree.
+/// Virtual current Type Schema pointer, authored document and artifacts.
+/// Keep them together so all current-state projections agree.
 #[domain_model]
 #[derive(Clone, Debug)]
 pub(super) struct SchemaState {
@@ -177,12 +149,7 @@ impl InstanceState {
     }
 }
 
-/// The terminal item write a commit path made, held until the pass publishes it.
-///
-/// The commit code already decides what a dry run records — it hands the port an
-/// [`ItemSuccess`], which is the closed set of shapes
-/// `ck_tr_operation_item_state` admits. Capturing that call rather than
-/// re-deriving the same values afterwards keeps one decision in one place.
+/// Capture the commit path's [`ItemSuccess`] for later publication.
 #[domain_model]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemOutcomeWrite {
@@ -327,12 +294,8 @@ impl Overlay {
         self.entities.insert(row.id, Arc::new(row));
     }
 
-    /// Every entity id this pass can have an opinion about: one it created, one
-    /// it modified, or one whose outgoing edges it replaced.
-    ///
-    /// The bounded set that makes the stored dependant reads answerable. A
-    /// stored answer may name an entity in here, and only for those does the
-    /// overlay have anything to add or take away.
+    /// IDs created, modified or given replacement edges by this pass.
+    /// Only these can change a stored dependant answer.
     pub(super) fn touched_ids(&self) -> HashSet<i64> {
         self.entities
             .keys()
@@ -482,12 +445,8 @@ impl Overlay {
         self.edges.insert(from_entity_id, unique.into());
     }
 
-    /// The part of the overlay a graph walk reads: ids, edges and liveness, and
-    /// none of the documents.
-    ///
-    /// Taken as a cheap owned copy so a walk can interleave base reads with
-    /// overlay lookups without holding the overlay's lock across an await, and
-    /// without copying the authored documents that make the overlay large.
+    /// Copy IDs, edges and liveness for graph walks, excluding documents.
+    /// Allows base reads without holding the overlay lock across an await.
     pub(super) fn graph(&self) -> GraphView {
         GraphView {
             edges: self.edges.clone(),

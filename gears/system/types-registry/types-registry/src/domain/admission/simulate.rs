@@ -1,26 +1,11 @@
-//! The dry-run pass: predict a whole batch against one snapshot, write nothing.
+//! Predict a batch against one snapshot and an [`AdmissionView`] overlay.
 //!
-//! The shape is the committing pass's, with two substitutions. The store is an
-//! [`AdmissionView`] rather than the database, so a candidate's writes are
-//! virtual and the next candidate sees them; and there is no commit transaction,
-//! so the outcomes are carried out and published afterwards, once the snapshot is
-//! released.
+//! Reuse committing-path ordering, refusal helpers, evaluation and commit checks.
+//! Successful virtual writes feed later candidates; publish outcomes only after
+//! releasing the snapshot.
 //!
-//! Everything else is the same code. The batch is ordered by the same
-//! [`order_batch`], cycle members and blocked candidates are refused by the same
-//! two helpers, and each candidate is evaluated by the same `evaluate_in` and
-//! committed by the same `commit_creation` / `commit_revision` /
-//! `unchanged::commit`. A dry run that ran its own checks would predict its own
-//! behaviour rather than the operation's.
-//!
-//! # No retry loop
-//!
-//! `process_item` revalidates when the state it evaluated against moves under it.
-//! Nothing moves here: the base is a fixed snapshot and the overlay is written
-//! only by the candidate currently running, so the revision-vector guard
-//! re-derives exactly what evaluation recorded. Drift would mean the view had
-//! answered two reads of one state differently, which is a fault rather than
-//! contention — so it propagates instead of being retried.
+//! No drift retries: the snapshot is fixed and the overlay has one writer.
+//! A revision-vector mismatch indicates inconsistent view reads and propagates.
 
 use std::sync::Arc;
 
@@ -89,15 +74,11 @@ struct PredictedCommit {
     write: Option<ItemOutcomeWrite>,
 }
 
-/// Predict one batch, in submission order, writing no entity state.
-///
-/// The whole batch runs inside one read-only transaction, so every base read
-/// belongs to one snapshot; the transaction is closed before this returns, so the
-/// caller publishes the outcomes on a connection this pass is no longer holding.
+/// Predict a batch without entity writes; return outcomes in submission order.
+/// Release the shared read-only snapshot before the caller publishes results.
 ///
 /// # Errors
-/// [`WorkerError`] for an infrastructure failure. A candidate-level refusal is a
-/// [`Predicted::Refused`], not an error.
+/// [`WorkerError`] for infrastructure failure; [`Predicted::Refused`] for refusal.
 pub(super) async fn simulate_batch(
     stores: &Arc<dyn Stores>,
     db: &DBProvider<WorkerError>,
@@ -181,13 +162,8 @@ pub(super) async fn simulate_batch(
     .await
 }
 
-/// Predict one candidate inside its own tentative layer.
-///
-/// The layer is kept on success and discarded on anything else — a refusal, a
-/// refusal discovered after the candidate's virtual writes began, or an
-/// infrastructure fault. That last case matters: the pass may still fail as a
-/// whole, and leaving half a candidate in the overlay would corrupt the
-/// prediction of every candidate after it.
+/// Predict in a tentative layer; retain it on success and discard it on any
+/// refusal or error, including failures after virtual writes.
 #[expect(
     clippy::too_many_arguments,
     reason = "mirrors `predict_commit`'s parameter list one for one; a shared context struct would have to be threaded through both and saves nothing"
@@ -323,15 +299,8 @@ async fn predict_commit(
     }))
 }
 
-/// Predict one deletion.
-///
-/// A deletion has no document, so there is nothing to evaluate: it is the commit
-/// transaction and nothing else, and `commit_deletion` runs against the view
-/// unchanged. The one difference from a registration is where the item write
-/// comes from — the committing path makes it *outside* its transaction, in
-/// `terminalize_deletion`, because a tombstone is already durable by then and
-/// there is no revision to roll back. There is nothing to write here either, so
-/// the prediction carries the same two values that call would have passed.
+/// Run `commit_deletion` against the view without document evaluation.
+/// Carry the values that `terminalize_deletion` would persist on the real path.
 async fn predict_deletion(
     view: &AdmissionView,
     tx: &toolkit_db::DbTx<'_>,

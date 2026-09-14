@@ -330,13 +330,8 @@ pub struct DependencyEdgeRow {
     pub to_entity_id: i64,
 }
 
-/// One stored edge between two entities the caller already holds, as
-/// [`Stores::edges_within`] reports it.
-///
-/// Named rather than an `(i64, i64)` pair: the direction is what the deletion
-/// order reads, and an implementation returning the endpoints the other way
-/// round would compile and quietly reverse that order. Ordered `from` then `to`,
-/// which is the sort the callers already apply.
+/// Directed stored edge returned by [`Stores::edges_within`].
+/// Named endpoints preserve direction; ordering is `from` then `to`.
 #[domain_model]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntityEdge {
@@ -346,13 +341,7 @@ pub struct EntityEdge {
     pub to_entity_id: i64,
 }
 
-/// What a `succeeded` item write records.
-///
-/// The three shapes `ck_tr_operation_item_state` admits, and nothing else. Two
-/// independent `Option`s gave four combinations, so a wrong pair surfaced as a
-/// constraint violation at runtime and every call site re-derived the rule for
-/// itself. The decision lives here instead, and the constructors are what the
-/// commit paths call.
+/// The three success shapes allowed by `ck_tr_operation_item_state`.
 #[domain_model]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemSuccess {
@@ -432,12 +421,8 @@ pub const EDGE_PAGE_IDS: usize = 128;
 /// that an ordinary closure finishes in one round trip.
 pub const EDGE_PAGE_ROWS: usize = 256;
 
-/// The maximum number of entities one dependency closure may reach.
-///
-/// A property of the port rather than of the adapter that walks it: the dry-run
-/// admission view walks the same relation over an overlay, and a second bound
-/// would be a second definition of how large a closure may be. Independent of
-/// `limits.activation_write_set`, which bounds refreshed rows rather than reads.
+/// Shared closure entity bound for storage and the dry-run view.
+/// Independent of `limits.activation_write_set`, which bounds refreshed rows.
 pub const CLOSURE_BOUND: usize = 512;
 
 /// The result of a dependency-closure read.
@@ -635,13 +620,8 @@ pub trait EntityWriteOrderStore: Send + Sync {
 /// The version family: the lock the family-wide rules are serialized by.
 #[async_trait]
 pub trait VersionFamilyStore: Send + Sync {
-    /// Exact read by family key, writing nothing.
-    ///
-    /// [`Self::create_or_get`] answers the same question, but only by being
-    /// prepared to insert. A caller that must not write — the dry-run admission
-    /// view — needs the question without the answer's side effect, and needs it
-    /// to distinguish a family this batch would found from one that already
-    /// holds members, because the kind rule is skipped only for the former.
+    /// Read a family by key without inserting. Dry run uses this to distinguish
+    /// existing families from virtual creations before applying the kind rule.
     async fn find_family_by_key(
         &self,
         tx: &DbTx<'_>,
@@ -745,13 +725,9 @@ pub trait EntityStore: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<Option<i64>, ScopeError>;
 
-    /// Move an **active** entity at `expected` to `DELETED`, advancing its
-    /// version (T20). The row survives: a tombstone stays exact-readable and
-    /// keeps serving as a compatibility baseline until purge (ADR-0013).
-    ///
-    /// Like [`Self::compare_and_swap_version`], both preconditions are in the
-    /// statement's `WHERE`, so `None` is a lost race rather than a separate read
-    /// the caller has to guard.
+    /// Tombstone an active entity at `expected`, advancing its version (T20).
+    /// Retain it for exact reads and compatibility until purge (ADR-0013).
+    /// Both preconditions are in `WHERE`; `None` means the CAS lost.
     async fn mark_deleted(
         &self,
         tx: &DbTx<'_>,
@@ -984,25 +960,15 @@ pub trait DependencyStore: Send + Sync {
         bound: usize,
     ) -> Result<usize, ScopeError>;
 
-    /// One **page** of the stored edges on one side of the relation.
+    /// Page stored edges on one side, ordered by primary key
+    /// `(from_entity_id, kind, to_entity_id)`. Resume strictly after `after`;
+    /// a short page is final.
     ///
-    /// The dry-run admission view walks the dependency relation itself, because
-    /// an overlay can replace one entity's outgoing set and a transitive read
-    /// would then follow edges the batch has removed. A walk needs single hops,
-    /// and a single hop on the incoming side has unbounded fan-in — one Type
-    /// Schema may have any number of dependants — so the read is paged rather
-    /// than materialized: the caller stops when the *distinct entities* it has
-    /// collected pass its own bound, having held at most one page at a time.
+    /// The dry-run view uses bounded single-hop reads to merge replaced edges
+    /// without materializing unbounded incoming fan-in.
     ///
-    /// Rows come back in `(from_entity_id, kind, to_entity_id)` order, which is
-    /// the relation's primary key and therefore a total order; `after` resumes
-    /// strictly past a row the caller has already seen. A short page is the last
-    /// one.
-    ///
-    /// `entity_ids` must hold at most [`EDGE_PAGE_IDS`] entries — one statement's
-    /// worth, because the keyset order has to be a single query's. An oversized
-    /// list is refused rather than chunked: chunking would silently restart the
-    /// ordering and hand the caller overlapping pages.
+    /// Reject more than [`EDGE_PAGE_IDS`] input IDs: chunking would restart
+    /// keyset ordering and produce overlapping pages.
     async fn edge_page(
         &self,
         tx: &DbTx<'_>,
@@ -1013,19 +979,11 @@ pub trait DependencyStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<DependencyEdgeRow>, ScopeError>;
 
-    /// Up to `limit` distinct **live** entities holding a direct edge into
-    /// `entity_id`, optionally of one kind, ordered by entity id.
+    /// Return up to `limit` distinct live direct dependant IDs, optionally filtered
+    /// by kind, in entity-ID order. Apply the limit in SQL.
     ///
-    /// The identity-bearing form of [`Self::live_direct_dependents`] and
-    /// [`Self::has_live_direct_instances`], bounded by `limit` in the statement.
-    /// The dry-run view needs identities rather than a count or a flag: a
-    /// candidate the same batch is admitting may add or remove a dependant, and
-    /// adjusting a number requires knowing whether the stored answer already
-    /// counted the one being adjusted. `limit` is the caller's own bound plus the
-    /// size of the bounded set it has to reason about, so the read stays as small
-    /// as the question.
-    ///
-    /// Identities do not reach a refusal message: T20 reports a count.
+    /// The dry-run view uses IDs to correct stored counts for overlay changes.
+    /// Public refusals report only counts.
     async fn live_direct_dependent_ids(
         &self,
         tx: &DbTx<'_>,

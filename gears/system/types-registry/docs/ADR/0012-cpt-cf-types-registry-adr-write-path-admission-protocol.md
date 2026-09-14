@@ -190,15 +190,11 @@ Absence fails the candidate retryably, like a base not yet registered. It is not
 
 Every mutation kind accepts a dry-run request: it runs the complete check sequence and commits nothing — no logical entity, no revision, no current-pointer move, no `resource_version` advance, no lifecycle transition, no removal. Per-candidate statuses and diagnostics are what the real operation would have produced against the state observed during the run. A candidate that would have committed carries no revision and no resulting resource version, because nothing was written; that is the one respect in which the result differs from the one it predicts.
 
-**The unit of prediction is the whole batch, not the candidate.** A committing batch is admitted in dependency order, so every candidate after the first is evaluated against a state that already carries its predecessors' writes: an in-batch `$ref` resolves against the base the batch is admitting, and an Instance is validated against the Type Schema revision the batch has just made current. A dry run predicts the same request and must therefore observe the same thing — one coherent base state, plus the hypothetical effects of every candidate the run has already admitted, in the same order and with the same dependency-aware partial admission. Predicting each candidate against committed state alone is not a weaker guarantee but a wrong one, in both directions: it refuses batches the real operation admits, and — the worse half — it approves candidates the real operation refuses, because the effect that would have invalidated them was discarded before they were judged.
+**Predict the whole batch** over one coherent base plus earlier successful candidates' hypothetical changes, in dependency order. In-batch references and Instance conformance see those changes. Discard refused or failed candidates' changes and block their dependents.
 
-A refused or failed candidate contributes nothing: its hypothetical changes are discarded exactly as a refused commit's writes are rolled back, and the candidates that depend on it are blocked, as they would be.
+**Issue no entity-state writes or `entity_write_order` claims.** Per-candidate rollback loses earlier effects; a batch transaction with savepoints preserves them but holds the shared write-order claim through all validations, blocking real writers. Use a snapshot and virtual changes instead. Verify zero write attempts with an instrumented adapter; unchanged final tables alone also permit rollback.
 
-**A dry run performs no entity-state write.** The defect this corrects is narrower than "rollback": it is rollback **per candidate**. Each candidate committed and discarded its own transaction before the next was evaluated, so every candidate was predicted against committed state alone and its predecessors' effects were gone by the time they mattered. One transaction spanning the whole batch, with a savepoint per candidate, would have kept them — the batch is expressible that way.
-
-It is rejected for what it would cost while it ran, not for what it could express. `entity_write_order` is the write path's single serialization point, claimed as the first statement of every commit; a dry run that claims it holds every committing admission behind a question about hypothetical state for the length of a whole batch, including the CPU-bound validation of every candidate in it. A prediction must not be able to stall the operations it predicts, and a mode whose cost to other writers scales with batch size is one an untrusted caller can aim.
-
-So no `version_family`, `entity`, revision, current-pointer or `dependency` row is written, and `entity_write_order` is not claimed. That also makes the guarantee checkable directly — an instrumented adapter observes no write attempt — where unchanged final tables alone are equally consistent with having written and undone. The operation, its per-candidate outcomes, the idempotency record and the dispatch record stay durable under the ordinary protocol: the caller asked a question and is owed a recorded answer.
+Operation, outcome, idempotency and dispatch records remain durable under the ordinary protocol.
 
 It is a mode rather than a separate validation operation, for the reason given under *Sub-choices within the selected option*, below.
 
@@ -206,7 +202,7 @@ The mode participates in the request fingerprint. Without that, a dry run and th
 
 The acceptance shape does not change. A dry run returns `202` with an operation UUID and is polled like any other, which is not uniformity for its own sake: when P2 hooks exist a dry run **must** invoke every hook the real operation would, or it stops predicting admission precisely where the stakes are highest — and hook duration is unbounded. Giving the mode a synchronous contract in P1 would therefore mean withdrawing it in P2, which is the client-contract break this ADR exists to avoid.
 
-A dry run is not a guarantee of admission and must not be presented as one. Its verdict is relative to the state it observed: a target's `resource_version` may advance, a dependency may admit a new revision, or the entity may be deleted before the real submission. It reserves nothing, and it predicts neither infrastructure failure nor a concurrent race. What it does guarantee is agreement with the real operation on the same initial state with no intervening writer — which is the comparison the mode is for, and the one its tests make.
+A dry run guarantees matching verdicts on identical initial state with no intervening writer. It reserves nothing and predicts neither infrastructure failures nor concurrent races; a later submission rechecks live state.
 
 **Purge is outside this ADR, and its dry run is separate.** ADR-0013 defines purge as a synchronous platform-plane job with no operation, request key, per-candidate row, or outbox message.
 
@@ -356,8 +352,8 @@ This decision is confirmed when:
 * Types Registry reaches ready state before any domain gear registers definitions;
 * tenant-scoped control-plane registration is rejected and Source Claim invariants are enforced without P2 hooks;
 * a dry run of each mutation kind reports the same per-candidate statuses and diagnostics as the real operation while leaving every entity, revision, current pointer, resource version, and lifecycle status untouched, and returns no revision and no resulting resource version for a candidate that would have committed;
-* a dry run of a **batch** reports the same per-candidate statuses and diagnostics as the same batch submitted for real against the same initial state — including a referrer whose base the batch creates, an Instance the batch's own Type Schema revision invalidates, and a deletion whose blocking dependant the batch removes first — so neither a refusal the real operation would not make nor an approval it would not give survives;
-* a dry run issues no entity-state write and claims no `entity_write_order`, which an instrumented storage adapter asserts directly: unchanged final tables alone would also be satisfied by writing and rolling back;
+* batch dry-run/commit parity on identical initial state covers in-batch references, Instances invalidated by preceding revisions, and dependant-first deletion;
+* an instrumented adapter observes no dry-run entity-state write or `entity_write_order` claim;
 * a dry run and a real submission carrying the same scoped key are treated as different requests, so the real submission executes rather than replaying the dry run;
 
 ## Pros and Cons of the Options

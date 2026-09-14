@@ -1615,47 +1615,28 @@ MySQL's integer boolean, and the SQLite insert chunk accounts for all 15 columns
 
 ### - [x] T19: Dependency-aware partial admission
 
-**Description:** Batch admission over two edge sets, which are not the same set. The
-**ordering** graph is authored `$ref`s between candidates, each candidate's
-identifier-derived immediate derivation base, its Instance conformance target, and the
-implicit `vM.(n-1)~ → vM.n~` edge; the topological sort runs over all of it, because an
-Instance must not commit ahead of a Type Schema that may then be refused. The
-**cycle-bearing** graph is `$ref` and derivation only — the two an effective form inlines,
-so the two a cycle can be built from, and a `$ref`-only check would order a mixed cycle and
-admit it. Process in topological order with one candidate per unit, and record an outcome for
-every candidate. What ADR-0012 makes acyclic
-is the *admitted* relation, not this graph: the overlay makes in-batch candidates visible to
-each other, so a batch can author a cycle that nothing has refused yet. The ordering function
-therefore detects one and fails its members with `invalid_schema` rather than assuming a
-topological order exists. What follows from acyclicity is only what happens after that refusal:
-no condensation step and no atomic group. The ordering stays a pure function over a candidate
-set.
+**Description:** Order candidates by `$ref`, derivation, conformance and implicit minor
+predecessor edges. Detect cycles over `$ref` and derivation, refusing members with
+`invalid_schema`. Process one candidate per unit and return one outcome each.
+Ordering is pure; admitted state stays acyclic without atomic groups or condensation.
 
 **Acceptance criteria:**
+
 - [x] Independent passing branches commit despite failures elsewhere
-- [x] In-batch references resolve against the candidate overlay, never a previously committed
-  revision. **The overlay is realized by commit order, not by a second document set** — see
-  Implementation notes below for the committed path and the dry-run limitation
-- [x] A failed selected dependency yields `blocked_by_dependency`; a failed lower minor yields `blocked_by_predecessor`
-- [x] A circular `$ref` between two candidates in one batch is refused as `invalid_schema` — the overlay makes both visible to each other, so this is where the acyclicity invariant is actually tested
-- [x] A cycle mixing `$ref` with derivation — a base candidate `$ref`ing a schema derived from it — is refused the same way: the ordering runs over the combined edge set, not over `$ref` alone
-- [x] A candidate with a self-referential GTS `$ref` is refused as `invalid_schema`.
-  For self-cycles and multi-candidate cycles, assert every cycle member fails and no new
-  entity/revision or outgoing edge is committed; existing revisions remain unchanged
-- [x] The implicit predecessor edge is not written to `dependency` —
-  `a_minor_pair_is_ordered_by_an_edge_that_is_never_stored` admits both minors in one batch
-  and asserts the upper one has no outgoing edge, beside `family_test`'s single-candidate form
-- [x] The ordering is exposed as a pure function over a candidate set, usable without a
-  database — `graph::order_batch(&[BatchCandidate]) -> BatchOrder`. All 17 of its tests run
-  with no database, which is the point: a cycle is exactly what no fixture database can hold,
-  because nothing cyclic is ever committed
+- [x] In-batch references use candidate state, not older committed revisions (see notes below)
+- [x] Failed dependency/predecessor yields `blocked_by_dependency`/`blocked_by_predecessor`
+- [x] In-batch `$ref` cycles fail `invalid_schema`
+- [x] Mixed `$ref`/derivation cycles fail `invalid_schema`
+- [x] Self-referential GTS `$ref` fails `invalid_schema`. All cycle members fail without
+  entity, revision or edge writes; existing revisions remain unchanged
+- [x] Implicit predecessor edges are not stored:
+  `a_minor_pair_is_ordered_by_an_edge_that_is_never_stored`
+- [x] Pure `graph::order_batch(&[BatchCandidate]) -> BatchOrder`; 17 database-free tests
 
 **Observability (P16):**
-- [x] `blocked_by_dependency` and `blocked_by_predecessor` are `Reason` consts and are counted
-      per blocked candidate, so a batch's blocked fan-out is one query rather than a read of
-      every item row. Like evaluated refusals, blocked candidates are counted by
-      `candidates_total{status="failed"}` and `refusals_total{stage="admission",reason}` the
-      same way an evaluated refusal is — there is no second, quieter terminalization path
+
+- [x] Both blocking reasons are `Reason` consts. Each blocked candidate increments
+  `candidates_total{status="failed"}` and `refusals_total{stage="admission",reason}`
 
 **Verification:**
 - [x] Gear tests, all three backends (see [Commands](#commands)) — recorded at completion:
@@ -1698,44 +1679,28 @@ and entity locks, recheck `ACTIVE` with no direct registered dependents, lifecyc
 deletion, predicting the whole batch against one coherent snapshot without entity-state writes.
 
 **Acceptance criteria:**
-- [x] Committed deletion claims the `entity_write_order` row as its transaction's first statement — without it the commit order admission's correctness rests on is no longer total, and `a_creation_claims_the_entity_write_order_row_exactly_once` (with its revision / `unchanged` siblings) is the shape of the test that catches an omission
-- [x] Deletion with a live direct registered dependent is refused, reporting a count without identities
-- [x] A transitive-only dependent does not block
-- [x] A schema whose `x-gts-ref` names the target does **not** block: the keyword creates no edge, so there is no registered dependent to find
-- [x] Paired public-service deletion scenarios prove the distinction: an otherwise equivalent
-  `$ref` holder blocks target deletion, while an `x-gts-ref` holder permits it and stays
-  readable. **Otherwise equivalent literally**: one `holder` fixture parameterised by the
-  keyword alone, both carrying `type: "string"`, so the tests compare two keywords rather
-  than two schemas. Tenant disable/unavailability scenarios belong to the deferred
-  Availability Evaluator, not T20 or P0
-- [x] A deleted entity is still exact-readable as deleted, and absent from lists
-- [x] Dry Run writes no entity state, claims no `entity_write_order`, and its mode is part of the fingerprint; operation outcomes remain durable
-- [x] Dry-run `succeeded` omits `resource_version`; dry-run `unchanged` reports the existing one
 
-**Observability — this task owns the label sweep (`plan.md` P16 rule 2):**
-- [x] **A dry run is distinguishable from a commit in every series it touches.** `dry_run`
-      becomes a label on `candidates_total`, `refusals_total` and T17's verdict counter. Without
-      it a dry run increments `candidates_total{status="succeeded"}` beside admissions
-      that actually wrote, and "how many registrations succeeded today" answers with a number
-      that includes passes which wrote nothing
-- [x] The activation-write-set histogram is **either labelled or not observed** for a dry run —
-      decided here and tested either way, with the reason recorded next to the call. A
-      hypothetical write set recorded beside real ones misreports how close the deployment runs
-      to `limits.activation_write_set`
-- [x] **A deletion is distinguishable from a registration:** `kind` becomes a label on
-      `candidates_total` and `refusals_total`. Deletions are rare and irreversible, and a success
-      series that blends them cannot answer *what did this deployment delete*. Both spans already
-      carry `kind` and `dry_run` (T16) — the gap is metrics-only, which is why nothing here
-      touches a span constructor
-- [x] Both labels are **required parameters** on the port's methods, so every existing call site
-      is a compile error until it says which mode and which kind it is. No defaulting to
-      `registration` / `false`, which is exactly how a mislabelled series gets shipped
-- [x] Deletion's refusals each carry their own `Reason` const from T17's vocabulary —
-      `has_registered_dependents`, `not_active`, beside the existing `precondition_failed`
-- [x] The blocked dependent **count** goes on the unit span (`blocked_dependents`), never in a
-      label and never with identities — the same rule the refusal message itself follows.
-      Asserted in both directions on the refusal log line: the number is there and the
-      dependant's identifier is not. Mutation-checked by dropping the `record` call
+- [x] Committed deletion claims `entity_write_order` as its first statement, covered by
+  claim-order tests matching creation/revision/`unchanged`
+- [x] Live direct registered dependants block deletion; report count only
+- [x] Transitive-only dependants do not block
+- [x] `x-gts-ref` creates no edge and does not block
+- [x] Paired service tests vary only `$ref`/`x-gts-ref` on a string property: the former
+  blocks deletion; the latter permits it and remains readable. Tenant availability is deferred
+- [x] Tombstones remain exact-readable and are excluded from lists
+- [x] Dry run issues no entity writes/claims; its mode enters the fingerprint and outcomes persist
+- [x] Predicted `succeeded` omits `resource_version`; `unchanged` reports the existing one
+
+**Observability — label sweep (P16 rule 2):**
+
+- [x] `dry_run` labels candidate, refusal and compatibility-verdict counters
+- [x] Dry runs do not observe the activation-write-set histogram; tested with rationale at the call
+- [x] `kind` distinguishes deletion/registration in candidate and refusal counters;
+  spans already carry both labels
+- [x] Both port labels are required, without defaults
+- [x] Deletion uses `has_registered_dependents`, `not_active` and `precondition_failed` reasons
+- [x] `blocked_dependents` is a span count, never a metric label or identity list.
+  Tests assert count presence and identity absence; dropping `record` fails the mutation check
 
 **Verification:**
 - [x] Gear tests, all three backends (see [Commands](#commands))
@@ -1801,47 +1766,38 @@ existing DE1201 warnings in unrelated file-storage/simple-user-settings crates.
 
 ### - [ ] T20a: REST deletion and dry run
 
-**Description:** Expose T20's deletion through `POST /entities:batchDelete` and
-`DELETE /entities/{entity_key}` on `/v2/`, with dry run available for registration and both
-deletion spellings. This is the mutation part of the former T27 (`plan.md` P17); read
-completion belongs to T22a. It works with inline admission before T21 introduces outbox dispatch.
+**Description:** Expose single/batch deletion on `/v2/` with dry run on all mutations.
+Uses inline admission until T21. Read completion belongs to T22a (P17).
 
 **Acceptance criteria:**
-- [ ] Deletion items name their entity in one `key` field, classified by the same
-      `EntityKey::parse` as an exact read; the batch array is `items`. Operation outcomes are
-      keyed by `gts_id` and preserve request order, including requests made by UUID
-- [ ] `:batchDelete` items carry a `key` plus a **required positive** `expected_resource_version`; absence is a `400`, not "delete if present"
-- [ ] `DELETE /entities/{entity_key}` is a one-item `:batchDelete` over the same domain path — no second deletion model, no handler-local precondition logic. It resolves `{entity_key}` as the `GET` does and requires `Idempotency-Key`
-- [ ] Its precondition is a required positive `expected_resource_version` **query parameter**; an `If-Match` header is refused, not ignored. Absent, non-numeric or `0` is a synchronous `400`; a mismatched version is `202` and then `precondition_failed` on the operation item, never `412` (DESIGN §3.3, `DELETE /entities/{entity_key}`)
-- [ ] Test: the same mismatched version through `DELETE /entities/{entity_key}` and through a one-item `:batchDelete` yields the identical item outcome — the assertion that keeps the two spellings one model
-- [ ] `dry_run` defaults to false on all three mutation routes: in the body for
-      `POST /entities` and `POST /entities:batchDelete`, in the query for
-      `DELETE /entities/{entity_key}` (DESIGN §3.3). Registration already passes the flag to
-      the domain and has a REST regression test; preserve that path and add deletion coverage
-- [ ] All mutations require `Idempotency-Key`; first acceptance returns `202` with
-      operation `Location` and `Retry-After`, terminal replay returns `200` and
-      `Idempotency-Replayed: true`. Dry run preserves the same operation protocol: operation
-      and outcome records persist, entity state and `resource_version` do not change; reusing
-      a dry-run key for a commit is a fingerprint conflict
-- [ ] Both deletion routes appear in OpenAPI with RFC-9457 errors, required
-      preconditions, idempotency and dry-run parameters. `QUICKSTART.md` documents registration,
-      deletion, dry run and submit-then-poll with working internal-route examples
-- [ ] The three mutation operations are not gateway-published: their operation specs keep
-      `exposed = false` until platform identity and a PDP decision are enforced before dispatch
-- [ ] `QUICKSTART.md` exists per `02_gear_layout_and_sdk_pattern.md` — description, features, link to `/docs`, one or two working `curl` examples
-- [ ] OpenAPI and `QUICKSTART.md` describe this as the platform-plane API for global entities,
-      state that mutation routes remain internal-only while platform identity
-      (`X-ToolKit-Internal-Token` / `PlatformIdentity`) and the separate listener are unavailable
-      (C8), and do not present a gateway mutation `curl` as usable
-- [ ] No handler added in this task carries logic the domain service does not already expose — the REST surface stays a mapping layer, so a later gRPC surface cannot diverge from it (SPEC §8.4)
-- [ ] Every route is authored on `/v2/` behind the `routes::V2` constant, so T24a's promotion
-      stays a constant change and not a sweep (T9a's criterion, inherited)
-- [ ] `DELETE /entities/{entity_key}` and `:batchDelete` emit T20's `kind="deletion"` series
-      unchanged: they add no second deletion model, so they add no second set of signals
-- [ ] **No e2e file is edited by this task** and `make e2e-local` stays green — P12's invariant
-      holds until T24 (P17). The v1 routes and the in-memory store they read are untouched
-- [ ] The changelog is **not** written here: both breaks land at T24a's promotion, and an entry
-      announcing a v1 break in a release where v1 still works is wrong (P17)
+
+- [ ] Batch `items` use `key` parsed by `EntityKey::parse`; outcomes use `gts_id` in request
+  order, including UUID submissions
+- [ ] `:batchDelete` requires positive `expected_resource_version` per item; absence is `400`
+- [ ] `DELETE /entities/{entity_key}` uses the one-item batch domain path, GET's key resolution
+  and `Idempotency-Key`; no handler-local deletion/precondition model
+- [ ] Single deletion requires a positive `expected_resource_version` query parameter and
+  refuses `If-Match`. Missing, non-numeric or zero yields `400`; mismatch yields `202`
+  then item `precondition_failed`, never `412` (DESIGN §3.3)
+- [ ] Single and one-item batch deletion return identical version-mismatch outcomes
+- [ ] `dry_run=false` by default; body field for registration/batch deletion, query for
+  single deletion. Preserve registration's router test and cover both deletion routes
+- [ ] All mutations require `Idempotency-Key`: acceptance returns `202`, `Location` and
+  `Retry-After`; terminal replay returns `200` and `Idempotency-Replayed: true`.
+  Dry runs persist outcomes without entity/version changes; dry-run/commit key reuse conflicts
+- [ ] OpenAPI includes deletion routes, RFC-9457 errors, preconditions, idempotency and dry run.
+  Quickstart covers registration, deletion, dry run and submit-then-poll on internal routes
+- [ ] All mutations keep `exposed = false` until platform identity/PDP checks precede dispatch
+- [ ] `QUICKSTART.md` meets the gear-layout guide: description, features, `/docs` link,
+  one or two working `curl` examples
+- [ ] OpenAPI/quickstart identify the global platform-plane API and C8's internal-only
+  mutations pending `X-ToolKit-Internal-Token`/`PlatformIdentity` and a separate listener;
+  no usable gateway mutation example
+- [ ] Handlers only map the domain service (SPEC §8.4)
+- [ ] All routes use `routes::V2` for T24a's promotion
+- [ ] Deletion routes reuse T20's `kind="deletion"` metrics
+- [ ] No e2e edits; `make e2e-local` stays green. Preserve v1 and its in-memory store (P12/P17)
+- [ ] Both breaking changelog entries belong to T24a's promotion
 
 **Verification:**
 - [ ] Gear tests (see [Commands](#commands)), including `TR/tests/api_rest_test.rs` through
@@ -1953,44 +1909,39 @@ there is no way for a gear to know which inventory records are its own.
 
 ### - [ ] T22a: REST batchGet and discovery
 
-**Description:** Complete reads with `POST /entities:batchGet` and the bounded, content-free
-`GET /entities` on `/v2/`; finish OpenAPI coverage of all seven routes and extend the
-quickstart. This is the remaining part of the former T27 (`plan.md` P17), including both
-batch reads and list. It follows T22 in the phase's execution order; `owning_gear` is not a
-technical dependency. The DTO contract is SPEC §10.1/§10.2, which T23 also follows.
+**Description:** Add `POST /entities:batchGet` and bounded, content-free `GET /entities`
+on `/v2/`; complete seven-route OpenAPI and quickstart coverage (former T27, P17).
+Follows T22 by schedule, independently of `owning_gear`; REST/SDK share SPEC §10.1/§10.2.
 
 **Acceptance criteria:**
-- [ ] `batchGet` returns one explicit result per requested key, including absence; duplicate keys collapse
-- [ ] Every batch item names its entity in one `key` field, classified by the same `EntityKey::parse` the path segment uses; the three batch bodies all name their array `items` (DESIGN §3.3, *Naming a single entity in a batch*)
-- [ ] Test: a syntactically impossible identifier answers **identically** through `:batchGet` and through `GET /entities/{entity_key}` — one classifier, so the two surfaces cannot disagree about one string
-- [ ] `:batchGet` results echo the `key` they were asked by
-- [ ] An `If-None-Match` **header** on `:batchGet` is refused, not ignored: validators are per item in `if_none_match`
-- [ ] `GET /entities` excludes deleted entities and sorts by canonical identifier
-- [ ] `GET /entities` returns **one bounded page and a cursor** (D12): `limit` defaults to `limits.page_size_default` (100) and a request above `limits.page_size_max` (1000) is **refused, not clamped**; cursors come from `toolkit-odata` and an unknown cursor version is rejected rather than reinterpreted
-- [ ] The page is **content-free**: the default field set is identity and metadata; all four documents (`content`, `resolved_schema`, `effective_traits`, `effective_traits_schema`) are absent, and a page carries no validator (§8.5)
-- [ ] One default set **per surface**: the page is content-free, while `GET /entities/{entity_key}` and `batchGet` return the full representation with D3's artifacts
-- [ ] A request carrying **`$select` is refused** with an RFC-9457 problem naming the parameter — never answered with the default representation (§10.2). Accept-and-ignore is wrong here: the caller would get up to 1MB it did not ask for and would build on behaviour P1 changes
-- [ ] `EntityRepo::list_page` gets its first real consumer here: its scan budget (`SCAN_BUDGET`, `SCAN_BATCH`) and prefix-range logic (`prefilter_prefix`, `range_upper_bound`) are the most intricate in the layer and have only ever been unit-tested — a test must exercise the budget boundary and a prefix range **through the route**
-- [ ] Both read routes go through T4's database read primitives; pattern filtering is `GtsId::matches_pattern` in Rust over prefiltered rows, never SQL that reimplements identifier matching
-- [ ] All **seven** routes appear in the OpenAPI document with RFC-9457 error responses registered — the four reads (`GET /entities/{entity_key}`, `GET /entities`, `:batchGet`, `GET /operations/{operation_id}`) and the three mutations (`POST /entities`, `:batchDelete`, `DELETE /entities/{entity_key}`)
-- [ ] The three mutation operations are not gateway-published: their operation specs keep
-      `exposed = false` until platform identity and a PDP decision are enforced before dispatch
-- [ ] Extend T20a's `QUICKSTART.md` with `batchGet` and content-free discovery,
-      cursor traversal and full-document hydration through exact/batch reads
-- [ ] OpenAPI and `QUICKSTART.md` describe this as the platform-plane API for global entities,
-      state that mutation routes remain internal-only while platform identity
-      (`X-ToolKit-Internal-Token` / `PlatformIdentity`) and the separate listener are unavailable
-      (C8), and do not present a gateway mutation `curl` as usable
-- [ ] No handler added in this task carries logic the domain service does not already expose — the REST surface stays a mapping layer, so a later gRPC surface cannot diverge from it (SPEC §8.4)
-- [ ] Every route is authored on `/v2/` behind the `routes::V2` constant, so T24a's promotion
-      stays a constant change and not a sweep (T9a's criterion, inherited)
-- [ ] The page and batch bodies follow SPEC §10.1/§10.2 — `items` as the array name, `key` as
-      the per-item entity name, `EntityPage` as the page shape — so T23's trait is written
-      against that section and not against these handlers (P17)
-- [ ] **No e2e file is edited by this task** and `make e2e-local` stays green — P12's invariant
-      holds until T24 (P17). The v1 routes and the in-memory store they read are untouched
-- [ ] The changelog is **not** written here: both breaks land at T24a's promotion, and an entry
-      announcing a v1 break in a release where v1 still works is wrong (P17)
+
+- [ ] `batchGet` returns an explicit result per key, including absence; duplicate keys collapse
+- [ ] All batch bodies use `items`; each item's `key` uses the path's `EntityKey::parse`
+  (DESIGN §3.3)
+- [ ] Impossible identifiers return identical errors through batch and exact reads
+- [ ] `batchGet` echoes requested keys
+- [ ] Reject a batch `If-None-Match` header; validators belong in per-item `if_none_match`
+- [ ] Discovery excludes tombstones and sorts by canonical identifier
+- [ ] Return one bounded page (D12): default `limits.page_size_default` (100), reject above
+  `page_size_max` (1000). Use `toolkit-odata` cursors and reject unknown versions
+- [ ] Pages contain identity/metadata only: no `content`, `resolved_schema`, `effective_traits`,
+  `effective_traits_schema` or validator (§8.5)
+- [ ] Exact/batch reads retain full representations and D3 artifacts
+- [ ] Reject `$select` with an RFC-9457 problem naming the parameter (§10.2)
+- [ ] Exercise `EntityRepo::list_page` scan-budget boundary and prefix range through the route
+- [ ] Use T4's DB reads; apply `GtsId::matches_pattern` in Rust to prefiltered rows
+- [ ] OpenAPI includes RFC-9457 errors for all seven routes: exact/list/batch/operation reads
+  and registration/batch deletion/single deletion
+- [ ] All mutations keep `exposed = false` until platform identity/PDP checks precede dispatch
+- [ ] Extend quickstart with batch reads, discovery, cursor traversal and full-document hydration
+- [ ] OpenAPI/quickstart identify the global platform-plane API and C8's internal-only
+  mutations pending `X-ToolKit-Internal-Token`/`PlatformIdentity` and a separate listener;
+  no usable gateway mutation example
+- [ ] Handlers only map the domain service (SPEC §8.4)
+- [ ] All routes use `routes::V2` for T24a's promotion
+- [ ] DTOs follow SPEC §10.1/§10.2: `items`, `key`, `EntityPage`; T23 follows the same contract
+- [ ] No e2e edits; `make e2e-local` stays green. Preserve v1 and its in-memory store (P12/P17)
+- [ ] Both breaking changelog entries belong to T24a's promotion
 
 **Verification:**
 - [ ] Gear tests (see [Commands](#commands)), including `TR/tests/api_rest_test.rs` driven

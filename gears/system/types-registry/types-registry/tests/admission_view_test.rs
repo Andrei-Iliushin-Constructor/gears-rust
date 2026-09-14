@@ -1,25 +1,8 @@
-//! The admission view's graph walks, against the adapter they replace.
+//! Admission-view graph walks compared with the storage adapter.
 //!
-//! `closure` and `reverse_impact` are recursive SQL in the adapter and a paged
-//! single-hop walk in the view, because an overlay can supersede an entity's
-//! outgoing edges and a transitive read would follow the ones a batch removed.
-//! Two implementations of one relation drift, so most cases here ask **both** the
-//! same question over an **empty** overlay and require the same answer. With the
-//! overlay empty the view is supposed to be the adapter, exactly.
-//!
-//! The last three cases are the other half of that contract, and the reason the
-//! walk is single-hop at all: with a candidate's outgoing set **superseded** by
-//! the batch's own revision of it, the two answers must *differ*, and the view's
-//! must be the one that stops at the replaced edge. An equality suite alone would
-//! pass against a view that ignored the overlay entirely.
-//!
-//! Two shapes. A **diamond** — `b → a`, `c → a`, `c → b` — because it is where a
-//! walk that charges its bound before discarding entities it has already counted
-//! gets the wrong answer: `c` is reached twice, and a walk that pays for it twice
-//! refuses a set that fits. And a **dense bipartite set** of 544 internal edges,
-//! because that is where a walk that mistook the 512-entity closure bound for an
-//! edge bound refuses a deletion order the real operation computes without
-//! complaint.
+//! Empty overlays must match; replaced edges must change traversal. Diamond
+//! fixtures catch double-counted entities; dense bipartite fixtures distinguish
+//! the 512-entity closure bound from edge count.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -487,15 +470,8 @@ async fn a_view_edges_within_does_not_report_edges_the_batch_replaced() {
     );
 }
 
-/// The dense fixture is **bipartite**: `HOLDERS` schemas each `$ref` every one
-/// of `LEAVES` schemas, for `HOLDERS * LEAVES` internal edges.
-///
-/// Bipartite rather than a full DAG on purpose. A chain where each member
-/// references every earlier one inlines every ancestor's *resolved* form into
-/// the next, which grows exponentially and hits `limits.resolved_document`
-/// around the fifteenth member — long before the edge count is interesting.
-/// Here each holder resolves one flat layer of tiny leaves, so the edge count
-/// is what grows.
+/// `HOLDERS * LEAVES` edges in a bipartite graph. One flat layer avoids the
+/// exponential resolved-document growth of a fully connected DAG.
 const LEAVES: usize = 32;
 const HOLDERS: usize = 17;
 
@@ -551,14 +527,7 @@ async fn seed_dense(db: &Provider) -> Vec<i64> {
     ids
 }
 
-/// A set whose members reference each other densely: 544 internal edges across
-/// 49 entities.
-///
-/// There is no bound on the **pairs** a deletion batch's own members form, and
-/// the adapter has none either — the batch bounds the endpoints, and how densely
-/// they reference one another is not a separate budget. A view that reused the
-/// 512-entity closure bound as an edge bound would refuse this set, which is a
-/// deletion order the real operation computes without complaint.
+/// 544 edges across 49 entities: deletion bounds endpoints, not edge count.
 #[tokio::test]
 async fn a_view_edges_within_matches_the_adapter_past_the_closure_bound() {
     let db = test_db().await;

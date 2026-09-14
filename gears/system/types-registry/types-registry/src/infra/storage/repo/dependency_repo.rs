@@ -77,21 +77,8 @@ impl DependencyRepo {
             .is_some())
     }
 
-    /// Count the **live direct** registered dependants of one entity (T20).
-    ///
-    /// Direct only: SPEC §16.9 blocks a deletion on a dependant that names the
-    /// target itself. A transitive one is separated by an entity that is still
-    /// resolvable, so it is not stranded by this deletion.
-    ///
-    /// Every edge kind counts, unlike [`Self::has_live_direct_instances`]: a
-    /// `$ref` holder, a derived Type Schema and a conforming Instance are all
-    /// stranded the same way. `x-gts-ref` is absent by construction — the keyword
-    /// produces no edge (T18), which is exactly what makes it not a dependant.
-    ///
-    /// The read is bounded at `bound + 1` rows, and the returned count saturates
-    /// there: the caller reports a number, and an unbounded count would make a
-    /// refusal cost more than the commit it refuses. `DISTINCT` because one
-    /// dependant can hold two edge kinds to one target.
+    /// Count distinct live direct dependants across all edge kinds (SPEC §16.9).
+    /// `x-gts-ref` produces no edge. Limit the read and count to `bound + 1`.
     ///
     /// # Errors
     /// Propagates the scoped query's failure.
@@ -145,16 +132,9 @@ impl DependencyRepo {
         Ok(rows.len())
     }
 
-    /// The stored edges **between** the given entities, as `(from, to)` pairs.
-    ///
-    /// Deletion order needs them (T20): a deletion submits no document, so the
-    /// only place its edges exist is this table. Edges leaving the set are
-    /// dropped — that dependant survives the deletion, and refusing on it is
-    /// the commit-time recheck's job, not the ordering's.
-    ///
-    /// Only `from_entity_id` is filtered in SQL; the far end is matched in Rust.
-    /// Two `IN (…)` lists would bind twice the parameters for the same rows, and
-    /// the set's own outgoing edges are what a deletion batch reads anyway.
+    /// Read stored edges between the given entities for deletion ordering.
+    /// Filter sources in SQL and targets in Rust to avoid doubling bind parameters.
+    /// External dependants are checked at commit time.
     ///
     /// # Errors
     /// Propagates the scoped query's failure.
@@ -194,15 +174,10 @@ impl DependencyRepo {
         Ok(pairs)
     }
 
-    /// One page of stored edges on one side of the relation (see the port).
-    ///
-    /// Ordered by the relation's primary key, limited in the statement, and
-    /// resumed strictly past `after` — so a caller walking a high-fan-in entity
-    /// holds one page rather than the whole fan-in.
+    /// Page edges in primary-key order, strictly after `after`, with a SQL limit.
     ///
     /// # Errors
-    /// [`ScopeError::Invalid`] for an id list larger than one statement's worth,
-    /// and whatever the scoped query fails with.
+    /// [`ScopeError::Invalid`] for too many input IDs; propagates query failures.
     pub async fn edge_page(
         runner: &impl DBRunner,
         scope: &AccessScope,
@@ -268,12 +243,8 @@ impl DependencyRepo {
             )
     }
 
-    /// Up to `limit` distinct live entities holding a direct edge into
-    /// `entity_id`, optionally of one kind (see the port).
-    ///
-    /// The same query as [`Self::live_direct_dependents`], returning the ids it
-    /// counts. Kept beside that method rather than replacing it: the real path
-    /// wants a count and must not carry identities it would then have to drop.
+    /// Return up to `limit` distinct live direct dependant IDs, optionally by kind.
+    /// The real path uses [`Self::live_direct_dependents`] to read only a count.
     ///
     /// # Errors
     /// Propagates the scoped query's failure.

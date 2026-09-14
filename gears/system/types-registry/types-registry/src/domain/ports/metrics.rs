@@ -61,15 +61,8 @@ impl TryFrom<OperationItemStatus> for TerminalStatus {
     }
 }
 
-/// The two labels every per-candidate series carries (T20, `plan.md` P16 rule 2).
-///
-/// One struct rather than two bare arguments, because both are being added to
-/// *existing* call sites: `(false, kind)` and `(kind, false)` would both compile
-/// at most of them, and a transposed pair is a mislabelled series that nothing
-/// fails on. Named fields make the transposition unrepresentable.
-///
-/// There is no `Default`, deliberately. Defaulting to `registration` / `false`
-/// is exactly how a dry run ends up counted beside passes that wrote.
+/// Required per-candidate labels (T20, `plan.md` P16 rule 2).
+/// No default: callers must explicitly distinguish dry runs and operation kinds.
 #[domain_model]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PassLabels {
@@ -106,28 +99,19 @@ pub trait AdmissionMetrics: std::fmt::Debug + Send + Sync {
     /// per refusal.
     fn refused(&self, stage: RefusalStage, reason: &'static str, labels: PassLabels);
 
-    /// Count each computed verdict in
+    /// Count computed verdicts in
     /// `types_registry_compat_verdicts_total{verdict,forced,dry_run}`.
-    /// Includes compatible verdicts, which do not increment [`Self::refused`].
-    /// Exempt candidates emit nothing; their baseline is recorded on the unit span.
-    /// `forced` records the effective ADR-0004 waiver.
-    ///
-    /// Takes the whole [`PassLabels`] and renders only `dry_run` from it: a verdict
-    /// is computed for a registration and never for a deletion, so a `kind` label
-    /// here would be one constant series — noise rather than signal.
+    /// Include compatible verdicts; exempt candidates emit only span baseline data.
+    /// `forced` is the effective ADR-0004 waiver. Omit `kind`: only registrations
+    /// compute verdicts.
     fn compat_verdict(&self, verdict: CompatibilityVerdict, forced: bool, labels: PassLabels);
 
     /// Count revalidation retries by drift.
     fn revalidation_retried(&self, drift: &VectorDrift);
 
-    /// Record dependents rewritten by one revision, including zero.
-    ///
-    /// **A dry run records nothing**, and that is decided here rather than left to
-    /// the caller: this histogram answers how close a deployment runs to
-    /// `limits.activation_write_set`, and a dry-run pass rewrote no dependents,
-    /// so its hypothetical set is not a data point about that pressure.
-    /// The case that matters stays visible — exceeding the bound is a refusal, and
-    /// refusals carry `dry_run`.
+    /// Record dependents rewritten by a revision, including zero.
+    /// Skip dry runs: this measures actual activation pressure. Bound refusals
+    /// remain counted with their `dry_run` label.
     fn observe_activation_write_set(&self, refreshed: usize, labels: PassLabels);
 
     /// `types_registry_operation_duration_seconds` — one admission pass, wall-clock.

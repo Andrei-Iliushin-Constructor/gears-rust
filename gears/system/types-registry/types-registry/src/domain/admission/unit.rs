@@ -276,13 +276,7 @@ pub struct EvaluationTarget<'a> {
     pub labels: PassLabels,
 }
 
-/// Everything an evaluation decides before it reads anything.
-///
-/// Pulled out of [`evaluate`] so the same decisions serve both entry points: the
-/// committing path, which opens its own snapshot, and the dry-run pass, which
-/// already has one open and must not start a second. Splitting the *decisions*
-/// from the *reads* is what keeps those two from drifting — there is one plan,
-/// one snapshot body and one validation, whichever way in the caller came.
+/// Plan evaluation before reading state, shared by committing and dry-run paths.
 #[domain_model]
 #[derive(Clone, Debug)]
 struct EvaluationPlan {
@@ -355,13 +349,7 @@ fn plan_evaluation(target: EvaluationTarget<'_>) -> Result<EvaluationPlan, ItemF
     })
 }
 
-/// Everything one evaluation reads, from one snapshot.
-///
-/// Takes the transaction rather than opening one: the committing path hands it
-/// the read-only transaction it just opened, and the dry-run pass hands it the
-/// one the whole batch is being predicted against. Neither can reach for a
-/// second, which is what makes "one coherent base" checkable rather than hoped
-/// for.
+/// Read evaluation inputs from the caller's snapshot.
 async fn read_evaluation_snapshot(
     stores: &dyn Stores,
     tx: &DbTx<'_>,
@@ -526,19 +514,12 @@ async fn finish_evaluation(
 }
 
 /// Probe once when requested, then evaluate a miss from the same snapshot.
-/// Validation and artifact materialization run after the snapshot closes.
-///
-/// Builds the unit's transient store from the database (D2), asks `gts-rust` to
-/// validate the candidate, and materializes D3's artifacts. The store is dropped
-/// when this returns: nothing is retained anywhere, and the next invocation reads
-/// the database again.
-///
-/// Resolution budgets apply before commit; `activation_write_set` also bounds reverse impact.
+/// After closing it, validate via `gts-rust`, materialize artifacts and drop the
+/// transient store. Resolution budgets apply before commit;
+/// `activation_write_set` also bounds reverse impact.
 ///
 /// # Errors
-/// [`WorkerError`] for an infrastructure failure, which the outbox handler must
-/// retry. A content failure is an [`ItemFailure`] in the `Ok(Err(..))` position: an
-/// *outcome*, not a fault, and retrying it would answer the same forever.
+/// [`WorkerError`] for infrastructure failure; `Ok(Err(ItemFailure))` for refusal.
 pub async fn evaluate(
     stores: &Arc<dyn Stores>,
     db: &DBProvider<WorkerError>,
@@ -579,28 +560,11 @@ pub async fn evaluate(
     }
 }
 
-/// [`evaluate`] against a transaction the caller already holds.
+/// [`evaluate`] within the caller's snapshot, used by whole-batch dry runs.
 ///
-/// The dry-run pass's entry point: one snapshot covers the whole batch, so the
-/// evaluation of each candidate must read through it rather than open its own.
-/// Everything else — the plan, the snapshot body, the validation — is the same
-/// code the committing path runs.
-///
-/// # The connection is held across validation, and that is the design
-///
-/// [`evaluate`] closes its snapshot before `finish_evaluation`, so its
-/// `spawn_blocking` validation holds no connection. This path cannot do the
-/// same: a dry run's candidates are evaluated against an overlay each one writes
-/// into, so candidate *n + 1* must see what candidate *n* committed virtually,
-/// and evaluation and commit therefore interleave inside the single snapshot.
-/// Hoisting the validations out of it would evaluate every candidate against
-/// base state and predict a different batch.
-///
-/// The cost is one pooled connection pinned for the pass, spanning
-/// `limits.batch_candidates` validations rather than a single one. That is
-/// bounded by the same limit acceptance enforces on the request (100 by
-/// default), which is what keeps it a batch-shaped hold rather than an unbounded
-/// one.
+/// Hold one pooled connection across validation so each candidate sees earlier
+/// virtual commits. The hold spans at most `limits.batch_candidates` validations
+/// (default 100); moving validation outside would lose batch semantics.
 ///
 /// # Errors
 /// As [`evaluate`].

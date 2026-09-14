@@ -693,47 +693,32 @@ functions, and its module header states why.
 
 ### P17. Complete mutations and dispatch in Phase 5; reads and the SDK contract in Phase 6
 
-**Revised after T20.** The earlier version moved all of T27 from Phase 7 into Phase 5.
-That closed the REST gap but bundled deletion with independent read work and left outbox
-dispatch until Phase 6. Split the former T27 into **T20a** and **T22a**, retire its identifier,
-and move **T21** into Phase 5. T28–T30 retain their IDs so existing references remain stable.
+T27 is split into T20a (mutations) and T22a (reads); T21 moves into Phase 5.
+T28–T30 keep their IDs.
 
-* **Phase 5: T19 → T20 → T20a → T21 → Checkpoint 5.** T20a exposes `:batchDelete` and
-  `DELETE /entities/{entity_key}` over T20's domain path. Dry run is available on all three
-  mutation routes: in the body for registration and batch deletion, in the query for single
-  deletion. Registration already forwards the flag and has a router test; deletion adds
-  coverage through the same operation protocol. T21 then replaces inline submission with
-  outbox dispatch, leaving seeding inline as P3 requires.
-* **Phase 6: T22 → T22a → T23 → Checkpoint 6.** T22a owns both `:batchGet` and bounded,
-  content-free `GET /entities`, including cursors, `$select` refusal and OpenAPI completeness.
-  T22's `owning_gear` is not a technical dependency of reads; their placement is the execution
-  order. The SDK and REST contracts both follow SPEC §10.1/§10.2 (`items`, `key`, `EntityPage`).
+- **Phase 5: T19 → T20 → T20a → T21 → Checkpoint 5.** T20a exposes single/batch
+  deletion with dry run on all mutations (body for registration/batch deletion, query for
+  single deletion). T21 adds outbox submission; seeding remains inline (P3).
+- **Phase 6: T22 → T22a → T23 → Checkpoint 6.** T22a adds `:batchGet` and bounded,
+  content-free discovery with cursors and `$select` refusal. REST and SDK follow SPEC
+  §10.1/§10.2 (`items`, `key`, `EntityPage`).
 
-**Dependencies remain explicit.** T20a can run before outbox wiring because admission already
-runs inline. T21 depends on T20's worker support; T20a precedes it to enable REST-to-outbox
-verification. Its old dependency on Checkpoint 5 is removed — the checkpoint now verifies
-T21 and cannot also precede it. T22a depends on the existing database read primitives and
-v2 surface, plus T20a for the complete seven-route OpenAPI and quickstart check. T23 depends
-on T22; the chosen execution order puts the verified read surface before SDK integration.
+T20a works with inline admission. T21 depends on T20; scheduling it after T20a enables
+REST-to-outbox tests before Checkpoint 5. T22a needs database reads, v2 routes and T20a's
+mutation docs for the seven-route completeness check. T22's `owning_gear` is independent
+of reads; T23 depends on T22 and follows T22a by execution order. T29 needs T22a and T23.
 
-**The checkpoints prove complete paths.** Checkpoint 5 verifies registration and both
-single/batch deletion through the real router and outbox, with and without dry run:
-submit → poll → terminal outcome, no direct worker invocation. A dry run persists operation
-and outcome records while leaving entity state, revisions and resource versions unchanged.
-Checkpoint 6 adds per-key batch results and bounded discovery; all seven routes are ready
-by the **end of Phase 6**. T29 therefore depends on T22a's batch read route and T23's models.
+Checkpoint 5 proves submit → poll → terminal outcome through the router and outbox for
+all mutations in both modes, without direct worker calls. Dry runs persist outcomes but
+change no entity state, revisions or versions. Checkpoint 6 verifies reads and completes
+all seven routes.
 
-**Documentation follows each slice.** T20a owns mutation OpenAPI and quickstart examples;
-T22a adds read examples and checks completeness. Both use `routes::V2` and preserve the
-internal-only mutation gate (C8). P12's invariant still holds: no e2e file changes before
-T24, and `make e2e-local` remains green. New v2 routes are verified through the real router
-and manual `curl`; T21 additionally proves outbox dispatch. T28 migrates the Python suites
-on the promoted v1 paths.
+T20a documents mutations; T22a completes OpenAPI and quickstart reads. Both use
+`routes::V2` and internal-only mutations (C8), with router tests and manual `curl`.
+P12 keeps e2e files unchanged and `make e2e-local` green until T24.
 
-**Cutover is unchanged: T24 → T24a → T28**, alongside T25 → T26. T24a promotes all seven
-routes and owns both changelog entries — the registration and discovery v1 breaks reach
-callers there. Moving read completion to Phase 6 adds no cutover dependency beyond that
-phase's existing checkpoint.
+Cutover remains **T24 → T24a → T28**, alongside T25 → T26. T24a promotes all seven
+routes and owns both v1-breaking changelog entries; T28 migrates the Python suites.
 
 ## Dependency graph
 

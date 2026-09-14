@@ -1,26 +1,11 @@
-//! Recording a predicted batch, once the snapshot it was predicted against is
-//! released.
+//! Publish dry-run outcomes after releasing the read snapshot.
 //!
-//! # One transaction, and what is in it
+//! Terminal item writes and operation completion share one transaction: item
+//! terminalization clears `request_payload`, so partial publication would prevent
+//! whole-batch recovery. Failure preserves payloads for redelivery to re-predict.
 //!
-//! Every item's terminal write **and** the operation's completion. Not because
-//! the two are one concern, but because terminalizing an item clears its
-//! `request_payload` — the only copy of the candidate document there is. An
-//! operation left `running` with its items terminal and their payloads gone is
-//! unrecoverable: the next pass has nothing to predict from. Completing in the
-//! same transaction makes the pair all-or-nothing, so a failure anywhere in
-//! publication leaves the operation exactly as the pass found it, and the
-//! redelivery re-predicts the whole batch from payloads that are still there.
-//!
-//! The committing path has no such coupling: its items are terminalized inside
-//! the transaction that wrote the entity they describe, and an incomplete
-//! operation with committed entities is re-drivable because the entities are real.
-//!
-//! # And what is not in it
-//!
-//! The read snapshot. It is closed before this runs: on `SQLite` a pinned read
-//! and the write that records the answer share one connection, so publishing
-//! under the snapshot would deadlock against itself.
+//! Release the snapshot first to avoid self-deadlock on SQLite's shared connection.
+//! Real commits can recover item-by-item because their entity writes are durable.
 
 use std::sync::Arc;
 

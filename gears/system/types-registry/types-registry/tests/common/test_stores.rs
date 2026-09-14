@@ -52,12 +52,8 @@ pub trait StoreHooks: Send + Sync {
         false
     }
 
-    /// Called before every **entity-state** write and before the write-order
-    /// claim, naming the port. The default records nothing and allows it.
-    ///
-    /// This is the hook a no-write assertion needs: unchanged final tables are
-    /// equally consistent with having written and rolled back, so the claim
-    /// "a dry run writes no entity state" has to be checked at the *attempt*.
+    /// Called before each entity-state write or write-order claim; allows by default.
+    /// No-write tests reject attempts, since final-state equality also permits rollback.
     fn entity_write(&self, _call: &'static str) -> Result<(), ScopeError> {
         Ok(())
     }

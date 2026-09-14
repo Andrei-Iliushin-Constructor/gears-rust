@@ -1,15 +1,7 @@
-//! Whole-batch dry-run parity across the rest of the admission protocol.
-//!
-//! `dry_run_batch_test.rs` holds the two regressions the correction exists for
-//! and the properties of the pass itself — one snapshot, no entity write, atomic
-//! publication. This file is the behavioural sweep: conformance, minors,
-//! deletion, dependent refresh, blocking, cycles and replay, each run **twice**
-//! against the same seed — once predicted, once committed — and required to
-//! agree on every candidate's status and reason.
-//!
-//! Normalization is the contract's and nothing more: a predicted `succeeded`
-//! carries no revision and no resulting resource version (ADR-0012). Statuses
-//! and reasons are compared exactly.
+//! Dry-run/commit parity for conformance, minors, deletion, dependent refresh,
+//! blocking, cycles and replay, using identical seed state.
+//! Normalize only predicted-success revision/version fields (ADR-0012);
+//! compare statuses and reasons exactly. Lifecycle tests: `dry_run_batch_test.rs`.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -567,19 +559,9 @@ fn retitled_derived() -> Value {
     document
 }
 
-/// The refresh is real: revising the base alone re-materializes the dependent's
-/// artifacts **without** moving the dependent's own revision pointer.
-///
-/// Measured separately from the batch case below so the fingerprint change is
-/// attributable: in that batch the dependent is revised too, and a revision
-/// rewrites artifacts on its own, so a change there would prove nothing about
-/// the refresh. Here nothing but the base moves.
-///
-/// The base change is an **inherited** one — `name` widens from `string` to
-/// `string | integer`, and the derived type composes the base through `allOf` —
-/// so the dependent's resolved document genuinely differs. A base change the
-/// dependent did not inherit would leave the fingerprint alone and make the
-/// assertion below vacuous.
+/// Widen inherited `name` from string to string-or-integer through `allOf`.
+/// Revising only the base must change the dependent's artifact fingerprint
+/// without advancing its revision, isolating refresh from revision effects.
 #[tokio::test]
 async fn revising_a_base_rematerializes_its_dependent_without_revising_it() {
     let db = test_db().await;
@@ -611,16 +593,8 @@ async fn revising_a_base_rematerializes_its_dependent_without_revising_it() {
     );
 }
 
-/// A base revision re-materializes its dependents' artifacts **before** its own
-/// revision is final, and a later candidate revising that same dependent has to
-/// see the refreshed projection — its compare-and-swap is against it.
-///
-/// This is the ordering the plan singles out: refresh writes a dependent's
-/// current row inside the base's commit, and the dependent's own revision
-/// follows in the same batch. The base change is the inherited widening, so the
-/// refresh the first candidate performs is the one
-/// `revising_a_base_rematerializes_its_dependent_without_revising_it` measures
-/// — this case adds the second candidate on top of it.
+/// Revise the base, then its dependent in the same batch. The dependent's CAS
+/// must see the projection refreshed during the base's commit.
 #[tokio::test]
 async fn a_dry_run_revises_a_dependent_its_own_base_revision_just_refreshed() {
     let candidates = || {
@@ -671,39 +645,13 @@ async fn a_dry_run_revises_a_dependent_its_own_base_revision_just_refreshed() {
     );
 }
 
-/// A refusal discovered **after** the candidate's writes began — the dependent
-/// refresh finding a derived type that no longer validates — discards
-/// everything that candidate did, including the refresh, while the candidates
-/// beside it stand.
+/// Post-write refusal must discard the candidate's revision, edges and refresh.
+/// Widening `name` passes compatibility, but `x-gts-final` makes refresh fail.
 ///
-/// # How the discard is actually observed
-///
-/// `PROBE` is the load-bearing candidate, and it is chosen so that its outcome
-/// is a **function of the refused candidate's tentative content**.
-///
-/// The refused revision does two things at once. It widens `name` from `string`
-/// to `string | integer`, which is backward compatible and therefore passes the
-/// comparison; and it sets `x-gts-final`, which the comparison cannot see and
-/// which the dependent refresh then refuses — a post-write refusal, after the
-/// revision, its edges and the dependent's re-materialized artifacts are
-/// already written.
-///
-/// `PROBE` is an Instance of the **derived** schema carrying `name: 42`. Its
-/// only edge is to an entity outside the batch, so the blocking rule leaves it
-/// alone and it is evaluated after the refusal. Against the seeded base that
-/// value is not a string, so the Instance is refused `invalid_value` — and
-/// `a_probe_is_admitted_once_the_widening_really_commits` shows the same value
-/// *is* admitted once the widening lands, so the refusal is about the base's
-/// content rather than about the value being unconditionally wrong.
-///
-/// The failure this catches was measured rather than assumed. With
-/// `discard_candidate` replaced by a no-op, `PROBE` comes back `invalid_schema`
-/// instead: the residual `final` base leaves the derived schema unresolvable,
-/// so the Instance cannot even be validated. The reason changes either way,
-/// which is what the assertion compares.
-///
-/// `LONER` is the independent control beside it: it reads nothing, so it says
-/// only that unrelated work still progresses.
+/// `PROBE` is a derived Instance with `name: 42`, outside batch blocking. After
+/// discard it fails `invalid_value`; leaked final state yields `invalid_schema`.
+/// The paired widening-only test admits it, proving the value is discriminating.
+/// `LONER` verifies independent progress.
 #[tokio::test]
 async fn a_dry_run_discards_a_candidate_refused_after_its_writes_began() {
     let candidates = || {
@@ -731,12 +679,8 @@ async fn a_dry_run_discards_a_candidate_refused_after_its_writes_began() {
     );
 }
 
-/// The other half of the discriminator: the same Instance the case above
-/// requires to be refused **is** admitted once the widening really lands.
-///
-/// Without this, `PROBE`'s refusal there could mean the batch discarded the
-/// tentative layer or merely that the value was never admissible. It is the
-/// first.
+/// Control: `PROBE` succeeds once widening commits, proving its earlier refusal
+/// detects discarded tentative content rather than an always-invalid value.
 #[tokio::test]
 async fn a_probe_is_admitted_once_the_widening_really_commits() {
     let db = test_db().await;
@@ -868,19 +812,9 @@ async fn a_dry_run_refuses_a_base_whose_external_dependant_survives() {
 // Replay
 // ---------------------------------------------------------------------------
 
-/// A redelivered pass reports the stored outcomes, field for field.
-///
-/// Asserted as **whole-`ItemOutcome` equality** rather than as matching statuses
-/// and reasons, because the two are built by different code: the first pass
-/// reports what it just decided, the replay reads the operation item back. The
-/// fields that only exist on one side are exactly where those two drift.
-///
-/// `gts_uuid` is the one that did. It is not a stored column — it derives from
-/// the identifier — and a replay used to report `None` for it while a first pass
-/// reported the Registry Reference, which ADR-0012 says a terminal success
-/// always carries. This runs for **both** modes because the fix is on the shared
-/// read-back path: a committing operation's redelivery is affected by it exactly
-/// as a dry run's is.
+/// Require whole-`ItemOutcome` equality on replay in both modes, including
+/// `gts_uuid`, derived from the identifier rather than stored on the item
+/// (ADR-0012). Status/reason equality alone misses this regression.
 async fn assert_replay_matches_the_first_pass(dry_run: bool) {
     let db = test_db().await;
     let operation_id = submit(
@@ -1064,13 +998,8 @@ async fn run_batch_permitting_force(
     .items
 }
 
-/// The waiver applies to a prediction exactly as it does to the commit it
-/// predicts, and in the same place: the cross-minor edge, re-authorized against
-/// the selected baseline and the deployment.
-///
-/// Both halves are asserted, because either alone is consistent with the waiver
-/// being ignored: unforced the same candidate is refused
-/// `incompatible_with_baseline`, and forced it is admitted — in both modes.
+/// Both modes re-authorize the cross-minor waiver against baseline and policy:
+/// unforced is `incompatible_with_baseline`; permitted force admits it.
 #[tokio::test]
 async fn a_dry_run_waives_the_same_cross_minor_check_a_commit_does() {
     let seed_minor = |db: Provider| async move {

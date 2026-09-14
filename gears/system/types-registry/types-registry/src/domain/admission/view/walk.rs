@@ -1,29 +1,11 @@
-//! The two dependency walks an overlay makes the adapter unable to do.
+//! Bounded dependency walks over snapshot edges merged with the overlay.
 //!
-//! `closure` and `reverse_impact` are recursive reads in SQL, and correctly so:
-//! the relation is in the database and the walk belongs next to it. Over an
-//! overlay they cannot be: a candidate admitted earlier in the batch may have
-//! **replaced** an entity's outgoing edge set, and a transitive read would follow
-//! the edges that revision removed. Following single hops and consulting the
-//! overlay at each one is the only shape that does not.
+//! Walk one hop at a time so replaced outgoing edges supersede stored ones.
+//! Preserve adapter semantics for [`CLOSURE_BOUND`], `chain_ids` seeds, tombstones
+//! and `missing_roots`; parity tests cover the untouched-registry case.
 //!
-//! # Why this is not a second implementation of the relation
-//!
-//! It is the same relation, read one hop at a time instead of transitively. The
-//! bound is the same number ([`CLOSURE_BOUND`]), the seeds are the same
-//! `chain_ids` prefixes, tombstones are included on the same grounds, and
-//! `missing_roots` means the same thing. `a_view_closure_matches_the_adapter_on_an
-//! _untouched_registry` in the dry-run suite is what keeps those from drifting.
-//!
-//! # Fan-in is why the reads are paged
-//!
-//! Outgoing fan-out is bounded by the document that declares it. Incoming fan-in
-//! is not — one Type Schema may have any number of dependants — so a walk never
-//! materializes a hop. It pages the relation in primary-key order and stops as
-//! soon as the **distinct entities** it has collected pass the caller's bound,
-//! having held one page at a time. Edges the overlay has superseded are skipped
-//! without counting, so a batch's own replacements cannot push a walk over a bound
-//! it would not otherwise reach.
+//! Incoming fan-in is unbounded: page by primary key and stop when distinct
+//! entities exceed the caller's bound. Skip superseded edges without counting them.
 
 use std::collections::{HashMap, HashSet};
 
@@ -66,15 +48,8 @@ struct Hop {
 }
 
 impl AdmissionView {
-    /// Every **new** entity one hop away from `ids` on `side`, merged with the
-    /// overlay.
-    ///
-    /// `seen` is everything the caller has already counted — the roots and every
-    /// entity collected by an earlier hop. Neighbours in it are dropped before
-    /// the allowance is charged, so an entity two paths reach costs one.
-    ///
-    /// Stops as soon as more than `allowance` new entities have been collected,
-    /// so the caller can refuse without the walk having read the rest.
+    /// Merge one hop with the overlay, excluding `seen` before counting.
+    /// Stop once distinct new entities exceed `allowance`.
     async fn hop(
         &self,
         tx: &DbTx<'_>,
@@ -295,14 +270,8 @@ impl AdmissionView {
         Ok(ReverseImpact::Within(rows))
     }
 
-    /// The merged edges between the given entities.
-    ///
-    /// Both endpoints are inside a set the caller already holds — a deletion
-    /// batch — so the read is one outgoing hop over a bounded set, and the pairs
-    /// it keeps are the ones that land back inside it. There is no bound on the
-    /// pairs themselves, and the adapter has none either: the batch bounds the
-    /// endpoints, and how densely a batch's own members reference each other is
-    /// not a separate budget.
+    /// Merge edges whose endpoints are both in the caller's deletion batch.
+    /// The batch bounds endpoints; edge density has no separate budget.
     pub(super) async fn walk_edges_within(
         &self,
         tx: &DbTx<'_>,

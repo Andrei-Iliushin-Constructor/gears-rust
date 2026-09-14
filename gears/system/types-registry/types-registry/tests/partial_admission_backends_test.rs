@@ -1,9 +1,5 @@
-//! T19 batch admission on PostgreSQL and MySQL.
-//!
-//! The ordering itself is pure and backend-independent; what these cases cover
-//! is the half that is not — a batch is many commit transactions against one
-//! database, and a candidate blocked by an earlier failure must leave nothing
-//! behind on an engine whose transaction semantics differ from `SQLite`'s.
+//! PostgreSQL/MySQL partial admission (T19): per-candidate transactions must
+//! preserve independent successes and leave no state for blocked candidates.
 
 #![cfg(feature = "integration")]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::doc_markdown)]

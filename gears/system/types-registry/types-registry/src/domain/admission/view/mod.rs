@@ -1,42 +1,12 @@
-//! The admission view: one dry-run pass's picture of the registry.
+//! Dry-run persistence ports over one read snapshot and an [`overlay::Overlay`].
 //!
-//! It implements the same persistence ports the committing pass uses, so the
-//! commit code runs against it unchanged — `commit_creation`, `commit_revision`,
-//! `commit_deletion`, `refresh_dependents`, the family rules, the revision-vector
-//! guard and the transient-store loader all take `&dyn Stores` and none of them
-//! knows which one it has. That is the whole point: a dry run must run the *same*
-//! checks in the *same* order, and the cheapest way to guarantee that is to have
-//! no second copy of them.
+//! Reuse admission checks unchanged. Reads merge lazy snapshot reads with virtual
+//! writes; no entity-state statement is issued and the registry is never loaded
+//! whole. Bounded graph walks account for replaced edges ([`walk`]).
 //!
-//! # What it is made of
-//!
-//! A **base**, read from one snapshot transaction through the real ports, and an
-//! **overlay** of what this pass has virtually written ([`overlay::Overlay`]).
-//! Every read merges the two; every write lands in the overlay and reaches no
-//! statement. The base is read lazily rather than materialized: the pass runs
-//! inside the snapshot, so a read is still a read of one coherent state, and the
-//! registry is never loaded whole.
-//!
-//! # What it is not
-//!
-//! Not a general store emulator, and not a second validator. It holds the
-//! *changes* a batch makes — bounded by the batch — and answers everything else
-//! by asking the database. The two graph reads, `closure` and `reverse_impact`,
-//! are the only places it walks a relation itself, and it does so because an
-//! overlay can replace an entity's outgoing edges: a transitive read would then
-//! follow edges this batch has removed. Both walks are bounded and paged, exactly
-//! as the adapter's own are ([`walk`]).
-//!
-//! # What it refuses
-//!
-//! Ports with no meaning here — accepting an operation, moving the operation row,
-//! paging stored edges — return [`ScopeError::Invalid`] rather than a silent no-op
-//! or a pass-through. A dry run that quietly wrote an operation row through a
-//! forwarding default is exactly the failure this type exists to make impossible.
-//!
-//! The port implementations live one per neighbouring module — [`entities`],
-//! [`documents`], [`operations`], [`dependencies`] — because each answers to a
-//! different table and they are read one at a time.
+//! Unsupported ports, including operation mutation and stored-edge paging, return
+//! [`ScopeError::Invalid`]. Implementations are grouped by port in [`entities`],
+//! [`documents`], [`operations`] and [`dependencies`].
 
 mod dependencies;
 mod documents;
@@ -101,17 +71,9 @@ impl AdmissionView {
         self.state.lock().await
     }
 
-    /// Open a candidate's tentative layer.
-    ///
-    /// Everything the candidate writes lands in the live overlay, so a later
-    /// check inside the same candidate sees its own earlier writes — which is
-    /// what a commit transaction does, and what `refresh_dependents` relies on
-    /// when it rewrites a dependent's artifacts before the candidate's own
-    /// revision is final.
-    ///
-    /// Cheap despite copying the whole overlay: every row and document in it is
-    /// shared and immutable, so what is copied is one pointer per entity the
-    /// batch has touched.
+    /// Checkpoint the overlay before a candidate. Its checks see its own writes,
+    /// including dependent refreshes. Shared immutable rows make checkpointing
+    /// copy pointers rather than documents.
     pub async fn begin_candidate(&self) -> CandidateLayer {
         CandidateLayer(self.overlay().await.clone())
     }

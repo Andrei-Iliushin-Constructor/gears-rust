@@ -281,25 +281,12 @@ pub fn validate(
         }
 
         // --- step 3: registration policy ---------------------------------
-        // **Creations only** (SPEC §8.1 step 3, DESIGN §3.2). The policy governs
-        // what may *appear* in a region; applying it to a revision or a deletion
-        // would let closing a region freeze the entities already inside it — for a
-        // deletion, by forbidding their removal — which is a different, and
-        // unasked-for, power. A deletion never reaches this gate for a second
-        // reason as well: `DeletionRequiresVersion` above makes every deletion
-        // carry a version, so `expected` is never `MustNotExist` on that path.
+        // Creations only (SPEC §8.1 step 3, DESIGN §3.2). Revision and deletion
+        // require an existing entity downstream, so neither can bypass the allowlist
+        // by creating one.
         //
-        // Safe only because the declared kind is enforced downstream: a revision
-        // naming a version for an identifier the registry does not hold is refused
-        // terminally by `commit_revision`, having created nothing, and a deletion
-        // of one is refused by `commit_deletion`. Without that, the bypass would be
-        // a way past the deployment allowlist.
-        //
-        // ponytail: ceiling C6 — the bypass leaves **no** authorization on either
-        // the revision or the deletion path. The right control is an owner or
-        // principal check, which P0 has nothing to check against. The residual
-        // exposure is recorded on `unit::commit_revision` and on
-        // `deletion::commit_deletion`.
+        // ponytail: ceiling C6 — neither path checks owner/principal authority in P0.
+        // See `unit::commit_revision` and `deletion::commit_deletion`.
         if expected == Precondition::MustNotExist {
             ctx.policy
                 .admits(&id, OwnershipScope::Global)
@@ -338,12 +325,8 @@ pub fn validate(
         }
 
         // --- step 5: declared dialect ------------------------------------
-        //
-        // A deletion names an entity and a version and submits no document, so
-        // steps 5 and 8 have nothing to read. The stored payload is JSON `null`:
-        // `ck_tr_operation_item_state` requires a non-null payload while the item
-        // is pending, and `null` is the JSON spelling of the absence rather than a
-        // placeholder document that something might one day try to parse.
+        // Deletion skips document checks (steps 5 and 8). Store JSON `null` because
+        // `ck_tr_operation_item_state` requires a non-null pending payload.
         let content = match (&candidate.content, deletion) {
             (Some(_), true) => {
                 return Err(AcceptanceError::DeletionCarriesContent {

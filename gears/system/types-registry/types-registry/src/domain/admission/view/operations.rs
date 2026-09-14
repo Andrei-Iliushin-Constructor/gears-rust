@@ -1,11 +1,5 @@
-//! Operations and their items.
-//!
-//! The only port family the view treats asymmetrically: the reads pass straight
-//! through, because an operation and its items are **real** rows this pass does
-//! not change, while the terminal item writes are captured and published later,
-//! outside the read snapshot. Everything that moves the operation row, or accepts
-//! one, is refused: those belong to the pass and to acceptance respectively, and
-//! a forwarding default here is precisely how a dry run would come to write one.
+//! Operation reads use stored rows; terminal item writes are captured for later
+//! publication outside the snapshot. Reject acceptance and operation mutations.
 
 use async_trait::async_trait;
 use time::OffsetDateTime;
@@ -98,15 +92,8 @@ impl OperationStore for AdmissionView {
         ))
     }
 
-    /// Captured, not written — and always `true`.
-    ///
-    /// The item write is the commit path's last statement, and its `false` rolls
-    /// the transaction back when another pass won the item. Here there is no
-    /// transaction to roll back and nothing to lose: the outcome is published
-    /// afterwards, in its own transaction, and *that* write is the compare-and-
-    /// swap. Answering `false` here would instead discard a prediction the pass
-    /// still owes the caller, and would leave the candidates that depend on it
-    /// without the effects they must see.
+    /// Capture success and return `true`. The real CAS happens during publication;
+    /// virtual effects must remain visible to dependent candidates until then.
     async fn mark_item_succeeded(
         &self,
         _tx: &DbTx<'_>,
@@ -135,12 +122,7 @@ impl OperationStore for AdmissionView {
         Ok(true)
     }
 
-    /// Refusals never travel through the view.
-    ///
-    /// The commit paths record success; a refusal is returned as an outcome and
-    /// recorded by the pass, outside any transaction, exactly as `record_failure`
-    /// does on the committing path. A refusal arriving here would mean a commit
-    /// path had started writing item state for one, which is worth failing on.
+    /// Reject refusal writes: the pass records refusals outside the view.
     async fn mark_item_failed(
         &self,
         _tx: &DbTx<'_>,

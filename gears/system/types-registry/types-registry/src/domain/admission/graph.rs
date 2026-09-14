@@ -1,32 +1,12 @@
-//! Batch ordering over two edge sets (T19, SPEC §8.1 steps 1–2).
+//! Pure batch ordering (T19, SPEC §8.1 steps 1–2).
 //!
-//! A pure function of a candidate set: no database, no clock, no global state.
-//! That is a testability requirement rather than a preference — the cases worth
-//! asserting here are cycles, and a cycle is precisely what no fixture database
-//! can be made to hold, because nothing cyclic is ever committed (ADR-0012).
+//! Ordering uses `$ref`, derivation, Instance conformance and implicit minor
+//! predecessor edges. Predecessor edges are never persisted or returned by
+//! [`extract_edges`] (SPEC §3.2).
 //!
-//! # Two edge sets, and they are not the same set
-//!
-//! The **ordering** graph is authored `$ref`s between candidates, each
-//! candidate's identifier-derived immediate derivation base, its Instance
-//! conformance target, and the implicit `vM.(n-1)~ → vM.n~` edge. Conformance
-//! closes no cycle and is still needed here: an Instance must not commit ahead of
-//! a Type Schema that may then be refused. The predecessor edge is an ordering
-//! edge only — it is never written to `dependency` (SPEC §3.2), and
-//! [`extract_edges`] does not produce it.
-//!
-//! The **cycle-bearing** graph is `$ref` and derivation, the two an effective
-//! form inlines and therefore the two a cycle can be built from. Checking `$ref`
-//! alone would order a mixed cycle — a base that `$ref`s a schema derived from it
-//! — and admit it.
-//!
-//! # Why a cycle is reachable at all
-//!
-//! What ADR-0012 makes acyclic is the *admitted* relation. The candidate overlay
-//! lets in-batch candidates see each other, so a batch can author a cycle that
-//! nothing has refused yet. This function detects one and reports its members;
-//! the worker fails them with `invalid_schema`. Past that refusal there is no
-//! condensation step and no atomic group.
+//! Cycle detection uses `$ref` and derivation, the edges effective forms inline.
+//! The candidate overlay can introduce cycles even though committed state is
+//! acyclic. The worker refuses cycle members with `invalid_schema` (ADR-0012).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -182,25 +162,12 @@ pub struct DependencyLink {
     pub target: String,
 }
 
-/// Order a **deletion** batch: a dependant before the entity it consumes.
+/// Order deletion candidates dependant-first using stored dependency edges.
 ///
-/// The mirror of [`order_batch`], and deliberately a separate function rather
-/// than a flag on it. The two are different relations read from different
-/// places: a registration's edges come from the candidate's own document, while
-/// a deletion submits none — its edges are the ones already stored in
-/// `dependency`, which is why they arrive as an argument.
-///
-/// **No blocking and no refusals.** If a deletion fails, the entity it consumed
-/// is refused by the commit-time recheck with `has_registered_dependents`, which
-/// names the real problem and counts it; inventing a second, vaguer reason here
-/// would be worse. And a cycle is impossible in committed state (ADR-0012), so
-/// anything the sort cannot place is corrupt state rather than a candidate
-/// error: those are appended in submission order and left to earn their own
-/// outcome. The one guarantee is that **every** candidate is placed exactly
-/// once — an item the order dropped is an item the operation never answers.
-///
-/// Edges whose other end is outside the batch are ignored: that dependant
-/// survives the deletion, and refusing on it is the recheck's job.
+/// Place every candidate once. Leave external dependants and failed deletions
+/// to the commit-time `has_registered_dependents` check; ordering adds no refusals
+/// or blocking. Unsortable candidates indicate corrupt committed state and are
+/// appended in submission order for individual evaluation.
 #[must_use]
 pub fn order_deletion_batch(gts_ids: &[String], edges: &[DependencyLink]) -> BatchOrder {
     let count = gts_ids.len();

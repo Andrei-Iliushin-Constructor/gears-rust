@@ -1,10 +1,6 @@
-//! The short deletion protocol (T20, SPEC §8.1 step 4, DESIGN §3.7).
-//!
-//! Deletion is a tombstone, not a row removal: the entity stays exact-readable
-//! as deleted and keeps serving as a compatibility baseline until purge
-//! (ADR-0013). What it must not do is strand a dependant, which is why the
-//! "no live direct registered dependants" recheck runs under the same
-//! `entity_write_order` claim as admission.
+//! Deletion safety (T20, SPEC §8.1 step 4, DESIGN §3.7).
+//! Tombstones remain readable and usable as baselines; live direct dependants
+//! block deletion under the admission write-order claim.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -66,13 +62,8 @@ fn schema(gts_id: &str) -> Value {
     })
 }
 
-/// One holder shape, parameterised by the **only** thing that differs between
-/// the two deletion-blocking cases: the keyword that names the target.
-///
-/// The pair has to be otherwise equivalent, or the tests below would be
-/// comparing two schemas rather than two keywords. Both carry `type: "string"`
-/// on the property — `x-gts-ref` constrains a string-valued instance, and a
-/// `$ref` alongside a sibling `type` resolves the same way it does alone.
+/// Equivalent holder schemas differing only in `$ref` versus `x-gts-ref`.
+/// Both use `type: "string"`, as required by `x-gts-ref`.
 fn holder(gts_id: &str, keyword: &str, value: &Value) -> Value {
     let mut doc = schema(gts_id);
     doc["properties"] = json!({ "target": { "type": "string", keyword: value } });

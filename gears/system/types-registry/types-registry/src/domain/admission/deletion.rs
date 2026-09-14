@@ -1,21 +1,11 @@
-//! The short deletion protocol (T20, SPEC §8.1 step 4, DESIGN §3.7).
+//! Deletion protocol (T20, SPEC §8.1 step 4, DESIGN §3.7).
 //!
-//! Deletion is a **tombstone**, not a row removal: the entity row survives, stays
-//! exact-readable as deleted, and keeps serving as a compatibility baseline until
-//! purge (ADR-0013). There is no document to evaluate, no compatibility check and
-//! no revision — which is why this path is a commit transaction and nothing else,
-//! with no evaluation phase in front of it.
+//! Tombstones remain exact-readable and serve as compatibility baselines until
+//! purge (ADR-0013). Deletion allocates no revision and needs no evaluation.
 //!
-//! # Why the write-order claim is load-bearing here
-//!
-//! The rule *"no live direct registered dependant"* is a check-then-act on a
-//! predicate no compare-and-swap carries: adding an edge writes only `dependency`
-//! and moves no `resource_version`, while this transaction writes the target's
-//! `entity` row. Two different rows, so optimistic concurrency cannot see the
-//! conflict. What orders them is the `entity_write_order` claim, taken as this
-//! transaction's **first statement** exactly as admission takes it — and the
-//! order is total only because it comes first. Without it, admission's own
-//! guarantee degrades with this one.
+//! Claim `entity_write_order` as the transaction's first statement: adding a
+//! dependency moves no target resource version, so CAS alone cannot serialize
+//! the live-dependant check against concurrent admission.
 
 use time::OffsetDateTime;
 use toolkit_db::DbTx;
@@ -55,32 +45,15 @@ impl DeletionCommit {
     }
 }
 
-/// Tombstone one entity, or report why it cannot be.
+/// Tombstone one entity inside the caller's commit transaction, after claiming
+/// write order. Check lifecycle, version and live registered dependants.
 ///
-/// Runs entirely inside the caller's commit transaction. Every question it asks
-/// is about committed state, and every one of them is asked **after** the write
-/// order is claimed.
-///
-/// # No authority check, and where that is recorded
-///
-/// Lifecycle, the version precondition and live registered dependants are the
-/// only gates here, and none of them asks *who* is deleting. Acceptance step 3
-/// does not cover this path either: the registration policy governs which regions
-/// gain members, so a deletion bypasses it by design, and
-/// `DeletionRequiresVersion` means a deletion candidate never carries the
-/// `MustNotExist` precondition the gate keys on. A caller that reaches the submit
-/// route can therefore tombstone any entity without a live dependant, a
-/// platform-seeded `cf.core.*` schema included.
-///
-/// ponytail: ceiling C6, the same one the revision path sits on — P0 has no
-/// identity-to-permission binding to check an owner or principal against, and the
-/// bound in the meantime is transport rather than policy (the mutation routes are
-/// internal-only, C8). SPEC's C6 row names both paths and the order the controls
-/// land in.
+/// ponytail: ceiling C6 — P0 has no owner/principal check. Any caller reaching
+/// the route can delete an eligible entity, including `cf.core.*`; mutation
+/// routes remain internal-only (C8). See SPEC C6 for the authorization rollout.
 ///
 /// # Errors
-/// [`WorkerError`] for an infrastructure failure. A refusal is an
-/// [`ItemFailure`] in the `Ok(Err(..))` position: an outcome, not a fault.
+/// [`WorkerError`] for infrastructure failure; `Ok(Err(ItemFailure))` for refusal.
 #[expect(
     clippy::too_many_arguments,
     reason = "the eight are the commit transaction's context: stores, tx, scope, the target and its precondition, limits, span and clock. Bundling them into a struct would rename the same values without removing one"

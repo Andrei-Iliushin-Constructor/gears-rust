@@ -99,13 +99,9 @@ impl TypeSchemaStore for AdmissionView {
             })
     }
 
-    /// The compare-and-swap, against the merged projection.
-    ///
-    /// `false` for a miss, exactly as a statement that matched no row would say.
-    /// The revision number may be the one already current — that is the dependent
-    /// refresh, which rewrites artifacts without moving the pointer — so the
-    /// authored document is carried over from the current state rather than
-    /// looked for among this pass's revisions.
+    /// CAS against the merged projection; return `false` on a miss.
+    /// Refresh may retain the revision number, so carry its authored document from
+    /// current state instead of requiring a revision written by this pass.
     async fn update_current_schema(
         &self,
         tx: &DbTx<'_>,

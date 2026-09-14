@@ -24,12 +24,7 @@ pub enum WorkerError {
     OperationNotFound { operation_id: Uuid },
     #[error("operation item {item_id} carries no request payload")]
     MissingPayload { item_id: i64 },
-    /// A commit path reported success and left no terminal item write behind.
-    ///
-    /// Distinct from [`Self::MissingPayload`]: the request was well formed and the
-    /// candidate was admitted, so an operator reading "carries no request payload"
-    /// would be sent to the wrong table. Only the dry-run pass can observe it,
-    /// because only it reads the write back out of the overlay.
+    /// The dry-run overlay has no terminal item write after a successful admission.
     #[error("the commit path for operation item {item_id} recorded no terminal item write")]
     MissingItemWrite { item_id: i64 },
     /// The dry-run pass left a prediction slot unfilled.
@@ -72,14 +67,8 @@ pub enum WorkerError {
     /// projection is missing behind an entity that is still there.
     #[error("entity '{gts_id}' (id {entity_id}) vanished mid-transaction")]
     EntityVanished { gts_id: String, entity_id: i64 },
-    /// A stored `gts_id` no longer parses.
-    ///
-    /// Acceptance canonicalized every identifier through `GtsId::try_new` before
-    /// the row was written, so one that fails to parse now is a corrupt row rather
-    /// than a bad request. Raised rather than absorbed: the Registry Reference is
-    /// derived from this identifier, and answering a terminal success without one
-    /// is exactly what ADR-0012 forbids. `plan_evaluation` refuses the same
-    /// condition on the evaluating path.
+    /// A stored `gts_id` no longer parses despite acceptance-time canonicalization.
+    /// Report corruption: deriving the required Registry Reference is impossible.
     #[error("operation item {item_id} holds an unparsable stored identifier '{gts_id}': {reason}")]
     StoredIdentifierUnparsable {
         item_id: i64,

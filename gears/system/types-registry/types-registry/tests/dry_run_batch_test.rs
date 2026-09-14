@@ -1,19 +1,8 @@
-//! Batch-level dry-run parity (T20 follow-up).
+//! Batch-level dry-run regression and lifecycle tests (T20 follow-up).
 //!
-//! `dry_run_test.rs` covers one candidate at a time, which is where a
-//! rollback-per-candidate implementation looks right. A **batch** is where it
-//! does not: a dry run must predict the whole request against one coherent base
-//! that already carries the hypothetical effects of the candidates admitted
-//! before it, exactly as the committing pass carries their real effects.
-//!
-//! Every case here therefore runs the *same* batch twice against the *same* seed
-//! state — once as a dry run, once for real, on two freshly migrated databases —
-//! and asserts both the expected per-candidate outcomes and their agreement.
-//! Asserting only agreement would let two equally wrong paths pass together.
-//!
-//! Normalization is confined to what the contract says differs: a predicted
-//! `succeeded` carries no revision and no resulting resource version (ADR-0012).
-//! Statuses and refusal reasons are never normalized — they are the prediction.
+//! Run identical batches against equally seeded databases and assert both expected
+//! outcomes and parity. Normalize only predicted-success revision/version fields
+//! (ADR-0012); compare statuses and refusal reasons exactly.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -50,17 +39,10 @@ const LATER: OffsetDateTime = datetime!(2026-09-13 10:20:40 UTC);
 const BASE: &str = gts_id!("cf.core.dryb.base.v1~");
 const REFERRER: &str = gts_id!("cf.core.dryb.holder.v1~");
 
-/// A Type Schema that the batch under test narrows to **abstract**, and one
-/// Instance of it the same batch then submits.
-///
-/// Abstract is the narrowing this fixture can actually use. ADR-0003 admits a
-/// revision only when every value the baseline accepted the candidate accepts
-/// too, so no *comparable* narrowing is admissible at all; `x-gts-abstract` is
-/// the documented gap — "JSON Schema compatibility does not enforce GTS's
-/// abstract modifier" (`unit::commit_revision`) — so the transition passes the
-/// comparison while emptying the type's direct instance set. Major-0 exemption
-/// is not an alternative here: an Instance may be neither major 0 itself nor
-/// stable-and-conforming-to-major-0 (ADR-0015).
+/// Revise a concrete type to abstract, then submit an Instance of it.
+/// `x-gts-abstract` passes JSON Schema compatibility while forbidding direct
+/// Instances. Ordinary narrowing would fail compatibility; major-0 Instances
+/// are forbidden by ADR-0015.
 const NARROWING: &str = gts_id!("cf.core.dryb.narrow.v1~");
 const SAMPLE: &str = gts_id!("cf.core.dryb.narrow.v1~cf.core.dryb.sample.v1");
 
@@ -233,19 +215,9 @@ fn expect_failure(gts_id: &str, reason: AdmissionFailureReason) -> Verdict {
     }
 }
 
-/// Every entity-state table a dry run must leave alone, dumped whole.
-///
-/// Rows are rendered with `Debug` rather than by naming columns: the claim is
-/// that *nothing* moved, and a hand-picked projection is exactly how a moved
-/// column escapes an assertion that says "unchanged". The seven tables are the
-/// complete entity-state set — family, entity, both revision tables, both
-/// current-pointer tables and the edges — plus `coordination_state`, which
-/// carries the `entity_write_order` sequence a dry run must not claim.
-///
-/// This is the *outcome* half of the no-write requirement. The other half —
-/// that no write was even attempted — is [`EntityWriteSpy`], because unchanged
-/// final tables alone would also be satisfied by writing and rolling back,
-/// which is the implementation under correction here.
+/// Dump all entity-state columns: family, entity, both revision/current tables,
+/// edges and the write-order coordination row. `Debug` avoids omitting columns.
+/// Pair final-state equality with [`EntityWriteSpy`] to reject write attempts too.
 #[derive(Debug, PartialEq, Eq)]
 struct EntityState {
     families: Vec<String>,
@@ -323,18 +295,9 @@ fn assert_predicted_fields(items: &[ItemOutcome]) {
 // A new base and its referrer, in one batch
 // ---------------------------------------------------------------------------
 
-/// The false **negative**: the referrer's `$ref` resolves against the base the
-/// same batch is admitting, so a dry run that discards the base before reaching
-/// the referrer refuses a batch the real operation admits.
-///
-/// It also carries the no-nested-transaction property for free: `test_db()` is an
-/// in-memory `SQLite` with a **one-connection** pool, so a pass that reached for a
-/// second connection while holding its read snapshot would wait on one it is
-/// itself holding, and this test would hang rather than fail. That is the `SQLite`
-/// hazard the contract names, and no more — a pass opening a fresh transaction per
-/// candidate, serially, would also complete. One coherent snapshot is what
-/// `a_dry_run_predicts_the_batch_against_the_state_it_started_from` tests, by
-/// moving the state underneath it.
+/// Regression: a referrer must see the base admitted earlier in the batch.
+/// The one-connection SQLite pool also exposes nested-transaction deadlocks;
+/// the concurrent-writer test separately verifies snapshot coherence.
 #[tokio::test]
 async fn a_dry_run_admits_a_referrer_whose_base_the_same_batch_creates() {
     let candidates = || {
@@ -408,15 +371,9 @@ async fn seed_narrowing(db: &Provider) {
     assert_eq!(items[0].status, OperationItemStatus::Succeeded, "{items:?}");
 }
 
-/// The false **positive**: an Instance is validated against whichever revision
-/// of its conforming Type Schema is current when it is evaluated. In the real
-/// batch that is the abstract revision the preceding candidate just admitted, so
-/// the value is refused — the same refusal the committed-race test
-/// `abstract_transition_committed_after_evaluation_blocks_instance_creation`
-/// pins. A dry run that discards the abstract revision validates the value
-/// against the superseded concrete schema and predicts an admission the real
-/// submission would refuse. This is the worse of the two defects, because it
-/// approves.
+/// Regression: an Instance must see the preceding abstract revision and fail.
+/// Discarding that virtual revision would falsely admit it against the old
+/// concrete schema.
 #[tokio::test]
 async fn a_dry_run_refuses_an_instance_the_batchs_own_abstract_revision_invalidates() {
     let candidates = || {
@@ -576,13 +533,9 @@ async fn the_write_spy_sees_a_committing_batch() {
 // Publication is atomic with completion
 // ---------------------------------------------------------------------------
 
-/// Terminalizing an item clears its `request_payload`, which is the only copy of
-/// the candidate document. If completion were a second transaction, a failure
-/// between the two would leave the operation `running` with terminal, payload-less
-/// items — and every redelivery would then fail on a document that no longer
-/// exists. Completion is therefore inside the publication transaction, and this
-/// is what says so: with completion failing, *nothing* is published, and the
-/// redelivery predicts the whole batch again from payloads that are still there.
+/// Fail completion and require publication to roll back all item writes.
+/// Terminalization clears payloads, so atomic completion must preserve them
+/// on failure for redelivery to predict the whole batch again.
 #[tokio::test]
 async fn a_failed_completion_publishes_nothing_and_the_redelivery_still_predicts_the_batch() {
     let db = test_db().await;
@@ -668,28 +621,12 @@ async fn stored_items(
 const SUBJECT_ONE: &str = gts_id!("cf.core.dryb.subjone.v1~");
 const SUBJECT_TWO: &str = gts_id!("cf.core.dryb.subjtwo.v1~");
 
-/// A dry run predicts against the state it observed, not against whatever the
-/// registry becomes while it is running.
+/// Pause prediction between candidates, then commit a revision of the second
+/// candidate's subject. The prediction must still see version 1 and admit it;
+/// a fresh snapshot would see version 2 and fail `precondition_failed`.
 ///
-/// The pass is paused inside its read snapshot, after the first candidate's
-/// current-document read and before the second candidate's. A second connection
-/// then commits a real revision of the *second* candidate's subject, moving it
-/// past the version that candidate names. If the pass were reading each
-/// candidate through its own transaction — which the single-connection test
-/// above cannot rule out — the second candidate would now read `resource_version
-/// 2` and be predicted `precondition_failed`. Reading through one snapshot, it
-/// still sees version 1 and predicts the admission the batch would have had.
-///
-/// That is the contract, and its limit: the prediction is relative to one
-/// observed state, and a later real submission rechecks live state for itself.
-///
-/// The fixture is WAL-mode `SQLite`, which is what makes this a real proof: a
-/// reader's snapshot is fixed at its first read and writers commit past it, so
-/// the concurrent revision genuinely lands — and is visible to a reader that
-/// starts afterwards — while the pass is still held. A pass reading each
-/// candidate through its own transaction would see it. `dry_run_batch_backends_test`
-/// runs the same case on `PostgreSQL` and `MySQL`, where `REPEATABLE READ` gives
-/// the same interleaving.
+/// SQLite WAL lets the writer commit while the snapshot is held. The backend
+/// suite repeats this under PostgreSQL/MySQL `REPEATABLE READ`.
 #[tokio::test]
 async fn a_dry_run_predicts_the_batch_against_the_state_it_started_from() {
     let dir = common::TestDir::new("types-registry-dry-run-snapshot");
@@ -880,21 +817,10 @@ async fn two_passes_over_one_dry_run_report_the_same_outcomes() {
     );
 }
 
-/// The losing branch, with the race taken out **and** the two passes made to
-/// disagree.
-///
-/// The first pass is held inside its read snapshot of an **empty** registry, so
-/// it goes on to predict that both candidates would be admitted. While it is
-/// held, `BASE` is registered for real. A second pass over the same dry-run
-/// operation then opens a fresh snapshot in which `BASE` exists, predicts
-/// `already_exists` for it and blocks the referrer behind it, and publishes
-/// that.
-///
-/// The first pass is then released. Its own prediction is two successes; every
-/// item compare-and-swap loses; and what it must return is the second pass's
-/// two failures. Both passes predicting the same thing — which is what a
-/// concurrent version of this test gets — would be satisfied by a losing pass
-/// that simply returned its own answer, which is the bug this shape rules out.
+/// Pause pass one on an empty snapshot, then register `BASE` and let pass two
+/// publish `already_exists` plus a blocked referrer. Release pass one: although
+/// it predicts two successes, losing publication CAS must return pass two's
+/// stored failures. Different predictions make stale-result returns observable.
 #[tokio::test]
 async fn a_pass_that_loses_publication_reports_the_stored_outcomes() {
     let dir = common::TestDir::new("types-registry-dry-run-publication");

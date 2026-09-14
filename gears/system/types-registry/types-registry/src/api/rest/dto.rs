@@ -497,15 +497,10 @@ pub struct SubmitEntityDto {
 pub struct SubmitEntitiesRequest {
     #[schema(min_items = 1)]
     pub items: Vec<SubmitEntityDto>,
-    /// Predict the batch without writing entity state (T20). The whole request
-    /// takes the ordinary admission path against one read snapshot and an
-    /// in-memory overlay, so each candidate is judged against what the ones
-    /// before it would have written; the predicted outcomes are then recorded on
-    /// the operation's items like any other. The verdict describes the state the
-    /// pass observed and reserves nothing.
+    /// Predict the batch using one snapshot and an overlay of prior candidates' effects.
+    /// Record outcomes without entity-state writes or reservations.
     ///
-    /// Absent means `false`. The field is part of the request fingerprint, so a
-    /// dry run and a commit cannot share one idempotency identity.
+    /// Defaults to `false`; participates in the idempotency fingerprint.
     #[serde(default)]
     pub dry_run: Option<bool>,
 }

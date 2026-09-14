@@ -1,10 +1,5 @@
-//! Dependency-aware partial admission (T19).
-//!
-//! One batch, one pass, one outcome per candidate. The properties asserted here
-//! are the ones a single-candidate batch cannot show: that the processing order
-//! is the batch's dependency order rather than its submission order, that a
-//! failure stops exactly its own downstream and nothing else, and that a cycle
-//! the overlay makes visible is refused before anything is written.
+//! Dependency-aware partial admission (T19): dependency order, downstream-only
+//! blocking, independent progress and cycle refusal before writes.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -439,15 +434,9 @@ async fn a_later_minor_whose_predecessor_failed_is_blocked_by_predecessor() {
 // The candidate overlay
 // ---------------------------------------------------------------------------
 
-/// A reference to an in-batch candidate resolves against **that candidate**,
-/// never against whatever is committed under the same identifier.
-///
-/// The discriminating shape is a revision that is refused. A referrer resolved
-/// against the committed revision would sail through — the old definition is
-/// perfectly resolvable — so being blocked instead is the evidence that the
-/// candidate, not the stored row, is what the reference names. Asserting on the
-/// referrer's artifacts would prove nothing: a dependent refresh (T14) rewrites
-/// them from the new base anyway, so both orders end in the same bytes.
+/// A refused in-batch revision must block its referrer even when the stored
+/// revision is resolvable. Artifact equality cannot prove this: dependent
+/// refresh may produce identical artifacts under either ordering.
 #[tokio::test]
 async fn an_in_batch_reference_never_resolves_against_the_committed_revision() {
     let db = test_db().await;

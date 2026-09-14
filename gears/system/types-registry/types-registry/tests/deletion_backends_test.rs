@@ -1,13 +1,6 @@
-//! T20 deletion and Dry Run on PostgreSQL and MySQL.
-//!
-//! Two properties `SQLite` cannot demonstrate. The dependants recheck runs
-//! inside the commit transaction under the `entity_write_order` claim, and the
-//! engines differ in what a transaction sees while one is held. A Dry Run issues
-//! **no entity-state write at all**: it predicts against an in-memory overlay and
-//! publishes the predicted outcomes in their own transaction afterwards. What is
-//! worth asking of a real engine is therefore that the prediction left both the
-//! entities and the write sequence untouched, and that
-//! `ck_tr_operation_item_state` accepts the shape publication writes.
+//! Deletion and dry-run checks on PostgreSQL and MySQL (T20).
+//! Cover dependant rechecks under the write-order claim, unchanged dry-run entity
+//! state and sequence, and publication accepted by `ck_tr_operation_item_state`.
 
 #![cfg(feature = "integration")]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::doc_markdown)]

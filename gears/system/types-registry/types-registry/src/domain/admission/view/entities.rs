@@ -15,17 +15,8 @@ use crate::domain::ports::{
 
 #[async_trait]
 impl EntityWriteOrderStore for AdmissionView {
-    /// Counted, never issued.
-    ///
-    /// The claim exists to order this transaction against other writers. A
-    /// fixed-snapshot simulation has no other writer to order against — it
-    /// observes one state and predicts against it — and claiming the row would
-    /// hold every committing admission behind a question about hypothetical
-    /// state for the length of a whole batch.
-    ///
-    /// It is counted rather than ignored so a test can assert the commit paths
-    /// still *ask* for it first, which is what keeps the real path's ordering
-    /// invariant from being quietly deleted by this one.
+    /// Count claims for ordering assertions without issuing them. A fixed-snapshot
+    /// dry run needs no writer serialization and must not block real admissions.
     async fn claim_entity_write_order(
         &self,
         _tx: &DbTx<'_>,
@@ -51,14 +42,8 @@ impl VersionFamilyStore for AdmissionView {
         self.base.find_family_by_key(tx, scope, family_key).await
     }
 
-    /// Reads, and founds a virtual family when there is none.
-    ///
-    /// The `bool` is load-bearing: `admits_new_member` skips the kind rule for a
-    /// family this admission is founding. A family founded by an *earlier
-    /// candidate of the same batch* is therefore not new to this one, which is
-    /// what makes a batch putting a Type Schema and an Instance in one family
-    /// refuse the second — the refusal the real operation makes, and the one a
-    /// per-candidate rollback loses.
+    /// Read or found a virtual family. A family created by an earlier candidate
+    /// is existing for this candidate, so `admits_new_member` enforces its kind.
     async fn create_or_get(
         &self,
         tx: &DbTx<'_>,
@@ -158,12 +143,7 @@ impl EntityStore for AdmissionView {
         self.base.find_by_gts_uuid(tx, scope, gts_uuid).await
     }
 
-    /// The stored answer first.
-    ///
-    /// A family with stored members has already decided its kind, and a virtual
-    /// member could only have joined by passing this same rule. A family with no
-    /// stored members is either empty or one this batch founded, and then the
-    /// overlay is the only place an answer can come from.
+    /// Stored members determine family kind; otherwise consult the overlay.
     async fn kind_in_family(
         &self,
         tx: &DbTx<'_>,
