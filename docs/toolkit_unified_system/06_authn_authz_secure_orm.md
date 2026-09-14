@@ -140,7 +140,7 @@ use authz_resolver_sdk::pep::ResourceType;
 use toolkit_security::pep_properties;
 
 pub const USER: ResourceType = ResourceType::from_static(
-    "my_gear.user",
+    "gts.example.core.my_gear.user.v1~",
     &[
         pep_properties::OWNER_TENANT_ID,  // tenant scoping
         pep_properties::RESOURCE_ID,      // resource-level access
@@ -148,7 +148,7 @@ pub const USER: ResourceType = ResourceType::from_static(
 );
 
 pub const DOCUMENT: ResourceType = ResourceType::from_static(
-    "my_gear.document",
+    "gts.example.core.my_gear.document.v1~",
     &[
         pep_properties::OWNER_TENANT_ID,
         pep_properties::RESOURCE_ID,
@@ -164,27 +164,31 @@ Well-known properties from `toolkit_security::pep_properties`:
 - `OWNER_ID` — the user who owns the resource
 
 A resource that can execute native `InGroup`/`InGroupSubtree` predicates must
-also declare the RG member-handle type used in
-`resource_group_membership.gts_type_id`:
+opt in explicitly and use its exact canonical GTS type path as the
+`ResourceType` name:
 
 ```rust
 pub const USER: ResourceType = ResourceType::from_static(
-    "my_gear.user",
+    "gts.example.core.my_gear.user.v1~",
     &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
 )
-.with_group_membership_type("gts.cf.core.rg.type.v1~example.core.mygear.user.v1~");
+.with_native_group_predicates();
 ```
 
-This value is not inferred from the AuthZ resource name: gears may use different
-GTS paths for policy matching and RG membership storage. `PolicyEnforcer`
-suppresses `GroupMembership` and `GroupHierarchy` capabilities for resource
-descriptors without this mapping, asking the PDP to expand the group scope to
-explicit resource-ID `in` predicates; a PDP that cannot expand must deny (the
-bundled plugins deny — neither implements expansion today). The querying database must also contain or project the tables each
-predicate executes against before the enforcer is configured with the
-corresponding capability: native `in_group` needs `resource_group_membership`
-and RG's `gts_type` registry; native `in_group_subtree` additionally needs
-`resource_group_closure`.
+The PEP uses that same identity to qualify
+`resource_group_membership.gts_type_id` through RG's `gts_type.schema_id`;
+consumers do not configure a second membership type. Without the per-resource
+opt-in, or for a non-canonical GTS policy name, `PolicyEnforcer` suppresses
+`GroupMembership` and `GroupHierarchy`, asking the PDP to expand the group scope
+to explicit resource-ID `in` predicates; a PDP that cannot expand must deny (the
+bundled plugins deny — neither implements expansion today).
+
+The querying database must also contain or project the tables each predicate
+executes against before the enforcer is configured with the corresponding
+capability: native `in_group` needs `resource_group_membership` and RG's
+`gts_type` registry; native `in_group_subtree` additionally needs
+`resource_group_closure`. External membership-type registration is tracked
+separately in [#4052](https://github.com/constructorfabric/gears-rust/issues/4052).
 
 ### Defining actions
 

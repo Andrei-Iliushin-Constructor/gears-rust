@@ -176,7 +176,7 @@ impl AccessRequest {
 pub struct ResourceType {
     name: Cow<'static, str>,
     supported_properties: &'static [&'static str],
-    group_membership_type: Option<&'static str>,
+    native_group_predicates: bool,
 }
 
 impl ResourceType {
@@ -191,7 +191,7 @@ impl ResourceType {
         Self {
             name: Cow::Borrowed(name),
             supported_properties,
-            group_membership_type: None,
+            native_group_predicates: false,
         }
     }
 
@@ -209,25 +209,20 @@ impl ResourceType {
         Self {
             name: name.into(),
             supported_properties,
-            group_membership_type: None,
+            native_group_predicates: false,
         }
     }
 
-    /// Associate this resource with the external GTS schema id used for its
-    /// member handles in `resource_group_membership`.
+    /// Enable native `InGroup`/`InGroupSubtree` predicates for this resource.
     ///
-    /// Group capabilities are advertised for a request only when this mapping
-    /// is present. The mapping is deliberately separate from [`Self::name`]: a
-    /// gear's `AuthZ` resource type and its RG type-registry entry need not be the
-    /// same GTS path. An empty value is treated as absent: group capabilities
-    /// are suppressed and any unsolicited native group predicate fails closed.
+    /// The resource name itself is used as the RG membership discriminator, so
+    /// it must be an exact canonical GTS type path and the resource must support
+    /// the `id` property. This flag is deliberately per resource while
+    /// [`PolicyEnforcer::with_capabilities`] records service-level access to the
+    /// required projection tables.
     #[must_use]
-    pub const fn with_group_membership_type(mut self, group_membership_type: &'static str) -> Self {
-        self.group_membership_type = if group_membership_type.is_empty() {
-            None
-        } else {
-            Some(group_membership_type)
-        };
+    pub const fn with_native_group_predicates(mut self) -> Self {
+        self.native_group_predicates = true;
         self
     }
 
@@ -243,11 +238,19 @@ impl ResourceType {
         self.supported_properties
     }
 
-    /// External GTS schema id used to qualify this resource's RG membership
-    /// rows, if native group predicates are executable for the resource.
-    #[must_use]
-    pub const fn group_membership_type(&self) -> Option<&'static str> {
-        self.group_membership_type
+    /// Return the canonical GTS type path used to qualify native RG membership
+    /// rows, or `None` when the policy resource name is not a GTS type path.
+    ///
+    /// Policy and membership use one identity. Resources without the explicit
+    /// opt-in, and non-GTS policy labels, can still be authorized, but their
+    /// group scopes must be expanded by the PDP to explicit `In` predicates.
+    fn native_group_membership_type(&self) -> Option<&str> {
+        if !self.native_group_predicates {
+            return None;
+        }
+        let name = self.name.as_ref();
+        let parsed = gts::GtsTypeId::try_new(name).ok()?;
+        (parsed.as_ref() == name).then_some(name)
     }
 }
 
@@ -349,12 +352,13 @@ impl PolicyEnforcer {
     /// Set PEP capabilities advertised to the PDP.
     ///
     /// The advertised set is re-validated per request against the resource
-    /// descriptor: `GroupMembership`/`GroupHierarchy` are suppressed when the
-    /// resource lacks a `group_membership_type` mapping or does not support
-    /// the `id` property, and `GroupHierarchy` is additionally suppressed
-    /// unless `GroupMembership` is advertised alongside it (`InGroupSubtree`
-    /// compilation requires both). The incoherent hierarchy-without-membership
-    /// combination is warned about here, once, rather than on every request.
+    /// descriptor: `GroupMembership`/`GroupHierarchy` are suppressed unless the
+    /// resource explicitly enables native group predicates, uses an exact
+    /// canonical GTS type path, and supports the `id` property. `GroupHierarchy`
+    /// is additionally suppressed unless `GroupMembership` is advertised
+    /// alongside it (`InGroupSubtree` compilation requires both). The incoherent
+    /// hierarchy-without-membership combination is warned about here, once,
+    /// rather than on every request.
     #[must_use]
     pub fn with_capabilities(mut self, capabilities: Vec<Capability>) -> Self {
         if capabilities.contains(&Capability::GroupHierarchy)
@@ -427,35 +431,34 @@ impl PolicyEnforcer {
 
         let bearer_token = ctx.bearer_token().cloned();
 
-        // Native group predicates are only executable when the resource
-        // descriptor supplies the RG member-handle type needed to qualify
-        // `resource_group_membership.gts_type_id`, and only against the `id`
-        // property (the compiler hard-rejects any other property). Suppress
-        // group capabilities whenever either prerequisite is missing so the
-        // PDP takes its degraded expansion path instead of returning a
-        // predicate that must fail compilation. `GroupHierarchy` is
-        // additionally not independently executable — `InGroupSubtree`
-        // compilation requires `GroupMembership` too — which
-        // `with_capabilities` already warned about once at configuration
-        // time.
-        let group_predicates_executable = resource.group_membership_type.is_some()
-            && resource
-                .supported_properties
-                .contains(&pep_properties::RESOURCE_ID);
+        // Native group predicates require per-resource opt-in, then use the
+        // AuthZ resource's canonical GTS type path to qualify
+        // `resource_group_membership.gts_type_id`. They can target only `id`.
+        // Suppress group capabilities whenever a prerequisite is missing so the
+        // PDP expands the group scope to explicit resource IDs or denies.
+        // `GroupHierarchy` is not independently executable: `InGroupSubtree`
+        // also requires `GroupMembership`.
+        let membership_type = resource.native_group_membership_type();
+        let supports_resource_id = resource
+            .supported_properties
+            .contains(&pep_properties::RESOURCE_ID);
+        let group_predicates_executable = membership_type.is_some() && supports_resource_id;
         let has_group_capability = self.capabilities.iter().any(|capability| {
             matches!(
                 capability,
                 Capability::GroupMembership | Capability::GroupHierarchy
             )
         });
-        if has_group_capability
-            && resource.group_membership_type.is_some()
-            && !group_predicates_executable
-        {
+        if has_group_capability && resource.native_group_predicates && membership_type.is_none() {
             tracing::warn!(
                 resource = %resource.name,
-                "group membership type is mapped but the resource does not \
-                 support the 'id' property; suppressing group capabilities"
+                "native group predicates enabled for a non-canonical GTS type path; \
+                 suppressing group capabilities"
+            );
+        } else if has_group_capability && membership_type.is_some() && !supports_resource_id {
+            tracing::warn!(
+                resource = %resource.name,
+                "resource does not support the 'id' property; suppressing group capabilities"
             );
         }
         let has_group_membership = self.capabilities.contains(&Capability::GroupMembership);
@@ -554,6 +557,12 @@ impl PolicyEnforcer {
         // preventing missing-table errors or stronger hierarchy predicates than
         // the querying service advertised.
         let negotiated_capabilities = eval_request.context.capabilities.clone();
+        // `build_request_with` retained GroupMembership only after validating
+        // the resource opt-in, canonical GTS type and `id` support. Reuse that
+        // decision instead of parsing the GTS name again after the PDP call.
+        let group_membership_type = negotiated_capabilities
+            .contains(&Capability::GroupMembership)
+            .then_some(resource.name());
         let authz = self.resolve_authz()?;
         // `evaluate` is a platform-plane method: the transport attaches this
         // gear's service-identity credential below the contract layer to
@@ -595,7 +604,7 @@ impl PolicyEnforcer {
             &response,
             require,
             resource.supported_properties,
-            resource.group_membership_type,
+            group_membership_type,
             &negotiated_capabilities,
         )?)
     }

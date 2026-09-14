@@ -140,10 +140,11 @@ impl From<String> for ConstraintFailure {
 /// properties fail that constraint (fail-closed). Native group predicates are
 /// additionally restricted to `id` and must share an AND constraint with an
 /// `owner_tenant_id` predicate. Native group
-/// predicates also fail closed through this entry point because their RG
-/// member-handle type is absent; use
-/// [`compile_to_access_scope_with_group_membership_type`] for those predicates.
-/// If ALL constraints fail compilation, returns `AllConstraintsFailed`.
+/// predicates also fail closed through this low-level entry point because no
+/// resource descriptor is available to supply their canonical GTS type. The
+/// high-level [`super::PolicyEnforcer`] derives that type from an explicitly
+/// opted-in [`super::ResourceType::name`]. If ALL constraints fail compilation,
+/// returns `AllConstraintsFailed`.
 ///
 /// # Errors
 ///
@@ -154,7 +155,7 @@ pub fn compile_to_access_scope(
     require_constraints: bool,
     supported_properties: &[&str],
 ) -> Result<AccessScope, ConstraintCompileError> {
-    compile_to_access_scope_with_group_membership_type(
+    compile_to_access_scope_with_resource_type(
         response,
         require_constraints,
         supported_properties,
@@ -162,13 +163,14 @@ pub fn compile_to_access_scope(
     )
 }
 
-/// Compile constraints with the RG member-handle type required by native group
-/// predicates.
+/// Compile constraints with the canonical resource GTS type required by native
+/// group predicates.
 ///
-/// Kept separate from [`compile_to_access_scope`] so existing low-level callers
-/// remain source-compatible. A native `InGroup`/`InGroupSubtree` predicate sent
-/// through the untyped entry point fails closed instead of querying membership
-/// rows across unrelated resource types.
+/// The high-level enforcer derives this value from an explicitly opted-in
+/// `ResourceType::name`. Kept internal so consumers do not establish a second
+/// policy-to-membership type mapping. The public low-level [`compile_to_access_scope`] remains
+/// source-compatible and rejects native group predicates because it has no
+/// resource descriptor.
 ///
 /// # Errors
 ///
@@ -177,7 +179,7 @@ pub fn compile_to_access_scope(
 /// absent or empty, when UUID hierarchy keys are malformed, when the predicate
 /// targets a property other than `id`, or when the same constraint lacks an
 /// `owner_tenant_id` predicate.
-pub fn compile_to_access_scope_with_group_membership_type(
+pub(crate) fn compile_to_access_scope_with_resource_type(
     response: &EvaluationResponse,
     require_constraints: bool,
     supported_properties: &[&str],
@@ -515,8 +517,8 @@ fn require_negotiated_capabilities(
     }
 }
 
-/// Return the configured RG member-handle type or a fail-closed compilation
-/// reason suitable for the enclosing constraint.
+/// Return the canonical resource GTS type or a fail-closed compilation reason
+/// suitable for the enclosing constraint.
 fn required_group_membership_type<'a>(
     group_membership_type: Option<&'a str>,
     predicate: &str,
@@ -524,7 +526,7 @@ fn required_group_membership_type<'a>(
 ) -> Result<&'a str, String> {
     group_membership_type.filter(|value| !value.is_empty()).ok_or_else(|| {
         format!(
-            "{predicate} predicate on '{property}' requires a configured RG membership resource type (fail-closed)"
+            "{predicate} predicate on '{property}' requires a canonical GTS resource type (fail-closed)"
         )
     })
 }

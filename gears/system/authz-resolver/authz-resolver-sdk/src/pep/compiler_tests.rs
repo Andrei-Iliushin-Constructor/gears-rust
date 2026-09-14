@@ -374,12 +374,12 @@ fn mixed_shape_constraints_produce_or_scope() {
 
 // === InGroup / InGroupSubtree Compilation Tests ===
 
-const GROUP_MEMBERSHIP_TYPE: &str = "gts.cf.core.rg.type.v1~example.core.rg.member.v1~";
+const GROUP_MEMBERSHIP_TYPE: &str = "gts.example.core.resource.v1~";
 
 fn compile_group_scope(
     response: &EvaluationResponse,
 ) -> Result<AccessScope, ConstraintCompileError> {
-    compile_to_access_scope_with_group_membership_type(
+    compile_to_access_scope_with_resource_type(
         response,
         true,
         DEFAULT_PROPS,
@@ -481,7 +481,7 @@ fn native_group_predicate_without_membership_type_fails_closed() {
     let Err(ConstraintCompileError::AllConstraintsFailed { reason }) = result else {
         panic!("untyped native group predicate must fail closed: {result:?}");
     };
-    assert!(reason.contains("requires a configured RG membership resource type"));
+    assert!(reason.contains("requires a canonical GTS resource type"));
 }
 
 #[test]
@@ -593,7 +593,7 @@ fn group_predicate_on_non_resource_property_fails_closed() {
         pep_properties::OWNER_ID,
     ];
 
-    let result = compile_to_access_scope_with_group_membership_type(
+    let result = compile_to_access_scope_with_resource_type(
         &response,
         true,
         supported,

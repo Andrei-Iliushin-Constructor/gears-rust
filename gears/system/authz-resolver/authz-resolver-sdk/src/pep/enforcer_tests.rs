@@ -187,8 +187,8 @@ impl AuthZResolverApi for CapturingMock {
     }
 }
 
-/// Mock PDP response used to verify that the resource descriptor's trusted RG
-/// member-handle type reaches the compiled `AccessScope`.
+/// Mock PDP response used to verify that the resource descriptor's canonical
+/// GTS type reaches the compiled `AccessScope`.
 struct GroupScopeMock;
 
 #[async_trait]
@@ -227,13 +227,12 @@ fn test_ctx() -> SecurityContext {
         .unwrap()
 }
 
-const TEST_RESOURCE: ResourceType = ResourceType::from_static(
-    gts_id!("cf.core.users.user.v1~"),
-    &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
-);
-const GROUP_MEMBERSHIP_TYPE: &str = gts_id!("cf.core.rg.type.v1~cf.core.users.user.v1~");
-const GROUP_TYPED_TEST_RESOURCE: ResourceType =
-    TEST_RESOURCE.with_group_membership_type(GROUP_MEMBERSHIP_TYPE);
+const TEST_RESOURCE_TYPE: &str = gts_id!("cf.core.users.user.v1~");
+const TEST_PROPERTIES: &[&str] = &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID];
+const TEST_RESOURCE: ResourceType = ResourceType::from_static(TEST_RESOURCE_TYPE, TEST_PROPERTIES);
+const GROUP_ENABLED_TEST_RESOURCE: ResourceType = TEST_RESOURCE.with_native_group_predicates();
+const NON_GTS_TEST_RESOURCE: ResourceType =
+    ResourceType::from_static("users.user", TEST_PROPERTIES).with_native_group_predicates();
 
 fn enforcer(mock: impl AuthZResolverApi + 'static) -> PolicyEnforcer {
     PolicyEnforcer::new(Arc::new(mock))
@@ -313,14 +312,7 @@ fn build_request_populates_fields() {
 }
 
 #[test]
-fn build_request_suppresses_group_capabilities_for_untyped_resource() {
-    assert_eq!(
-        TEST_RESOURCE
-            .with_group_membership_type("")
-            .group_membership_type(),
-        None,
-        "an empty mapping must normalize to an untyped resource"
-    );
+fn build_request_suppresses_group_capabilities_without_resource_opt_in() {
     let e = enforcer(AllowAllMock).with_capabilities(vec![
         Capability::TenantHierarchy,
         Capability::GroupMembership,
@@ -333,17 +325,69 @@ fn build_request_suppresses_group_capabilities_for_untyped_resource() {
 }
 
 #[test]
-fn build_request_preserves_group_capabilities_for_typed_resource() {
+fn build_request_suppresses_group_capabilities_for_non_gts_resource() {
+    let e = enforcer(AllowAllMock).with_capabilities(vec![
+        Capability::TenantHierarchy,
+        Capability::GroupMembership,
+        Capability::GroupHierarchy,
+    ]);
+
+    let req = e.build_request(&test_ctx(), &NON_GTS_TEST_RESOURCE, "list", None, true);
+
+    assert_eq!(req.context.capabilities, vec![Capability::TenantHierarchy]);
+}
+
+#[test]
+fn build_request_preserves_group_capabilities_for_opted_in_canonical_gts_resource() {
     let capabilities = vec![Capability::GroupMembership, Capability::GroupHierarchy];
     let e = enforcer(AllowAllMock).with_capabilities(capabilities.clone());
 
-    let req = e.build_request(&test_ctx(), &GROUP_TYPED_TEST_RESOURCE, "list", None, true);
+    let req = e.build_request(
+        &test_ctx(),
+        &GROUP_ENABLED_TEST_RESOURCE,
+        "list",
+        None,
+        true,
+    );
 
     assert_eq!(req.context.capabilities, capabilities);
-    assert_eq!(
-        GROUP_TYPED_TEST_RESOURCE.group_membership_type(),
-        Some(GROUP_MEMBERSHIP_TYPE)
-    );
+}
+
+#[test]
+fn build_request_rejects_non_canonical_and_instance_gts_names() {
+    let e = enforcer(AllowAllMock).with_capabilities(vec![Capability::GroupMembership]);
+    let resources = [
+        ResourceType::from_static(" gts.cf.core.users.user.v1~", TEST_PROPERTIES)
+            .with_native_group_predicates(),
+        ResourceType::from_static("gts.cf.core.users.user.v1~ ", TEST_PROPERTIES)
+            .with_native_group_predicates(),
+        ResourceType::from_static("not-a-gts~", TEST_PROPERTIES).with_native_group_predicates(),
+        ResourceType::from_static(
+            "gts.cf.core.users.user.v1~cf.core.users.instance.v1",
+            TEST_PROPERTIES,
+        )
+        .with_native_group_predicates(),
+    ];
+
+    for resource in resources {
+        let req = e.build_request(&test_ctx(), &resource, "list", None, true);
+        assert!(
+            req.context.capabilities.is_empty(),
+            "{} must not enable native group predicates",
+            resource.name()
+        );
+    }
+}
+
+#[test]
+fn build_request_supports_runtime_canonical_gts_resource() {
+    let resource = ResourceType::new(TEST_RESOURCE_TYPE.to_owned(), TEST_PROPERTIES)
+        .with_native_group_predicates();
+    let e = enforcer(AllowAllMock).with_capabilities(vec![Capability::GroupMembership]);
+
+    let req = e.build_request(&test_ctx(), &resource, "list", None, true);
+
+    assert_eq!(req.context.capabilities, vec![Capability::GroupMembership]);
 }
 
 #[test]
@@ -356,21 +400,26 @@ fn build_request_suppresses_group_hierarchy_without_group_membership() {
         Capability::GroupHierarchy,
     ]);
 
-    let req = e.build_request(&test_ctx(), &GROUP_TYPED_TEST_RESOURCE, "list", None, true);
+    let req = e.build_request(
+        &test_ctx(),
+        &GROUP_ENABLED_TEST_RESOURCE,
+        "list",
+        None,
+        true,
+    );
 
     assert_eq!(req.context.capabilities, vec![Capability::TenantHierarchy]);
 }
 
 #[test]
 fn build_request_suppresses_group_capabilities_without_resource_id_property() {
-    // Native group predicates are hard-restricted to the `id` property; a
-    // typed resource that does not support `id` can never execute one, so
-    // its group capabilities must be suppressed despite the mapping.
-    const NO_ID_GROUP_TYPED_RESOURCE: ResourceType = ResourceType::from_static(
+    // Native group predicates are hard-restricted to the `id` property; even a
+    // canonical GTS resource without `id` support cannot execute one.
+    const NO_ID_GTS_RESOURCE: ResourceType = ResourceType::from_static(
         gts_id!("cf.core.users.user.v1~"),
         &[pep_properties::OWNER_TENANT_ID],
     )
-    .with_group_membership_type(GROUP_MEMBERSHIP_TYPE);
+    .with_native_group_predicates();
 
     let e = enforcer(AllowAllMock).with_capabilities(vec![
         Capability::TenantHierarchy,
@@ -378,7 +427,7 @@ fn build_request_suppresses_group_capabilities_without_resource_id_property() {
         Capability::GroupHierarchy,
     ]);
 
-    let req = e.build_request(&test_ctx(), &NO_ID_GROUP_TYPED_RESOURCE, "list", None, true);
+    let req = e.build_request(&test_ctx(), &NO_ID_GTS_RESOURCE, "list", None, true);
 
     assert_eq!(req.context.capabilities, vec![Capability::TenantHierarchy]);
 }
@@ -455,24 +504,26 @@ async fn access_scope_threads_caller_identity_into_subject() {
 }
 
 #[tokio::test]
-async fn access_scope_carries_resource_group_membership_type_into_filter() {
+async fn access_scope_uses_canonical_resource_type_for_group_membership() {
     let scope = enforcer(GroupScopeMock)
         .with_capabilities(vec![Capability::GroupMembership])
-        .access_scope(&test_ctx(), &GROUP_TYPED_TEST_RESOURCE, "list", None)
+        .access_scope(&test_ctx(), &GROUP_ENABLED_TEST_RESOURCE, "list", None)
         .await
-        .expect("typed resource must compile the negotiated native group predicate");
+        .expect(
+            "opted-in canonical GTS resource must compile the negotiated native group predicate",
+        );
 
     let filter = &scope.constraints()[0].filters()[1];
     let toolkit_security::ScopeFilter::InGroup(filter) = filter else {
         panic!("expected InGroup filter, got {filter:?}");
     };
-    assert_eq!(filter.membership_resource_type(), GROUP_MEMBERSHIP_TYPE);
+    assert_eq!(filter.membership_resource_type(), TEST_RESOURCE_TYPE);
 }
 
 #[tokio::test]
 async fn access_scope_rejects_unadvertised_native_group_predicate() {
     let error = enforcer(GroupScopeMock)
-        .access_scope(&test_ctx(), &GROUP_TYPED_TEST_RESOURCE, "list", None)
+        .access_scope(&test_ctx(), &GROUP_ENABLED_TEST_RESOURCE, "list", None)
         .await
         .expect_err("a native group predicate must have been advertised");
 
@@ -488,12 +539,31 @@ async fn access_scope_rejects_unadvertised_native_group_predicate() {
 }
 
 #[tokio::test]
-async fn access_scope_rejects_group_predicate_after_suppressing_untyped_capability() {
+async fn access_scope_rejects_group_predicate_without_resource_opt_in() {
     let error = enforcer(GroupScopeMock)
         .with_capabilities(vec![Capability::GroupMembership])
         .access_scope(&test_ctx(), &TEST_RESOURCE, "list", None)
         .await
-        .expect_err("an untyped resource must not accept an unsolicited group predicate");
+        .expect_err("a resource that did not opt in must reject native group predicates");
+
+    let EnforcerError::CompileFailed(ConstraintCompileError::UnadvertisedCapabilities {
+        predicate,
+        missing,
+    }) = error
+    else {
+        panic!("expected resource opt-in to suppress the capability, got: {error:?}");
+    };
+    assert_eq!(predicate, "InGroup");
+    assert_eq!(missing, vec!["group_membership"]);
+}
+
+#[tokio::test]
+async fn access_scope_rejects_group_predicate_after_suppressing_non_gts_capability() {
+    let error = enforcer(GroupScopeMock)
+        .with_capabilities(vec![Capability::GroupMembership])
+        .access_scope(&test_ctx(), &NON_GTS_TEST_RESOURCE, "list", None)
+        .await
+        .expect_err("a non-GTS resource must not accept an unsolicited group predicate");
 
     let EnforcerError::CompileFailed(ConstraintCompileError::UnadvertisedCapabilities {
         predicate,
@@ -501,7 +571,7 @@ async fn access_scope_rejects_group_predicate_after_suppressing_untyped_capabili
     }) = error
     else {
         panic!(
-            "the resource mapping must suppress the configured capability before evaluation, \
+            "the non-GTS resource name must suppress the configured capability before evaluation, \
              got: {error:?}"
         );
     };

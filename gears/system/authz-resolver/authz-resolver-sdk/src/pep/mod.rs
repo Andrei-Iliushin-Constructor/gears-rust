@@ -3,7 +3,6 @@
 //! - [`PolicyEnforcer`] - PEP object (build → evaluate → compile)
 //! - [`ResourceType`] - Static descriptor for a resource type + its supported properties
 //! - [`compile_to_access_scope`] - Low-level scalar/tenant constraint compilation
-//! - [`compile_to_access_scope_with_group_membership_type`] - Low-level compilation with typed native group predicates
 //! - [`IntoPropertyValue`] - Convert typed values into `serde_json::Value` for PDP requests
 
 use serde_json::Value;
@@ -12,10 +11,7 @@ use uuid::Uuid;
 pub mod compiler;
 pub mod enforcer;
 
-pub use compiler::{
-    ConstraintCompileError, compile_to_access_scope,
-    compile_to_access_scope_with_group_membership_type,
-};
+pub use compiler::{ConstraintCompileError, compile_to_access_scope};
 pub use enforcer::{AccessRequest, EnforcerError, PolicyEnforcer, ResourceType};
 
 /// Trait for types that can be converted into `serde_json::Value` for PDP

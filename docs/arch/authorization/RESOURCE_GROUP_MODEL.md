@@ -74,35 +74,39 @@ expand the group scope to explicit resource-ID `in` predicates; the PEP does not
 perform this expansion automatically. A PDP that cannot expand the scope MUST
 deny rather than emit an unadvertised native predicate or remove group filtering.
 
-For native group predicates, the PEP resource descriptor MUST also configure its
-RG member-handle GTS path with
-`ResourceType::with_group_membership_type(...)`. The mapping is necessary but
-not evidence that projection tables exist: the service owner remains responsible
-for configuring `PolicyEnforcer::with_capabilities(...)` to match the local
-schema. SecureORM resolves the external path through RG's local `gts_type` table
-and adds the resulting `gts_type_id` condition to the membership subquery. This
-is required because `resource_group_membership` is shared by all member types
-and external resource IDs are only unique within a type. The AuthZ resource name
-must not be used as an implicit replacement: a gear may deliberately use a
-different GTS path for policy matching. The configured value MUST be a member
-type actually registered in RG's type registry (a `gts.cf.core.rg.type.v1~`-prefixed
-code accepted by `validate_type_code`, whose resolved `gts_type_id` is stored
-on membership rows) — a value that never resolves through `gts_type` makes
-every native group predicate silently match zero rows. Resource groups themselves have no member-handle type:
-group nesting is hierarchy (`parent_id`/`resource_group_closure`), not
-membership, so RG's own group resource descriptor deliberately carries no
-mapping.
+For native group predicates, the PEP resource descriptor MUST opt in with
+`ResourceType::with_native_group_predicates()` and use the resource's exact
+canonical GTS type path as its `ResourceType` name. That same identity is sent to
+AuthZ and used to qualify membership rows; consumers do not configure a second
+policy-to-membership type mapping. SecureORM resolves the path through RG's
+local `gts_type` table and adds the resulting `gts_type_id` condition to the
+membership subquery. This is required because
+`resource_group_membership` is shared by all member types and external resource
+IDs are only unique within a type.
 
-A resource descriptor without the mapping suppresses configured group
-capabilities for that request. The PEP also rejects a native group predicate
-that was not among the capabilities actually advertised or that lacks the
-trusted mapping.
+The type MUST already resolve in the local or projected `gts_type` table. RG's
+current public registration path accepts external membership types during
+validation but cannot materialize a non-RG-prefixed type row; that independent
+registry inconsistency is tracked by
+[#4052](https://github.com/constructorfabric/gears-rust/issues/4052). A service
+MUST NOT opt an affected resource into native group predicates until the
+canonical external type can be registered and projected. It must instead use
+PDP-expanded explicit `in` predicates or deny.
 
-Native group predicates currently target only `id`: one resource descriptor
-carries one RG member-handle type, so applying that mapping to another property
-could compare identifiers from unrelated resource types. Every group predicate
-must also have an `owner_tenant_id` predicate in the same AND constraint. Keeping
-the tenant predicate in a separate OR branch would let the group branch escape
+A resource without the per-resource opt-in, or with a non-canonical GTS policy
+name, suppresses configured group capabilities for that request. The opt-in says
+the resource participates in RG membership; `PolicyEnforcer::with_capabilities`
+separately says the service has the tables needed to execute native predicates.
+The PEP also rejects a native group predicate that was not among the capabilities
+actually advertised. Resource groups themselves use a canonical GTS policy
+name, but deliberately do not opt in: group nesting is hierarchy
+(`parent_id`/`resource_group_closure`), not membership rows.
+
+Native group predicates currently target only `id`: applying the resource's GTS
+type to another property could compare identifiers from an unrelated resource
+type. Every group predicate must also have an `owner_tenant_id` predicate in the
+same AND constraint. Keeping the tenant predicate in a separate OR branch would
+let the group branch escape
 the platform's mandatory tenant boundary and is rejected fail-closed.
 
 The native SQL casts the querying entity's ID to text, rather than casting RG's

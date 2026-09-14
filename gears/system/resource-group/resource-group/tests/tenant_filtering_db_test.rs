@@ -508,14 +508,11 @@ impl AuthZResolverApi for GroupScopingAuthZ {
     }
 }
 
-/// Phase 2 test: `RG_GROUP_RESOURCE` carries no RG member-handle type
-/// mapping (groups nest through `parent_id`/`resource_group_closure`, not
-/// membership rows, and `gts.cf.core.rg.group.v1~` can never be registered
-/// in `gts_type`), so `PolicyEnforcer` suppresses the configured
-/// `GroupMembership` capability per request and a PDP that returns a native
-/// `InGroup` predicate anyway is rejected fail-closed with the typed
-/// unadvertised-capability error — never silently compiled into a
-/// zero-row membership subquery.
+/// Phase 2 test: `RG_GROUP_RESOURCE` does not opt in to native group predicates
+/// because groups nest through `parent_id`/`resource_group_closure`, not
+/// membership rows. Even when the enforcer has table-level `GroupMembership`
+/// capability, it suppresses that capability for the resource; a PDP that
+/// returns `InGroup` anyway is rejected fail-closed.
 // Scenario: L2-Tenant-06 - InGroup predicate against groups fails closed (S14)
 #[tokio::test]
 async fn group_based_in_group_predicate_against_groups_fails_closed() {
@@ -538,7 +535,7 @@ async fn group_based_in_group_predicate_against_groups_fails_closed() {
             None,
         )
         .await
-        .expect_err("an InGroup predicate against the unmapped group resource must fail closed");
+        .expect_err("an InGroup predicate against a non-opted-in resource must fail closed");
 
     let authz_resolver_sdk::pep::EnforcerError::CompileFailed(
         authz_resolver_sdk::pep::ConstraintCompileError::UnadvertisedCapabilities {

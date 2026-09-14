@@ -92,12 +92,12 @@ impl InPredicate {
 
 /// Group membership predicate: resource is visible if it belongs to any of the listed groups.
 ///
-/// The PEP compiler combines this wire-level predicate with the current
-/// [`crate::pep::ResourceType`]'s RG member-handle type. `SecureORM` compiles the
-/// result to a type-qualified membership subquery and casts the entity property
-/// to text to match RG's opaque `resource_id` storage. Compilation fails closed
-/// when the resource descriptor has no membership mapping; a degraded PDP
-/// response must use an explicit [`InPredicate`] instead.
+/// The PEP compiler uses the current [`crate::pep::ResourceType`]'s canonical
+/// GTS name as the RG member type. `SecureORM` compiles the result to a
+/// type-qualified membership subquery and casts the entity property to text to
+/// match RG's opaque `resource_id` storage. Unless the resource explicitly opts
+/// in with a canonical GTS name, the PEP suppresses the native capability and
+/// the PDP must use an explicit [`InPredicate`] or deny.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
 pub struct InGroupPredicate {
     /// Resource property to filter. Native compilation currently requires
@@ -128,12 +128,12 @@ impl InGroupPredicate {
 /// Group subtree predicate: resource is visible if it belongs to any group
 /// that is a descendant of the listed ancestor groups.
 ///
-/// The PEP compiler combines this wire-level predicate with the current
-/// [`crate::pep::ResourceType`]'s RG member-handle type. `SecureORM` compiles the
-/// result to a type-qualified membership subquery whose group set comes from
-/// `resource_group_closure`. Compilation fails closed when the resource
-/// descriptor has no membership mapping; a degraded PDP response must use an
-/// explicit [`InPredicate`] instead.
+/// The PEP compiler uses the current [`crate::pep::ResourceType`]'s canonical
+/// GTS name as the RG member type. `SecureORM` compiles the result to a
+/// type-qualified membership subquery whose group set comes from
+/// `resource_group_closure`. Unless the resource explicitly opts in with a
+/// canonical GTS name, the PEP suppresses the native capabilities and the PDP
+/// must use an explicit [`InPredicate`] or deny.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, utoipa::ToSchema)]
 pub struct InGroupSubtreePredicate {
     /// Resource property to filter. Native compilation currently requires
