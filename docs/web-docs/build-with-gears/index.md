@@ -54,14 +54,14 @@ Use `make example` when you want runnable example endpoints. Use `make quickstar
 Check detailed health:
 
 ```sh
-curl -s http://127.0.0.1:8087/health
+curl -s http://127.0.0.1:8087/cf/health
 # {"status":"healthy","timestamp":"..."}
 ```
 
 Check liveness:
 
 ```sh
-curl -s http://127.0.0.1:8087/healthz
+curl -s http://127.0.0.1:8087/cf/healthz
 # ok
 ```
 
