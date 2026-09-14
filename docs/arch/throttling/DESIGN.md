@@ -142,9 +142,9 @@ The zone owns the key strategy. An operation names a zone; it does not describe
 how that zone keys. This is the config/code boundary ADR-0002 asks for, applied
 to keying.
 
-`Identity` resolves to `SecurityContext::subject_id()`, falling back to
-`"anonymous"` — the behavior the `None` branch has today. `Ip` resolves through
-`client_ip()` with `trusted_proxy_hops`, unchanged.
+`Identity` resolves to `SecurityContext::subject_id()`. A missing context is an
+invariant violation, not a shared bucket: the request fails with an internal
+error. `Ip` resolves through `client_ip()` with `trusted_proxy_hops`, unchanged.
 
 ### D3: `max_keys` becomes an enforced bound on rate zones
 
@@ -221,9 +221,9 @@ keyed structure, so the hot-path cap check never walks every `DashMap` shard.
 
 `compute_key_identity_uses_extractor_then_subject` currently asserts the
 extractor is preferred over the subject id. With the extractor gone, the
-remaining behavior — identity resolves to `subject_id()`, `"anonymous"` when no
-`SecurityContext` is present — must still be asserted; rename accordingly rather
-than delete. `builder_with_throttling_sets_spec_and_extractor` loses its reason
+remaining behavior — identity resolves to `subject_id()`, and `compute_key`
+returns `None` when no `SecurityContext` is present — must still be asserted;
+rename accordingly rather than delete. `builder_with_throttling_sets_spec_and_extractor` loses its reason
 to exist in its current form; what survives is a `Debug`/`Clone` round-trip on a
 now-plain struct, which is low value — prefer deleting it over keeping a test
 that asserts derive macros work.
@@ -413,11 +413,13 @@ Recorded so the boundary is explicit rather than implied by omission.
 
 ### [Risk] The admission bound penalizes new keys under saturation
 
-Once a zone's admission set is full, a legitimate new client is rejected while an
-established abuser already inside the set continues at its configured rate. This
-is inherent to any hard count bound — the alternative is admitting unbounded
-keys — and is why the bound must be observable and the default `max_keys`
-generous. Document the interaction; do not silently ship it.
+Once a zone's admission set is full, a legitimate new client is rejected with
+`kind = "max_keys"` even though it has not exceeded any per-client limit, while
+an established abuser already inside the set continues at its configured rate.
+This applies to both zone kinds. It is inherent to any hard count bound — the
+alternative is admitting unbounded keys — and is why the bound must be
+observable and the default `max_keys` generous. Document the interaction; do
+not silently ship it.
 
 The full-clear on each sweep bounds how long a client stays locked out to one
 prune interval. An established client loses its *admission*, not its limiter
@@ -426,6 +428,25 @@ state fades only over the replenish window when re-admission fails. Under
 sustained saturation this makes admission roughly round-robin by arrival rather
 than stable per client. Accept it as the cost of a hard bound, or revisit if a
 zone in production shows churn.
+
+### [Risk] Proxy-header trust is a deployment contract, not a runtime check
+
+With `trusted_proxy_hops >= 1` the gateway derives the client IP from
+`X-Forwarded-For` by position, with `X-Real-IP` as the fallback under the same
+trust assumption, and never verifies that the immediate peer is a trusted
+proxy. A gateway that is reachable directly therefore lets a client choose or
+rotate its IP throttling key. The requirement is documented on
+`trusted_proxy_hops`: only trusted proxies may reach the gateway, and they must
+sanitize forwarding headers. Validating the peer against a configured proxy
+list is a roadmap item.
+
+### [Decision] A zone is all dry-run or all enforced
+
+Zone state is shared by name, so a dry-run operation would spend the rate
+tokens and in-flight permits of an enforced operation on the same zone and
+cause enforced rejections. `build_maps` refuses a zone bound with both
+`dry_run` values at startup. Isolating observational state from enforced
+budgets needs a design and is a roadmap item.
 
 ### [Risk] `max_keys` semantics differ between zone kinds
 

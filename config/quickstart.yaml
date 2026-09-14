@@ -131,8 +131,11 @@ gears:
       #
       # The key strategy (`ip` vs `identity`) lives in the zone `key:` block
       # below; `ip` is used so it works with auth_disabled (no identity available
-      # pre-auth). Switch both zones to `key: { type: identity }` and the spec to
-      # `require_security_context: true` to throttle per authenticated subject.
+      # pre-auth). To throttle per authenticated subject, switch both zones to
+      # `key: { type: identity }`, set the spec to `require_security_context: true`
+      # on an authenticated operation, and set `auth_disabled: false`; the router
+      # build rejects an identity zone on an anonymous operation or with
+      # `auth_disabled: true`, because every client would share one key.
       # ----------------------------------------------------------------------
       rate_limit_zones:
         rl_mini_chat_chat:

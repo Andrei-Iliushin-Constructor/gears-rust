@@ -43,6 +43,7 @@ use opentelemetry::metrics::Counter;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use toolkit::api::{OperationSpec, ThrottlingSpec};
+use toolkit_canonical_errors::CanonicalError;
 use toolkit_security::SecurityContext;
 
 use crate::config::{ApiGatewayConfig, InFlightLimitZone, KeyType, RateLimitZone, RetryAfter};
@@ -153,6 +154,16 @@ impl KeyGate {
         }
         // `_backlog_slot` is released here, before the in-flight permit is held.
     }
+
+    /// Take a free in-flight permit without waiting in the backlog.
+    ///
+    /// Used by dry-run mode, which observes the limit but must never delay a
+    /// request. Because it skips the backlog wait, dry-run `in_flight` counts
+    /// over-report relative to enforce mode, which admits some requests after
+    /// a wait.
+    fn try_acquire(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.inflight).try_acquire_owned().ok()
+    }
 }
 
 /// A resolved in-flight (concurrency) zone with per-key gates.
@@ -262,8 +273,11 @@ impl ThrottlingMap {
     /// pre-auth map) and is intended for standalone use such as tests.
     ///
     /// # Errors
-    /// Returns an error if an entry references an undefined zone or an invalid
-    /// (e.g. zero-limit) zone.
+    /// Returns an error if an entry references an undefined zone, an invalid
+    /// (e.g. zero-limit) zone, an identity-keyed zone bound to an operation
+    /// that allows anonymous access, or an identity-keyed zone while
+    /// `auth_disabled` is true. The dry-run consistency check is skipped here;
+    /// only [`build_maps`] performs it.
     pub fn from_specs(specs: &[OperationSpec], cfg: &ApiGatewayConfig) -> Result<Self> {
         let mut rate_zones = HashMap::new();
         let mut inflight_zones = HashMap::new();
@@ -289,7 +303,11 @@ impl ThrottlingMapNoAuth {
     ///
     /// # Errors
     /// Returns an error if an entry references an undefined zone, an invalid
-    /// zone, or an identity-keyed zone (forbidden before authentication).
+    /// zone, or an identity-keyed zone (forbidden before authentication). That
+    /// last rule fires first in this partition, so the post-auth identity
+    /// rules — an operation that allows anonymous access, or `auth_disabled =
+    /// true` — cannot be reached here. The dry-run consistency check is
+    /// skipped here; only [`build_maps`] performs it.
     pub fn from_specs(specs: &[OperationSpec], cfg: &ApiGatewayConfig) -> Result<Self> {
         let mut rate_zones = HashMap::new();
         let mut inflight_zones = HashMap::new();
@@ -314,12 +332,16 @@ impl ThrottlingMapNoAuth {
 /// gate is a single instance rather than one per auth partition.
 ///
 /// # Errors
-/// Returns an error if any entry references an undefined or invalid zone, or an
-/// identity-keyed zone from a pre-auth operation.
+/// Returns an error if any entry references an undefined or invalid zone, an
+/// identity-keyed zone from a pre-auth operation, an identity-keyed zone bound
+/// to an operation that allows anonymous access, or an identity-keyed zone
+/// while `auth_disabled` is true. It also fails when one zone is bound by both
+/// dry-run and enforced operations.
 pub fn build_maps(
     specs: &[OperationSpec],
     cfg: &ApiGatewayConfig,
 ) -> Result<(ThrottlingMap, ThrottlingMapNoAuth, ThrottleKeyPruner)> {
+    check_dry_run_consistency(specs)?;
     let mut rate_zones: HashMap<String, Arc<RateZone>> = HashMap::new();
     let mut inflight_zones: HashMap<String, Arc<InFlightZone>> = HashMap::new();
     let auth = build(specs, cfg, true, &mut rate_zones, &mut inflight_zones)?;
@@ -396,6 +418,45 @@ impl ThrottleKeyPruner {
     }
 }
 
+/// Reject a zone bound by both dry-run and enforced operations.
+///
+/// Zone state is shared by name, so dry-run traffic would spend the rate
+/// tokens and in-flight permits of an enforced operation. Isolating
+/// observational state is a design item; until then the binding is refused
+/// at startup. The standalone `from_specs` constructors (tests) skip this.
+fn check_dry_run_consistency(specs: &[OperationSpec]) -> Result<()> {
+    let mut seen: HashMap<(&str, &str), (bool, &OperationSpec)> = HashMap::new();
+    for spec in specs {
+        let Some(thr) = spec.throttling.as_ref() else {
+            continue;
+        };
+        let bindings = [
+            ("rate_limit", thr.rate_limit_zone.as_deref()),
+            ("in_flight_limit", thr.in_flight_limit_zone.as_deref()),
+        ];
+        for (kind, zone) in bindings {
+            let Some(zone) = zone else { continue };
+            match seen.get(&(kind, zone)) {
+                Some((dry_run, first)) if *dry_run != thr.dry_run => bail!(
+                    "throttling: {kind} zone '{zone}' is bound with dry_run={} by {} {} and \
+                     dry_run={} by {} {}; a zone must be all dry-run or all enforced",
+                    dry_run,
+                    first.method,
+                    first.path,
+                    thr.dry_run,
+                    spec.method,
+                    spec.path
+                ),
+                Some(_) => {}
+                None => {
+                    seen.insert((kind, zone), (thr.dry_run, spec));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Shared builder used by both maps, selecting specs by `require_ctx`.
 ///
 /// `rate_zones` / `inflight_zones` are caches shared across partitions so the
@@ -427,7 +488,7 @@ fn build(
                     zone_name
                 )
             })?;
-            check_key_type(require_ctx, zone_name, zcfg.key.key_type)?;
+            check_key_type(spec, cfg, require_ctx, zone_name, zcfg.key.key_type)?;
             Some(get_or_build_rate_zone(rate_zones, zone_name, zcfg)?)
         } else {
             None
@@ -442,7 +503,7 @@ fn build(
                     zone_name
                 )
             })?;
-            check_key_type(require_ctx, zone_name, zcfg.key.key_type)?;
+            check_key_type(spec, cfg, require_ctx, zone_name, zcfg.key.key_type)?;
             Some(get_or_build_inflight_zone(inflight_zones, zone_name, zcfg))
         } else {
             None
@@ -495,12 +556,37 @@ fn build_counter(cfg: &ApiGatewayConfig, suffix: &str, description: &str) -> Cou
         .build()
 }
 
-/// Identity keying is only valid after authentication.
-fn check_key_type(require_ctx: bool, zone: &str, kt: KeyType) -> Result<()> {
-    if !require_ctx && matches!(kt, KeyType::Identity) {
+/// Identity keying is only valid on an authenticated operation, after
+/// authentication, with authentication enabled. Otherwise every client would
+/// share one bucket (the anonymous or the `auth_disabled` default subject).
+fn check_key_type(
+    spec: &OperationSpec,
+    cfg: &ApiGatewayConfig,
+    require_ctx: bool,
+    zone: &str,
+    kt: KeyType,
+) -> Result<()> {
+    if !matches!(kt, KeyType::Identity) {
+        return Ok(());
+    }
+    if !require_ctx {
         bail!(
             "throttling: zone '{zone}' is identity-keyed but is referenced by a pre-auth \
              (require_security_context=false) operation; identity keying requires authentication"
+        );
+    }
+    if !spec.authenticated {
+        bail!(
+            "throttling: zone '{zone}' is identity-keyed but operation {} {} allows anonymous \
+             access; every anonymous client would share one key",
+            spec.method,
+            spec.path
+        );
+    }
+    if cfg.auth_disabled {
+        bail!(
+            "throttling: zone '{zone}' is identity-keyed but auth_disabled=true; every request \
+             would share one key"
         );
     }
     Ok(())
@@ -588,7 +674,9 @@ async fn enforce(inner: &ThrottlingInner, req: Request, next: Next) -> Response 
 
     // Rate limiting.
     if let Some(zone) = entry.rate_zone.as_ref() {
-        let id = compute_key(zone.cfg.key.key_type, &req, inner.trusted_proxy_hops);
+        let Some(id) = compute_key(zone.cfg.key.key_type, &req, inner.trusted_proxy_hops) else {
+            return missing_context_response(&key, &zone.name);
+        };
         // `max_keys` admission cap: a new key beyond the cap is rejected before
         // it can grow the limiter's keyed store (until the next prune frees
         // capacity). Existing keys are unaffected. In dry-run mode the
@@ -609,9 +697,9 @@ async fn enforce(inner: &ThrottlingInner, req: Request, next: Next) -> Response 
                         // Dry-run: observe but don't enforce. Count, log, fall through.
                         record_dry_run(inner, &key, &zone.name, "rate_limit", &id);
                     } else {
-                        let wait = not_until
-                            .wait_time_from(zone.limiter.clock().now())
-                            .as_secs();
+                        // Round up: a positive sub-second wait must not become 0.
+                        let wait = not_until.wait_time_from(zone.limiter.clock().now());
+                        let wait = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
                         let retry_after = match zone.cfg.response_retry_after {
                             RetryAfter::Auto => Some(wait),
                             RetryAfter::Seconds(n) => Some(n),
@@ -621,6 +709,7 @@ async fn enforce(inner: &ThrottlingInner, req: Request, next: Next) -> Response 
                             zone.cfg.response_status_code,
                             retry_after,
                             Some((&zone.policy, zone.cfg.burst_limit)),
+                            "rate_limit",
                         );
                     }
                 }
@@ -633,13 +722,16 @@ async fn enforce(inner: &ThrottlingInner, req: Request, next: Next) -> Response 
                 zone.cfg.response_status_code,
                 Some(KEY_PRUNE_INTERVAL.as_secs()),
                 Some((&zone.policy, zone.cfg.burst_limit)),
+                "max_keys",
             );
         }
     }
 
     // In-flight concurrency limiting.
     if let Some(zone) = entry.inflight_zone.as_ref() {
-        let id = compute_key(zone.cfg.key.key_type, &req, inner.trusted_proxy_hops);
+        let Some(id) = compute_key(zone.cfg.key.key_type, &req, inner.trusted_proxy_hops) else {
+            return missing_context_response(&key, &zone.name);
+        };
         if !zone.excluded.contains(&id) {
             // `max_keys` admission cap, same contract as the rate zone above:
             // a never-seen key past the cap is refused before it can grow the
@@ -656,9 +748,16 @@ async fn enforce(inner: &ThrottlingInner, req: Request, next: Next) -> Response 
                     zone.cfg.response_status_code,
                     Some(KEY_PRUNE_INTERVAL.as_secs()),
                     None,
+                    "max_keys",
                 );
             };
-            let Some(permit) = gate.acquire(zone.cfg.backlog_timeout).await else {
+            // Dry-run must never delay a request: no backlog wait.
+            let permit = if entry.spec.dry_run {
+                gate.try_acquire()
+            } else {
+                gate.acquire(zone.cfg.backlog_timeout).await
+            };
+            let Some(permit) = permit else {
                 if entry.spec.dry_run {
                     // Dry-run: observe but don't enforce. Count, log and serve
                     // the request without holding an in-flight permit.
@@ -675,7 +774,12 @@ async fn enforce(inner: &ThrottlingInner, req: Request, next: Next) -> Response 
                     .backlog_timeout
                     .as_secs()
                     .max(DEFAULT_IN_FLIGHT_RETRY_AFTER_SECS);
-                return throttle_response(zone.cfg.response_status_code, Some(retry_after), None);
+                return throttle_response(
+                    zone.cfg.response_status_code,
+                    Some(retry_after),
+                    None,
+                    "in_flight",
+                );
             };
             let mut response = next.run(req).await;
             drop(permit);
@@ -711,14 +815,33 @@ fn apply_rate_headers(response: &mut Response, rate_headers: Option<&RateHeaders
 }
 
 /// Compute the throttling key for a request according to the zone key type.
-fn compute_key(kind: KeyType, req: &Request, trusted_proxy_hops: usize) -> String {
+///
+/// Returns `None` only for an identity-keyed zone without a `SecurityContext`.
+/// Startup validation guarantees such zones run after authentication on
+/// authenticated operations, so `None` is an invariant violation, not a limit;
+/// dry-run does not soften it.
+fn compute_key(kind: KeyType, req: &Request, trusted_proxy_hops: usize) -> Option<String> {
     match kind {
-        KeyType::Ip => client_ip(req, trusted_proxy_hops),
+        KeyType::Ip => Some(client_ip(req, trusted_proxy_hops)),
         KeyType::Identity => req
             .extensions()
             .get::<SecurityContext>()
-            .map_or_else(|| "anonymous".to_owned(), |sc| sc.subject_id().to_string()),
+            .map(|sc| sc.subject_id().to_string()),
     }
+}
+
+/// Internal error for an identity-keyed zone reached without a security
+/// context; see [`compute_key`].
+fn missing_context_response(key: &ThrottleKey, zone: &str) -> Response {
+    tracing::error!(
+        method = %key.0,
+        path = %key.1,
+        zone,
+        "throttling: identity-keyed zone reached without a security context"
+    );
+    CanonicalError::internal("throttling: identity-keyed zone without security context")
+        .create()
+        .into_response()
 }
 
 /// Resolve the client IP used as the throttling bucket key.
@@ -779,15 +902,23 @@ fn peer_ip(req: &Request) -> String {
 /// `rate_headers` carries `(policy, burst_limit)` for rate-limit rejections so
 /// the `RateLimit-*` / legacy `X-RateLimit-Limit` headers are echoed on the
 /// error (matching the legacy rate limiter); it is `None` for in-flight
-/// rejections, which have no token-bucket policy.
+/// rejections, which have no token-bucket policy. `kind` (`rate_limit`,
+/// `max_keys`, `in_flight`) is carried in the problem detail and violation so
+/// clients can tell the rejections apart; the violation subject stays
+/// `throttling`.
 fn throttle_response(
     status: u16,
     retry_after_seconds: Option<u64>,
     rate_headers: Option<(&HeaderValue, u32)>,
+    kind: &str,
 ) -> Response {
-    let err = ApiGatewayGatewayError::resource_exhausted("throttling limit exceeded")
-        .with_quota_violation("throttling", "limit exceeded")
-        .create();
+    let err =
+        ApiGatewayGatewayError::resource_exhausted(format!("throttling limit exceeded ({kind})"))
+            .with_quota_violation("throttling", format!("{kind} limit exceeded"));
+    let err = match retry_after_seconds {
+        Some(secs) => err.with_quota_violation_retry_after_seconds(secs).create(),
+        None => err.create(),
+    };
     let mut response = err.into_response();
     if let Ok(code) = StatusCode::from_u16(status) {
         *response.status_mut() = code;

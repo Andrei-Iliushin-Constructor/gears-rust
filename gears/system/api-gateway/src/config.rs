@@ -131,7 +131,14 @@ pub struct ApiGatewayConfig {
     /// to bypass pre-auth IP limits. When set to `n >= 1`, the client IP is
     /// taken from the `X-Forwarded-For` entry `n` positions from the right (the
     /// value written by the outermost trusted proxy), which an untrusted client
-    /// cannot forge.
+    /// cannot forge. When `X-Forwarded-For` is absent or too short, the
+    /// immediate peer's `X-Real-IP` is used under the same trust assumption.
+    ///
+    /// Deployment requirement for `n >= 1`: the gateway must not be reachable
+    /// except through the trusted proxies, and those proxies must overwrite or
+    /// append the forwarding headers rather than pass client values through.
+    /// The gateway does not verify the peer address; a directly reachable
+    /// gateway lets a client choose its own throttling key.
     #[serde(default)]
     pub trusted_proxy_hops: usize,
 }

@@ -275,6 +275,12 @@ async fn test_rate_limit_returns_canonical_problem_with_headers() {
         .expect("violations must be present");
     assert_eq!(violations.len(), 1);
     assert_eq!(violations[0]["subject"], "throttling");
+    assert_eq!(violations[0]["description"], "rate_limit limit exceeded");
+    assert!(
+        violations[0]["retry_after_seconds"].is_number(),
+        "retry_after_seconds must be a number: {:?}",
+        violations[0]
+    );
 }
 
 #[tokio::test]

@@ -22,7 +22,10 @@ fn op(method: Method, path: &str, throttling: Option<ThrottlingSpec>) -> Operati
         request_body: None,
         responses: vec![],
         handler_id: "test".to_owned(),
-        authenticated: false,
+        // Identity zones need an authenticated operation; IP zones do not care.
+        authenticated: throttling
+            .as_ref()
+            .is_some_and(|t| t.require_security_context),
         exposed: true,
         throttling,
         allowed_request_content_types: None,
@@ -248,10 +251,150 @@ fn client_ip_trusted_proxy_falls_back_when_xff_short_or_invalid() {
 }
 
 #[test]
-fn compute_key_identity_uses_subject_or_anonymous() {
-    // No SecurityContext present → anonymous.
+fn compute_key_identity_requires_security_context() {
+    // No SecurityContext present → None (invariant violation, not "anonymous").
     let req = Request::builder().body(Body::empty()).unwrap();
-    assert_eq!(compute_key(KeyType::Identity, &req, 0), "anonymous");
+    assert_eq!(compute_key(KeyType::Identity, &req, 0), None);
+    // IP keys never depend on a context.
+    assert_eq!(
+        compute_key(KeyType::Ip, &req, 0).as_deref(),
+        Some("unknown")
+    );
+}
+
+#[test]
+fn identity_zone_rejects_anonymous_operation_and_auth_disabled() {
+    let mut cfg = cfg_with_rate("id", rate_zone_cfg(10, 10, KeyType::Identity));
+    let mut anon = op(Method::GET, "/x", Some(thr("id", "", true)));
+    anon.authenticated = false;
+    let err = ThrottlingMap::from_specs(&[anon], &cfg)
+        .err()
+        .expect("should error")
+        .to_string();
+    assert!(err.contains("allows anonymous access"), "{err}");
+
+    cfg.auth_disabled = true;
+    let authed = op(Method::GET, "/x", Some(thr("id", "", true)));
+    let err = ThrottlingMap::from_specs(&[authed], &cfg)
+        .err()
+        .expect("should error")
+        .to_string();
+    assert!(err.contains("auth_disabled=true"), "{err}");
+}
+
+#[tokio::test]
+async fn identity_zone_without_context_is_internal_error() {
+    let cfg = cfg_with_rate("id", rate_zone_cfg(10, 10, KeyType::Identity));
+    let specs = vec![op(Method::GET, "/x", Some(thr("id", "", true)))];
+    let map = ThrottlingMap::from_specs(&specs, &cfg).unwrap();
+    let app = Router::new()
+        .route("/x", get(|| async { "ok" }))
+        .layer(axum::middleware::from_fn(
+            move |req: Request, next: Next| {
+                let map = map.clone();
+                async move { throttling_middleware(map, req, next).await }
+            },
+        ));
+    // No SecurityContext in extensions: the zone invariant is violated.
+    let resp = app
+        .oneshot(Request::builder().uri("/x").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[test]
+fn mixed_dry_run_and_enforce_on_one_zone_is_rejected() {
+    let cfg = cfg_with_rate("ip", rate_zone_cfg(10, 10, KeyType::Ip));
+    let mixed = vec![
+        op(Method::GET, "/a", Some(thr("ip", "", false))),
+        op(Method::GET, "/b", Some(thr_dry("ip", ""))),
+    ];
+    let err = build_maps(&mixed, &cfg)
+        .err()
+        .expect("should error")
+        .to_string();
+    assert!(err.contains("all dry-run or all enforced"), "{err}");
+
+    let same = vec![
+        op(Method::GET, "/a", Some(thr_dry("ip", ""))),
+        op(Method::GET, "/b", Some(thr_dry("ip", ""))),
+    ];
+    assert!(build_maps(&same, &cfg).is_ok());
+}
+
+#[tokio::test]
+async fn retry_after_rounds_subsecond_wait_up() {
+    // rps=2, burst=1: the wait after one hit is ~500 ms, the header must say 1.
+    let cfg = cfg_with_rate("ip", rate_zone_cfg(2, 1, KeyType::Ip));
+    let specs = vec![op(Method::GET, "/x", Some(thr("ip", "", false)))];
+    let map = ThrottlingMapNoAuth::from_specs(&specs, &cfg).unwrap();
+    let app = Router::new()
+        .route("/x", get(|| async { "ok" }))
+        .layer(axum::middleware::from_fn(
+            move |req: Request, next: Next| {
+                let map = map.clone();
+                async move { throttling_no_auth_middleware(map, req, next).await }
+            },
+        ));
+    let req = || Request::builder().uri("/x").body(Body::empty()).unwrap();
+    assert_eq!(
+        app.clone().oneshot(req()).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let second = app.oneshot(req()).await.unwrap();
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        second
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+}
+
+#[tokio::test]
+async fn dry_run_in_flight_does_not_wait_for_backlog() {
+    // in_flight_limit=1 held by a test handle, backlog would wait 500 ms:
+    // dry-run must serve at once instead.
+    let mut zone = inflight_zone_cfg(1, KeyType::Ip, vec![]);
+    zone.backlog_limit = 1;
+    zone.backlog_timeout = Duration::from_millis(500);
+    let mut cfg = ApiGatewayConfig::default();
+    cfg.in_flight_limit_zones.insert("ifl".to_owned(), zone);
+    let specs = vec![op(Method::GET, "/x", Some(thr_dry("", "ifl")))];
+    let map = ThrottlingMapNoAuth::from_specs(&specs, &cfg).unwrap();
+    let inflight_zone = Arc::clone(
+        map.inner.routes[&(Method::GET, "/x".to_owned())]
+            .inflight_zone
+            .as_ref()
+            .unwrap(),
+    );
+    let held = inflight_zone
+        .gate("unknown")
+        .unwrap()
+        .try_acquire()
+        .unwrap();
+
+    let app = Router::new()
+        .route("/x", get(|| async { "ok" }))
+        .layer(axum::middleware::from_fn(
+            move |req: Request, next: Next| {
+                let map = map.clone();
+                async move { throttling_no_auth_middleware(map, req, next).await }
+            },
+        ));
+    let started = std::time::Instant::now();
+    let resp = app
+        .oneshot(Request::builder().uri("/x").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        started.elapsed() < Duration::from_millis(100),
+        "dry-run must not wait in the backlog"
+    );
+    drop(held);
 }
 
 #[tokio::test]
