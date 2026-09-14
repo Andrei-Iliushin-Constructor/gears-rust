@@ -10,7 +10,7 @@ Contributions are welcome across the project: new gears, bug fixes, documentatio
 
 ## Contribute to the framework
 
-- **[Cross-platform setup](../build-with-gears/prepare-environment/)** — clean installation on macOS, Linux, or Windows.
+- **[Cross-platform setup](../build-with-gears/#prepare-environment)** — clean installation on macOS, Linux, or Windows.
 - **[Development setup](./development-setup/)** — cloning with submodules and building.
 - **[Code contribution guide](./code-contribution-guide/)** — branch, commit (with DCO sign-off), PR, and review workflow.
 - **[Spec-driven workflow (SDD + Studio)](./spec-driven-workflow/)** — the specification templates and Constructor Studio.
