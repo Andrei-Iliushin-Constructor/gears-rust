@@ -259,6 +259,48 @@ pub enum PreparedUnit {
     Unchanged(Arc<UnchangedCandidate>),
 }
 
+/// Inputs for applying a prepared registration in the caller's transaction.
+#[domain_model]
+pub(super) struct CommitRequest<'a> {
+    pub prepared: &'a PreparedUnit,
+    pub precondition: Precondition,
+    pub now: OffsetDateTime,
+    pub limits: Limits,
+    pub metrics: &'a Arc<dyn AdmissionMetrics>,
+}
+
+/// Select the commit from the stored precondition for both execution modes.
+/// The caller supplies either persistent stores or the dry-run view, and owns
+/// the transaction boundary and any retries.
+pub(super) async fn commit_prepared_in(
+    stores: &dyn Stores,
+    tx: &DbTx<'_>,
+    scope: &AccessScope,
+    request: CommitRequest<'_>,
+) -> Result<Result<RevisionCommit, ItemFailure>, WorkerError> {
+    let CommitRequest {
+        prepared,
+        precondition,
+        now,
+        limits,
+        metrics,
+    } = request;
+    let unit = match prepared {
+        PreparedUnit::Unchanged(candidate) => {
+            return unchanged::commit(stores, tx, scope, candidate, now).await;
+        }
+        PreparedUnit::Evaluated(unit) => unit,
+    };
+    match precondition {
+        Precondition::MustNotExist => commit_creation(stores, tx, scope, unit, &limits, now)
+            .await
+            .map(|result| result.map(RevisionCommit::Admitted)),
+        Precondition::Version(expected) => {
+            commit_revision(stores, tx, scope, unit, expected, &limits, now, metrics).await
+        }
+    }
+}
+
 /// Stored inputs for one evaluation, named to prevent positional mix-ups.
 #[domain_model]
 #[derive(Clone, Copy, Debug)]

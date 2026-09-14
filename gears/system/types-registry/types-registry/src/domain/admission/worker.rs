@@ -13,47 +13,28 @@ use std::time::Instant;
 
 use time::OffsetDateTime;
 use toolkit_db::secure::{AccessScope, ScopeError};
-use toolkit_db::{DBProvider, DbError, DbTx};
+use toolkit_db::{DBProvider, DbError};
 use toolkit_macros::domain_model;
 use tracing::{Instrument, Span};
 use uuid::Uuid;
 
+use super::batch::{self, order_deletions};
 use super::deletion;
 pub use super::errors::{ItemFailure, WorkerError};
-use super::graph::{
-    BatchCandidate, BatchOrder, BlockKind, Blocker, DependencyLink, order_batch,
-    order_deletion_batch,
-};
+use super::graph::BatchOrder;
 use super::publish;
 use super::revision::{CommittedUnit, RevisionCommit};
 use super::simulate::{self, Predicted};
-use super::unchanged;
-use super::unit::{EvaluationTarget, PreparedUnit, commit_creation, commit_revision, evaluate};
+pub use super::tuning::Tuning;
+use super::tuning::effective_force;
+use super::unit::{CommitRequest, EvaluationTarget, PreparedUnit, commit_prepared_in, evaluate};
 use super::vector::VectorDrift;
-use crate::config::{Limits, WorkerSettings};
 use crate::domain::admission::AdmissionFailureReason;
 use crate::domain::admission::Precondition;
 use crate::domain::enums::{OperationItemStatus, OperationKind, OperationStatus};
 use crate::domain::ports::metrics::{AdmissionMetrics, RefusalStage, TerminalStatus};
 use crate::domain::ports::{OperationItemRow, OperationRow, Stores, commit_write, snapshot_read};
 use crate::observability;
-
-/// The configuration one admission pass obeys, carried together.
-#[derive(Clone, Copy)]
-pub struct Tuning<'a> {
-    pub limits: &'a Limits,
-    pub worker: &'a WorkerSettings,
-    pub metrics: &'a Arc<dyn AdmissionMetrics>,
-    /// Deployment waiver setting for this pass, including retries and revalidation.
-    /// See [`effective_force`].
-    pub allow_compatibility_force: bool,
-}
-
-/// Clear a stored waiver when the deployment disables it. The candidate then
-/// receives the ordinary verdict, and provenance records the cleared flag.
-const fn effective_force(item_forced: bool, tuning: &Tuning<'_>) -> bool {
-    item_forced && tuning.allow_compatibility_force
-}
 
 /// What one pass over an operation produced.
 #[domain_model]
@@ -169,43 +150,28 @@ async fn commit_pass(
     let order = if operation.kind == OperationKind::Deletion {
         deletion_order(stores, db, scope, items).await?
     } else {
-        let batch: Vec<BatchCandidate> = items.iter().map(batch_candidate).collect();
-        order_batch(&batch)
+        batch::registration_order(items)
     };
-    // Indexed by position in `items`, so the report keeps submission order while
-    // the work follows dependency order.
-    let mut outcomes: Vec<Option<ItemOutcome>> = vec![None; items.len()];
-
-    // A cycle member is refused without being evaluated: it has no resolved form,
-    // so there is nothing to evaluate it against.
-    for member in order.cyclic() {
-        let item = &items[member.index];
-        let failure = ItemFailure::new(AdmissionFailureReason::InvalidSchema, member.message());
-        outcomes[member.index] = Some(
-            refuse_unevaluated(stores, db, scope, tuning, operation_id, item, failure, now).await?,
-        );
-    }
-
-    for &index in order.order() {
-        let item = &items[index];
-        outcomes[index] = Some(
-            match blocked_by(&order, index, |i| {
-                outcomes[i].as_ref().map(|outcome| outcome.status)
-            }) {
-                Some(blocker) => {
-                    let failure = blocked_failure(blocker, &items[blocker.index].gts_id);
+    let outcomes = batch::run_ordered(
+        items,
+        &order,
+        |index, refusal| async move {
+            let item = &items[index];
+            match refusal {
+                Some(failure) => {
                     refuse_unevaluated(stores, db, scope, tuning, operation_id, item, failure, now)
-                        .await?
+                        .await
                 }
-                // Instrument each item without splitting `process_item` to own the span.
                 None => {
                     process_item(stores, db, scope, tuning, operation_id, item, now)
                         .instrument(unit_span(operation_id, item))
-                        .await?
+                        .await
                 }
-            },
-        );
-    }
+            }
+        },
+        |outcome| outcome.status,
+    )
+    .await?;
 
     mark_completed(stores, db, scope, operation_id, now).await?;
 
@@ -225,10 +191,8 @@ async fn commit_pass(
 
 /// Predict one dry-run batch and record what it predicted.
 ///
-/// Split out of [`run_operation_inner`] because it shares only its inputs with
-/// the committing path: there is no ordering loop here, no commit transaction
-/// and no separate completion — publication does all three of the last one's
-/// jobs at once (see [`publish`]).
+/// Simulation uses the shared batch traversal inside one snapshot; publication
+/// then records all outcomes and completion atomically (see [`publish`]).
 async fn dry_run_pass(
     stores: &Arc<dyn Stores>,
     db: &DBProvider<WorkerError>,
@@ -287,19 +251,6 @@ async fn dry_run_pass(
     })
 }
 
-/// The ordering's view of one stored item. An unparsable payload yields no
-/// content and therefore no edge — the item's own evaluation refuses it with
-/// `invalid_document`, which is a better message than anything this layer has.
-pub(super) fn batch_candidate(item: &OperationItemRow) -> BatchCandidate {
-    BatchCandidate {
-        gts_id: item.gts_id.clone(),
-        content: item
-            .request_payload
-            .as_deref()
-            .and_then(|payload| serde_json::from_str(payload).ok()),
-    }
-}
-
 /// Read deletion order in one snapshot: resolve candidate IDs, then their edges.
 /// Missing entities contribute no edges; their commits fail `precondition_failed`.
 async fn deletion_order(
@@ -317,33 +268,6 @@ async fn deletion_order(
         Box::pin(async move { order_deletions(stores_tx.as_ref(), tx, &scope_tx, &gts_ids).await })
     })
     .await
-}
-
-/// [`deletion_order`] within the caller's snapshot, shared by the dry-run batch.
-///
-/// # Errors
-/// Propagates either read failure.
-pub(super) async fn order_deletions(
-    stores: &dyn Stores,
-    tx: &DbTx<'_>,
-    scope: &AccessScope,
-    gts_ids: &[String],
-) -> Result<BatchOrder, WorkerError> {
-    let rows = stores.find_by_gts_ids(tx, scope, gts_ids).await?;
-    let entity_ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
-    let named: HashMap<i64, String> = rows.into_iter().map(|row| (row.id, row.gts_id)).collect();
-    let links = stores
-        .edges_within(tx, scope, &entity_ids)
-        .await?
-        .into_iter()
-        .filter_map(|edge| {
-            Some(DependencyLink {
-                dependant: named.get(&edge.from_entity_id)?.clone(),
-                target: named.get(&edge.to_entity_id)?.clone(),
-            })
-        })
-        .collect::<Vec<_>>();
-    Ok(order_deletion_batch(gts_ids, &links))
 }
 
 fn unit_span(operation_id: Uuid, item: &OperationItemRow) -> Span {
@@ -385,36 +309,6 @@ async fn refuse_unevaluated(
     )
     .instrument(unit_span(operation_id, item))
     .await
-}
-
-/// Find the first failed in-batch blocker, or `None`.
-/// Blocking propagates through failed outcomes in topological order; cycle
-/// members are refused first. Only a self-blocker can have no outcome yet.
-pub(super) fn blocked_by(
-    order: &BatchOrder,
-    index: usize,
-    decided: impl Fn(usize) -> Option<OperationItemStatus>,
-) -> Option<Blocker> {
-    order
-        .blockers(index)
-        .iter()
-        .copied()
-        .find(|blocker| decided(blocker.index) == Some(OperationItemStatus::Failed))
-}
-
-/// The refusal a blocked candidate carries, naming the candidate that blocked it.
-pub(super) fn blocked_failure(blocker: Blocker, target: &str) -> ItemFailure {
-    let edge = match blocker.kind {
-        BlockKind::Predecessor => "the preceding minor",
-        BlockKind::Dependency => "the selected dependency",
-    };
-    ItemFailure::new(
-        blocker.kind.reason(),
-        format!(
-            "{edge} '{target}' was submitted in the same batch and did not succeed, so this \
-             candidate was not evaluated and nothing was committed for it"
-        ),
-    )
 }
 
 /// The `DbErr` inside a [`WorkerError`], for the transaction retry helper.
@@ -470,16 +364,6 @@ async fn prepare(
     Ok(prepared)
 }
 
-/// Groups the per-item commit inputs so the transaction boundary stays readable
-/// without crossing Clippy's argument-count threshold.
-struct CommitRequest<'a> {
-    prepared: &'a PreparedUnit,
-    item: &'a OperationItemRow,
-    now: OffsetDateTime,
-    limits: Limits,
-    metrics: &'a Arc<dyn AdmissionMetrics>,
-}
-
 /// Run the serialized commit transaction (SPEC step 4b).
 ///
 /// Its first statement claims `entity_write_order`, replacing the former family locks.
@@ -491,12 +375,11 @@ async fn commit_prepared(
 ) -> Result<Result<RevisionCommit, ItemFailure>, WorkerError> {
     let CommitRequest {
         prepared,
-        item,
+        precondition,
         now,
         limits,
         metrics,
     } = request;
-    let precondition = item.precondition;
     // A short READ COMMITTED transaction containing only rechecks and
     // writes. The `Arc` keeps transaction retries from cloning the artifacts.
     //
@@ -523,39 +406,19 @@ async fn commit_prepared(
             let tx_stores = Arc::clone(&tx_stores);
             let tx_metrics = Arc::clone(&tx_metrics);
             Box::pin(async move {
-                let unit = match &prepared {
-                    PreparedUnit::Unchanged(candidate) => {
-                        return unchanged::commit(
-                            tx_stores.as_ref(),
-                            tx,
-                            &tx_scope,
-                            candidate,
-                            now,
-                        )
-                        .await;
-                    }
-                    PreparedUnit::Evaluated(unit) => unit,
-                };
-                match precondition {
-                    Precondition::MustNotExist => {
-                        commit_creation(tx_stores.as_ref(), tx, &tx_scope, unit, &tx_limits, now)
-                            .await
-                            .map(|r| r.map(RevisionCommit::Admitted))
-                    }
-                    Precondition::Version(expected) => {
-                        commit_revision(
-                            tx_stores.as_ref(),
-                            tx,
-                            &tx_scope,
-                            unit,
-                            expected,
-                            &tx_limits,
-                            now,
-                            &tx_metrics,
-                        )
-                        .await
-                    }
-                }
+                commit_prepared_in(
+                    tx_stores.as_ref(),
+                    tx,
+                    &tx_scope,
+                    CommitRequest {
+                        prepared: &prepared,
+                        precondition,
+                        now,
+                        limits: tx_limits,
+                        metrics: &tx_metrics,
+                    },
+                )
+                .await
             })
         })
         .await
@@ -790,7 +653,7 @@ async fn process_item(
             scope,
             CommitRequest {
                 prepared: &prepared,
-                item,
+                precondition: item.precondition,
                 now,
                 limits: *tuning.limits,
                 metrics: tuning.metrics,

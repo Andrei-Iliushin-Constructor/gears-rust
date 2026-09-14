@@ -4,7 +4,7 @@
 //! terminalization clears `request_payload`, so partial publication would prevent
 //! whole-batch recovery. Failure preserves payloads for redelivery to re-predict.
 //!
-//! Release the snapshot first to avoid self-deadlock on SQLite's shared connection.
+//! Release the snapshot first to avoid self-deadlock on `SQLite's` shared connection.
 //! Real commits can recover item-by-item because their entity writes are durable.
 
 use std::sync::Arc;

@@ -86,7 +86,7 @@ pub async fn test_db_file(path: &std::path::Path) -> Arc<DBProvider<DbError>> {
     provider_for(&dsn, 4).await
 }
 
-/// File-backed SQLite in WAL mode, allowing writers to commit during an open
+/// File-backed `SQLite` in WAL mode, allowing writers to commit during an open
 /// read snapshot. Matches the interleaving tested under PostgreSQL/MySQL
 /// `REPEATABLE READ`; rollback journaling would block the writer.
 pub async fn test_db_file_wal(path: &std::path::Path) -> Arc<DBProvider<DbError>> {

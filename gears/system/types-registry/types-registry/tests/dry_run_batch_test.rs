@@ -296,7 +296,7 @@ fn assert_predicted_fields(items: &[ItemOutcome]) {
 // ---------------------------------------------------------------------------
 
 /// Regression: a referrer must see the base admitted earlier in the batch.
-/// The one-connection SQLite pool also exposes nested-transaction deadlocks;
+/// The one-connection `SQLite` pool also exposes nested-transaction deadlocks;
 /// the concurrent-writer test separately verifies snapshot coherence.
 #[tokio::test]
 async fn a_dry_run_admits_a_referrer_whose_base_the_same_batch_creates() {
@@ -625,7 +625,7 @@ const SUBJECT_TWO: &str = gts_id!("cf.core.dryb.subjtwo.v1~");
 /// candidate's subject. The prediction must still see version 1 and admit it;
 /// a fresh snapshot would see version 2 and fail `precondition_failed`.
 ///
-/// SQLite WAL lets the writer commit while the snapshot is held. The backend
+/// `SQLite` WAL lets the writer commit while the snapshot is held. The backend
 /// suite repeats this under PostgreSQL/MySQL `REPEATABLE READ`.
 #[tokio::test]
 async fn a_dry_run_predicts_the_batch_against_the_state_it_started_from() {

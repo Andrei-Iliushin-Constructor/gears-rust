@@ -16,15 +16,12 @@ use toolkit_macros::domain_model;
 use tracing::Instrument;
 use uuid::Uuid;
 
+use super::batch;
 use super::deletion;
 use super::errors::{ItemFailure, WorkerError};
-use super::graph::{BatchCandidate, BatchOrder};
-use super::revision::RevisionCommit;
-use super::unchanged;
-use super::unit::{EvaluationTarget, PreparedUnit, commit_creation, commit_revision, evaluate_in};
+use super::tuning::Tuning;
+use super::unit::{CommitRequest, EvaluationTarget, PreparedUnit, commit_prepared_in, evaluate_in};
 use super::view::{AdmissionView, ItemOutcomeWrite};
-use super::worker::{Tuning, batch_candidate, blocked_by, blocked_failure, order_deletions};
-use crate::domain::admission::graph::order_batch;
 use crate::domain::admission::{AdmissionFailureReason, Precondition};
 use crate::domain::enums::{OperationItemStatus, OperationKind};
 use crate::domain::ports::{OperationItemRow, OperationRow, Stores, snapshot_read};
@@ -107,46 +104,50 @@ pub(super) async fn simulate_batch(
             // The two kinds order by opposite relations, exactly as the
             // committing pass orders them — and a deletion's edges are read
             // through this batch's own snapshot rather than a second one.
-            let order: BatchOrder = if kind == OperationKind::Deletion {
+            let order = if kind == OperationKind::Deletion {
                 let gts_ids: Vec<String> = items.iter().map(|item| item.gts_id.clone()).collect();
-                order_deletions(&view, tx, &scope, &gts_ids).await?
+                batch::order_deletions(&view, tx, &scope, &gts_ids).await?
             } else {
-                let batch: Vec<BatchCandidate> = items.iter().map(batch_candidate).collect();
-                order_batch(&batch)
+                batch::registration_order(&items)
             };
-            let mut predictions: Vec<Option<Predicted>> = vec![None; items.len()];
-
-            // A cycle member has no resolved form, so there is nothing to
-            // evaluate it against — the committing pass's reason, unchanged.
-            for member in order.cyclic() {
-                predictions[member.index] = Some(Predicted::Refused(ItemFailure::new(
-                    AdmissionFailureReason::InvalidSchema,
-                    member.message(),
-                )));
-            }
-
-            for &index in order.order() {
-                let item = &items[index];
-                let blocker = blocked_by(&order, index, |i| {
-                    predictions[i].as_ref().map(Predicted::status)
-                });
-                predictions[index] = Some(match blocker {
-                    Some(blocker) => {
-                        Predicted::Refused(blocked_failure(blocker, &items[blocker.index].gts_id))
+            let predictions = batch::run_ordered(
+                &items,
+                &order,
+                |index, refusal| {
+                    let view = &view;
+                    let scope = &scope;
+                    let limits = &limits;
+                    let metrics = &metrics;
+                    let item = &items[index];
+                    async move {
+                        match refusal {
+                            Some(failure) => Ok(Predicted::Refused(failure)),
+                            None => {
+                                simulate_item(
+                                    view,
+                                    tx,
+                                    scope,
+                                    limits,
+                                    metrics,
+                                    allow_force,
+                                    item,
+                                    now,
+                                )
+                                .instrument(observability::unit_span(
+                                    operation_id,
+                                    &item.gts_id,
+                                    item.kind,
+                                    item.dry_run,
+                                    item.id,
+                                ))
+                                .await
+                            }
+                        }
                     }
-                    None => {
-                        simulate_item(&view, tx, &scope, &limits, &metrics, allow_force, item, now)
-                            .instrument(observability::unit_span(
-                                operation_id,
-                                &item.gts_id,
-                                item.kind,
-                                item.dry_run,
-                                item.id,
-                            ))
-                            .await?
-                    }
-                });
-            }
+                },
+                Predicted::status,
+            )
+            .await?;
 
             // `order_batch` partitions the batch into the ordered and the cyclic,
             // so every position is filled.
@@ -227,9 +228,8 @@ async fn simulate_item(
 
 /// Evaluate and commit one candidate against the view.
 ///
-/// The mirror of `process_item`'s body without its revalidation loop, and with
-/// the same rule choosing the commit: the item's **stored precondition**, never
-/// the candidate's shape.
+/// Evaluation stays in the batch snapshot; `commit_prepared_in` then selects
+/// the same commit as the persistent path from the stored precondition.
 #[expect(
     clippy::too_many_arguments,
     reason = "the evaluation context the committing `process_item` also takes; the two are read side by side and keeping the shapes identical is the point"
@@ -278,19 +278,19 @@ async fn predict_commit(
     let hit = matches!(&prepared, PreparedUnit::Unchanged(_));
     metrics.unchanged_probe(hit);
 
-    let committed = match &prepared {
-        PreparedUnit::Unchanged(candidate) => {
-            unchanged::commit(view, tx, scope, candidate, now).await
-        }
-        PreparedUnit::Evaluated(unit) => match item.precondition {
-            Precondition::MustNotExist => commit_creation(view, tx, scope, unit, limits, now)
-                .await
-                .map(|result| result.map(RevisionCommit::Admitted)),
-            Precondition::Version(expected) => {
-                commit_revision(view, tx, scope, unit, expected, limits, now, metrics).await
-            }
+    let committed = commit_prepared_in(
+        view,
+        tx,
+        scope,
+        CommitRequest {
+            prepared: &prepared,
+            precondition: item.precondition,
+            now,
+            limits: *limits,
+            metrics,
         },
-    }?;
+    )
+    .await?;
     // The commit path recorded the item write itself; a registration's terminal
     // values are its to decide.
     Ok(committed.map(|commit| PredictedCommit {

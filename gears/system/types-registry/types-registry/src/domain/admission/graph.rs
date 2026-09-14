@@ -285,10 +285,17 @@ pub fn order_batch(candidates: &[BatchCandidate]) -> BatchOrder {
         })
         .collect();
 
-    let mut cyclic = inlined_cycles(&inlined, candidates);
-    let refused: BTreeSet<usize> = cyclic.iter().map(|member| member.index).collect();
-    let (order, unorderable) = topological(&blockers, &refused, count);
-    cyclic.extend(unorderable_cycles(&unorderable, candidates));
+    let mut cyclic = cycle_members(&inlined, candidates, CycleKind::Inlined);
+    let mut refused: BTreeSet<usize> = cyclic.iter().map(|member| member.index).collect();
+    let (mut order, unorderable) = topological(&blockers, &refused, count);
+    if !unorderable.is_empty() {
+        let cycles = unorderable_cycles(&unorderable, &blockers, candidates);
+        refused.extend(cycles.iter().map(|member| member.index));
+        cyclic.extend(cycles);
+        // Kahn's residue also contains downstream candidates. Once the actual
+        // cycle members are refused, place their dependants for blocked outcomes.
+        (order, _) = topological(&blockers, &refused, count);
+    }
     cyclic.sort_by_key(|member| member.index);
 
     BatchOrder {
@@ -298,31 +305,45 @@ pub fn order_batch(candidates: &[BatchCandidate]) -> BatchOrder {
     }
 }
 
-/// Every candidate on a cycle of the `$ref`-and-derivation graph.
-fn inlined_cycles(inlined: &[Vec<usize>], candidates: &[BatchCandidate]) -> Vec<CyclicCandidate> {
+/// Every candidate on a cycle, grouped by strongly connected component.
+fn cycle_members(
+    adjacency: &[Vec<usize>],
+    candidates: &[BatchCandidate],
+    kind: CycleKind,
+) -> Vec<CyclicCandidate> {
     let mut members = Vec::new();
-    for component in strongly_connected(inlined) {
+    for component in strongly_connected(adjacency) {
         // A one-node component is a cycle only through a self-referential edge,
         // which `strongly_connected` cannot distinguish from an ordinary node.
         let is_cycle = component.len() > 1
             || component
                 .first()
-                .is_some_and(|&only| inlined[only].contains(&only));
+                .is_some_and(|&only| adjacency[only].contains(&only));
         if !is_cycle {
             continue;
         }
-        members.extend(describe(&component, candidates, CycleKind::Inlined));
+        members.extend(describe(&component, candidates, kind));
     }
     members
 }
 
-/// The residue: candidates the ordering could not place once the inlined cycles
-/// were taken out. One group, because nothing here distinguishes the loops.
-fn unorderable_cycles(remaining: &[usize], candidates: &[BatchCandidate]) -> Vec<CyclicCandidate> {
-    if remaining.is_empty() {
-        return Vec::new();
+/// Cycles in the residual ordering graph, excluding already refused inlined
+/// cycles and the acyclic candidates that merely depend on an ordering cycle.
+fn unorderable_cycles(
+    remaining: &[usize],
+    blockers: &[Vec<Blocker>],
+    candidates: &[BatchCandidate],
+) -> Vec<CyclicCandidate> {
+    let remaining: BTreeSet<usize> = remaining.iter().copied().collect();
+    let mut adjacency = vec![Vec::new(); candidates.len()];
+    for &index in &remaining {
+        adjacency[index] = blockers[index]
+            .iter()
+            .filter(|blocker| remaining.contains(&blocker.index))
+            .map(|blocker| blocker.index)
+            .collect();
     }
-    describe(remaining, candidates, CycleKind::Unorderable)
+    cycle_members(&adjacency, candidates, CycleKind::Unorderable)
 }
 
 /// One [`CyclicCandidate`] per member, each carrying the same sorted member list.

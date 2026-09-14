@@ -412,7 +412,10 @@ the exception both ways: types-registry accepts and admits it itself, inline, wi
    because it has no resolved form. The in-batch graph is not acyclic by construction — the
    overlay lets candidates see each other — so the ordering detects a cycle and fails its
    members with `invalid_schema`. Past that refusal there is no condensation step and no
-   atomic group.
+   atomic group. If predecessor edges still prevent ordering, identify the actual cyclic
+   components in the remaining ordering graph and refuse only their members. Candidates
+   downstream of either kind of cycle remain ordered and receive `blocked_by_dependency`
+   or `blocked_by_predecessor` according to their failed blocker; they are not cycle members.
 3. Build the unit's transient `gts-rust` store (D2): the candidates, plus the transitive
    closure of what they consume, read `gts_id`-sorted from the database. Evaluate outside
    any transaction against it: resolution, compat vs

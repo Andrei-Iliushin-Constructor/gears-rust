@@ -9,7 +9,9 @@
 use serde_json::{Value, json};
 use toolkit_gts::gts_id;
 
-use super::{BatchCandidate, BlockKind, DependencyLink, order_batch, order_deletion_batch};
+use super::{
+    BatchCandidate, BlockKind, CycleKind, DependencyLink, order_batch, order_deletion_batch,
+};
 
 const ROOT: &str = gts_id!("cf.core.batch.root.v1~");
 const DERIVED: &str = gts_id!("cf.core.batch.root.v1~cf.core.batch.leaf.v1~");
@@ -236,6 +238,78 @@ fn a_cycle_closed_only_by_the_predecessor_edge_refuses_both() {
         vec![V1_0.to_owned(), V1_1.to_owned()]
     );
     assert!(order_batch(&candidates).order().is_empty());
+}
+
+#[test]
+fn a_predecessor_cycle_leaves_its_dependants_ordered() {
+    let candidates = vec![
+        candidate(ROOT, refs(ROOT, V1_0)),
+        candidate(OTHER, refs(OTHER, ROOT)),
+        candidate(V1_0, refs(V1_0, V1_1)),
+        candidate(V1_1, schema(V1_1, json!({}))),
+        candidate(OUTSIDE, schema(OUTSIDE, json!({}))),
+    ];
+    let order = order_batch(&candidates);
+
+    assert_eq!(order.order(), &[0, 1, 4]);
+    assert_eq!(order.cyclic().len(), 2);
+    for (member, index) in order.cyclic().iter().zip([2, 3]) {
+        assert_eq!(member.index, index);
+        assert_eq!(member.kind, CycleKind::Unorderable);
+        assert_eq!(member.cycle, [V1_0, V1_1]);
+    }
+}
+
+#[test]
+fn separate_predecessor_cycles_report_their_own_members() {
+    const SECOND_ZERO: &str = gts_id!("cf.core.batch.second.v1.0~");
+    const SECOND_ONE: &str = gts_id!("cf.core.batch.second.v1.1~");
+    let candidates = vec![
+        candidate(V1_0, refs(V1_0, V1_1)),
+        candidate(V1_1, schema(V1_1, json!({}))),
+        candidate(SECOND_ZERO, refs(SECOND_ZERO, SECOND_ONE)),
+        candidate(SECOND_ONE, schema(SECOND_ONE, json!({}))),
+    ];
+    let order = order_batch(&candidates);
+
+    assert!(order.order().is_empty());
+    assert_eq!(order.cyclic().len(), 4);
+    for (member, expected) in order.cyclic().iter().zip([
+        [V1_0, V1_1],
+        [V1_0, V1_1],
+        [SECOND_ZERO, SECOND_ONE],
+        [SECOND_ZERO, SECOND_ONE],
+    ]) {
+        assert_eq!(member.kind, CycleKind::Unorderable);
+        assert_eq!(member.cycle, expected);
+    }
+}
+
+#[test]
+fn an_inlined_cycle_does_not_absorb_a_minor_waiting_on_it() {
+    let candidates = vec![
+        candidate(
+            V1_0,
+            schema(
+                V1_0,
+                json!({ "allOf": [
+                { "$ref": format!("gts://{ROOT}") },
+                { "$ref": format!("gts://{V1_1}") },
+            ] }),
+            ),
+        ),
+        candidate(ROOT, refs(ROOT, V1_0)),
+        candidate(V1_1, schema(V1_1, json!({}))),
+    ];
+    let order = order_batch(&candidates);
+
+    assert_eq!(order.order(), &[2]);
+    assert_eq!(order.cyclic().len(), 2);
+    for member in order.cyclic() {
+        assert_eq!(member.kind, CycleKind::Inlined);
+        assert_eq!(member.cycle, [ROOT, V1_0]);
+    }
+    assert_eq!(order.blockers(2)[0].kind, BlockKind::Predecessor);
 }
 
 /// A candidate whose stored payload does not parse as its identifier's shape

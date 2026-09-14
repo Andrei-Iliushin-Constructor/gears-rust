@@ -492,6 +492,38 @@ async fn a_dry_run_blocks_a_dependant_and_lets_an_independent_candidate_through(
 const LOOP_ONE: &str = gts_id!("cf.core.dryp.loopone.v1~");
 const LOOP_TWO: &str = gts_id!("cf.core.dryp.looptwo.v1~");
 
+/// Only the two mutually waiting minors are cyclic. Their referrers and later
+/// minors carry blocked reasons in both the committing and predicting passes.
+#[tokio::test]
+async fn a_predecessor_cycle_blocks_its_dependants_in_both_modes() {
+    const MINOR_TWO: &str = gts_id!("cf.core.dryp.minor.v2.2~");
+    let (predicted, committed, _) = both_ways(
+        |_| async {},
+        vec![
+            creation(HOLDER, referencing(HOLDER, MINOR_ZERO)),
+            creation(BASE, referencing(BASE, HOLDER)),
+            creation(MINOR_TWO, schema(MINOR_TWO, "third minor")),
+            creation(MINOR_ZERO, referencing(MINOR_ZERO, MINOR_ONE)),
+            creation(MINOR_ONE, schema(MINOR_ONE, "second minor")),
+            creation(LONER, schema(LONER, "independent")),
+        ],
+    )
+    .await;
+
+    assert_agreed(
+        &predicted,
+        &committed,
+        &[
+            refused(HOLDER, AdmissionFailureReason::BlockedByDependency),
+            refused(BASE, AdmissionFailureReason::BlockedByDependency),
+            refused(MINOR_TWO, AdmissionFailureReason::BlockedByPredecessor),
+            refused(MINOR_ZERO, AdmissionFailureReason::InvalidSchema),
+            refused(MINOR_ONE, AdmissionFailureReason::InvalidSchema),
+            ok(LONER),
+        ],
+    );
+}
+
 /// A cycle is refused without being evaluated, in both modes, and the
 /// independent candidate beside it still progresses.
 #[tokio::test]

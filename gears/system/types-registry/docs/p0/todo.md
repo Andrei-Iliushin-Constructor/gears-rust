@@ -1748,22 +1748,6 @@ is untested; the deletion refusal itself is covered.
 
 ---
 
-### T20 follow-up — dry run without entity writes
-
-Implementation plan: [dry-run-plan.md](./dry-run-plan.md). Completed and reviewed before T20a.
-
-- [x] DR1: Batch-simulation contract and failing parity regressions, including false approval
-- [x] DR2: Coherent admission view and one passing vertical slice; coordinator reviews the seam
-- [x] DR3: Registration, revision/refresh and deletion parity; candidate layers discard on refusal
-- [x] DR4: Durable outcomes, replay/recovery and removal of rollback-only dry-run control flow
-- [x] DR5: SQLite/PostgreSQL/MySQL verification, architecture checks and coordinator review
-
-**Verification:** 871/871 gear tests; PostgreSQL/MySQL backend suite 36/36, no skipped tests.
-`make fmt`, `make clippy GEAR=types-registry` and `make dylint` passed. Dylint retains four
-existing DE1201 warnings in unrelated file-storage/simple-user-settings crates.
-
----
-
 ### - [ ] T20a: REST deletion and dry run
 
 **Description:** Expose single/batch deletion on `/v2/` with dry run on all mutations.

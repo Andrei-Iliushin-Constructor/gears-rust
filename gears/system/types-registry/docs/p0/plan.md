@@ -3,8 +3,6 @@
 Spec: [`SPEC.md`](./SPEC.md)
 Task list: [`todo.md`](./todo.md)
 
-Completed T20 correction: [dry-run implementation plan](./dry-run-plan.md), verified before T20a.
-
 > **Location note.** These three artifacts live with the gear they describe, in
 > `gears/system/types-registry/docs/p0/`, not in a repository-root `tasks/`. This is
 > deliberate: the monorepo holds many gears, and a shared root `tasks/` would collide

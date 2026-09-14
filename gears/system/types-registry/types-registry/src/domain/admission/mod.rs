@@ -13,6 +13,7 @@
 //! to have no database in scope at all.
 
 pub mod acceptance;
+mod batch;
 mod bounds;
 mod deletion;
 mod drift;
@@ -26,6 +27,7 @@ mod publish;
 pub mod refresh;
 pub mod revision;
 pub mod simulate;
+mod tuning;
 pub mod unit;
 pub mod vector;
 pub mod view;
