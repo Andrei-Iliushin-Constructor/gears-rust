@@ -6,6 +6,6 @@ sidebar:
   order: 2
 ---
 
-The canonical copy-pasteable instructions are in [Prepare environment](../../build-with-gears/prepare-environment/). They cover macOS, Linux, and Windows prerequisites, Rust and Cargo through rustup, and Constructor Studio.
+The canonical copy-pasteable instructions are in [Prepare environment](../../build-with-gears/#prepare-environment). They cover macOS, Linux, and Windows prerequisites, Rust and Cargo through rustup, and Constructor Studio.
 
 Continue with [Build and run](../../build-with-gears/) after preparing the environment.
