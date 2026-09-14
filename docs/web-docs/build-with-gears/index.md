@@ -10,34 +10,25 @@ This page incorporates the current repository quickstart. For the source quickst
 
 When you're ready to write code, continue to [Build your first gear](./your-first-gear/).
 
-## Prerequisites
+## Prepare environment
 
-- A recent **stable Rust toolchain** (`rustup` + `cargo`).
-- `git`, `make`, and `curl` available on your machine.
-- The Gears framework repository checked out locally.
-- Optional: build with `--features fips` when you need the FIPS-aware TLS provider path.
+Use the copy-pasteable [Prepare environment](./prepare-environment/) instructions for macOS, Linux, or Windows. They install Rust and Cargo through rustup, native build prerequisites, and Constructor Studio.
+
+## Build and run
 
 :::caution[No published crate yet]
 The example server is built from the framework repository. There is no crate to `cargo install` at this stage. Clone the repository and run the commands below from its root.
 :::
 
-## Clone the repository
-
 ```sh
 git clone --recurse-submodules https://github.com/constructorfabric/gears-rust
-```
-
-Run the following commands from the repository root.
-
-## Start the server
-
-```sh
-# With example gears such as tenant-resolver and users-info
-make example
-
-# Or minimal runtime with no example gears
+cd gears-rust
+make setup
+make build
 make quickstart
 ```
+
+`make quickstart` starts the minimal SQLite runtime. Use `make example` instead for example gears such as tenant-resolver and users-info.
 
 Both targets run `cf-gears-example-server` with `config/quickstart.yaml`. The server listens on `http://127.0.0.1:8087`.
 
