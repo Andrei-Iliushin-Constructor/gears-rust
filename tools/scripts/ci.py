@@ -203,14 +203,17 @@ def cmd_docker_pins(_args):
     channel = m.group(1)
     print(f"rust-toolchain.toml channel: {channel}")
 
-    dockerfiles = sorted(
-        os.path.join(root, name)
-        for root, dirs, files in os.walk(PROJECT_ROOT)
-        for name in files
-        if name.endswith("Dockerfile")
-        and ".git" not in root
-        and "target" not in root.split(os.sep)
-    )
+    # Prune rather than filter after the fact: `target/` alone is ~17 GB here, and
+    # os.walk would happily recurse all of it looking for Dockerfiles it cannot
+    # contain.
+    pruned = {".git", ".venv", "node_modules", "target"}
+    dockerfiles = []
+    for root, dirs, files in os.walk(PROJECT_ROOT):
+        dirs[:] = [d for d in dirs if d not in pruned]
+        dockerfiles.extend(
+            os.path.join(root, name) for name in files if name.endswith("Dockerfile")
+        )
+    dockerfiles.sort()
 
     problems = []
     checked = 0
@@ -591,6 +594,22 @@ def cmd_e2e(args):
     exit_code = result.returncode
 
     if args.docker and docker_env_started:
+        # Before `down`, not after: the teardown removes the containers, so a
+        # caller (CI step, human) has nothing left to read once we return.
+        if exit_code != 0:
+            step("Capturing docker-compose logs")
+            run_cmd_allow_fail(
+                [
+                    "docker",
+                    "compose",
+                    "-f",
+                    "testing/docker/docker-compose.yml",
+                    "logs",
+                    "--no-color",
+                    "--tail=400",
+                ]
+            )
+
         step("Stopping E2E docker-compose environment")
         run_cmd_allow_fail(
             [
