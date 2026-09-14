@@ -44,22 +44,15 @@ See also [REPO_PLAYBOOK](docs/REPO_PLAYBOOK.md) with the registry of repository-
 
 ## Quick Start
 
-### Prerequisites
+### Prerequisites and installation
 
-- Rust stable with Cargo ([Install via rustup](https://rustup.rs/))
-- Protocol Buffers compiler (`protoc`):
-  - macOS: `brew install protobuf`
-  - Linux: `apt-get install protobuf-compiler`
-  - Windows: Download from https://github.com/protocolbuffers/protobuf/releases
-- MariaDB/PostgreSQL/SQLite or in-memory database
+See [SETUP.md](SETUP.md) for clean-install and run instructions for macOS, Linux, and Windows. It covers Rust and Cargo through rustup, native build prerequisites, `make setup`, and optional Constructor Studio installation.
+
+A MariaDB, PostgreSQL, SQLite, or in-memory database is required for the corresponding runtime configuration.
 
 ### CI/Development Commands
 
 ```bash
-# Clone the repository
-git clone --recurse-submodules <repository-url>
-cd gears-rust
-
 make build      # Build the whole-project example server release binary
 make test       # Run workspace tests
 make check      # Run formatting, validation, linting, security, docs, and tests

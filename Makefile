@@ -214,7 +214,7 @@ setup: .setup-stamp py-env
 	@echo "Installing required development tools..."
 	rustup component add clippy
 	cargo install lychee
-	cargo install cargo-geigerfi
+	cargo install cargo-geiger
 	cargo install cargo-deny
 	cargo install cargo-gears
 	cargo install cargo-fuzz
@@ -662,7 +662,7 @@ GEAR_COVERAGE_ARGS := $(if $(GEAR),--package $(firstword $(subst -p ,,$(GEAR_PKG
 
 # --- Server feature selection for run / openapi ---
 # Base features always enabled when running a focused server.
-GEAR_SERVER_BASE_FEATURES ?= static-tenants,static-authn,static-authz
+GEAR_SERVER_BASE_FEATURES ?= static-tenants,static-authn,static-authz,account-management
 # System gears that are non-optional deps of the example server (always linked).
 GEAR_SERVER_ALWAYS_LINKED ?= api-gateway gear-orchestrator types-registry tenant-resolver authn-resolver authz-resolver
 # Check whether GEAR is a valid example-server feature or an always-linked gear.
