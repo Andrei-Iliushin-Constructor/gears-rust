@@ -6,9 +6,12 @@ sidebar:
   order: 2
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 Choose your operating system and run the commands in order. `rustup` installs Rust and Cargo together, then `rustup default stable` selects the Rust toolchain used by this repository.
 
-## macOS
+<Tabs syncKey="os">
+<TabItem label="macOS" icon="apple">
 
 ### 1. Install system tools
 
@@ -37,7 +40,10 @@ source ~/.zshrc
 pipx install git+https://github.com/constructorfabric/studio.git
 ```
 
-## Linux (Debian/Ubuntu)
+</TabItem>
+<TabItem label="Linux" icon="linux">
+
+Debian/Ubuntu instructions. For another distribution, install equivalent packages before running the Rust commands.
 
 ### 1. Install system tools
 
@@ -60,7 +66,8 @@ source ~/.profile
 pipx install git+https://github.com/constructorfabric/studio.git
 ```
 
-## Windows
+</TabItem>
+<TabItem label="Windows" icon="seti:windows">
 
 The supported full workflow uses WSL 2 with Ubuntu because the repository Makefile expects a POSIX shell.
 
@@ -96,6 +103,9 @@ pipx ensurepath
 source ~/.profile
 pipx install git+https://github.com/constructorfabric/studio.git
 ```
+
+</TabItem>
+</Tabs>
 
 ## Next: build and run
 
