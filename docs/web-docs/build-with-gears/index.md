@@ -12,7 +12,7 @@ When you're ready to write code, continue to [Build your first gear](./your-firs
 
 ## Prepare environment
 
-Use the copy-pasteable [Prepare environment](./prepare-environment/) instructions for macOS, Linux, or Windows. They install Rust and Cargo through rustup, native build prerequisites, and Constructor Studio.
+Use the copy-pasteable [Prepare environment](./prepare-environment/) instructions for macOS, Linux, or Windows. They install Rust and Cargo through rustup, native build prerequisites, and optional Constructor Studio.
 
 ## Build and run
 
