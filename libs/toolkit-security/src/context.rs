@@ -91,7 +91,17 @@ impl SecurityContext {
     }
 }
 
-#[derive(Default)]
+/// Builds a [`SecurityContext`] field by field.
+///
+/// `subject_id` and `subject_tenant_id` are required; [`Self::build`] reports a
+/// missing one rather than defaulting it, since a nil subject is how an
+/// *anonymous* context is represented and silently producing one would turn a
+/// wiring mistake into an unauthenticated caller. Use
+/// [`SecurityContext::anonymous`] when that is what you actually mean.
+///
+/// `Debug` never renders the bearer token: the field holds a `SecretString`,
+/// which redacts itself.
+#[derive(Debug, Default)]
 pub struct SecurityContextBuilder {
     subject_id: Option<Uuid>,
     subject_type: Option<String>,
@@ -101,30 +111,43 @@ pub struct SecurityContextBuilder {
 }
 
 impl SecurityContextBuilder {
+    /// Set the subject's unique id. Required.
     #[must_use]
     pub fn subject_id(mut self, subject_id: Uuid) -> Self {
         self.subject_id = Some(subject_id);
         self
     }
 
+    /// Set the subject's classification, e.g. `"user"` or `"service"`.
+    ///
+    /// Optional to build, but it is the positive marker a real `AuthN` resolver
+    /// always populates, so consumers use its absence to spot a context that
+    /// never went through authentication.
     #[must_use]
     pub fn subject_type(mut self, subject_type: &str) -> Self {
         self.subject_type = Some(subject_type.to_owned());
         self
     }
 
+    /// Set the subject's home tenant. Required.
     #[must_use]
     pub fn subject_tenant_id(mut self, subject_tenant_id: Uuid) -> Self {
         self.subject_tenant_id = Some(subject_tenant_id);
         self
     }
 
+    /// Set the token's capability scopes.
+    ///
+    /// `["*"]` is first-party / unrestricted. See the field documentation on
+    /// [`SecurityContext`] for what an empty list means.
     #[must_use]
     pub fn token_scopes(mut self, scopes: Vec<String>) -> Self {
         self.token_scopes = scopes;
         self
     }
 
+    /// Carry the original bearer token, for forwarding to a policy decision
+    /// point. Never serialized and never rendered by `Debug`.
     #[must_use]
     pub fn bearer_token(mut self, token: impl Into<SecretString>) -> Self {
         self.bearer_token = Some(token.into());

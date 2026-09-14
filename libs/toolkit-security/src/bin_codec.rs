@@ -2,22 +2,40 @@ use crate::SecurityContext;
 use postcard::Error as PostcardError;
 use thiserror::Error;
 
+/// Format version, written as the first byte of every encoded blob.
+///
+/// [`decode_bin`] accepts this version and no other, so producer and consumer
+/// must agree exactly — there is no backward-compatible read path.
+///
+/// **Bump this whenever [`SecurityContext`]'s serialized field list changes.**
+/// postcard is positional and carries no field names, so adding, removing or
+/// reordering a field silently changes the layout: an older decoder would then
+/// read the new bytes as whatever its own field order says, rather than
+/// rejecting them. The version byte is the only thing that turns that into a
+/// clean `UnsupportedVersion` error, and nothing derives it automatically.
 pub const SECCTX_BIN_VERSION: u8 = 1;
 
+/// Why a [`SecurityContext`] could not be encoded.
 #[derive(Debug, Error)]
 pub enum SecCtxEncodeError {
+    /// postcard could not serialize the context.
     #[error("security context serialization failed: {0:?}")]
     Postcard(#[from] PostcardError),
 }
 
+/// Why a blob could not be decoded into a [`SecurityContext`].
 #[derive(Debug, Error)]
 pub enum SecCtxDecodeError {
+    /// The blob carried no bytes at all, so not even a version byte.
     #[error("empty secctx blob")]
     Empty,
 
+    /// The leading version byte is not [`SECCTX_BIN_VERSION`]; the payload is
+    /// left unread rather than guessed at.
     #[error("unsupported secctx version: {0}")]
     UnsupportedVersion(u8),
 
+    /// The version matched but the payload did not deserialize.
     #[error("security context deserialization failed: {0:?}")]
     Postcard(#[from] PostcardError),
 }

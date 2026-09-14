@@ -549,8 +549,12 @@ impl<'a> ScopeFilterValues<'a> {
     #[must_use]
     pub fn iter(&self) -> ScopeFilterValuesIter<'a> {
         match self {
-            Self::Single(v) => ScopeFilterValuesIter::Single(Some(v)),
-            Self::Multiple(vs) => ScopeFilterValuesIter::Multiple(vs.iter()),
+            Self::Single(v) => {
+                ScopeFilterValuesIter(ScopeFilterValuesIterInner::Single(Some(v)))
+            }
+            Self::Multiple(vs) => {
+                ScopeFilterValuesIter(ScopeFilterValuesIterInner::Multiple(vs.iter()))
+            }
         }
     }
 
@@ -580,7 +584,16 @@ impl<'a> IntoIterator for &ScopeFilterValues<'a> {
 }
 
 /// Iterator over [`ScopeFilterValues`].
-pub enum ScopeFilterValuesIter<'a> {
+#[derive(Debug, Clone)]
+pub struct ScopeFilterValuesIter<'a>(ScopeFilterValuesIterInner<'a>);
+
+/// How [`ScopeFilterValuesIter`] is actually yielding values.
+///
+/// Private on purpose: as public variants this put `std::slice::Iter` into the
+/// crate's API, pinning an implementation detail into the contract that a
+/// change of backing collection would then break.
+#[derive(Debug, Clone)]
+enum ScopeFilterValuesIterInner<'a> {
     /// Yields a single value.
     Single(Option<&'a ScopeValue>),
     /// Yields from a slice.
@@ -591,12 +604,24 @@ impl<'a> Iterator for ScopeFilterValuesIter<'a> {
     type Item = &'a ScopeValue;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Single(v) => v.take(),
-            Self::Multiple(iter) => iter.next(),
+        match &mut self.0 {
+            ScopeFilterValuesIterInner::Single(v) => v.take(),
+            ScopeFilterValuesIterInner::Multiple(iter) => iter.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match &self.0 {
+            ScopeFilterValuesIterInner::Single(v) => {
+                let n = usize::from(v.is_some());
+                (n, Some(n))
+            }
+            ScopeFilterValuesIterInner::Multiple(iter) => iter.size_hint(),
         }
     }
 }
+
+impl ExactSizeIterator for ScopeFilterValuesIter<'_> {}
 
 /// A conjunction (AND) of scope filters — one access path.
 ///
@@ -758,7 +783,40 @@ impl AccessScope {
         !self.unconstrained && self.constraints.is_empty()
     }
 
+    /// Whether this scope permits `id` for `property`.
+    ///
+    /// Prefer this over [`AccessScope::contains_uuid`] for an authorization
+    /// decision. The `contains_*` and `has_property` family reports on the
+    /// *constraint list* only, so on an allow-all scope — which has no
+    /// constraints — every one of them answers "no", which reads exactly like
+    /// deny-all at the call site. Each caller then has to remember to check
+    /// [`AccessScope::is_unconstrained`] first, and a caller that forgets denies
+    /// a request the scope actually permits.
+    ///
+    /// This folds that check in, so the unconstrained case cannot be skipped.
+    #[must_use]
+    pub fn allows_uuid(&self, property: &str, id: Uuid) -> bool {
+        self.unconstrained || self.contains_uuid(property, id)
+    }
+
+    /// Whether this scope permits `value` for `property`.
+    ///
+    /// The [`AccessScope::allows_uuid`] rationale applies here too: this is the
+    /// predicate to use for an authorization decision, because it accounts for
+    /// an allow-all scope.
+    #[must_use]
+    pub fn allows_value(&self, property: &str, value: &ScopeValue) -> bool {
+        self.unconstrained || self.contains_value(property, value)
+    }
+
     /// Collect all values for a given property across all constraints.
+    ///
+    /// **Reports on the constraint list only.** An allow-all scope has no
+    /// constraints, so this returns an empty `Vec` for it — which means "no
+    /// constraint names this property", never "this scope permits nothing".
+    /// An allow-all scope permits every value, and no finite list can say so.
+    /// Check [`AccessScope::is_unconstrained`] before reading anything into an
+    /// empty result.
     #[must_use]
     pub fn all_values_for(&self, property: &str) -> Vec<&ScopeValue> {
         let mut result = Vec::new();
@@ -775,6 +833,10 @@ impl AccessScope {
     /// Collect all UUID values for a given property across all constraints.
     ///
     /// Convenience wrapper — skips non-UUID values.
+    ///
+    /// **Reports on the constraint list only**, with the same caveat as
+    /// [`AccessScope::all_values_for`]: empty on an allow-all scope, which
+    /// permits everything rather than nothing.
     #[must_use]
     pub fn all_uuid_values_for(&self, property: &str) -> Vec<Uuid> {
         let mut result = Vec::new();
@@ -789,6 +851,10 @@ impl AccessScope {
     }
 
     /// Check if any constraint has a filter matching the given property and value.
+    ///
+    /// **Reports on the constraint list only**, so an allow-all scope answers
+    /// `false` despite permitting the value. Use [`AccessScope::allows_value`]
+    /// for an authorization decision.
     #[must_use]
     pub fn contains_value(&self, property: &str, value: &ScopeValue) -> bool {
         self.constraints.iter().any(|c| {
@@ -804,6 +870,10 @@ impl AccessScope {
     /// that UUID-as-string values are treated consistently with
     /// [`AccessScope::all_uuid_values_for`], which also parses strings via
     /// [`ScopeValue::as_uuid`].
+    ///
+    /// **Reports on the constraint list only**, so an allow-all scope answers
+    /// `false` despite permitting the id. Use [`AccessScope::allows_uuid`] for
+    /// an authorization decision.
     #[must_use]
     pub fn contains_uuid(&self, property: &str, id: Uuid) -> bool {
         self.constraints.iter().any(|c| {
@@ -814,6 +884,10 @@ impl AccessScope {
     }
 
     /// Check if any constraint references the given property.
+    ///
+    /// **Reports on the constraint list only**: an allow-all scope has no
+    /// constraints and so answers `false`, which is not a statement about what
+    /// it permits. Check [`AccessScope::is_unconstrained`] first.
     #[must_use]
     pub fn has_property(&self, property: &str) -> bool {
         self.constraints
@@ -1006,13 +1080,82 @@ mod tests {
     }
 
     #[test]
-    fn contains_value_works_with_eq() {
+    fn contains_uuid_works_with_eq() {
         let scope = AccessScope::single(ScopeConstraint::new(vec![ScopeFilter::eq(
             pep_properties::OWNER_TENANT_ID,
             uid(T1),
         )]));
         assert!(scope.contains_uuid(pep_properties::OWNER_TENANT_ID, uid(T1)));
         assert!(!scope.contains_uuid(pep_properties::OWNER_TENANT_ID, uid(T2)));
+    }
+
+    #[test]
+    fn contains_value_matches_the_value_it_was_given() {
+        // This is `contains_value` itself, not `contains_uuid`: the two tests
+        // named for it exercised the latter, leaving this one untested.
+        let scope = AccessScope::single(ScopeConstraint::new(vec![ScopeFilter::eq(
+            pep_properties::OWNER_TENANT_ID,
+            uid(T1),
+        )]));
+
+        assert!(scope.contains_value(
+            pep_properties::OWNER_TENANT_ID,
+            &ScopeValue::Uuid(uid(T1))
+        ));
+        assert!(!scope.contains_value(
+            pep_properties::OWNER_TENANT_ID,
+            &ScopeValue::Uuid(uid(T2))
+        ));
+        assert!(
+            !scope.contains_value("some_other_property", &ScopeValue::Uuid(uid(T1))),
+            "a match on the value alone is not a match: the property must agree too"
+        );
+    }
+
+    #[test]
+    fn contains_value_is_false_for_a_subquery_filter() {
+        // `InGroup` resolves in SQL, so it exposes no values in memory. The
+        // answer here is "cannot tell from memory", and `false` is the
+        // fail-closed rendering of that.
+        let scope = AccessScope::single(ScopeConstraint::new(vec![ScopeFilter::in_group(
+            pep_properties::RESOURCE_ID,
+            vec![ScopeValue::Uuid(uid(T1))],
+        )]));
+        assert!(!scope.contains_value(pep_properties::RESOURCE_ID, &ScopeValue::Uuid(uid(T1))));
+    }
+
+    #[test]
+    fn an_allow_all_scope_permits_everything_it_reports_no_constraint_for() {
+        // The distinction the `contains_*` family cannot express on its own: an
+        // allow-all scope holds no constraints, so every one of them answers
+        // "no" for a value the scope in fact permits.
+        let scope = AccessScope::allow_all();
+
+        assert!(!scope.contains_uuid(pep_properties::OWNER_TENANT_ID, uid(T1)));
+        assert!(!scope.has_property(pep_properties::OWNER_TENANT_ID));
+        assert!(scope.all_uuid_values_for(pep_properties::OWNER_TENANT_ID).is_empty());
+
+        assert!(
+            scope.allows_uuid(pep_properties::OWNER_TENANT_ID, uid(T1)),
+            "an allow-all scope permits any id"
+        );
+        assert!(
+            scope.allows_value(
+                pep_properties::OWNER_TENANT_ID,
+                &ScopeValue::Uuid(uid(T1))
+            ),
+            "an allow-all scope permits any value"
+        );
+    }
+
+    #[test]
+    fn a_deny_all_scope_permits_nothing() {
+        let scope = AccessScope::deny_all();
+        assert!(!scope.allows_uuid(pep_properties::OWNER_TENANT_ID, uid(T1)));
+        assert!(!scope.allows_value(
+            pep_properties::OWNER_TENANT_ID,
+            &ScopeValue::Uuid(uid(T1))
+        ));
     }
 
     // --- tenant_only ---
