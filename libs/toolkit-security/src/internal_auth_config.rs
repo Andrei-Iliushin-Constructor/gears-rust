@@ -76,9 +76,18 @@ pub enum InternalAuthConfig {
     },
     /// A projected Kubernetes `ServiceAccount` token (Profile 3).
     Kube {
-        /// Expected token audiences for `TokenReview` (inbound). When empty,
-        /// the API server's default audience validation applies.
-        #[serde(default)]
+        /// Expected token audiences for `TokenReview` (inbound).
+        ///
+        /// **Required, and must not be empty.** An empty list disables audience
+        /// binding twice over in `toolkit-k8s-auth`: no audience is sent to the
+        /// API server, *and* the client-side comparison against the response is
+        /// skipped. Any `ServiceAccount` token the API server accepts — from
+        /// any workload in the cluster, issued for any audience — would then
+        /// authenticate as a platform peer.
+        ///
+        /// It used to default to empty, so a config that simply omitted the
+        /// field got that silently.
+        #[serde(deserialize_with = "non_empty_audiences")]
         audiences: Vec<String>,
         /// Projected-token path to read + rotate for outbound calls. When
         /// absent, no outbound credential is attached (inbound-only).
@@ -89,6 +98,28 @@ pub enum InternalAuthConfig {
 
 fn default_peer_name() -> String {
     DEFAULT_INTERNAL_PEER_NAME.to_owned()
+}
+
+/// Deserialize `audiences`, refusing an absent or empty list.
+///
+/// Failing here rather than at first use is deliberate: an unbound audience is
+/// a cluster-wide authentication weakness, and a service that comes up and
+/// accepts every `ServiceAccount` token is far worse than one that refuses to
+/// start with a config error naming the field.
+fn non_empty_audiences<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let audiences = Vec::<String>::deserialize(deserializer)?;
+    if audiences.is_empty() {
+        return Err(D::Error::custom(
+            "internal_auth provider=kube requires a non-empty `audiences` list; an empty one \
+             disables audience verification and accepts any ServiceAccount token in the cluster",
+        ));
+    }
+    Ok(audiences)
 }
 
 /// Manual [`Debug`] that never renders the shared secret. The derived impl would
@@ -358,19 +389,35 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_kube_with_only_a_provider() {
-        // The inbound-only shape, and the one the documented defaults produce.
-        // Only the fully-populated form was covered, so nothing pinned what
-        // omitting these fields actually yields.
-        let cfg: InternalAuthConfig =
-            serde_json::from_value(serde_json::json!({ "provider": "kube" })).unwrap();
+    fn kube_without_audiences_is_refused() {
+        // An omitted list used to default to empty, which disables audience
+        // binding entirely -- any ServiceAccount token in the cluster would
+        // authenticate as a platform peer. Refusing the config is the point:
+        // failing to start beats starting unbound.
+        let err = serde_json::from_value::<InternalAuthConfig>(
+            serde_json::json!({ "provider": "kube" }),
+        )
+        .expect_err("kube without audiences must not deserialize");
+        assert!(
+            err.to_string().contains("audiences"),
+            "the error must name the field: {err}"
+        );
+
+        let err = serde_json::from_value::<InternalAuthConfig>(
+            serde_json::json!({ "provider": "kube", "audiences": [] }),
+        )
+        .expect_err("an explicitly empty list is the same weakness");
+        assert!(err.to_string().contains("audiences"), "got: {err}");
+    }
+
+    #[test]
+    fn kube_with_audiences_and_no_token_path_is_inbound_only() {
+        let cfg: InternalAuthConfig = serde_json::from_value(
+            serde_json::json!({ "provider": "kube", "audiences": ["toolkit-internal"] }),
+        )
+        .unwrap();
 
         assert!(cfg.is_kube());
-        assert_eq!(
-            cfg.kube_audiences(),
-            Some(&[][..]),
-            "an omitted audience list is empty, not absent"
-        );
         assert_eq!(
             cfg.kube_token_path(),
             None,

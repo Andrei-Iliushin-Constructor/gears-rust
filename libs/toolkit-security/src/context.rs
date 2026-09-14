@@ -29,7 +29,15 @@ pub struct SecurityContext {
     /// subject belongs to a tenant.
     subject_tenant_id: Uuid,
     /// Token capability restrictions. `["*"]` means first-party / unrestricted.
-    /// Empty means no scopes were asserted (treat as unrestricted for backward compatibility).
+    ///
+    /// **Empty means no capability was granted, not unrestricted.** This field
+    /// used to be documented the other way round — "treat as unrestricted for
+    /// backward compatibility" — while the gateway enforcer did the opposite
+    /// and fail-closed on an empty list. A consumer following the old wording
+    /// would turn a context carrying no scopes into full access.
+    ///
+    /// Read it through [`SecurityContext::has_scope`] rather than inspecting
+    /// the list, so the `["*"]` rule lives in one place.
     #[serde(default)]
     token_scopes: Vec<String>,
     /// Original bearer token for PDP forwarding. Never serialized/persisted.
@@ -82,6 +90,20 @@ impl SecurityContext {
     #[must_use]
     pub fn token_scopes(&self) -> &[String] {
         &self.token_scopes
+    }
+
+    /// Whether the token carries `scope`.
+    ///
+    /// The wildcard `"*"` satisfies every scope: it is what a first-party
+    /// caller presents. An empty list satisfies none — it means no capability
+    /// was granted, which is why this is the accessor to reason with rather
+    /// than the raw list, where "empty" has repeatedly been read as its
+    /// opposite.
+    #[must_use]
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.token_scopes
+            .iter()
+            .any(|granted| granted == "*" || granted == scope)
     }
 
     /// Get the original bearer token (for PDP forwarding).
@@ -350,6 +372,32 @@ mod tests {
             !serialized.contains("super-secret-token"),
             "the token value must not appear: {serialized}"
         );
+    }
+
+    #[test]
+    fn has_scope_treats_empty_as_no_capability_and_wildcard_as_all() {
+        let build = |scopes: Vec<String>| {
+            SecurityContext::builder()
+                .subject_id(Uuid::from_u128(1))
+                .subject_tenant_id(Uuid::from_u128(2))
+                .token_scopes(scopes)
+                .build()
+                .unwrap()
+        };
+
+        let none = build(Vec::new());
+        assert!(
+            !none.has_scope("read:events"),
+            "an empty scope list grants nothing; it once read as unrestricted"
+        );
+
+        let wildcard = build(vec!["*".to_owned()]);
+        assert!(wildcard.has_scope("read:events"));
+        assert!(wildcard.has_scope("anything-at-all"));
+
+        let specific = build(vec!["read:events".to_owned()]);
+        assert!(specific.has_scope("read:events"));
+        assert!(!specific.has_scope("write:events"));
     }
 
     #[test]

@@ -946,7 +946,7 @@ mod tests {
     #[tokio::test]
     async fn build_internal_authenticator_builds_shared_secret() {
         let cfg = InternalAuthConfig::SharedSecret {
-            secret: "test-secret".to_owned(),
+            secret: secrecy::SecretString::from("test-secret"),
             peer_name: "test-peer".to_owned(),
         };
         let auth = build_internal_authenticator(Some(&cfg), 30).await.unwrap();
