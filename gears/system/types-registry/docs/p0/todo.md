@@ -2,6 +2,10 @@
 
 Plan: [`plan.md`](./plan.md) · Spec: [`SPEC.md`](./SPEC.md)
 
+32 P0 implementation tasks; existing IDs retained. T22 is deferred to P1 as
+[#4827](https://github.com/constructorfabric/gears-rust/issues/4827) under #4628 (plan P18),
+not marked complete. Phase 6 executes T22a → T23.
+
 Standing bar for every task, on top of its own acceptance criteria: `make fmt`, `make clippy` and
 gear tests green, no regression in other gears, behaviour verified at runtime, docs updated.
 **The full `make ci` is a checkpoint gate, not a per-task one** — it ends in `dylint` and pulls in
@@ -1967,32 +1971,17 @@ task so the REST-to-outbox flow can be verified before Checkpoint 5
 
 ## Phase 6 — Read API and the new contract
 
-### - [ ] T22: `toolkit-gts` — `owning_gear` on inventory records
+### T22: Deferred to P1 — inventory ownership metadata and per-gear push
 
-**Description:** Add `owning_gear` to `InventoryTypeSchema` and `InventoryInstance`, derived
-at macro-expansion time from the declaring crate's gear name, so the SDK can filter the
-process-wide inventory down to what each gear owns (plan decision P4). Without this field
-there is no way for a gear to know which inventory records are its own.
+**Moved, not completed.** The task is now [#4827](https://github.com/constructorfabric/gears-rust/issues/4827)
+under [P1 #4628](https://github.com/constructorfabric/gears-rust/issues/4628)
+and plan P18, which supersedes P4's P0 scope. The original T22 metadata/macros/filtering work
+and per-gear startup inventory integration now ship with the platform-plane client and authN.
+C3 remains open in P0. Task IDs are retained; this transfer note is not an open P0 task.
 
-**Acceptance criteria:**
-- [ ] Both record structs carry `owning_gear: &'static str`
-- [ ] `#[gts_type_schema]` and `gts_instance!` populate it without the declaring crate passing anything explicitly
-- [ ] `toolkit-gts` exposes a filter — records for one `owning_gear` — beside the existing aggregators
-- [ ] Existing aggregators keep working; nothing that reads all records breaks
-- [ ] Generated schema documents are byte-identical to before (this change adds metadata, not schema content)
-
-**Verification:**
-- [ ] `cargo test -p cf-gears-toolkit-gts`
-- [ ] `cargo test --workspace` — every declaring crate still compiles
-- [ ] Test: the filter returns exactly one gear's records for a fixture with two declaring crates
-- [ ] Manual: diff generated schema documents against the T1 baseline — no change
-
-**Dependencies:** T1 (independent of T22a; scheduled after Checkpoint 5)
-**Files likely touched:**
-- `libs/toolkit-gts/src/lib.rs`
-- `libs/toolkit-gts-macros/src/lib.rs`
-- `libs/toolkit-gts/tests/`
-**Scope:** M — a library and macro change; blast radius is every declaring crate
+T23 retains reconciliation of explicitly supplied documents. T24 retains process-wide
+inventory collection while moving admission to the database; T25/T26 migrate existing calls
+without adding inventory registration to every declaring gear.
 
 ---
 
@@ -2000,7 +1989,7 @@ there is no way for a gear to know which inventory records are its own.
 
 **Description:** Add `POST /entities:batchGet` and bounded, content-free `GET /entities`
 on `/v2/`; complete seven-route OpenAPI and quickstart coverage (former T27, P17).
-Follows T22 by schedule, independently of `owning_gear`; REST/SDK share SPEC §10.1/§10.2.
+First in Phase 6 after Checkpoint 5; REST/SDK share SPEC §10.1/§10.2. T22 is deferred to P1 (P18).
 
 **Acceptance criteria:**
 
@@ -2054,11 +2043,13 @@ and quickstart, for the seven-route completeness check)
 
 ---
 
-### - [ ] T23: New SDK trait and the reconciliation helper
+### - [ ] T23: New SDK trait and explicit-document reconciliation helper
 
 **Description:** `TypesRegistryEntities` plus its models per SPEC §10.1, and the
-reconciliation workflow of DESIGN §3.3 as an SDK helper so no gear hand-rolls batching,
-idempotency or retry (plan decision P4). The old trait is **not** kept — it is deleted in
+reconciliation workflow of DESIGN §3.3 over explicitly supplied desired documents, as an SDK
+helper so existing callers need not hand-roll batching, idempotency or retry (P18). Inventory
+collection and per-gear filtering are deferred to P1; the helper does not discover declarations
+or delete entities absent from its input. The old trait is **not** kept — it is deleted in
 T26 once every consumer has moved.
 
 **Acceptance criteria:**
@@ -2075,7 +2066,7 @@ T26 once every consumer has moved.
 - [ ] `list_instances` / `list_type_schemas` **hydrate a content-free page through `batchGet`**, so the ~87 existing call sites keep reading payloads from the result. The doc comment states the trade: complete with respect to the traversal, not to an instant, and one extra round trip per page which the client cache absorbs
 - [ ] **The validator field is in the models from this task**, and `BatchGet` accepts a validator per requested key in `BatchGetItem::if_none_match`, even though T29 computes them and T30 consumes them. Adding either later would break the SDK contract after ~50 call sites have moved onto it (SPEC §8.5, `plan.md` P9). A result variant for `unchanged` is part of the same shape
 - [ ] **Reconciliation helper** implements DESIGN §3.3's five steps: batch-read the desired identifiers, omit content equal to current, set `expected_resource_version` from the read for differing ones and leave it unset for missing ones, return `UpToDate` with no POST when nothing remains, otherwise submit once under one idempotency key and poll to terminality
-- [ ] The helper filters the process inventory by `owning_gear` (T22) and batches within `limits.batch_candidates`
+- [ ] The helper accepts an explicit desired-document set and batches within `limits.batch_candidates`; it has no inventory collection/filtering dependency. Diagnostic gear names are caller labels, not identity or authority
 - [ ] **Retry lives here, not in gears:** a candidate failing because a dependency is not yet registered is retried a bounded number of times; failure names the gear and identifier
 - [ ] One generated idempotency key spans an invocation's retries and polling
 - [ ] Callable from a consumer's `init()` (P3). Its doc comment states the one requirement: declare `deps = [types_registry]`, or `init` ordering is not guaranteed
@@ -2084,10 +2075,11 @@ T26 once every consumer has moved.
 - [ ] `cargo test -p cf-gears-types-registry-sdk`
 - [ ] Test: a mock consumer round-trips submit → poll → read through the new trait
 - [ ] Test: helper returns `UpToDate` without submitting when everything already matches
+- [ ] Test: only supplied documents are reconciled; unrelated linked inventory and existing registry entities are neither submitted nor deleted
 - [ ] Test: helper converges when a base type is admitted only on the second attempt
 - [ ] Test: helper against an operation nothing will drain fails on its deadline with a diagnosable error, not a hang
 
-**Dependencies:** T22. Scheduled after T22a so the read surface is verified before SDK
+**Dependencies:** T4 (reads), T21 (async dispatch). Scheduled after T22a so the read surface is verified before SDK
 integration; its contract shape is fixed by SPEC, not by the REST DTOs
 **Files likely touched:**
 - `TR-SDK/src/entities.rs`
@@ -2105,8 +2097,7 @@ integration; its contract shape is fixed by SPEC, not by the REST DTOs
       traverses the stable set exactly once; `$select` is refused; `QUICKSTART.md` covers reads
       and mutations (T20a, T22a, P17)
 - [ ] `make e2e-local` remains green with no e2e file edited; gear tests and `make lychee` pass
-- [ ] Inventory records carry `owning_gear`; generated schema documents unchanged
-- [ ] New trait and reconciliation helper pass against a mock consumer
+- [ ] New trait and explicit-document reconciliation helper pass against a mock consumer without inventory metadata/filtering; T22 is deferred to P1 (P18)
 - [ ] Nothing is cut over yet — consumers still on the old path
 - [ ] `make dylint` — full workspace, once for the phase (P13)
 - [ ] Human review
@@ -2115,10 +2106,10 @@ integration; its contract shape is fixed by SPEC, not by the REST DTOs
 
 ## Phase 7 — Cutover and migration
 
-### - [ ] T24: Cutover — registry seeds only what it owns; ready mode and in-memory repository out
+### - [ ] T24: Cutover — linked inventory seeds into the database; ready mode and in-memory repository out
 
-**Description:** types-registry stops pulling the whole process inventory. It seeds only what
-it owns — `toolkit-gts` base types and its own control-plane types — inline at `init()` (P2),
+**Description:** types-registry keeps collecting the whole process-linked inventory and seeds
+its Type Schemas and Instances into the database inline at `init()` (P2/P18),
 then starts the outbox worker (P3). Delete `switch_to_ready`, the `temporary`/`persistent`
 split, `SystemCapability::post_init` and the in-memory repository. From here on reads are
 served from the database (SPEC D2, §8.2) — this is the task where the old in-memory read path
@@ -2131,17 +2122,17 @@ field carries operator-controlled identities that cannot be expressed as invento
 GTS identifiers are deployment-specific (e.g. the platform-root and customer tenant types in
 `e2e-local.yaml`). Currently these are seeded only into the in-memory `TypesRegistryService`;
 T24 must seed them into the database through the same inline admission path used for
-types-registry's own inventory. An invalid or oversized `cfg.entities` must fail boot loudly
+the linked inventory. An invalid or oversized combined seed set must fail boot loudly
 (current in-memory behaviour preserved). The `cfg.entities` field itself is not removed — it
 remains the deployment-time escape hatch for identities that no gear can own.
 
 **Acceptance criteria:**
-- [ ] Seeding covers exactly the entities types-registry owns; no other gear's declarations are pulled
+- [ ] Seeding covers all linked Type Schema and Instance inventory, including other gears, through the database admission path; no per-gear filter is introduced (D11/P18)
 - [ ] `cfg.entities` from the deployment configuration is seeded into the database at startup, through the same inline admission path; the field is validated and any failure fails boot
-- [ ] Seeding is idempotent — a second start admits nothing new and reports `unchanged` for both owned inventory and `cfg.entities`
+- [ ] Seeding is idempotent — a second start admits nothing new and reports `unchanged` for both linked inventory and `cfg.entities`
 - [ ] Seeding runs **before** the outbox worker starts (P3) and enqueues nothing — it invokes the worker inline
 - [ ] `init()` never waits on a registrant and never blocks on the outbox (`constraint-boot-path`)
-- [ ] Owned inventory and `cfg.entities` together fit within `limits.batch_candidates`; if they exceed it, startup fails loudly rather than silently splitting
+- [ ] All linked inventory and `cfg.entities` together fit within `limits.batch_candidates` and other admission limits; if they exceed them, startup fails before publishing the client, with a diagnostic naming the exceeded limit. No truncation or silent split. Admission orders cross-crate dependencies inside this single batch
 - [ ] The v1 REST routes T9a restored are deleted **together with** the repository they read —
       `POST /v1/entities` (`types_registry.register`), `GET /v1/entities/{gts_id}`
       (`types_registry.get`) and the in-memory `GET /v1/entities` list. A route left pointing at a
@@ -2152,17 +2143,18 @@ remains the deployment-time escape hatch for identities that no gear can own.
       (`plan.md` P12). The shim is one store and one write path — not a dual path — and T26
       deletes it with the trait
 - [ ] Ready mode and the in-memory repository are gone; `ready_mode_tests.rs` deleted. The old model-typed cache goes with the old models, and the four `local_client.cache.{type_schemas,instances}.{capacity,ttl}` keys become accepted-and-ignored with a warning naming their T30 replacements
-- [ ] `owning_gear` comes from T22's inventory field, not a constant — ceiling C3 is struck from SPEC §9 in this task
+- [ ] `owning_gear = "types-registry"` remains a compatibility placeholder for P0 admissions. C3 stays open; its source comment describes incomplete attribution and the P1 upgrade, never claims that all declarations belong to the registry. Keep the column and global NOT NULL constraint
 - [ ] No entity-derived state survives `init()` — no `ArcSwap`, no entity map, no `GtsOps` field on the gear or the service. Grep-checkable, and the ceilings C1/C4 struck by D2 depend on it
 
 **Verification:**
 - [ ] Gear tests, all three backends (see [Commands](#commands))
 - [ ] Test: second `init()` against a populated database seeds nothing
-- [ ] Test: the seed set contains no entity owned by another gear
+- [ ] Test: declarations from at least two linked crates seed successfully, including a cross-crate dependency; inventory selection does not require `owning_gear`
+- [ ] Test: the combined inventory + `cfg.entities` count exceeds a deliberately low `limits.batch_candidates`; startup fails explicitly before client publication, with no silent split/truncation
 - [ ] Test: `cfg.entities` entries are present and readable after boot, and a second boot reports `unchanged` for them
 - [ ] Test: an invalid entry in `cfg.entities` fails boot with a clear error
 - [ ] Test: a read issued after an entity is written directly to the database (not through the service) returns it — proving the read path holds no process-local copy. This is the single-process form of SPEC §13's two-pod criterion
-- [ ] `make quickstart` — server boots with only registry-owned types present
+- [ ] `make quickstart` — server boots with all linked inventory present in the database; the configured batch/admission limits cover the real seed set
 - [ ] `make e2e-local` — server boots with `cfg.entities` populated (the two AM tenant types); both are readable after boot
 - [ ] Manual: restart, confirm entities and artifacts byte-identical
 
@@ -2229,8 +2221,8 @@ T20a and T22a preserve by not touching an e2e file.
 
 **Description:** Move every system gear and plugin off `TypesRegistryClient`: reads to the new
 trait, and the ~13 explicit `register(...)` sites to the reconciliation helper called from
-`init()`. Each gear gates its own readiness on its own registration — DESIGN's *"Each gear
-gates only its own readiness"*.
+`init()` with explicitly supplied documents. Existing registrants await their own terminal
+results. New per-gear inventory registration calls are deferred to P1 (P18).
 
 Covers `account-management` (+ static-idp-plugin), `authn-resolver` (+ static and oidc
 plugins), `authz-resolver` (+ static and tr plugins), `tenant-resolver` (+ static,
@@ -2240,9 +2232,9 @@ single-tenant and rg plugins), `resource-group`, `usage-collector` (+ plugins), 
 **Acceptance criteria:**
 - [ ] No system gear or plugin references `TypesRegistryClient`
 - [ ] Read sites move mechanically: T23's provided helpers keep the call shapes, so a read migration is a `use` change plus field reads where a computed method was used
-- [ ] Every gear declaring GTS types calls the reconciliation helper once, in `init()`, and declares `deps = [types_registry]`
+- [ ] Existing explicit registration sites call the helper with their desired documents and declare `deps = [types_registry]`; gears that only declare inventory gain no new registration call in P0
 - [ ] `RegisterResult::ensure_all_ok` sites are replaced by the helper's terminal result — no site treats `pending` as success
-- [ ] Registration failure fails that gear's startup naming the gear and identifier, and does not affect other gears
+- [ ] Explicit registration failure fails the calling gear's startup naming the gear and identifier; shared inventory bootstrap failures remain registry startup failures (P18)
 
 - [ ] Where a materialized `effective_*` field differs from what the deleted client-side method returned, the **materialized value is accepted** — the difference is the old approximation being wrong (unresolved non-parent `$ref`, trait-default order), and `gts-rust` is authoritative. A failing assertion is updated to the new value, never "fixed" back
 **Verification:**
@@ -2261,7 +2253,8 @@ single-tenant and rg plugins), `resource-group`, `usage-collector` (+ plugins), 
 **Description:** The remaining consumers — `bss/ledger`, `bss/rate-provider` (its shared
 `registration.rs` helper), `mini-chat` (+ static-audit and static-model-policy plugins),
 `llm-gateway`, `model-registry` — then delete `TypesRegistryClient`, its models and
-`testing::MockTypesRegistryClient`.
+`testing::MockTypesRegistryClient`. Existing explicit registration sites use T23 with their
+documents; automatic per-gear inventory registration remains in P1 (P18).
 
 **Acceptance criteria:**
 - [ ] No crate in the workspace references `TypesRegistryClient`, `RegisterResult`, `RegisterSummary`, `TypeSchemaQuery` or `InstanceQuery`
@@ -2413,8 +2406,8 @@ only the projection / visibility / Context-Tenant key dimensions.
 ---
 
 ### Checkpoint 7 — ready for review
-- [ ] The cutover holds: the real inventory seeds through the new path, every existing consumer works unchanged, the platform boots and stays healthy
-- [ ] All 16 success criteria of SPEC §16 met
+- [ ] The cutover holds: all linked inventory + `cfg.entities` seed into the database within configured limits; existing explicit callers reconcile their documents; repeat startup is idempotent and the platform stays healthy. C3 remains documented until P1
+ ] All 16 success criteria of SPEC §16 met
 - [ ] `make ci`, gear tests on three backends, `make e2e-local`, `make e2e-docker`, `make dylint`, `make lychee` green
 - [ ] Every ceiling in SPEC §9 has a comment at the point it binds
 - [ ] `TypesRegistryClient` is deleted and no crate references it (D6, T26)
