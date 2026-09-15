@@ -29,6 +29,8 @@ gts = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
+# The stateful entry point takes the runtime's cancellation token (T21).
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 # Admission metrics use ToolKit's global meter provider.
 opentelemetry = { workspace = true }

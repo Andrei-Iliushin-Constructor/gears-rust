@@ -296,21 +296,7 @@ impl RegistryService {
         if self.admission_mode == AdmissionMode::Inline && !accepted.terminal() {
             // After the acceptance transaction committed, never inside it: the
             // worker reads the operation it is admitting.
-            let worker: DBProvider<WorkerError> = DBProvider::new(self.db.clone());
-            run_operation(
-                &self.stores,
-                &worker,
-                &Self::scope(),
-                Tuning {
-                    limits: &self.config.limits,
-                    worker: &self.config.worker,
-                    metrics: &self.metrics,
-                    allow_compatibility_force: self.config.allow_compatibility_force,
-                },
-                accepted.operation_id,
-                now,
-            )
-            .await?;
+            self.admit(accepted.operation_id, now).await?;
             // A pass that returns `Ok` leaves the operation `completed`, whether it
             // did the work or found it already terminal — `run_operation` ends with
             // `mark_completed` on the first path and returns early on the second. So
@@ -318,6 +304,39 @@ impl RegistryService {
             accepted.status = OperationStatus::Completed;
         }
         Ok(accepted)
+    }
+
+    /// Drive one accepted operation through admission.
+    ///
+    /// The outbox handler's entire body, and the inline branch of [`Self::submit`]
+    /// above. One method rather than two call sites building [`Tuning`], so the
+    /// interim inline path and the dispatched one cannot be tuned differently.
+    ///
+    /// **Idempotent, which the leased outbox requires.** `run_operation` returns
+    /// early on an operation that is already `completed` and skips items that are
+    /// already terminal, so a redelivery is a no-op rather than a second admission.
+    ///
+    /// # Errors
+    /// [`ServiceError::Worker`] for an infrastructure failure. A candidate refused
+    /// on its merits is **not** an error: it is recorded on the operation item, and
+    /// this returns `Ok`.
+    pub async fn admit(&self, operation_id: Uuid, now: OffsetDateTime) -> Result<(), ServiceError> {
+        let worker: DBProvider<WorkerError> = DBProvider::new(self.db.clone());
+        run_operation(
+            &self.stores,
+            &worker,
+            &Self::scope(),
+            Tuning {
+                limits: &self.config.limits,
+                worker: &self.config.worker,
+                metrics: &self.metrics,
+                allow_compatibility_force: self.config.allow_compatibility_force,
+            },
+            operation_id,
+            now,
+        )
+        .await?;
+        Ok(())
     }
 
     /// Accept a deletion, and — while admission is inline — admit it.

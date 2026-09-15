@@ -3,25 +3,26 @@
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 use toolkit::api::OpenApiRegistry;
 use toolkit::contracts::{DatabaseCapability, SystemCapability};
+use toolkit::lifecycle::ReadySignal;
 use toolkit::{Gear, GearCtx, RestApiCapability};
+use toolkit_db::outbox::OutboxHandle;
 use toolkit_gts::{all_inventory_instances, all_inventory_type_schemas};
 use tracing::{debug, info, warn};
 use types_registry_sdk::{RegisterResult, RegisterSummary, TypesRegistryClient};
 
 use crate::config::TypesRegistryConfig;
-use crate::domain::admission::{NullDispatch, OperationDispatch};
+use crate::domain::admission::OperationDispatch;
 use crate::domain::local_client::TypesRegistryLocalClient;
 use crate::domain::ports::Stores;
 use crate::domain::ports::metrics::AdmissionMetrics;
 use crate::domain::registry_service::RegistryService;
 use crate::domain::service::TypesRegistryService;
 use crate::infra::InMemoryGtsRepository;
+use crate::infra::outbox::{OutboxDispatch, TABLE_PREFIX as OUTBOX_TABLE_PREFIX};
 use crate::infra::storage::Repos;
-
-/// Table prefix for the gear's `toolkit-db` outbox (SPEC §5).
-const OUTBOX_TABLE_PREFIX: &str = "types_registry_outbox";
 
 /// Types Registry gear.
 ///
@@ -32,6 +33,24 @@ const OUTBOX_TABLE_PREFIX: &str = "types_registry_outbox";
 /// - `system` — Core infrastructure gear, initialized early in startup
 /// - `db` — Owns the managed-state schema (`docs/database.sql`, P0 subset)
 /// - `rest` — Exposes REST API endpoints
+/// - `stateful` — Owns the admission outbox worker's lifetime (T21)
+///
+/// ## Where the admission worker runs, and why not in `start`
+///
+/// The worker is started at the **end of `init()`**, not from the stateful entry
+/// point, and this is a correctness requirement rather than a preference
+/// (`plan.md` P3). The runtime's phase order is
+/// `pre_init → migrations → init (all gears) → post_init → REST → start`, so
+/// `init` of *every* gear precedes `start` of *any*. A worker living in `start`
+/// would not exist while consumers are initializing — and consumers register
+/// their types from their own `init()` and block on the result, so they would
+/// hang on operations nothing was there to admit.
+///
+/// The stateful entry point therefore owns the worker's *shutdown*, not its
+/// start: it parks on the runtime's cancellation token and drains the retained
+/// `OutboxHandle`. `OutboxBuilder::start()` owns its own internal token and
+/// exposes no setter for an external one, so `OutboxHandle::stop()` — which
+/// cancels that token and joins the workers — is the whole of the wiring.
 ///
 /// ## Link-time inventory seeding
 ///
@@ -50,13 +69,18 @@ const OUTBOX_TABLE_PREFIX: &str = "types_registry_outbox";
 /// the dependency graph.
 #[toolkit::gear(
     name = "types-registry",
-    capabilities = [system, db, rest]
+    capabilities = [system, db, rest, stateful],
+    lifecycle(entry = "serve", stop_timeout = "30s", await_ready)
 )]
 pub struct TypesRegistryGear {
     service: OnceLock<Arc<TypesRegistryService>>,
     /// The database-backed path. Absent when no database is bound to this gear.
     registry: OnceLock<Arc<RegistryService>>,
     local_client: OnceLock<Arc<TypesRegistryLocalClient>>,
+    /// The running admission pipeline, retained from `init()` so [`Self::serve`]
+    /// can drain it. `None` where no database is bound, and `None` again once it
+    /// has been stopped — taking it is what makes the drain idempotent.
+    outbox: tokio::sync::Mutex<Option<OutboxHandle>>,
 }
 
 impl Default for TypesRegistryGear {
@@ -65,7 +89,40 @@ impl Default for TypesRegistryGear {
             service: OnceLock::new(),
             registry: OnceLock::new(),
             local_client: OnceLock::new(),
+            outbox: tokio::sync::Mutex::new(None),
         }
+    }
+}
+
+impl TypesRegistryGear {
+    /// The stateful entry point: hold the admission worker open, then drain it.
+    ///
+    /// It starts nothing. The worker is already running — `init()` started it, for
+    /// the reason in this type's documentation — so all this does is own the
+    /// shutdown edge: park on the runtime's cancellation token, then stop the
+    /// pipeline and join its tasks. Returning from here is what lets the generated
+    /// `stop` report the gear stopped.
+    #[allow(
+        clippy::redundant_pub_crate,
+        reason = "module-private serve entry-point invoked by the toolkit runtime"
+    )]
+    pub(crate) async fn serve(
+        self: Arc<Self>,
+        cancel: CancellationToken,
+        ready: ReadySignal,
+    ) -> anyhow::Result<()> {
+        ready.notify();
+        cancel.cancelled().await;
+
+        // Take rather than borrow: the handle is consumed by `stop()`, and a
+        // second pass — a re-entrant shutdown, a `stop` after a cancel — then
+        // finds `None` and does nothing instead of stopping a dead pipeline.
+        if let Some(handle) = self.outbox.lock().await.take() {
+            info!("types_registry draining the admission outbox");
+            handle.stop().await;
+            info!("types_registry admission outbox stopped");
+        }
+        Ok(())
     }
 }
 
@@ -188,11 +245,11 @@ impl Gear for TypesRegistryGear {
         // `503 Service Unavailable` through the ordinary canonical-error ladder,
         // and this warning names the cause.
         if let Some(db) = ctx.db() {
-            // Admission runs inline until T21 starts the outbox worker in
-            // `init()`. `NullDispatch` therefore enqueues nothing — the
-            // dispatch is still written inside the acceptance transaction, so
-            // the shape T21 needs is already in place.
-            let dispatch: Arc<dyn OperationDispatch> = Arc::new(NullDispatch);
+            // The dispatch is built empty and bound to the pipeline below: the
+            // pipeline's handler needs the service, the service needs a dispatch,
+            // and the dispatch needs the pipeline's `Outbox`. See
+            // `infra::outbox::OutboxDispatch` for why the loop is closed weakly.
+            let dispatch = Arc::new(OutboxDispatch::new());
             // The domain names its persistence ports and never the repositories;
             // this is the one place the database-backed adapter is chosen.
             let stores: Arc<dyn Stores> = Arc::new(Repos);
@@ -201,14 +258,30 @@ impl Gear for TypesRegistryGear {
                 stores,
                 registration_policy,
                 cfg_for_registry,
-                dispatch,
-                crate::domain::registry_service::AdmissionMode::Inline,
+                Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
+                // T21: admission is dispatched, never run in the caller's task.
+                // Seeding stays inline and permanently so (SPEC §8.1), which is a
+                // separate service instance's business rather than this one's.
+                crate::domain::registry_service::AdmissionMode::Outbox,
                 Arc::clone(&metrics),
             ));
+
+            // Last in `init()`, and after the seeding above: seed operations are
+            // admitted inline and enqueue nothing, so starting the pipeline only
+            // once they are done means no lease can ever race one (`plan.md` P3).
+            let handle = crate::infra::outbox::start(db.db(), &registry, &dispatch)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to start the admission outbox: {e}"))?;
+            *self.outbox.lock().await = Some(handle);
+
             self.registry
                 .set(registry)
                 .map_err(|_| anyhow::anyhow!("{} gear already initialized", Self::MODULE_NAME))?;
-            info!("types_registry database-backed admission path wired");
+            info!(
+                queue = crate::infra::outbox::QUEUE,
+                table_prefix = OUTBOX_TABLE_PREFIX,
+                "types_registry database-backed admission path wired; outbox worker running"
+            );
         } else {
             tracing::warn!(
                 "types_registry has no database bound: POST /entities, GET /operations/{{id}} and \

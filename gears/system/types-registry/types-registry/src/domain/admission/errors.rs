@@ -106,6 +106,34 @@ pub enum WorkerError {
     Db(#[from] DbError),
 }
 
+impl WorkerError {
+    /// `true` when a redelivery of the same message could succeed.
+    ///
+    /// The classification lives here rather than in the outbox handler, which is
+    /// required to be a shell: the handler maps this one boolean onto
+    /// `Retry` / `Reject` and makes no judgement of its own.
+    ///
+    /// **Almost everything is transient, and the type's own header says why** —
+    /// nothing in this enum is a statement about a candidate, so nothing in it is
+    /// the caller's fault to give up on. The exception is
+    /// [`Self::OperationNotFound`]: the outbox message is written by the same
+    /// transaction as the operation row, so a delivered message always had an
+    /// operation, and one that does not is a message no redelivery can make
+    /// valid. That is the "permanently invalid message" the dead-letter table is
+    /// for.
+    ///
+    /// The corruption variants — an unparsable stored identifier, a missing
+    /// current-state row — are deliberately on the transient side even though a
+    /// redelivery will not fix them. Dead-lettering them would trade a message
+    /// that keeps an alert firing for a row nothing looks at, and the operator
+    /// action is the same either way: repair the data. A message-attempt bound is
+    /// the honest way to stop retrying forever, and P0 does not set one.
+    #[must_use]
+    pub const fn transient(&self) -> bool {
+        !matches!(self, Self::OperationNotFound { .. })
+    }
+}
+
 /// A candidate-level failure: final, recorded, and never retried.
 #[domain_model]
 #[derive(Clone, Debug, PartialEq, Eq)]

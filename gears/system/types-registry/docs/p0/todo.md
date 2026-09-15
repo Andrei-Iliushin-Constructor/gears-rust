@@ -1862,41 +1862,139 @@ local toolchain shadows the pinned 1.97.0; the file is untouched by this task. `
 - `gears/system/types-registry/QUICKSTART.md`
 **Scope:** M
 
-### - [ ] T21: Outbox dispatch wiring
+### - [x] T21: Outbox dispatch wiring
 
 **Description:** Wire the `toolkit-db` leased outbox with prefix `types_registry_outbox` as
 a thin `LeasedMessageHandler` shell over the worker function, mapping its result to
 `Ok`/`Retry`/`Reject`. Messages carry only the operation UUID.
 
 **Acceptance criteria:**
-- [ ] Production submissions use `AdmissionMode::Outbox`; acceptance and enqueue share a
+- [x] Production submissions use `AdmissionMode::Outbox`; acceptance and enqueue share a
       transaction, while seeding stays inline and never enqueues (P3)
-- [ ] Handler contains no admission logic — it resolves the operation UUID and calls the worker
-- [ ] Delivery is at-least-once and commits are idempotent; duplicate delivery is a no-op
-- [ ] Transient database failure returns `Retry`; `Reject` only for a permanently invalid message
-- [ ] Candidate content never enters an outbox or dead-letter payload
-- [ ] The gear gains the `stateful` capability — SPEC §5 puts it at `[system, db, rest, stateful]` and T2 deferred the fourth to this task
-- [ ] **Worker is started at the end of types-registry's `init()`**, not in the stateful `start` (plan decision P3), wired to `ctx.cancellation_token()`; the `OutboxHandle` is retained and `stop()`ed on shutdown
-- [ ] Started **after** inline seeding, so seed operations — which are never enqueued — cannot be leased concurrently
-- [ ] An operation submitted from any consumer's `init()` is admitted without that consumer waiting for the `start` phase
+- [x] Handler contains no admission logic — it resolves the operation UUID and calls the worker
+- [x] Delivery is at-least-once and commits are idempotent; duplicate delivery is a no-op
+- [x] Transient database failure returns `Retry`; `Reject` only for a permanently invalid message
+- [x] Candidate content never enters an outbox or dead-letter payload
+- [x] The gear gains the `stateful` capability — SPEC §5 puts it at `[system, db, rest, stateful]` and T2 deferred the fourth to this task
+- [x] **Worker is started at the end of types-registry's `init()`**, not in the stateful `start` (plan decision P3), wired to `ctx.cancellation_token()`; the `OutboxHandle` is retained and `stop()`ed on shutdown
+- [x] Started **after** inline seeding, so seed operations — which are never enqueued — cannot be leased concurrently
+- [x] An operation submitted from any consumer's `init()` is admitted without that consumer waiting for the `start` phase
 
 **Verification:**
-- [ ] Gear tests, all three backends (see [Commands](#commands))
-- [ ] Test: real-router submissions for registration, batch deletion and single deletion,
+- [x] Gear tests, all three backends (see [Commands](#commands))
+- [x] Test: real-router submissions for registration, batch deletion and single deletion,
       each in committed and dry-run mode, reach terminal outcomes through the outbox without
       a direct worker call. Dry runs persist operation/outcome records but preserve entity
       state, revisions and resource versions
-- [ ] Test: duplicate delivery of one operation UUID changes nothing
-- [ ] Test: an operation submitted immediately after `init()` returns reaches `completed` without the `start` phase running
-- [ ] Test: shutdown drains or cancels cleanly — no task leak after `stop()`
-- [ ] Manual: submit over REST against `make example` and observe the operation reach `completed` without direct worker invocation
+- [x] Test: duplicate delivery of one operation UUID changes nothing
+- [x] Test: an operation submitted immediately after `init()` returns reaches `completed` without the `start` phase running
+- [x] Test: shutdown drains or cancels cleanly — no task leak after `stop()`
+- [x] Manual: submit over REST against `make example` and observe the operation reach `completed` without direct worker invocation
+
+**SPEC amended, and this is the task's one real decision.** SPEC §13 forbade `sleep`,
+`timeout`, `tokio::time::*`, polling and retries in Rust tests and reserved the real dispatch
+loop for E2E as *"the only place polling is allowed"*; §14 listed a poll loop under **Never**.
+That is incompatible with this task's own verification, which asks for Rust tests where a
+router submission reaches a terminal outcome *through* the outbox. Researching the conflict
+settled it in favour of a narrow exception rather than a narrower task:
+
+- **`toolkit-db` tests its own outbox exactly this way.** `poll_until` reads an async
+  predicate every 10 ms against a deadline (`outbox/integration_tests.rs:438`, used with
+  5000 ms by the builder, custom-prefix and multi-queue delivery tests); its full-pipeline
+  tests additionally await a handler-fired `Notify` under a 10 s deadline (`:4153`, `:4213`,
+  `:4472`). So does the rest of the repo: mini-chat waits on a `Notify` under `timeout(5s)`
+  (`mini-chat/src/infra/outbox.rs:1125`), event-broker polls every 10 ms for 2 s
+  (`event-broker-sdk/tests/producer/outbox.rs:793`).
+- **The deterministic alternative does not exist for us.** `run_sequencer_until_idle`,
+  `run_leased` and `run_transactional` work only because `integration_tests.rs` is an
+  *internal* module of `toolkit-db` (`outbox/mod.rs:132`); `workers`, the strategies, the
+  store and the statement catalog are private and unexported. Public `Outbox::flush()` only
+  sends a wakeup (`outbox/core.rs:549`). There is no tick, drain or single-pass entry point a
+  dependent crate can call.
+- **Waiting here is therefore the behaviour under test, not an accident of the harness** —
+  which is the exact justification §13 used to allow it in E2E.
+
+§13 now carries the exception with four bounds (one shared helper, one immediate read then
+capped backoff under one deadline, only a non-terminal observation retried, only for
+delivery-subject tests), §14 scopes its "Never" around that helper, §13's E2E paragraph no
+longer claims to be the only place the loop runs, and §8.1's inline *"no test may poll"* is
+now *"worker and domain tests never wait"*. The under-5-s budget is kept and restated as a
+property of a **passing** run, because six cases at a 2 s failure deadline cannot bound a red
+one.
+
+**Implementation notes:**
+- `common::await_delivery` is that one helper: an immediate observation, then 10 → 20 → 40 →
+  80 → 100 ms under a single 2 s deadline whose expiry panics. The closure returns
+  `Some(value)` when terminal and `None` only for `pending`/`running`, so an unexpected
+  status or a non-`200` fails on the first read instead of being re-read until the deadline.
+- **Two test layers, and the split is the point.** The handler shell is driven synchronously
+  by `AdmissionHandler::admit_payload(&[u8])` — every mapping and the at-least-once no-op are
+  proved with no pipeline and nothing to wait for. Real delivery is proved once per surface:
+  `outbox_test.rs` at the domain, `api_rest_test.rs` over the six route/mode combinations,
+  `outbox_backends_test.rs` on PostgreSQL and MySQL where the lease actually takes row locks.
+  Splitting `admit_payload` out of `LeasedMessageHandler::handle` also removed the only
+  reason to construct an `OutboxMessage` in a test, so no `chrono` dev-dependency was added.
+- `RegistryService::admit(operation_id, now)` is the handler's whole body, and also the inline
+  branch of `submit`. One method rather than two call sites building `Tuning`, so the interim
+  inline path and the dispatched one cannot be tuned apart.
+- `WorkerError::transient()` owns the `Retry`/`Reject` split, so the handler decides nothing.
+  Almost everything is transient because the type's own header says so — *"an infrastructure
+  failure, retryable by construction"*. The exception is `OperationNotFound`: the message is
+  written by the same transaction as the operation row, so a delivered message always had
+  one, and one that does not is the "permanently invalid message" the dead-letter table is
+  for. The corruption variants stay on the transient side deliberately; see the method's
+  documentation for why, and for the attempt bound P0 does not set.
+- **`OutboxDispatch` holds the `Outbox` weakly.** The wiring is circular by construction —
+  handler → service → dispatch → `Outbox` → handler — so a strong reference there would leak
+  the pipeline past shutdown. A dispatch that outlives its pipeline refuses, which is why a
+  submission after `stop()` is an error rather than an operation nothing will admit.
+- One partition, and that is a protocol fact rather than a default: every entity-state writer
+  claims `entity_write_order` as its commit transaction's first statement (D4), so an
+  installation admits one at a time however many processors are leased.
+- `OutboxProfile::low_latency()`, because the default profile paces 100 ms minimum and 500 ms
+  active intervals between consecutive passes — throughput tuning for a queue nobody awaits,
+  and P3 has consumers awaiting this one. First delivery is notification-driven either way.
+- `infra::outbox::start` is called by `init()` **and** by all three test harnesses, so the
+  queue name, table prefix, partition count and profile cannot drift between the suite and
+  the deployment.
+
+**Deviation, recorded rather than silently absorbed: `ctx.cancellation_token()` cannot be
+handed to the outbox.** `OutboxBuilder::start()` creates its own `CancellationToken`
+(`toolkit-db/src/outbox/manager.rs:496`) and the builder has no token field or setter
+(`:103`); `LeasedQueueBuilder::start()` just delegates. The wiring is the stateful entry point
+instead: `lifecycle(entry = "serve", stop_timeout = "30s", await_ready)` gives `serve` the
+runtime's token, it parks on it and drains the retained `OutboxHandle`, and `TaskSet::Drop`
+cancels without joining as the backstop. SPEC §8.1 has been corrected to say this rather than
+to promise an API that does not exist. Closing it properly is a `toolkit-db` change.
+
+**Visible behaviour change.** A submission receipt now reports `status: "pending"` where it
+reported `"completed"`, because nothing admits in the caller's task any more. `200` on a
+terminal replay is correspondingly rarer: a replay now usually finds the operation still
+running. Both were already documented as mode-dependent; this is the mode changing.
+
+**Recorded verification:** SQLite 903/903, steady-state suite 2.05–2.26 s (a cold first run
+measured 4.6 s; the slowest single test is 0.47 s and the six-case outbox router test is
+0.22 s). PostgreSQL + MySQL 39/39 as one `make test-types-registry-db` run, three consecutive
+green runs. `make e2e-local`: 324 passed, 19 skipped — unchanged, no e2e file edited, with
+production now dispatching. `make fmt` and gear-scoped `cargo clippy --no-deps --all-features`
+clean. Manual against a live server: `init()` logged `outbox worker running`, a submission
+answered `202` with `status: "pending"`, and registration, dry-run deletion and committed
+deletion each reached `completed` with no worker call anywhere; `SIGTERM` logged
+`draining the admission outbox` → `admission outbox stopped` → `Stopped gear`.
+
+**Observed flakiness, not a regression.** One `make test-types-registry-db` run failed
+`migration_backends_test` on both PostgreSQL and MySQL, then passed three times in a row.
+The suite now starts two more containers than before, and that test does schema rollback
+work; container startup under that contention is the cause. Worth a longer container wait if
+it recurs in CI.
 
 **Dependencies:** T20 (worker supports both mutation kinds and dry run); T20a precedes this
 task so the REST-to-outbox flow can be verified before Checkpoint 5
 **Files likely touched:** `TR/src/infra/outbox.rs`, `TR/src/gear.rs`, `TR/Cargo.toml`,
-`TR/tests/outbox_test.rs`, `TR/tests/api_rest_test.rs`
+`TR/src/domain/registry_service.rs`, `TR/src/domain/admission/errors.rs`,
+`TR/tests/outbox_test.rs`, `TR/tests/outbox_backends_test.rs`, `TR/tests/api_rest_test.rs`,
+`TR/tests/common/mod.rs`, `docs/p0/SPEC.md` (§§8.1, 13, 14)
 **Scope:** M
-
 ---
 
 ### Checkpoint 5

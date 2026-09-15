@@ -20,6 +20,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use toolkit::api::{OpenApiRegistry, ResponseHeaderType};
+use toolkit_db::outbox::OutboxHandle;
 use toolkit_gts::{gts_id, gts_uri};
 use tower::ServiceExt;
 
@@ -30,6 +31,7 @@ use types_registry::domain::policy::RegistrationPolicy;
 use types_registry::domain::registry_service::{AdmissionMode, RegistryService};
 use types_registry::domain::service::TypesRegistryService;
 use types_registry::infra::InMemoryGtsRepository;
+use types_registry::infra::outbox::OutboxDispatch;
 
 mod common;
 use common::{stores, test_db};
@@ -188,6 +190,45 @@ async fn router_with(v1_ready: bool) -> Router {
         legacy,
         Some(registry),
     )
+}
+
+/// The router over a **dispatched** admission path, plus the pipeline's handle.
+///
+/// [`router_with_db`] above keeps `AdmissionMode::Inline`, and that is not a
+/// leftover: inline admission makes an operation terminal by the time the
+/// submission returns, which is what lets every other test in this file assert
+/// an outcome without waiting. SPEC §13 asks for exactly that wherever it is
+/// possible. This harness exists for the one question inline mode cannot answer
+/// — whether the wiring delivers — and the tests that use it are the only ones
+/// here that wait.
+async fn router_with_outbox() -> (Router, OutboxHandle) {
+    let db = common::test_db_with_outbox().await;
+    let openapi = TestOpenApi::default();
+    let config = TypesRegistryConfig::default();
+    let legacy = Arc::new(TypesRegistryService::new(
+        Arc::new(InMemoryGtsRepository::new(config.to_gts_config())),
+        config.clone(),
+    ));
+    let dispatch = Arc::new(OutboxDispatch::new());
+    let registry = Arc::new(RegistryService::new(
+        db.db(),
+        stores(),
+        RegistrationPolicy::default(),
+        config,
+        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
+        AdmissionMode::Outbox,
+        common::metrics(),
+    ));
+    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
+        .await
+        .expect("start the admission outbox");
+    let router = types_registry::api::rest::routes::register_routes(
+        Router::new(),
+        &openapi,
+        legacy,
+        Some(registry),
+    );
+    (router, handle)
 }
 
 /// The same routes with no database bound — `no-db.yaml` and `--mock`. Ready,
@@ -1931,4 +1972,174 @@ async fn without_a_database_the_deletion_routes_report_service_unavailable() {
         "{:?}",
         batched.body
     );
+}
+
+// ---------------------------------------------------------------------------
+// Through the outbox (T21)
+// ---------------------------------------------------------------------------
+//
+// Everything above this line runs the admission worker in the request's task.
+// These two tests are the opposite claim: the router accepts, nothing in the
+// test calls the worker, and the operation becomes terminal anyway. They are the
+// only tests in the gear that wait, through `common::await_delivery` under SPEC
+// §13's scoped exception.
+//
+// Note what is *absent* from the harness: there is no `start` phase. The
+// pipeline is built the way `init()` builds it and delivery happens regardless,
+// which is the property `plan.md` P3 needs for a consumer that submits from its
+// own `init()`.
+
+/// Which mutation spelling a case exercises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mutation {
+    Register,
+    BatchDelete,
+    DeleteOne,
+}
+
+/// Follow a receipt to its terminal operation document, waiting for the outbox.
+async fn await_operation(router: &Router, receipt: &Response, what: &str) -> Value {
+    let operation_id = receipt.body["operation_id"]
+        .as_str()
+        .expect("a receipt carries an operation_id")
+        .to_owned();
+    let uri = format!("{V2}/operations/{operation_id}");
+    common::await_delivery(what, || async {
+        let response = call(router, get(&uri)).await;
+        assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
+        match response.body["status"].as_str() {
+            Some("completed") => Some(response.body),
+            // The one observation worth re-reading.
+            Some("pending" | "running") => None,
+            other => panic!("unexpected operation status {other:?}: {:?}", response.body),
+        }
+    })
+    .await
+}
+
+/// Every mutation route, in both modes, reaches a terminal outcome with no
+/// direct worker call — and a dry run leaves entity state exactly where the
+/// committed spelling moves it.
+#[tokio::test]
+async fn every_mutation_reaches_a_terminal_outcome_through_the_outbox() {
+    let cases = vec![
+        (Mutation::Register, false),
+        (Mutation::Register, true),
+        (Mutation::BatchDelete, false),
+        (Mutation::BatchDelete, true),
+        (Mutation::DeleteOne, false),
+        (Mutation::DeleteOne, true),
+    ];
+
+    for (mutation, dry_run) in cases {
+        let case = format!("{mutation:?} dry_run={dry_run}");
+        // A router per case: the outbox is a real pipeline, and sharing one
+        // across cases would make a case's outcome depend on its predecessors.
+        let (router, handle) = router_with_outbox().await;
+
+        // Deletion needs something to delete, and registering it goes through the
+        // same outbox, so the arrange step is itself a delivery.
+        let deleting = mutation != Mutation::Register;
+        if deleting {
+            let seeded = call(&router, submit(Some("arrange"), &one_candidate(CF_TYPE))).await;
+            assert_eq!(
+                seeded.status,
+                StatusCode::ACCEPTED,
+                "{case}: {:?}",
+                seeded.body
+            );
+            let operation = await_operation(&router, &seeded, &format!("{case}: arrange")).await;
+            assert_eq!(
+                operation["items"][0]["status"],
+                json!("succeeded"),
+                "{case}"
+            );
+        }
+
+        let request = match (mutation, dry_run) {
+            (Mutation::Register, false) => submit(Some("act"), &one_candidate(CF_TYPE)),
+            (Mutation::Register, true) => {
+                let mut body = one_candidate(CF_TYPE);
+                body["dry_run"] = json!(true);
+                submit(Some("act"), &body)
+            }
+            (Mutation::BatchDelete, false) => batch_delete(Some("act"), &one_target(CF_TYPE, 1)),
+            (Mutation::BatchDelete, true) => {
+                let mut body = one_target(CF_TYPE, 1);
+                body["dry_run"] = json!(true);
+                batch_delete(Some("act"), &body)
+            }
+            (Mutation::DeleteOne, false) => {
+                delete_one(Some("act"), CF_TYPE, "?expected_resource_version=1")
+            }
+            (Mutation::DeleteOne, true) => delete_one(
+                Some("act"),
+                CF_TYPE,
+                "?expected_resource_version=1&dry_run=true",
+            ),
+        };
+
+        let accepted = call(&router, request).await;
+        assert_eq!(
+            accepted.status,
+            StatusCode::ACCEPTED,
+            "{case}: a dispatched submission is never terminal on return: {:?}",
+            accepted.body,
+        );
+        assert_eq!(
+            accepted.body["status"],
+            json!("pending"),
+            "{case}: the receipt must report queued work, not a completed pass",
+        );
+
+        let operation = await_operation(&router, &accepted, &case).await;
+        assert_eq!(
+            operation["kind"],
+            json!(if deleting { "deletion" } else { "registration" }),
+            "{case}",
+        );
+        assert_eq!(operation["dry_run"], json!(dry_run), "{case}");
+        assert_eq!(
+            operation["items"][0]["status"],
+            json!("succeeded"),
+            "{case}: {:?}",
+            operation["items"],
+        );
+
+        // What the mode did, or did not, do to entity state.
+        let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
+        match (mutation, dry_run) {
+            (Mutation::Register, false) => {
+                assert_eq!(entity.status, StatusCode::OK, "{case}: {:?}", entity.body);
+                assert_eq!(entity.body["lifecycle_status"], json!("active"), "{case}");
+                assert_eq!(entity.body["resource_version"], json!(1), "{case}");
+            }
+            (Mutation::Register, true) => {
+                assert_eq!(
+                    entity.status,
+                    StatusCode::NOT_FOUND,
+                    "{case}: a predicted registration leaves nothing readable",
+                );
+            }
+            (_, false) => {
+                assert_eq!(entity.status, StatusCode::OK, "{case}: {:?}", entity.body);
+                assert_eq!(entity.body["lifecycle_status"], json!("deleted"), "{case}");
+            }
+            (_, true) => {
+                assert_eq!(entity.status, StatusCode::OK, "{case}: {:?}", entity.body);
+                assert_eq!(
+                    entity.body["lifecycle_status"],
+                    json!("active"),
+                    "{case}: a predicted deletion leaves the entity alone",
+                );
+                assert_eq!(
+                    entity.body["resource_version"],
+                    json!(1),
+                    "{case}: and does not advance resource_version",
+                );
+            }
+        }
+
+        handle.stop().await;
+    }
 }

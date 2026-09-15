@@ -118,6 +118,108 @@ fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
     types_registry::infra::storage::Migrator::migrations()
 }
 
+/// Shared in-memory `SQLite` with the managed-state **and** outbox migrations,
+/// over a real pool.
+///
+/// Two differences from [`test_db`], both forced by the outbox running actual
+/// background tasks:
+///
+/// * **A named shared cache rather than `sqlite::memory:`.** A bare
+///   `sqlite::memory:` gives every pooled connection its own empty database, so
+///   the sequencer would find no tables. The name carries a UUID, so tests stay
+///   isolated from each other.
+/// * **`max_conns > 1`.** The sequencer, the partition processor, the reconciler
+///   and the test itself are separate actors; with one connection each would
+///   queue behind whichever holds it, and the acceptance transaction that
+///   *contains* the enqueue would be the one they queue behind.
+pub async fn test_db_with_outbox() -> Arc<DBProvider<DbError>> {
+    let name = format!("tr-outbox-{}", uuid::Uuid::new_v4());
+    provider_for_with_outbox(&format!("sqlite:file:{name}?mode=memory&cache=shared"), 4).await
+}
+
+/// Any DSN with the managed-state **and** outbox migrations applied, so the
+/// `PostgreSQL` and `MySQL` outbox suites run the same wiring as the `SQLite`
+/// ones. The prefix comes from the gear, not from a literal, or the pipeline
+/// would read tables the migration never created.
+pub async fn provider_for_with_outbox(dsn: &str, max_conns: u32) -> Arc<DBProvider<DbError>> {
+    let opts = ConnectOpts {
+        max_conns: Some(max_conns),
+        min_conns: Some(1),
+        ..Default::default()
+    };
+    let dsn_scheme = dsn.split(':').next().unwrap_or("database");
+    let db = connect_db(dsn, opts)
+        .await
+        .unwrap_or_else(|e| panic!("connect {dsn_scheme} test database: {e}"));
+    let mut all = migrations();
+    all.extend(
+        toolkit_db::outbox::outbox_migrations_with_prefix(
+            types_registry::infra::outbox::TABLE_PREFIX,
+        )
+        .expect("outbox migration prefix"),
+    );
+    run_migrations_for_testing(&db, all)
+        .await
+        .expect("run migrations");
+    Arc::new(DBProvider::new(db))
+}
+
+// ---------------------------------------------------------------------------
+// The outbox-delivery wait (SPEC §13's scoped exception)
+// ---------------------------------------------------------------------------
+
+/// Wait for an outbox-delivered operation to reach a terminal state.
+///
+/// **The only place in the gear's tests that waits**, and SPEC §13 permits it
+/// only here. Everything about the shape is that exception's four rules:
+///
+/// * `read` performs one observation and returns `Some(value)` once the
+///   operation is terminal, `None` while it is still `pending` or `running`.
+///   Only that `None` is retried — the closure asserts on anything else itself,
+///   so a `409`, a malformed body or an unexpected status fails immediately
+///   instead of being re-read until the deadline.
+/// * One immediate observation, then capped exponential backoff: 10, 20, 40, 80,
+///   then 100 ms.
+/// * One deadline covering the observations *and* the waits. Expiry **panics**;
+///   it never falls through to a weaker assertion.
+///
+/// Nothing here retries a submission or a failed assertion. If a test can call
+/// `run_operation` directly, it must — this exists for the handful of tests
+/// whose subject is delivery itself, because `toolkit-db` keeps its sequencer
+/// and processor private and `Outbox::flush()` only sends a wakeup.
+///
+/// # Panics
+/// If the deadline expires before `read` returns `Some`.
+pub async fn await_delivery<T, F, Fut>(what: &str, read: F) -> T
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    use std::time::Duration;
+
+    /// Generous for a notification-driven pipeline whose passing case is
+    /// milliseconds. It is a *failure* bound, not a latency expectation: a green
+    /// run never spends it, which is what keeps SPEC §13's under-5-s budget a
+    /// property of the passing suite.
+    const DEADLINE: Duration = Duration::from_secs(2);
+    const FIRST_BACKOFF: Duration = Duration::from_millis(10);
+    const MAX_BACKOFF: Duration = Duration::from_millis(100);
+
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    let mut backoff = FIRST_BACKOFF;
+    loop {
+        if let Some(value) = read().await {
+            return value;
+        }
+        assert!(
+            tokio::time::Instant::now() + backoff < deadline,
+            "{what}: the outbox did not deliver within {DEADLINE:?}"
+        );
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
+}
+
 /// The database-backed persistence ports, as the gear wires them. Tests that
 /// drive `accept` / `run_operation` / `RegistryService` pass this: the domain names
 /// only its ports, so the adapter is chosen here exactly as `init()` chooses it.
