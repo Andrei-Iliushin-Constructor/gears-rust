@@ -501,6 +501,7 @@ impl MessageService {
                             text: String::new(),
                             error: err.to_string(),
                             finish_reason,
+                            extra_parts: Vec::new(),
                         },
                     )
                     .await
@@ -964,6 +965,7 @@ impl MessageService {
                             text: String::new(),
                             error: err.to_string(),
                             finish_reason,
+                            extra_parts: Vec::new(),
                         },
                     )
                     .await
@@ -1604,7 +1606,10 @@ impl MessageService {
                         .finalize_assistant(
                             session_id,
                             assistant_id,
-                            FinalizeOutcome::Cancelled { text: accumulator },
+                            FinalizeOutcome::Cancelled {
+                                text: accumulator,
+                                extra_parts,
+                            },
                         )
                         .await
                 }
@@ -1620,6 +1625,7 @@ impl MessageService {
                                 text: accumulator,
                                 error,
                                 finish_reason,
+                                extra_parts,
                             },
                         )
                         .await

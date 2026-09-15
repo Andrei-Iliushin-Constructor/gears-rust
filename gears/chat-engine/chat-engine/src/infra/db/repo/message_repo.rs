@@ -351,7 +351,7 @@ impl MessageRepo for SeaMessageRepo {
                 citations,
                 extra_parts,
             } => (text, metadata, true, citations, extra_parts),
-            FinalizeOutcome::Cancelled { text } => {
+            FinalizeOutcome::Cancelled { text, extra_parts } => {
                 let mut meta = serde_json::Map::new();
                 meta.insert("cancelled".into(), JsonValue::Bool(true));
                 meta.insert("partial".into(), JsonValue::Bool(true));
@@ -360,13 +360,14 @@ impl MessageRepo for SeaMessageRepo {
                     Some(JsonValue::Object(meta)),
                     false,
                     PartCitations::default(),
-                    Vec::new(),
+                    extra_parts,
                 )
             }
             FinalizeOutcome::Errored {
                 text,
                 error,
                 finish_reason,
+                extra_parts,
             } => {
                 let mut meta = serde_json::Map::new();
                 meta.insert(
@@ -380,7 +381,7 @@ impl MessageRepo for SeaMessageRepo {
                     Some(JsonValue::Object(meta)),
                     false,
                     PartCitations::default(),
-                    Vec::new(),
+                    extra_parts,
                 )
             }
         };

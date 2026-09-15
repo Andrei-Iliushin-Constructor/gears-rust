@@ -120,6 +120,11 @@ pub enum FinalizeOutcome {
     Cancelled {
         /// Accumulated text up to the cancellation point.
         text: String,
+        /// Typed parts already streamed via `StreamingEvent::Part` before the
+        /// cancellation. Persisted like the completed case — a part the
+        /// plugin emitted (a tool call it already made, a link card it
+        /// already sent) is as real as the text accumulated beside it.
+        extra_parts: Vec<MessagePartInput>,
     },
     /// Plugin yielded an `Err`/`StreamingErrorEvent` mid-stream. Persist
     /// the partial response with `finish_reason` recorded.
@@ -132,6 +137,9 @@ pub enum FinalizeOutcome {
         /// Canonical finish_reason label (`"error"`, `"timeout"`,
         /// `"interrupted"`). Stored under `metadata.finish_reason`.
         finish_reason: &'static str,
+        /// Typed parts already streamed via `StreamingEvent::Part` before the
+        /// failure. Persisted for the same reason as on the cancelled path.
+        extra_parts: Vec<MessagePartInput>,
     },
 }
 

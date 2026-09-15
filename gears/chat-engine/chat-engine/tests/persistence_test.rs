@@ -216,6 +216,79 @@ async fn cancel_after_partial_chunks_persists_is_complete_false_against_sqlite()
 }
 
 // ===========================================================================
+// 1b. Cancellation preserves streamed parts — a part the plugin emitted
+//     before the cancel is persisted alongside the partial text, not dropped.
+// ===========================================================================
+
+#[tokio::test]
+async fn cancel_persists_parts_streamed_before_the_cancel_against_sqlite() {
+    let harness = db::setup_sqlite().await;
+    let plugin_id = "cancel-parts-plugin";
+    let session_type_id = db::seed_session_type(&harness, plugin_id).await;
+    let session_id = db::seed_active_session(&harness, TENANT_ID, USER_ID, session_type_id).await;
+
+    let placeholder = Uuid::nil();
+    let plugin = FakePlugin::new(
+        plugin_id,
+        FakePluginScript::EventsThenHang(vec![
+            StreamingEvent::Part(StreamingPartEvent {
+                message_id: placeholder,
+                part: MessagePartInput {
+                    part_type: MessagePartType::ToolCall,
+                    content: serde_json::json!({
+                        "tool_call_id": "call_1",
+                        "name": "get_weather",
+                        "arguments": { "city": "Berlin" },
+                    }),
+                    file_citations: vec![],
+                    link_citations: vec![],
+                    references: vec![],
+                },
+            }),
+            StreamingEvent::Chunk(StreamingChunkEvent {
+                message_id: placeholder,
+                chunk: "checking".into(),
+            }),
+        ]),
+    );
+    let plugin_dyn: Arc<dyn ChatEngineBackendPlugin> = plugin;
+    let svc = build_service(&harness, plugin_id, plugin_dyn);
+
+    let cancel = CancellationToken::new();
+    let mut stream = svc
+        .send_message(make_request(session_id), &make_ctx(), cancel.clone())
+        .await
+        .expect("send_message dispatch");
+
+    // Cancel once the chunk that follows the part has reached the wire, so
+    // the driver has certainly accumulated the part.
+    while let Some(evt) = stream.next().await {
+        if matches!(evt, StreamingEvent::Chunk(_)) {
+            cancel.cancel();
+            break;
+        }
+    }
+
+    let row = db::wait_for_finalize(&harness.db, session_id, Duration::from_secs(2)).await;
+    assert!(
+        !row.is_complete,
+        "cancelled row must stay is_complete=false"
+    );
+
+    let parts = db::message_parts_ordered(&harness.db, session_id, "assistant").await;
+    let types: Vec<&str> = parts.iter().map(|(t, _, _)| t.as_str()).collect();
+    assert_eq!(
+        types,
+        vec!["text", "tool_call"],
+        "a part streamed before the cancel must persist beside the partial text",
+    );
+    assert_eq!(
+        parts[1].2["arguments"]["city"], "Berlin",
+        "the preserved part must keep its content verbatim",
+    );
+}
+
+// ===========================================================================
 // 1a. Multi-part body — a message sent with several ordered typed parts
 //     persists them into message_parts and reads them back in order (FR-022).
 // ===========================================================================

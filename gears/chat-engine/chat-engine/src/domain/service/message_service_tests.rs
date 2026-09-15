@@ -8,6 +8,7 @@ use crate::domain::session::SessionType;
 use uuid::Uuid;
 
 use async_trait::async_trait;
+use chat_engine_sdk::models::{MessagePartType, StreamingPartEvent};
 use chat_engine_sdk::plugin::ChatEngineBackendPlugin;
 use chat_engine_sdk::plugin::stream_from_events;
 use parking_lot::Mutex;
@@ -210,27 +211,38 @@ enum FinalizeOutcomeSnapshot {
     },
     Cancelled {
         text: String,
+        part_types: Vec<MessagePartType>,
     },
     Errored {
         text: String,
         error: String,
         finish_reason: String,
+        part_types: Vec<MessagePartType>,
     },
+}
+
+fn part_types_of(parts: &[MessagePartInput]) -> Vec<MessagePartType> {
+    parts.iter().map(|p| p.part_type).collect()
 }
 
 impl From<FinalizeOutcome> for FinalizeOutcomeSnapshot {
     fn from(value: FinalizeOutcome) -> Self {
         match value {
             FinalizeOutcome::Complete { text, metadata, .. } => Self::Complete { text, metadata },
-            FinalizeOutcome::Cancelled { text } => Self::Cancelled { text },
+            FinalizeOutcome::Cancelled { text, extra_parts } => Self::Cancelled {
+                text,
+                part_types: part_types_of(&extra_parts),
+            },
             FinalizeOutcome::Errored {
                 text,
                 error,
                 finish_reason,
+                extra_parts,
             } => Self::Errored {
                 text,
                 error,
                 finish_reason: finish_reason.to_string(),
+                part_types: part_types_of(&extra_parts),
             },
         }
     }
@@ -310,7 +322,8 @@ enum PluginScript {
     Events(Vec<StreamingEvent>),
     PreError(PluginError),
     EventsThenErr(Vec<StreamingEvent>, PluginError),
-    Hang, // never resolves; relies on cancellation
+    Hang,                                // never resolves; relies on cancellation
+    EventsThenHang(Vec<StreamingEvent>), // emits, then relies on cancellation
 }
 
 struct ScriptPlugin {
@@ -354,6 +367,13 @@ impl ChatEngineBackendPlugin for ScriptPlugin {
                 // A stream that yields nothing — cancellation is the
                 // only way out.
                 Ok(empty_stream_pending())
+            }
+            PluginScript::EventsThenHang(events) => {
+                let items: Vec<std::result::Result<StreamingEvent, PluginError>> =
+                    events.into_iter().map(Ok).collect();
+                Ok(futures::stream::iter(items)
+                    .chain(empty_stream_pending())
+                    .boxed())
             }
         }
     }
@@ -517,7 +537,78 @@ async fn mid_stream_cancellation_finalizes_with_cancelled() {
     let calls = messages.finalize_calls.lock().clone();
     assert_eq!(calls.len(), 1);
     match &calls[0].1 {
-        FinalizeOutcomeSnapshot::Cancelled { text } => assert_eq!(text, ""),
+        FinalizeOutcomeSnapshot::Cancelled { text, .. } => assert_eq!(text, ""),
+        other => panic!("expected Cancelled finalize, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn cancellation_persists_parts_streamed_before_the_cancel() {
+    // A part the plugin already emitted (here: a tool call it actually made)
+    // is as real as the text accumulated beside it — cancelling the turn must
+    // not drop it while keeping the text.
+    let plugin_id = "plugin-part-then-hang";
+    let session_type_id = Uuid::new_v4();
+    let plugin = ScriptPlugin::new(
+        plugin_id,
+        PluginScript::EventsThenHang(vec![StreamingEvent::Part(StreamingPartEvent {
+            message_id: Uuid::nil(),
+            part: MessagePartInput {
+                part_type: MessagePartType::ToolCall,
+                content: serde_json::json!({
+                    "tool_call_id": "call_1",
+                    "name": "get_weather",
+                    "arguments": { "city": "Berlin" },
+                }),
+                file_citations: vec![],
+                link_citations: vec![],
+                references: vec![],
+            },
+        })]),
+    );
+    let plugin_dyn: Arc<dyn ChatEngineBackendPlugin> = plugin;
+    let (svc, sessions, messages) = make_service(plugin_id, plugin_dyn, session_type_id, None);
+
+    let cancel = CancellationToken::new();
+    let mut stream = svc
+        .send_message(
+            make_request(sessions.session_id()),
+            &make_ctx(),
+            cancel.clone(),
+        )
+        .await
+        .expect("send_message dispatch");
+
+    // Drain until the part reaches the wire, so the driver has accumulated it.
+    let mut saw_part = false;
+    while let Ok(Some(evt)) = tokio::time::timeout(Duration::from_millis(200), stream.next()).await
+    {
+        if matches!(evt, StreamingEvent::Part(_)) {
+            saw_part = true;
+            break;
+        }
+    }
+    assert!(
+        saw_part,
+        "plugin part must reach the wire before cancelling"
+    );
+
+    cancel.cancel();
+    let next = tokio::time::timeout(Duration::from_millis(200), stream.next()).await;
+    assert!(
+        matches!(next, Ok(None) | Err(_)),
+        "stream must terminate after cancel"
+    );
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let calls = messages.finalize_calls.lock().clone();
+    assert_eq!(calls.len(), 1);
+    match &calls[0].1 {
+        FinalizeOutcomeSnapshot::Cancelled { part_types, .. } => assert_eq!(
+            part_types,
+            &vec![MessagePartType::ToolCall],
+            "the streamed part must survive the cancellation",
+        ),
         other => panic!("expected Cancelled finalize, got {other:?}"),
     }
 }
@@ -606,6 +697,60 @@ async fn mid_stream_err_emits_streaming_error_event_and_finalizes() {
         } => {
             assert_eq!(text, "partial");
             assert_eq!(finish_reason, "error");
+        }
+        other => panic!("expected Errored finalize, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn mid_stream_error_persists_parts_streamed_before_the_failure() {
+    let plugin_id = "plugin-part-then-err";
+    let session_type_id = Uuid::new_v4();
+    let plugin = ScriptPlugin::new(
+        plugin_id,
+        PluginScript::EventsThenErr(
+            vec![
+                StreamingEvent::Part(StreamingPartEvent {
+                    message_id: Uuid::nil(),
+                    part: MessagePartInput {
+                        part_type: MessagePartType::Links,
+                        content: serde_json::json!({ "links": [{ "url": "https://e.com" }] }),
+                        file_citations: vec![],
+                        link_citations: vec![],
+                        references: vec![],
+                    },
+                }),
+                StreamingEvent::Chunk(StreamingChunkEvent {
+                    message_id: Uuid::nil(),
+                    chunk: "partial".into(),
+                }),
+            ],
+            PluginError::internal("boom"),
+        ),
+    );
+    let plugin_dyn: Arc<dyn ChatEngineBackendPlugin> = plugin;
+    let (svc, sessions, messages) = make_service(plugin_id, plugin_dyn, session_type_id, None);
+
+    let cancel = CancellationToken::new();
+    let mut stream = svc
+        .send_message(make_request(sessions.session_id()), &make_ctx(), cancel)
+        .await
+        .expect("send_message dispatch");
+    while stream.next().await.is_some() {}
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let calls = messages.finalize_calls.lock().clone();
+    assert_eq!(calls.len(), 1);
+    match &calls[0].1 {
+        FinalizeOutcomeSnapshot::Errored {
+            text, part_types, ..
+        } => {
+            assert_eq!(text, "partial");
+            assert_eq!(
+                part_types,
+                &vec![MessagePartType::Links],
+                "the streamed part must survive the failure",
+            );
         }
         other => panic!("expected Errored finalize, got {other:?}"),
     }
