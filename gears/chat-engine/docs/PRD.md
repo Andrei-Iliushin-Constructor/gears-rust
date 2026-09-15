@@ -720,6 +720,7 @@ The system **MUST** represent a message body as an **ordered list of typed parts
 - An `images`/`videos` part referencing a file UUID is forwarded to backend plugins without the engine fetching the file.
 - A `tool_call` part and the `tool_result` part quoting its `tool_call_id` round-trip through persistence and appear in a session export.
 - A message with no parts is rejected as an invalid request.
+- A part whose `type` is outside the known set is rejected as an invalid request; it is never coerced into another type.
 
 **Actors**: `cpt-cf-chat-engine-actor-client`, `cpt-cf-chat-engine-actor-backend-plugin`
 <!-- fdd-id-content -->
