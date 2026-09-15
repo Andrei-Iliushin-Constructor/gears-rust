@@ -41,16 +41,16 @@ impl RootTypeConfig {
     pub fn validated_id(&self) -> Result<&str, String> {
         let type_id = self.gts_id.as_ref();
         let parsed = GtsId::try_new(type_id)
-            .map_err(|error| format!("root_type.gts_id `{type_id}` is invalid: {error}"))?;
+            .map_err(|error| format!("root_tenant_type.gts_id `{type_id}` is invalid: {error}"))?;
         if !parsed.is_type() || parsed.id() != type_id {
             return Err(format!(
-                "root_type.gts_id `{type_id}` must be a canonical GTS type-schema ID"
+                "root_tenant_type.gts_id `{type_id}` must be a canonical GTS type-schema ID"
             ));
         }
         let chain = parsed.chain_ids();
         if chain.len() != 2 || chain.first().map(String::as_str) != Some(TENANT_TYPE_BASE) {
             return Err(format!(
-                "root_type.gts_id `{type_id}` must be a concrete type directly derived from {TENANT_TYPE_BASE}"
+                "root_tenant_type.gts_id `{type_id}` must be a concrete type directly derived from {TENANT_TYPE_BASE}"
             ));
         }
         Ok(type_id)

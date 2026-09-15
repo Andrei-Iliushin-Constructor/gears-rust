@@ -31,10 +31,13 @@ fn default_validates_clean() {
 #[test]
 fn independent_root_type_resolves_without_bootstrap() {
     let cfg = AccountManagementConfig {
-        root_type: Some(root_type(false)),
+        root_tenant_type: Some(root_type(false)),
         ..AccountManagementConfig::default()
     };
-    assert_eq!(cfg.resolved_root_type().expect("valid"), cfg.root_type);
+    assert_eq!(
+        cfg.resolved_root_type().expect("valid"),
+        cfg.root_tenant_type
+    );
 }
 
 #[test]
@@ -56,7 +59,7 @@ fn deprecated_bootstrap_root_type_is_migrated() {
 #[test]
 fn modern_and_legacy_root_type_conflict_is_fatal() {
     let cfg = AccountManagementConfig {
-        root_type: Some(root_type(true)),
+        root_tenant_type: Some(root_type(true)),
         bootstrap: Some(BootstrapConfig {
             root_tenant_type: Some(gts::GtsTypeId::new(ROOT_TYPE)),
             root_tenant_type_idp_provisioning: Some(false),
@@ -76,7 +79,7 @@ fn bootstrap_without_root_type_is_fatal_even_when_nonstrict() {
     };
     let error = cfg.validate().expect_err("schema contract is mandatory");
     assert!(
-        error.contains("bootstrap requires root_type.gts_id"),
+        error.contains("bootstrap requires root_tenant_type.gts_id"),
         "{error}"
     );
 }

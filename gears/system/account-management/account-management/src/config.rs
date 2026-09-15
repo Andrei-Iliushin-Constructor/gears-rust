@@ -47,7 +47,7 @@ pub struct AccountManagementConfig {
     /// AM-owned concrete platform-root tenant-type contract. Independent from
     /// tenant bootstrap so a deployment that creates its root out of band still
     /// reconciles the shared schema.
-    pub root_type: Option<RootTypeConfig>,
+    pub root_tenant_type: Option<RootTypeConfig>,
 
     /// Optional platform-bootstrap saga configuration. `None` means no
     /// in-process bootstrap on this platform start (deployment is
@@ -501,11 +501,11 @@ impl AccountManagementConfig {
             );
         }
 
-        let resolved = match (&self.root_type, legacy) {
+        let resolved = match (&self.root_tenant_type, legacy) {
             (Some(modern), Some(legacy)) => {
                 if modern.gts_id != legacy.gts_id {
                     return Err(format!(
-                        "root_type.gts_id `{}` conflicts with deprecated bootstrap.root_tenant_type `{}`",
+                        "root_tenant_type.gts_id `{}` conflicts with deprecated bootstrap.root_tenant_type `{}`",
                         modern.gts_id, legacy.gts_id
                     ));
                 }
@@ -516,7 +516,7 @@ impl AccountManagementConfig {
                     && modern.idp_provisioning != legacy_idp
                 {
                     return Err(format!(
-                        "root_type.idp_provisioning={} conflicts with deprecated bootstrap.root_tenant_type_idp_provisioning={legacy_idp}",
+                        "root_tenant_type.idp_provisioning={} conflicts with deprecated bootstrap.root_tenant_type_idp_provisioning={legacy_idp}",
                         modern.idp_provisioning
                     ));
                 }
@@ -526,7 +526,7 @@ impl AccountManagementConfig {
             (None, Some(legacy)) => Some(legacy),
             (None, None) if self.bootstrap.is_some() => {
                 return Err(
-                    "bootstrap requires root_type.gts_id (or deprecated bootstrap.root_tenant_type during migration)"
+                    "bootstrap requires root_tenant_type.gts_id (or deprecated bootstrap.root_tenant_type during migration)"
                         .to_owned(),
                 );
             }

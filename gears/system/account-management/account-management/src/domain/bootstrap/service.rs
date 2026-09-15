@@ -978,14 +978,14 @@ impl<R: TenantRepo> BootstrapService<R> {
         let configured_type_uuid = gts::GtsId::try_new(self.root_type.gts_id.as_ref())
             .map_err(|error| DomainError::InvalidTenantType {
                 detail: format!(
-                    "invalid root_type.gts_id chain `{}`: {error}",
+                    "invalid root_tenant_type.gts_id chain `{}`: {error}",
                     self.root_type.gts_id
                 ),
             })?
             .to_uuid();
         if existing.tenant_type_uuid != configured_type_uuid {
             return Err(DomainError::internal(format!(
-                "platform root {} has tenant_type_uuid={}, but configured root_type.gts_id {} resolves to {}; an explicit root/schema migration is required",
+                "platform root {} has tenant_type_uuid={}, but configured root_tenant_type.gts_id {} resolves to {}; an explicit root/schema migration is required",
                 existing.id, existing.tenant_type_uuid, self.root_type.gts_id, configured_type_uuid
             )));
         }
@@ -1472,7 +1472,7 @@ impl<R: TenantRepo> BootstrapService<R> {
         // Build the AM-internal `TenantContext` from the saga's
         // in-scope facts: `root_id`, the configured root name/type,
         // and whatever the plugin returned from `provision_tenant`
-        // (we just got it in `finalize`). `root_type.gts_id` is
+        // (we just got it in `finalize`). `root_tenant_type.gts_id` is
         // the typed `GtsTypeId` the saga already passed into the
         // provision call, so we forward the same value here without
         // re-parsing. Convert to the SDK `IdpTenantContext` at the

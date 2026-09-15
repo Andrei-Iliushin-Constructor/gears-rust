@@ -55,14 +55,14 @@ pub struct BootstrapConfig {
     /// the `tenants.name` column verbatim.
     pub root_name: String,
 
-    /// Deprecated compatibility alias for `root_type.gts_id`.
+    /// Deprecated compatibility alias for `root_tenant_type.gts_id`.
     ///
-    /// New deployments must use the independent top-level `root_type` block.
+    /// New deployments must use the independent top-level `root_tenant_type` block.
     /// When both are supplied they must agree; resolution is performed by
     /// [`crate::config::AccountManagementConfig::resolved_root_type`].
     pub root_tenant_type: Option<gts::GtsTypeId>,
 
-    /// Deprecated compatibility alias for `root_type.idp_provisioning`.
+    /// Deprecated compatibility alias for `root_tenant_type.idp_provisioning`.
     pub root_tenant_type_idp_provisioning: Option<bool>,
 
     /// Opaque deployment-supplied metadata forwarded to the `IdP` plugin

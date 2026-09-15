@@ -553,11 +553,16 @@ fn validate_existing_root_binding(
         );
     }
     let configured_type_uuid = gts::GtsId::try_new(root_type.gts_id.as_ref())
-        .map_err(|error| anyhow::anyhow!("invalid root_type.gts_id {}: {error}", root_type.gts_id))?
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "invalid root_tenant_type.gts_id {}: {error}",
+                root_type.gts_id
+            )
+        })?
         .to_uuid();
     if existing_type_uuid != configured_type_uuid {
         anyhow::bail!(
-            "existing platform root {existing_root_id} has tenant_type_uuid={existing_type_uuid}, but configured root_type.gts_id {} resolves to {configured_type_uuid}; an explicit root/schema migration is required",
+            "existing platform root {existing_root_id} has tenant_type_uuid={existing_type_uuid}, but configured root_tenant_type.gts_id {} resolves to {configured_type_uuid}; an explicit root/schema migration is required",
             root_type.gts_id
         );
     }
@@ -940,7 +945,7 @@ impl Gear for AccountManagementGear {
                 );
             } else {
                 let root_type = root_type.clone().ok_or_else(|| {
-                    anyhow::anyhow!("validated bootstrap is missing its root_type contract")
+                    anyhow::anyhow!("validated bootstrap is missing its root_tenant_type contract")
                 })?;
                 *self.bootstrap_params.lock() = Some(BootstrapParams {
                     config: boot_cfg,

@@ -614,7 +614,7 @@ mod no_seed_startup_tests {
         let config: Arc<dyn ConfigProvider> = Arc::new(StartupConfig {
             account_management: json!({
                 "config": {
-                    "root_type": {
+                    "root_tenant_type": {
                         "gts_id": ROOT_TENANT_TYPE,
                         "idp_provisioning": false
                     },
@@ -690,7 +690,10 @@ mod no_seed_startup_tests {
             .config_or_default()
             .expect("load AM startup config");
         assert_eq!(
-            loaded.root_type.as_ref().map(|cfg| cfg.gts_id.as_ref()),
+            loaded
+                .root_tenant_type
+                .as_ref()
+                .map(|cfg| cfg.gts_id.as_ref()),
             Some(ROOT_TENANT_TYPE)
         );
         account_management_gear
