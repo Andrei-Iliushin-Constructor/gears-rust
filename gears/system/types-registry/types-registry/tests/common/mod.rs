@@ -118,29 +118,15 @@ fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
     types_registry::infra::storage::Migrator::migrations()
 }
 
-/// Shared in-memory `SQLite` with the managed-state **and** outbox migrations,
-/// over a real pool.
-///
-/// Two differences from [`test_db`], both forced by the outbox running actual
-/// background tasks:
-///
-/// * **A named shared cache rather than `sqlite::memory:`.** A bare
-///   `sqlite::memory:` gives every pooled connection its own empty database, so
-///   the sequencer would find no tables. The name carries a UUID, so tests stay
-///   isolated from each other.
-/// * **`max_conns > 1`.** The sequencer, the partition processor, the reconciler
-///   and the test itself are separate actors; with one connection each would
-///   queue behind whichever holds it, and the acceptance transaction that
-///   *contains* the enqueue would be the one they queue behind.
+/// Isolated in-memory `SQLite` pool with managed-state and outbox migrations.
+/// A UUID-named shared cache lets background connections see the same tables;
+/// multiple connections let acceptance and outbox tasks run concurrently.
 pub async fn test_db_with_outbox() -> Arc<DBProvider<DbError>> {
     let name = format!("tr-outbox-{}", uuid::Uuid::new_v4());
     provider_for_with_outbox(&format!("sqlite:file:{name}?mode=memory&cache=shared"), 4).await
 }
 
-/// Any DSN with the managed-state **and** outbox migrations applied, so the
-/// `PostgreSQL` and `MySQL` outbox suites run the same wiring as the `SQLite`
-/// ones. The prefix comes from the gear, not from a literal, or the pipeline
-/// would read tables the migration never created.
+/// Apply managed-state and outbox migrations using the production table prefix.
 pub async fn provider_for_with_outbox(dsn: &str, max_conns: u32) -> Arc<DBProvider<DbError>> {
     let opts = ConnectOpts {
         max_conns: Some(max_conns),
@@ -168,25 +154,11 @@ pub async fn provider_for_with_outbox(dsn: &str, max_conns: u32) -> Arc<DBProvid
 // The outbox-delivery wait (SPEC §13's scoped exception)
 // ---------------------------------------------------------------------------
 
-/// Wait for an outbox-delivered operation to reach a terminal state.
+/// Wait for real outbox delivery only (SPEC §13). Other tests call the worker directly.
 ///
-/// **The only place in the gear's tests that waits**, and SPEC §13 permits it
-/// only here. Everything about the shape is that exception's four rules:
-///
-/// * `read` performs one observation and returns `Some(value)` once the
-///   operation is terminal, `None` while it is still `pending` or `running`.
-///   Only that `None` is retried — the closure asserts on anything else itself,
-///   so a `409`, a malformed body or an unexpected status fails immediately
-///   instead of being re-read until the deadline.
-/// * One immediate observation, then capped exponential backoff: 10, 20, 40, 80,
-///   then 100 ms.
-/// * One deadline covering the observations *and* the waits. Expiry **panics**;
-///   it never falls through to a weaker assertion.
-///
-/// Nothing here retries a submission or a failed assertion. If a test can call
-/// `run_operation` directly, it must — this exists for the handful of tests
-/// whose subject is delivery itself, because `toolkit-db` keeps its sequencer
-/// and processor private and `Outbox::flush()` only sends a wakeup.
+/// `read` returns `Some` when terminal, `None` only for `pending`/`running`, and
+/// asserts on other responses. Observe immediately, then back off 10–100 ms under
+/// one deadline covering reads and waits. Never retry submissions or assertions.
 ///
 /// # Panics
 /// If the deadline expires before `read` returns `Some`.
@@ -197,10 +169,7 @@ where
 {
     use std::time::Duration;
 
-    /// Generous for a notification-driven pipeline whose passing case is
-    /// milliseconds. It is a *failure* bound, not a latency expectation: a green
-    /// run never spends it, which is what keeps SPEC §13's under-5-s budget a
-    /// property of the passing suite.
+    /// Failure deadline; the passing suite must still meet SPEC §13's 5 s budget.
     const DEADLINE: Duration = Duration::from_secs(2);
     const FIRST_BACKOFF: Duration = Duration::from_millis(10);
     const MAX_BACKOFF: Duration = Duration::from_millis(100);

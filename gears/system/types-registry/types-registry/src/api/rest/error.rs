@@ -134,12 +134,7 @@ impl From<ServiceError> for CanonicalError {
             ServiceError::CorruptDocument(detail) => {
                 opaque_internal(&detail, "stored document parse")
             }
-            // `404`, and the same `404` on both deletion spellings: the key names a
-            // resource, `GET /entities/{entity_key}` answers `404` for that same
-            // key, and DESIGN §3.3 defines the deletion path's `entity_key` as
-            // "resolved exactly as GET resolves it". A `400` would be reporting the
-            // request as malformed, which it is not — it is well-formed and names
-            // nothing.
+            // Match GET's unresolved-key response (DESIGN §3.3).
             ServiceError::UnresolvedReference { gts_uuid } => TypeRegistryError::not_found(
                 format!("No entity with Registry Reference: {gts_uuid}"),
             )
@@ -285,14 +280,8 @@ pub fn idempotency_key_not_utf8() -> CanonicalError {
     )
 }
 
-/// `If-Match` was sent to a deletion route.
-///
-/// Refused rather than ignored, and the refusal names its replacement: a caller
-/// that sent `If-Match` believes the request is conditional in the RFC 9110
-/// §13.1.1 sense, and it is not — the precondition is
-/// `expected_resource_version`, and its failure is an asynchronous item outcome
-/// rather than a `412` (DESIGN §3.3). Ignoring the header would answer a
-/// conditional request unconditionally.
+/// Reject `If-Match`: deletion uses `expected_resource_version`, checked
+/// asynchronously at admission, so it cannot provide HTTP `412` semantics (DESIGN §3.3).
 #[must_use]
 pub fn if_match_not_supported() -> CanonicalError {
     invalid_field(

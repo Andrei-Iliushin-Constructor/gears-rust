@@ -99,3 +99,6 @@ tracing-test = { workspace = true }
 # Captures admission spans in integration tests.
 tracing-subscriber = { workspace = true }
 time = { workspace = true, features = ["macros"] }
+# `OutboxMessage::created_at` is a `chrono` timestamp, and the envelope-guard test
+# builds one directly. Test-only: the gear's own timestamps are all `time`.
+chrono = { workspace = true }

@@ -363,27 +363,20 @@ Replay of a matching fingerprint under the same key returns the stored operation
 `202` while active, `200` when terminal. A different fingerprint under the same key
 returns `409`.
 
-**The worker is a plain function, not a task.** Its entry point takes
-`(operation_id, runner)` and performs one full pass; the outbox handler is a thin shell
-that calls it and maps the result to `Ok` / `Retry` / `Reject`. This is required by the
-testing rules of §13 — worker and domain tests never wait — and it is what makes every
-concurrency case below reachable in a `#[tokio::test]` against SQLite `:memory:`.
+**The worker is a plain function:** `(operation_id, runner)` performs one pass; the
+outbox shell maps its result to `Ok` / `Retry` / `Reject`. Direct calls keep worker/domain
+tests wait-free (§13) and concurrency cases testable with `#[tokio::test]` on SQLite `:memory:`.
 
-**Where it runs.** The outbox worker is started at the end of types-registry's own `init()`,
-not in the stateful `start` entry, and stopped through the retained `OutboxHandle`. `init` of
-every gear precedes `start` of any, so a worker in `start` would leave operations submitted
-during a consumer's `init()` sitting `pending`.
+**Where it runs.** Start the outbox at the end of types-registry's `init()`; retain its
+`OutboxHandle` for shutdown. All gears initialize before any stateful `start`, so deferring
+the worker would leave consumer `init()` submissions `pending`.
 
-**What "wired to the cancellation token" means here**, because the obvious reading is not
-available: `OutboxBuilder::start()` creates its own `CancellationToken` and exposes no setter
-for an external one, so there is nothing to hand `ctx.cancellation_token()` to. The wiring is
-the stateful entry point instead — it receives the runtime's token, parks on it, and calls
-`OutboxHandle::stop()`, which cancels the pipeline's internal token and joins its workers.
-The gear therefore declares `stateful` for the *shutdown* edge while the start stays in
-`init()`. `TaskSet`'s `Drop` cancels without joining, as the backstop. Startup order
-inside `init()` is: repositories → inline seeding → start worker → publish client. There is no
-snapshot step and no warm-up read: seeding builds its own transient store like any other
-admission (D2), and every later read goes to the database.
+`OutboxBuilder::start()` owns an internal cancellation token with no external setter.
+The stateful entry point awaits runtime cancellation, then calls `OutboxHandle::stop()`
+to cancel and join the workers. `TaskSet::Drop` cancels without joining as a backstop.
+Startup order inside `init()`: repositories → inline seeding → start worker → publish client.
+No snapshot or warm-up read: seeding builds a transient store like other admissions (D2);
+later reads use the database.
 Seeding precedes the worker start and enqueues nothing, so seed operations cannot be leased
 concurrently.
 
@@ -1348,8 +1341,13 @@ gears:
         page_size_max: 1000
       registration_policy: {}          # closed by default; global `cf` implicit
       worker:
-        operation_timeout: 5m          # accepted, not enforced until T21
+        operation_timeout: 5m          # T21 lease-handler budget; must be > 0. Not
+                                       # bounded by stop_timeout: the host hard-stops
+                                       # at 35s, so a long pass outlives the drain
         max_revalidation_attempts: 8   # the revalidation loop's bound, §8.1 step 4.3
+        max_delivery_attempts: 8       # T21: failed deliveries before dead-lettering
+                                       # and terminalizing as `admission_abandoned`.
+                                       # >0 and <= 32767 (the outbox's i16 counter)
       local_client:
         cache:
           freshness_window: 30s        # DESIGN §3.3; `0s` disables the window
@@ -1617,41 +1615,20 @@ property that makes the deviation safe to hold.
 
 ## 13. Testing strategy
 
-Conventions from `12_unit_testing.md`, which override anything implied elsewhere —
-with one scoped exception, the outbox-delivery wait below. The exception is named here
-because `12_unit_testing.md` bans timers and polling independently of this document, so a
-reader following it alone would refuse the outbox tests T21 requires.
+Follow `12_unit_testing.md`, with one exception for real outbox-delivery tests:
 
-- **No `sleep`, no `timeout`, no `tokio::time::*`, no polling, no retries — except when
-  real outbox delivery is the behaviour under test.** This still has its design consequence
-  for D1: **the admission worker must be invocable directly** as a function of
-  `(operation_id, runner)`, and every worker, domain and compatibility test drives it that
-  way rather than enqueuing and waiting. A test that waits on an operation the worker could
-  have been *called* for is wrong by construction, and that is the rule the exception does
-  not touch.
-- **The outbox-delivery exception, and why it is not a loophole.** T21 has to prove that a
-  REST submission reaches a terminal outcome *through the outbox* with no direct worker
-  call, and there is no way to do that without waiting: `toolkit-db` keeps its sequencer,
-  processor and strategies private to its own crate — its internal tests drive them
-  directly, we cannot — and the public `Outbox::flush()` only sends a wakeup rather than
-  awaiting sequencing or acknowledgement. Waiting is therefore not an accident of the
-  harness here either; it is the only observation point the dependency offers. Delivery is
-  notification-driven (`enqueue` marks the partition dirty and wakes the sequencer, which
-  wakes its processor), so a passing wait is milliseconds, not intervals.
-  The exception is bounded by four rules:
-  1. **One shared helper**, in `tests/common/mod.rs`, and no ad-hoc wait anywhere else.
-  2. **One immediate read first**, then capped exponential backoff, under a single deadline
-     that covers both the reads and the waits. A wait that expires **fails** the test — it
-     never falls through to a weaker assertion.
-  3. **Only a non-terminal observation is retried.** Never a submission, never a failed
-     assertion, never a test case. A `pending`/`running` operation is the one thing worth
-     re-reading; anything else is a result.
-  4. **Only for tests whose subject is delivery.** Outbox-backed router tests use it; the
-     handler shell itself is tested synchronously, by calling it with a message.
-- **Whole passing suite under 5 s**, and the wait deadlines do not establish that: six
-  outbox-backed cases at a 2 s deadline each could spend far longer on the way to failing.
-  The budget is a property of a green run, which is the run that gates every commit; a red
-  one is already broken and its wall clock is diagnostic, not a target.
+- **No timers, polling or retries in worker, domain or compatibility tests.** Invoke the
+  admission worker directly with `(operation_id, runner)`.
+- **Real outbox delivery may wait.** `toolkit-db` exposes no single-pass driver;
+  `Outbox::flush()` only sends a wakeup. This exception has four bounds:
+  1. Use only `tests/common/mod.rs::await_delivery`; no ad-hoc waits.
+  2. Read immediately, then use capped exponential backoff under one deadline covering
+     reads and waits. Expiry fails the test.
+  3. Retry only `pending`/`running` observations, never submissions, assertions or test cases.
+     Other responses must be handled immediately.
+  4. Use the helper only when delivery is the subject, including outbox-backed router tests.
+     Test the handler shell directly without waiting.
+- **Whole passing suite under 5 s.** Per-wait failure deadlines do not replace this budget.
 - Each test builds its own **SQLite `:memory:`** database and fresh service instances; no
   shared state, parallel-safe. `make test-types-registry-db` on PostgreSQL and MySQL covers the
   backend-specific lock, CAS and range-bound paths.
@@ -1760,11 +1737,9 @@ identifier profile refusals, topological order, baseline selection.
 | Deleted entity | exact read returns it as deleted; list excludes it |
 
 **E2E** (`testing/e2e/`, pytest) — register → poll → read → re-register unchanged →
-delete, over REST, plus the `Idempotency-Key` replay and `409` paths. This exercises the
-real outbox dispatch loop against a real server and a real HTTP client, which the Rust
-outbox tests deliberately do not: they prove the wiring, E2E proves the deployment. Those
-two and nothing else may wait — E2E freely, the Rust tests only through the shared helper
-of the exception above.
+delete, plus idempotency replay and `409`, against a real server and HTTP client.
+E2E tests verify deployment; Rust outbox tests verify wiring. Only these two test groups
+may wait; Rust tests must use the shared helper above.
 
 **Compatibility fixture** — pin representative `GTS Identifier → UUID` mappings, per
 `constraint-single-installation`, so a `gts-rust` upgrade cannot silently move

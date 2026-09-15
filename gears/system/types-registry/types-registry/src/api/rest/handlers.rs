@@ -165,11 +165,7 @@ pub async fn submit_entities(
     receipt(uri.path(), accepted)
 }
 
-/// `POST /types-registry/v2/entities:batchDelete`
-///
-/// One deletion batch, each item carrying its own precondition. A body-based
-/// custom action because no single header could express several preconditions
-/// (DESIGN §3.3).
+/// Submit a deletion batch with per-item preconditions (DESIGN §3.3).
 pub async fn batch_delete_entities(
     Extension(service): Extension<Option<Arc<RegistryService>>>,
     OriginalUri(uri): OriginalUri,
@@ -184,8 +180,6 @@ pub async fn batch_delete_entities(
             .items
             .into_iter()
             .map(|item| DeleteTarget {
-                // The same classification the exact read uses, and it is the
-                // domain's, not this layer's.
                 key: EntityKey::parse(&item.key),
                 expected_resource_version: item.expected_resource_version,
             })
@@ -200,12 +194,7 @@ pub async fn batch_delete_entities(
     receipt(uri.path(), accepted)
 }
 
-/// `DELETE /types-registry/v2/entities/{entity_key}`
-///
-/// One item's worth of `:batchDelete`, spread across the path and the query. It
-/// maps onto the same [`DeleteRequest`], so the two spellings cannot drift: there
-/// is no precondition, existence or ordering rule here that the batch route does
-/// not have.
+/// Submit a single deletion through the same [`DeleteRequest`] as batch deletion.
 pub async fn delete_entity(
     Extension(service): Extension<Option<Arc<RegistryService>>>,
     OriginalUri(uri): OriginalUri,
@@ -214,10 +203,7 @@ pub async fn delete_entity(
     extract::Query(query): extract::Query<DeleteEntityQuery>,
 ) -> ApiResult<(StatusCode, HeaderMap, Json<OperationAcceptedDto>)> {
     let service = require_registry(service)?;
-    // A transport concern and therefore this layer's: the domain has no view of
-    // HTTP conditional headers. `expected_resource_version` is malformed-or-not by
-    // the extractor above and positive-or-not by acceptance below, so no
-    // precondition *rule* lives here.
+    // Reject HTTP conditionals here; acceptance validates the version precondition.
     if headers.contains_key(header::IF_MATCH) {
         return Err(super::error::if_match_not_supported());
     }
@@ -239,13 +225,7 @@ pub async fn delete_entity(
     receipt(uri.path(), accepted)
 }
 
-/// The `Idempotency-Key` as the caller sent it.
-///
-/// Absent and unusable are kept apart. An absent header is the domain's refusal to
-/// make — `validate` takes the empty string and answers "an Idempotency-Key header
-/// is required" — but a header that *was* sent and cannot be decoded is this
-/// layer's own answer, because a `String` cannot carry the distinction any further
-/// and "required" would be a lie about what the caller did.
+/// Decode `Idempotency-Key`; acceptance handles absence, this layer rejects invalid bytes.
 fn idempotency_key(headers: &HeaderMap) -> Result<String, CanonicalError> {
     match headers.get("idempotency-key") {
         None => Ok(String::new()),
@@ -256,12 +236,7 @@ fn idempotency_key(headers: &HeaderMap) -> Result<String, CanonicalError> {
     }
 }
 
-/// The response every mutation returns: one receipt, one contract.
-///
-/// The status comes from the receipt, not from a second read: `submit` already
-/// knows it — `pending` when the operation is queued, `completed` once inline
-/// admission has run — so a constant `pending` here would be wrong and a re-read
-/// would cost a snapshot transaction over two statements.
+/// Build the shared mutation response from the receipt's admission status.
 fn receipt(
     request_path: &str,
     accepted: Accepted,
@@ -318,17 +293,9 @@ fn receipt(
 /// Checkpoint 1 report §8.1). [`OriginalUri`] rather than `Uri` for the same
 /// reason: `nest` strips exactly the prefix that has to survive here.
 ///
-/// The receipt is a **sibling** of the `entities` collection — `…/v2/entities`
-/// answers with `…/v2/operations/{id}` — so everything from the `entities` segment
-/// on is replaced, not appended to. Cutting at the segment rather than stripping a
-/// suffix is what makes one function serve all three mutation paths: they end in
-/// `/entities`, `/entities:batchDelete` and `/entities/{entity_key}` respectively,
-/// and only the first is a suffix. The **last** occurrence, because the mount prefix
-/// is outside this gear's control and may contain the word itself.
-///
-/// If the route is ever mounted somewhere with no `entities` segment at all, the
-/// gear-relative path is the fallback: a wrong prefix beats a path with two
-/// resources in it.
+/// Replace the last `/entities` segment and its suffix with `/operations/{id}`.
+/// This handles all mutation paths and preserves mount prefixes containing `entities`.
+/// Fall back to a gear-relative path when the segment is absent.
 fn operation_location(request_path: &str, operation_id: Uuid) -> String {
     let trimmed = request_path.trim_end_matches('/');
     match trimmed.rfind("/entities") {

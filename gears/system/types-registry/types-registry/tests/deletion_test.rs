@@ -24,7 +24,10 @@ use types_registry::domain::enums as domain_enums;
 use types_registry::domain::enums::{LifecycleStatus, OperationItemStatus, OperationKind};
 use types_registry::domain::policy::RegistrationPolicy;
 use types_registry::domain::ports::EntityRow;
-use types_registry::infra::storage::repo::{CoordinationStateRepo, EntityRepo, PageRequest};
+use types_registry::domain::ports::OperationItemRow;
+use types_registry::infra::storage::repo::{
+    CoordinationStateRepo, EntityRepo, OperationRepo, PageRequest,
+};
 
 mod common;
 use common::{allow_all, stores, test_db};
@@ -178,6 +181,15 @@ async fn entity_of(db: &Provider, gts_id: &str) -> Option<EntityRow> {
     EntityRepo::find_by_gts_id(&conn, &allow_all(), gts_id)
         .await
         .expect("read")
+}
+
+/// The stored operation items, for a test asserting what a redelivery would find.
+async fn items_of(db: &Provider, operation_id: Uuid) -> Vec<OperationItemRow> {
+    let provider = worker(db);
+    let conn = provider.conn().expect("conn");
+    OperationRepo::find_items(&conn, &allow_all(), operation_id)
+        .await
+        .expect("read the operation items")
 }
 
 async fn listed_ids(db: &Provider) -> Vec<String> {
@@ -681,6 +693,65 @@ async fn a_deletion_whose_write_matches_no_row_is_refused_not_reported_as_done()
         entity_of(&db, TARGET).await.expect("row").lifecycle_status,
         LifecycleStatus::Active,
         "nothing was written",
+    );
+}
+
+/// Outcome-write failure must roll back the tombstone, or redelivery would
+/// misreport a committed deletion as `NotActive`.
+#[tokio::test]
+async fn deletion_rolls_back_when_its_item_outcome_cannot_be_written() {
+    let db = test_db().await;
+    register(&db, "reg", TARGET, schema(TARGET)).await;
+
+    let op = submit(
+        &db,
+        "del-atomic",
+        OperationKind::Deletion,
+        vec![Candidate {
+            gts_id: TARGET.to_owned(),
+            content: None,
+            expected_resource_version: Some(1),
+            force: false,
+        }],
+    )
+    .await
+    .expect("accepted");
+    let hooked: Arc<dyn types_registry::domain::ports::Stores> =
+        common::TestStores::failing_item_success();
+
+    let result = run_operation(
+        &hooked,
+        &worker(&db),
+        &allow_all(),
+        Tuning {
+            limits: &common::limits(),
+            worker: &common::worker_settings(),
+            metrics: &common::metrics(),
+            allow_compatibility_force: false,
+        },
+        op,
+        LATER,
+    )
+    .await;
+    // The variant matters: `is_err()` would also hold for a failure raised before
+    // the deletion was attempted, which would make the rollback claim below vacuous.
+    assert!(
+        matches!(result, Err(WorkerError::Storage(_))),
+        "the injected item write must surface as the storage failure it is: {result:?}",
+    );
+    assert_eq!(
+        entity_of(&db, TARGET).await.expect("row").lifecycle_status,
+        LifecycleStatus::Active,
+        "the entity mutation must roll back with the item outcome",
+    );
+    // What a redelivery sees, which is what the docstring is about: the item is
+    // still non-terminal, so the next pass owes it an outcome.
+    let items = items_of(&db, op).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0].status,
+        OperationItemStatus::Pending,
+        "a rolled-back commit must leave the item for the next delivery",
     );
 }
 

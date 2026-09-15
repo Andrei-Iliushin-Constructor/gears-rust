@@ -505,61 +505,50 @@ pub struct SubmitEntitiesRequest {
     pub dry_run: Option<bool>,
 }
 
-/// One entity named for deletion in a `:batchDelete` body.
-///
-/// `key` and not `gts_id`: unlike a registration candidate, a deletion may name
-/// its target by either spelling — a canonical GTS identifier or the Registry
-/// Reference UUID derived from it — and it is resolved exactly as
-/// `GET /entities/{entity_key}` resolves its path segment.
+/// A batch deletion target, resolved like `GET /entities/{entity_key}`.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(request)]
 pub struct DeleteEntityDto {
     /// A canonical GTS identifier or a Registry Reference UUID.
     pub key: String,
-    /// Required and positive — deletion only targets an entity the caller has
-    /// read, so must-not-exist has no delete meaning.
+    /// Required positive version. Optional in Rust so acceptance returns the same
+    /// `400 deletion_requires_version` on both deletion routes rather than letting
+    /// the extractor answer first.
     ///
-    /// **Optional in the type, required by the contract**, and the split is
-    /// deliberate: modelled as absent-able, absence reaches acceptance and is
-    /// refused there as `deletion_requires_version` — a `400` with a stable reason,
-    /// identical on both deletion spellings. Declared non-optional, the same
-    /// mistake would be a `422` from the JSON extractor on one route and a `400`
-    /// from the query extractor on the other, for one malformed precondition. The
-    /// `OpenAPI` document declares it required regardless, through
-    /// `#[schema(required)]`, which is what a generated client reads.
+    /// `value_type = i64` alongside `required` is what keeps the generated schema a
+    /// plain `integer`: `required` on its own leaves the property nullable, so the
+    /// document would promise that an explicit `null` is accepted while acceptance
+    /// answers `400` — and it would disagree with the DELETE route, which declares
+    /// the same precondition as a non-nullable `integer` query parameter.
     #[serde(default)]
-    #[schema(required)]
+    #[schema(required, value_type = i64)]
     pub expected_resource_version: Option<i64>,
 }
 
 /// A deletion batch.
-///
-/// `items` and `dry_run` are spelled exactly as the registration body spells them
-/// — the three batch surfaces differ in what an item carries, not in what the
-/// array is called.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(request)]
 pub struct DeleteEntitiesRequest {
+    /// No `max_items`: the ceiling is `limits.batch_candidates`, which a deployment
+    /// configures. A literal here would be a second, fixed number that disagrees
+    /// with the server the moment anyone changes that setting. `RegistryService::delete`
+    /// enforces the real one before reading anything.
     #[schema(min_items = 1)]
     pub items: Vec<DeleteEntityDto>,
-    /// Predict the batch and commit nothing. Defaults to `false`; participates in
-    /// the idempotency fingerprint.
+    /// Predict without changing entities. Defaults to `false`; part of the idempotency fingerprint.
     #[serde(default)]
     pub dry_run: Option<bool>,
 }
 
-/// The single deletion spelling's query string: one `:batchDelete` item's worth,
-/// with `key` in the path instead.
+/// Single-deletion parameters; the entity key is in the path.
 #[derive(Debug, Clone, Default)]
 #[toolkit_macros::api_dto(request)]
 pub struct DeleteEntityQuery {
-    /// Required and positive, the same field the batch item carries, with the same
-    /// meaning and the same optional-in-the-type reasoning. A non-numeric value is
-    /// a `400` from the extractor; an absent one is acceptance's
-    /// `deletion_requires_version`.
+    /// Required positive version, validated by acceptance as on the batch route.
+    /// Missing or non-numeric values return `400`.
     #[serde(default)]
     pub expected_resource_version: Option<i64>,
-    /// As on the batch route. Defaults to `false`.
+    /// Predict without changing entities. Defaults to `false`.
     #[serde(default)]
     pub dry_run: Option<bool>,
 }

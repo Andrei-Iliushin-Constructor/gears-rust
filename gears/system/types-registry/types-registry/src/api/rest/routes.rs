@@ -58,11 +58,6 @@ pub fn register_routes(
     // so the contract check sees them. T24a changes the path constant only; it must
     // not expose mutation routes while ceiling C8 remains open.
 
-    // Split into one function per route group because `register_routes` is the
-    // route table: `clippy::too_many_lines` is right that a 300-line table is not
-    // readable, and the split is along the seam the comments above already draw.
-    // Each takes and returns the router, so registration order stays explicit here
-    // rather than hidden in a call graph.
     router = register_v1(router, openapi);
     router = register_submit(router, openapi);
     router = register_reads(router, openapi);
@@ -72,12 +67,8 @@ pub fn register_routes(
     router.layer(Extension(service)).layer(Extension(registry))
 }
 
-/// The required `Idempotency-Key` header, declared identically on every mutation.
-///
-/// Declared, not merely enforced. `OperationBuilder` has no `header_param` beside
-/// `path_param` / `query_param` (upstream #4614), but `ParamLocation::Header`
-/// exists and the registry maps it, so `param` does the job — a required header
-/// absent from the document is what a generated client omits.
+/// Declare the required mutation header via `param`; `OperationBuilder` has
+/// no `header_param` helper (upstream #4614).
 fn idempotency_key_param() -> ParamSpec {
     ParamSpec {
         name: "Idempotency-Key".to_owned(),
@@ -310,13 +301,6 @@ fn register_reads(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
 
 /// `POST {V2}/entities:batchDelete` (T20a).
 fn register_batch_delete(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
-    // POST /types-registry/v2/entities:batchDelete — submit a deletion batch
-    //
-    // A custom action rather than `DELETE` on the collection because each item
-    // carries its own precondition and no single header could express several
-    // (DESIGN §3.3). `:batchDelete` rather than `:delete` so the name says what a
-    // reader will find in the body — an array — and so it reads as the sibling of
-    // T22a's `:batchGet`.
     router = OperationBuilder::post(format!("{V2}/entities:batchDelete"))
         .operation_id("types_registry.batch_delete_entities")
         .summary("Submit GTS entities for deletion")
@@ -392,14 +376,6 @@ fn register_batch_delete(mut router: Router, openapi: &dyn OpenApiRegistry) -> R
 
 /// `DELETE {V2}/entities/{{entity_key}}` (T20a).
 fn register_delete_entity(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
-    // DELETE /types-registry/v2/entities/{entity_key} — delete one entity
-    //
-    // Sugar over a one-item `:batchDelete` and not a second deletion model: the
-    // handler builds the same request the batch route builds. The precondition is
-    // `expected_resource_version` and **not** `If-Match`, which is refused if sent
-    // rather than ignored — a caller that sent one believes the request is
-    // conditional in the RFC 9110 §13.1.1 sense, and the version check is
-    // authoritative only at admission (DESIGN §3.3).
     router = OperationBuilder::delete(format!("{V2}/entities/{{entity_key}}"))
         .operation_id("types_registry.delete_entity")
         .summary("Delete one GTS entity")
@@ -419,13 +395,12 @@ fn register_delete_entity(mut router: Router, openapi: &dyn OpenApiRegistry) -> 
             "A GTS identifier (e.g. gts.acme.core.events.user_created.v1~) or a Registry \
              Reference UUID",
         )
-        // `query_param_typed` takes the description *before* the type; passing them
-        // the other way round compiles and silently publishes `type: string` with
-        // the type name as the description. The declaration test pins both.
+        // `query_param_typed` takes description before type; swapping them silently emits `string`.
         .query_param_typed(
             "expected_resource_version",
             true,
-            "Required and positive: the resource_version the caller observed. Absent,              non-numeric or zero is a 400; a mismatch is reported on the operation item",
+            "Required and positive: the resource_version the caller observed. Absent, \
+             non-numeric or zero is a 400; a mismatch is reported on the operation item",
             "integer",
         )
         .query_param_typed(

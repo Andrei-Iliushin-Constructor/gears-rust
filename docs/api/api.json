@@ -4641,10 +4641,10 @@
         "type": "object"
       },
       "DeleteEntitiesRequest": {
-        "description": "A deletion batch.\n\n`items` and `dry_run` are spelled exactly as the registration body spells them\n— the three batch surfaces differ in what an item carries, not in what the\narray is called.",
+        "description": "A deletion batch.",
         "properties": {
           "dry_run": {
-            "description": "Predict the batch and commit nothing. Defaults to `false`; participates in\nthe idempotency fingerprint.",
+            "description": "Predict without changing entities. Defaults to `false`; part of the idempotency fingerprint.",
             "type": [
               "boolean",
               "null"
@@ -4664,15 +4664,12 @@
         "type": "object"
       },
       "DeleteEntityDto": {
-        "description": "One entity named for deletion in a `:batchDelete` body.\n\n`key` and not `gts_id`: unlike a registration candidate, a deletion may name\nits target by either spelling — a canonical GTS identifier or the Registry\nReference UUID derived from it — and it is resolved exactly as\n`GET /entities/{entity_key}` resolves its path segment.",
+        "description": "A batch deletion target, resolved like `GET /entities/{entity_key}`.",
         "properties": {
           "expected_resource_version": {
-            "description": "Required and positive — deletion only targets an entity the caller has\nread, so must-not-exist has no delete meaning.\n\n**Optional in the type, required by the contract**, and the split is\ndeliberate: modelled as absent-able, absence reaches acceptance and is\nrefused there as `deletion_requires_version` — a `400` with a stable reason,\nidentical on both deletion spellings. Declared non-optional, the same\nmistake would be a `422` from the JSON extractor on one route and a `400`\nfrom the query extractor on the other, for one malformed precondition. The\n`OpenAPI` document declares it required regardless, through\n`#[schema(required)]`, which is what a generated client reads.",
+            "description": "Required positive version. Optional in Rust so acceptance returns the same\n`400 deletion_requires_version` on both deletion routes rather than letting\nthe extractor answer first.\n\n`value_type = i64` alongside `required` is what keeps the generated schema a\nplain `integer`: `required` on its own leaves the property nullable, so the\ndocument would promise that an explicit `null` is accepted while acceptance\nanswers `400` — and it would disagree with the DELETE route, which declares\nthe same precondition as a non-nullable `integer` query parameter.",
             "format": "int64",
-            "type": [
-              "integer",
-              "null"
-            ]
+            "type": "integer"
           },
           "key": {
             "description": "A canonical GTS identifier or a Registry Reference UUID.",
@@ -53255,7 +53252,7 @@
             }
           },
           {
-            "description": "Required and positive: the resource_version the caller observed. Absent,              non-numeric or zero is a 400; a mismatch is reported on the operation item",
+            "description": "Required and positive: the resource_version the caller observed. Absent, non-numeric or zero is a 400; a mismatch is reported on the operation item",
             "in": "query",
             "name": "expected_resource_version",
             "required": true,

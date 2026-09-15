@@ -77,10 +77,7 @@ struct PredictedCommit {
     write: Option<ItemOutcomeWrite>,
 }
 
-/// Predict one dry-run batch and record what it predicted.
-///
-/// Simulation uses the shared batch traversal inside one snapshot; publication
-/// then records all outcomes and completion atomically (see [`publish`]).
+/// Simulate a batch in one snapshot, then atomically publish outcomes and completion.
 pub(super) async fn run_batch(
     stores: &Arc<dyn Stores>,
     db: &DBProvider<WorkerError>,
@@ -95,10 +92,7 @@ pub(super) async fn run_batch(
         predict_batch(stores, db, scope, tuning, operation, Arc::clone(items), now).await?;
     let published =
         publish::publish(stores, db, scope, operation_id, items, &predictions, now).await?;
-    // A lost compare-and-swap means an overlapping pass terminalized the item
-    // first; its stored outcome stands, as it does on the real path. All of them
-    // are in the same post-publication state, so read the items once instead of
-    // once per lost item, which was one transaction and one full item scan each.
+    // A concurrent pass won the CAS; keep its stored outcomes, loading all items once.
     let terminalized: HashMap<i64, OperationItemRow> = if published.recorded.contains(&false) {
         read_operation(stores, db, scope, operation_id)
             .await?

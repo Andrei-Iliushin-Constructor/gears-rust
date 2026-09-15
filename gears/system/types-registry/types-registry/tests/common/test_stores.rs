@@ -20,8 +20,8 @@ use types_registry::domain::ports::{
     DependencyStore, EdgeSide, EntityEdge, EntityRow, EntityStore, EntityWriteOrderStore,
     InstanceStore, ItemSuccess, NewCurrentInstance, NewCurrentTypeSchema, NewEntity,
     NewInstanceRevision, NewOperation, NewOperationItem, NewRevision, OperationItemRow,
-    OperationRow, OperationStore, ReverseImpact, Stores, TypeSchemaStore, VersionFamilyRow,
-    VersionFamilyStore,
+    OperationRow, OperationStore, RecoveryCursor, ReverseImpact, Stores, TypeSchemaStore,
+    VersionFamilyRow, VersionFamilyStore,
 };
 use uuid::Uuid;
 
@@ -61,6 +61,19 @@ pub trait StoreHooks: Send + Sync {
     /// Return `true` to fail the operation's completion write, which is how the
     /// atomicity of publication is put under test.
     fn fail_mark_completed(&self) -> bool {
+        false
+    }
+
+    /// Return `true` to fail the item-success write, which is used to verify
+    /// that a deletion and its operation outcome share one transaction.
+    fn fail_mark_item_succeeded(&self) -> bool {
+        false
+    }
+
+    /// Return `true` to fail `mark_running`, which is the first write a pass makes.
+    /// The operation is still `pending` when the failure surfaces, which is the
+    /// state abandonment has to terminalize from.
+    fn fail_mark_running(&self) -> bool {
         false
     }
 
@@ -211,6 +224,15 @@ impl StoreHooks for CompletionFailureHooks {
     }
 }
 
+/// Fails the item-success write and nothing else.
+pub struct ItemSuccessFailureHooks;
+
+impl StoreHooks for ItemSuccessFailureHooks {
+    fn fail_mark_item_succeeded(&self) -> bool {
+        true
+    }
+}
+
 impl TestStores<CompletionFailureHooks> {
     /// Ports whose `mark_completed` always fails, so a publication that includes
     /// it must leave every item write behind with it.
@@ -219,6 +241,38 @@ impl TestStores<CompletionFailureHooks> {
         Arc::new(Self {
             inner: stores(),
             hooks: CompletionFailureHooks,
+        })
+    }
+}
+
+pub struct RunningFailureHooks;
+
+impl StoreHooks for RunningFailureHooks {
+    fn fail_mark_running(&self) -> bool {
+        true
+    }
+}
+
+impl TestStores<RunningFailureHooks> {
+    /// Ports whose `mark_running` always fails, so the pass aborts while the
+    /// operation is still `pending`.
+    #[must_use]
+    pub fn failing_running() -> Arc<Self> {
+        Arc::new(Self {
+            inner: stores(),
+            hooks: RunningFailureHooks,
+        })
+    }
+}
+
+impl TestStores<ItemSuccessFailureHooks> {
+    /// Ports whose deletion item-success write always fails, so the entity
+    /// mutation must roll back with it.
+    #[must_use]
+    pub fn failing_item_success() -> Arc<Self> {
+        Arc::new(Self {
+            inner: stores(),
+            hooks: ItemSuccessFailureHooks,
         })
     }
 }
@@ -403,6 +457,15 @@ impl<H: StoreHooks> EntityStore for TestStores<H> {
         gts_uuid: Uuid,
     ) -> Result<Option<EntityRow>, ScopeError> {
         self.inner.find_by_gts_uuid(tx, scope, gts_uuid).await
+    }
+
+    async fn find_by_gts_uuids(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        gts_uuids: &[Uuid],
+    ) -> Result<Vec<EntityRow>, ScopeError> {
+        self.inner.find_by_gts_uuids(tx, scope, gts_uuids).await
     }
 
     async fn kind_in_family(
@@ -602,6 +665,18 @@ impl<H: StoreHooks> OperationStore for TestStores<H> {
         self.inner.find_by_id(tx, scope, id).await
     }
 
+    async fn find_nonterminal_ids(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        after: Option<RecoveryCursor>,
+        limit: u64,
+    ) -> Result<Vec<RecoveryCursor>, ScopeError> {
+        self.inner
+            .find_nonterminal_ids(tx, scope, after, limit)
+            .await
+    }
+
     async fn insert_operation(
         &self,
         tx: &DbTx<'_>,
@@ -637,6 +712,11 @@ impl<H: StoreHooks> OperationStore for TestStores<H> {
         id: Uuid,
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError> {
+        if self.hooks.fail_mark_running() {
+            return Err(ScopeError::Invalid(
+                "this operation's running move is under failure injection",
+            ));
+        }
         self.inner.mark_running(tx, scope, id, now).await
     }
 
@@ -655,6 +735,16 @@ impl<H: StoreHooks> OperationStore for TestStores<H> {
         self.inner.mark_completed(tx, scope, id, now).await
     }
 
+    async fn mark_abandoned(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        id: Uuid,
+        now: OffsetDateTime,
+    ) -> Result<bool, ScopeError> {
+        self.inner.mark_abandoned(tx, scope, id, now).await
+    }
+
     async fn mark_item_succeeded(
         &self,
         tx: &DbTx<'_>,
@@ -663,6 +753,11 @@ impl<H: StoreHooks> OperationStore for TestStores<H> {
         outcome: ItemSuccess,
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError> {
+        if self.hooks.fail_mark_item_succeeded() {
+            return Err(ScopeError::Invalid(
+                "this item's success write is under failure injection",
+            ));
+        }
         self.inner
             .mark_item_succeeded(tx, scope, item_id, outcome, now)
             .await
