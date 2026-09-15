@@ -22,6 +22,7 @@
 )]
 
 use super::*;
+use crate::domain::root_type::RootTypeConfig;
 use crate::domain::tenant::model::{TenantModel, TenantStatus};
 use crate::domain::tenant::test_support::{
     FakeDeprovisionOutcome, FakeIdpProvisioner, FakeOutcome, FakeTenantRepo,
@@ -52,6 +53,13 @@ fn epoch_ts() -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("stable epoch")
 }
 
+fn root_type_cfg() -> RootTypeConfig {
+    RootTypeConfig {
+        gts_id: gts::GtsTypeId::new(ROOT_TENANT_TYPE),
+        idp_provisioning: false,
+    }
+}
+
 /// Pin every duration knob at 1 second so deadline arithmetic is
 /// trivially explainable. Bootstrap defaults are 2-30s scale; the
 /// saga retry-loop math is the same regardless of the absolute units.
@@ -59,7 +67,8 @@ fn bootstrap_cfg() -> BootstrapConfig {
     BootstrapConfig {
         root_id: root_id(),
         root_name: "platform-root".into(),
-        root_tenant_type: gts::GtsTypeId::new(ROOT_TENANT_TYPE),
+        root_tenant_type: Some(gts::GtsTypeId::new(ROOT_TENANT_TYPE)),
+        root_tenant_type_idp_provisioning: Some(false),
         root_tenant_metadata: None,
         idp_wait_timeout: std::time::Duration::from_secs(1),
         idp_retry_backoff_initial: std::time::Duration::from_secs(1),
@@ -93,6 +102,7 @@ fn make_bootstrap(
         repo,
         idp.clone() as Arc<dyn IdpPluginClient>,
         bootstrap_cfg(),
+        root_type_cfg(),
     );
     (idp, svc)
 }
@@ -711,8 +721,13 @@ async fn run_rejects_root_name_violating_tenant_v1_schema_via_gts() {
     let idp = Arc::new(FakeIdpProvisioner::new(FakeOutcome::Ok));
     let mut cfg = bootstrap_cfg();
     cfg.root_name = "x".repeat(256);
-    let svc = BootstrapService::new(repo, idp.clone() as Arc<dyn IdpPluginClient>, cfg)
-        .with_types_registry(StubTypesRegistry::arc());
+    let svc = BootstrapService::new(
+        repo,
+        idp.clone() as Arc<dyn IdpPluginClient>,
+        cfg,
+        root_type_cfg(),
+    )
+    .with_types_registry(StubTypesRegistry::arc());
 
     let err = svc
         .run()
@@ -991,6 +1006,7 @@ async fn run_takes_over_when_peer_compensates_mid_resume_wait() {
         repo_for_saga,
         idp.clone() as Arc<dyn IdpPluginClient>,
         bootstrap_cfg_long_deadline(),
+        root_type_cfg(),
     )
     .with_types_registry(StubTypesRegistry::arc());
     let idp_for_assert = Arc::clone(&idp);
@@ -1051,7 +1067,8 @@ fn bootstrap_cfg_long_deadline() -> BootstrapConfig {
     BootstrapConfig {
         root_id: root_id(),
         root_name: "platform-root".into(),
-        root_tenant_type: gts::GtsTypeId::new(ROOT_TENANT_TYPE),
+        root_tenant_type: Some(gts::GtsTypeId::new(ROOT_TENANT_TYPE)),
+        root_tenant_type_idp_provisioning: Some(false),
         root_tenant_metadata: None,
         idp_wait_timeout: std::time::Duration::from_secs(30),
         idp_retry_backoff_initial: std::time::Duration::from_secs(1),
@@ -1090,6 +1107,7 @@ async fn run_aborts_after_max_already_exists_streak_when_root_id_drifts() {
         Arc::clone(&repo),
         idp.clone() as Arc<dyn IdpPluginClient>,
         bootstrap_cfg_long_deadline(),
+        root_type_cfg(),
     );
     let svc = svc.with_types_registry(StubTypesRegistry::arc());
 
@@ -1137,6 +1155,7 @@ async fn step3_failure_under_idp_required_keeps_provisioning_row_on_unsupported_
         Arc::clone(&repo),
         idp.clone() as Arc<dyn IdpPluginClient>,
         bootstrap_cfg(),
+        root_type_cfg(),
     );
     let svc = svc
         .with_types_registry(StubTypesRegistry::arc())

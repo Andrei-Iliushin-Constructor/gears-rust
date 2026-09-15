@@ -53,6 +53,7 @@ use serde_json::Value;
 use crate::domain::bootstrap::config::BootstrapConfig;
 use crate::domain::error::{DomainError, UnsupportedResource};
 use crate::domain::metrics::{AM_BOOTSTRAP_LIFECYCLE, MetricKind, emit_metric};
+use crate::domain::root_type::RootTypeConfig;
 use crate::domain::system_actor::for_bootstrap;
 use crate::domain::tenant::TenantContext;
 use crate::domain::tenant::closure::build_activation_rows;
@@ -240,6 +241,7 @@ pub struct BootstrapService<R: TenantRepo> {
     idp: Arc<dyn IdpPluginClient>,
     types_registry: Option<Arc<dyn TypesRegistryClient>>,
     cfg: BootstrapConfig,
+    root_type: RootTypeConfig,
     /// Mirrors `cfg.idp.required` from the parent
     /// `AccountManagementConfig`. Threaded in via
     /// [`Self::with_idp_required`] so the step-3 compensator can
@@ -291,7 +293,12 @@ impl<R: TenantRepo> BootstrapService<R> {
     /// honored at every call site (production path is honored by
     /// `gear.rs::init`).
     #[must_use]
-    pub fn new(repo: Arc<R>, idp: Arc<dyn IdpPluginClient>, cfg: BootstrapConfig) -> Self {
+    pub fn new(
+        repo: Arc<R>,
+        idp: Arc<dyn IdpPluginClient>,
+        cfg: BootstrapConfig,
+        root_type: RootTypeConfig,
+    ) -> Self {
         // Single `validate()` call so the assertion message and the
         // boolean predicate cannot disagree.
         if cfg!(debug_assertions)
@@ -308,6 +315,7 @@ impl<R: TenantRepo> BootstrapService<R> {
             idp,
             types_registry: None,
             cfg,
+            root_type,
             idp_required: false,
             cancel: CancellationToken::new(),
         }
@@ -842,7 +850,7 @@ impl<R: TenantRepo> BootstrapService<R> {
         // and can correlate with the deadline.
         let entity = match tokio::time::timeout_at(
             deadline,
-            registry.get_type_schema(self.cfg.root_tenant_type.as_ref()),
+            registry.get_type_schema(self.root_type.gts_id.as_ref()),
         )
         .await
         {
@@ -862,7 +870,7 @@ impl<R: TenantRepo> BootstrapService<R> {
                         ],
                     );
                     return Err(DomainError::InvalidTenantType {
-                        detail: self.cfg.root_tenant_type.to_string(),
+                        detail: self.root_type.gts_id.to_string(),
                     });
                 }
                 emit_metric(
@@ -940,7 +948,7 @@ impl<R: TenantRepo> BootstrapService<R> {
             return Err(DomainError::TypeNotAllowed {
                 detail: format!(
                     "root tenant type {} has allowed_parent_types={allowed:?}",
-                    self.cfg.root_tenant_type
+                    self.root_type.gts_id
                 ),
             });
         }
@@ -1069,11 +1077,11 @@ impl<R: TenantRepo> BootstrapService<R> {
         // validates the chain shape, surfacing
         // `DomainError::InvalidTenantType` early on a malformed
         // configuration rather than at the FK insert.
-        let tenant_type_uuid = gts::GtsId::try_new(self.cfg.root_tenant_type.as_ref())
+        let tenant_type_uuid = gts::GtsId::try_new(self.root_type.gts_id.as_ref())
             .map_err(|e| DomainError::InvalidTenantType {
                 detail: format!(
                     "invalid root_tenant_type chain `{}`: {e}",
-                    self.cfg.root_tenant_type
+                    self.root_type.gts_id
                 ),
             })?
             .to_uuid();
@@ -1112,7 +1120,7 @@ impl<R: TenantRepo> BootstrapService<R> {
         let mut req = IdpProvisionTenantRequest::for_root(
             provisioning_root.id,
             self.cfg.root_name.clone(),
-            self.cfg.root_tenant_type.clone(),
+            self.root_type.gts_id.clone(),
         );
         if let Some(meta) = self.cfg.root_tenant_metadata.clone() {
             req = req.with_metadata(meta);
@@ -1443,7 +1451,7 @@ impl<R: TenantRepo> BootstrapService<R> {
         // Build the AM-internal `TenantContext` from the saga's
         // in-scope facts: `root_id`, the configured root name/type,
         // and whatever the plugin returned from `provision_tenant`
-        // (we just got it in `finalize`). `cfg.root_tenant_type` is
+        // (we just got it in `finalize`). `root_type.gts_id` is
         // the typed `GtsTypeId` the saga already passed into the
         // provision call, so we forward the same value here without
         // re-parsing. Convert to the SDK `IdpTenantContext` at the
@@ -1451,7 +1459,7 @@ impl<R: TenantRepo> BootstrapService<R> {
         let tenant_context = TenantContext::new(
             root_id,
             self.cfg.root_name.clone(),
-            self.cfg.root_tenant_type.clone(),
+            self.root_type.gts_id.clone(),
             idp_metadata.cloned(),
         );
         let req = IdpDeprovisionTenantRequest::new(IdpTenantContext::from(&tenant_context));
@@ -1641,7 +1649,7 @@ impl<R: TenantRepo> BootstrapService<R> {
         let tenant_context = TenantContext::new(
             row.id,
             row.name.clone(),
-            self.cfg.root_tenant_type.clone(),
+            self.root_type.gts_id.clone(),
             metadata,
         );
         let req = IdpDeprovisionTenantRequest::new(IdpTenantContext::from(&tenant_context));

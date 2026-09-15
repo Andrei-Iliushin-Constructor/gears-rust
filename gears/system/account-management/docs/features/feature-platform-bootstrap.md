@@ -51,7 +51,7 @@ Implements PRD §5.1 Platform Bootstrap — the foundation FR group without whic
 
 | Actor | Role in Feature |
 |-------|-----------------|
-| `cpt-cf-account-management-actor-platform-admin` | Configures bootstrap parameters (`root_tenant_type`, `root_tenant_name`, `root_tenant_metadata`, IdP retry/timeout values) before platform start; observes bootstrap outcome via audit + metrics. |
+| `cpt-cf-account-management-actor-platform-admin` | Configures the independent AM-owned root contract (`root_type.gts_id`, `root_type.idp_provisioning`) and optional bootstrap parameters (`bootstrap.root_id`, `bootstrap.root_name`, `bootstrap.root_tenant_metadata`, and IdP retry/timeout values) before platform start; observes bootstrap outcome via audit + metrics. |
 | `cpt-cf-account-management-actor-idp` | Receives `provision_tenant(IdpProvisionTenantRequest{ tenant_id=root_id, ... })` during the saga; returns an optional opaque `IdpProvisionResult::metadata` blob that AM persists into `tenant_idp_metadata` (one row per tenant, plugin-owned shape). |
 
 ### 1.4 References
@@ -73,14 +73,14 @@ Bootstrap is triggered by the `AccountManagementGear` lifecycle rather than an e
 
 **Success Scenarios**:
 
-- First platform start: root tenant is created with configured `root_tenant_type`, IdP binding established, status transitions `provisioning → active`, `tenant_closure` self-row present, gear signals ready.
+- First platform start: the configured `root_type.gts_id` schema is reconciled in authoritative Types Registry storage and all subsequent AM reads of that root use the persistent record (no duplicated platform-root YAML seed is required); when bootstrap is enabled, the root tenant is created with that type, its IdP binding is established, status transitions `provisioning → active`, `tenant_closure` self-row is present, and the gear signals ready.
 - Restart after prior success: idempotent detection finds the existing `active` root; saga is skipped; gear signals ready immediately.
 - IdP briefly unavailable at start: wait-loop backs off and eventually proceeds when IdP reports available within the configured total timeout.
 
 **Error Scenarios**:
 
 - IdP never becomes available within total timeout: bootstrap fails with `CanonicalError::ServiceUnavailable` (HTTP 503); no `provisioning` row is left behind; gear does not signal ready.
-- Root tenant type preflight fails: the configured root type is not registered in GTS, GTS is unavailable, or the effective `allowed_parent_types` value is not root-eligible; no `tenants` row is written.
+- Root-type reconciliation fails: Types Registry is unavailable, persisted schema semantics or ownership conflict, or an existing root's durable type UUID differs. This is lifecycle-fatal regardless of `bootstrap.strict`; no `tenants` row is written.
 - Finalization fails after successful `provision_tenant`: `tenants` row remains in `provisioning`; Provisioning Reaper compensates on its next sweep; next bootstrap attempt recreates the root.
 - Concurrent replicas race: the `ux_tenants_single_root` unique partial index prevents duplicate roots; the losing replica hits a constraint violation and falls through to the idempotency path on its next classification attempt.
 
@@ -166,7 +166,7 @@ Bootstrap is triggered by the `AccountManagementGear` lifecycle rather than an e
 
 - [ ] `p1` - **ID**: `cpt-cf-account-management-algo-platform-bootstrap-finalization-saga`
 
-**Input**: `bootstrap_config` (with resolved `root_tenant_type`, `root_tenant_name`, `root_tenant_metadata`)
+**Input**: independent `root_type` contract plus `bootstrap_config` (`root_id`, `root_name`, `root_tenant_metadata`, and saga policy)
 
 **Output**: Result — `success` (root tenant visible in `active` status with self-closure row), `clean_failure` (no AM or IdP root state retained; safe to retry), or `ambiguous_failure` (provisioning row persists, awaits reaper)
 
@@ -174,7 +174,7 @@ Bootstrap is triggered by the `AccountManagementGear` lifecycle rather than an e
 
 > This algorithm describes the saga at the `TenantService` abstraction level. `TenantService` owns the concrete DB operations (schema layout, column-level ORM calls, transaction boundaries); the algo specifies *which* service methods are invoked and in what order, not *how* they are implemented. See DESIGN §3.2 `TenantService` component + §3.6 `seq-bootstrap` for the authoritative DB-level contract.
 
-1. [ ] - `p1` - Resolve `bootstrap_config.root_tenant_type` through `TypesRegistryClient` using DESIGN §3.1 effective-trait resolution; this bootstrap-owned root preflight does not call downstream barrier features because bootstrap is earlier in the feature DAG - `inst-algo-saga-type-check`
+1. [ ] - `p1` - Resolve the independently reconciled `root_type.gts_id` through AM's authoritative-root Types Registry view using DESIGN §3.1 effective-trait resolution; this bootstrap-owned root preflight does not call downstream barrier features because bootstrap is earlier in the feature DAG - `inst-algo-saga-type-check`
 2. [ ] - `p1` - **IF** GTS is unavailable, times out, or cannot resolve effective traits - `inst-algo-saga-type-gts-unavailable`
    1. [ ] - `p1` - **RETURN** `clean_failure` with the delegated `service_unavailable` classification from `errors-observability`; no DB state persisted and no IdP call issued - `inst-algo-saga-return-gts-unavailable`
 3. [ ] - `p1` - **IF** the configured root type is not a registered chained tenant type under `gts.cf.core.am.tenant_type.v1~` - `inst-algo-saga-type-invalid-branch`
@@ -186,7 +186,7 @@ Bootstrap is triggered by the `AccountManagementGear` lifecycle rather than an e
 6. [ ] - `p1` - **CATCH** saga step 1 error - `inst-algo-saga-step-1-catch`
    1. [ ] - `p1` - **RETURN** `clean_failure` (no row persisted; no cleanup needed) - `inst-algo-saga-return-step-1-fail`
 7. [ ] - `p1` - **TRY** saga step 2 (IdP call, no open TX) - `inst-algo-saga-step-2`
-   1. [ ] - `p1` - IdP: `provision_tenant(IdpProvisionTenantRequest{ tenant_id=root_id, tenant_name=root_tenant_name, tenant_type=root_tenant_type, parent_id=None, tenant_metadata=root_tenant_metadata })` - `inst-algo-saga-idp-call`
+   1. [ ] - `p1` - IdP: `provision_tenant(IdpProvisionTenantRequest{ tenant_id=root_id, tenant_name=root_name, tenant_type=root_type.gts_id, parent_id=None, tenant_metadata=root_tenant_metadata })` - `inst-algo-saga-idp-call`
    2. [ ] - `p1` - Receive `IdpProvisionResult { metadata: Option<opaque JSON blob> }` — AM does not inspect or validate the blob - `inst-algo-saga-receive-result`
 8. [ ] - `p1` - **CATCH** saga step 2 error - `inst-algo-saga-step-2-catch`
    1. [ ] - `p1` - **IF** the provider result proves no IdP-side root state was retained - `inst-algo-saga-step-2-clean-branch`
@@ -247,7 +247,7 @@ The system **MUST** create exactly one root tenant row (`parent_id IS NULL`) dur
 
 - [x] `p1` - **ID**: `cpt-cf-account-management-dod-platform-bootstrap-idp-linking`
 
-The system **MUST** invoke the IdP provider's `provision_tenant(IdpProvisionTenantRequest{ tenant_id=root_id, tenant_name=root_tenant_name, tenant_type=root_tenant_type, parent_id=None, tenant_metadata=root_tenant_metadata })` exactly once during a successful bootstrap and **MUST** upsert the opaque `IdpProvisionResult::metadata` blob returned by the plugin (if any) into `tenant_idp_metadata` keyed by `tenant_id` in the finalization transaction. Bootstrap **MUST NOT** semantically interpret, namespace, or validate `root_tenant_metadata` or the returned blob — both sides are forwarded as-is between the deployer config and the plugin (the plugin owns the JSON shape end-to-end). When the plugin returns no metadata, bootstrap **MUST NOT** write a `tenant_idp_metadata` row.
+The system **MUST** invoke the IdP provider's `provision_tenant(IdpProvisionTenantRequest{ tenant_id=root_id, tenant_name=root_name, tenant_type=root_type.gts_id, parent_id=None, tenant_metadata=root_tenant_metadata })` exactly once during a successful bootstrap and **MUST** upsert the opaque `IdpProvisionResult::metadata` blob returned by the plugin (if any) into `tenant_idp_metadata` keyed by `tenant_id` in the finalization transaction. Bootstrap **MUST NOT** semantically interpret, namespace, or validate `root_tenant_metadata` or the returned blob — both sides are forwarded as-is between the deployer config and the plugin (the plugin owns the JSON shape end-to-end). When the plugin returns no metadata, bootstrap **MUST NOT** write a `tenant_idp_metadata` row.
 
 **Implements**:
 
@@ -317,7 +317,7 @@ The system **MUST** emit `actor=system` platform audit events at every terminal 
 - [ ] Start observing a **young** `provisioning` root row (within the `2 * idp_retry_timeout` window — another replica is currently running steps 1–3): no second root created; no audit event is emitted (the `bootstrapDeferredToReaper` path is not taken); `bootstrap.outcome` carries `classification=in_progress_elsewhere`; gear does not signal ready and the call returns immediately so the peer can finalize without interference.
 - [ ] IdP unavailable for longer than `idp_retry_timeout` (every saga attempt returned `IdpProvisionFailure::CleanFailure`, each compensated by the saga before the next retry): bootstrap returns `CanonicalError::ServiceUnavailable` (HTTP 503); no `tenants` row is left in `provisioning`; `bootstrap.idp_wait.timeout` metric is incremented; gear does not signal ready.
 - [ ] Concurrent replica starts on a fresh database: exactly one replica wins the insert race and creates the root. Each losing replica's insert attempt hits the `ux_tenants_single_root` unique constraint; the CATCH branch maps the unique-violation to `clean_failure` and returns immediately on the current attempt (no DB side effects, safe to retry). On the *next* bootstrap attempt — once the winning replica has finalized the root through `provisioning → active` — the loser's classification step finds the active root and returns `bootstrapSkipped`. No duplicate `tenants` or `tenant_closure` rows exist at any point.
-- [ ] Bootstrap configuration with `root_tenant_type` that is not registered in GTS: the bootstrap-owned root-type preflight returns `clean_failure` surfaced as `CanonicalError::InvalidArgument` (HTTP 400) carrying the canonical `reason = "INVALID_TENANT_TYPE"` token on the field-violation entry per DESIGN §3.8 — **before** saga step 1 begins; no `tenants` row is written; no IdP call is issued. A configuration whose registered `root_tenant_type` has an effective `allowed_parent_types` value other than `[]` fails the same way as `CanonicalError::FailedPrecondition` (HTTP 400) with `reason = "TYPE_NOT_ALLOWED"` on the precondition-violation entry; a GTS transport/timeout failure returns the delegated `service_unavailable` classification (`CanonicalError::ServiceUnavailable`, HTTP 503) with no DB side effects. The `reason` token is the stable wire discriminator clients switch on; AM does not surface AM-private `code=` strings.
+- [ ] A reconciled `root_type.gts_id` that cannot be resolved during bootstrap: the bootstrap-owned root-type preflight returns `clean_failure` surfaced as `CanonicalError::InvalidArgument` (HTTP 400) carrying the canonical `reason = "INVALID_TENANT_TYPE"` token on the field-violation entry per DESIGN §3.8 — **before** saga step 1 begins; no `tenants` row is written; no IdP call is issued. A root type whose effective `allowed_parent_types` value is not `[]` fails the same way as `CanonicalError::FailedPrecondition` (HTTP 400) with `reason = "TYPE_NOT_ALLOWED"` on the precondition-violation entry; a GTS transport/timeout failure returns the delegated `service_unavailable` classification (`CanonicalError::ServiceUnavailable`, HTTP 503) with no DB side effects. The `reason` token is the stable wire discriminator clients switch on; AM does not surface AM-private `code=` strings.
 - [ ] During `provision_tenant`, a provider failure that proves no IdP-side root state was retained deletes the `provisioning` row in a compensating transaction and returns `clean_failure` mapped to `CanonicalError::ServiceUnavailable` (HTTP 503); the next bootstrap retry may safely re-run the saga. A transport timeout or ambiguous provider result leaves the `provisioning` row for the reaper, returns `ambiguous_failure`, and does not invite blind automatic retry.
 - [ ] Start observing a suspended or deleted root tenant row (illegal pre-existing state): bootstrap returns `CanonicalError::Internal` (HTTP 500) and the `classification=invariant_violation` metric label on `bootstrap.outcome`; no second root is created; gear does not signal ready; audit sink has a `bootstrapInvariantViolation actor=system` event.
 
