@@ -125,6 +125,10 @@ pub enum FinalizeOutcome {
         /// plugin emitted (a tool call it already made, a link card it
         /// already sent) is as real as the text accumulated beside it.
         extra_parts: Vec<MessagePartInput>,
+        /// Mid-stream citations already attached to the primary text part
+        /// (FR-023). The partial text keeps the `[N]` markers that reference
+        /// them, so dropping the citations would leave dangling markers.
+        citations: PartCitations,
     },
     /// Plugin yielded an `Err`/`StreamingErrorEvent` mid-stream. Persist
     /// the partial response with `finish_reason` recorded.
@@ -140,6 +144,9 @@ pub enum FinalizeOutcome {
         /// Typed parts already streamed via `StreamingEvent::Part` before the
         /// failure. Persisted for the same reason as on the cancelled path.
         extra_parts: Vec<MessagePartInput>,
+        /// Mid-stream citations already attached to the primary text part,
+        /// preserved for the same reason as on the cancelled path.
+        citations: PartCitations,
     },
 }
 

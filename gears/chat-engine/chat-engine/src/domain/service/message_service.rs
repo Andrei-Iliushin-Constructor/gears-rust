@@ -502,6 +502,7 @@ impl MessageService {
                             error: err.to_string(),
                             finish_reason,
                             extra_parts: Vec::new(),
+                            citations: PartCitations::default(),
                         },
                     )
                     .await
@@ -966,6 +967,7 @@ impl MessageService {
                             error: err.to_string(),
                             finish_reason,
                             extra_parts: Vec::new(),
+                            citations: PartCitations::default(),
                         },
                     )
                     .await
@@ -1609,6 +1611,7 @@ impl MessageService {
                             FinalizeOutcome::Cancelled {
                                 text: accumulator,
                                 extra_parts,
+                                citations: text_citations,
                             },
                         )
                         .await
@@ -1626,6 +1629,7 @@ impl MessageService {
                                 error,
                                 finish_reason,
                                 extra_parts,
+                                citations: text_citations,
                             },
                         )
                         .await

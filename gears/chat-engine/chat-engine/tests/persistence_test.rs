@@ -30,8 +30,9 @@ use chat_engine::domain::service::plugin_service::PluginService;
 use chat_engine::infra::db::repo::stream_event_repo::SeaStreamEventBuffer;
 use chat_engine_sdk::models::{FileCitation, MessagePartInput, MessagePartType};
 use chat_engine_sdk::{
-    ChatEngineBackendPlugin, PluginError, StreamingChunkEvent, StreamingCompleteEvent,
-    StreamingEvent, StreamingPartEvent, StreamingStateEvent, StreamingToolEvent,
+    ChatEngineBackendPlugin, PluginError, StreamingChunkEvent, StreamingCitationEvent,
+    StreamingCompleteEvent, StreamingEvent, StreamingPartEvent, StreamingStateEvent,
+    StreamingToolEvent,
 };
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -216,12 +217,13 @@ async fn cancel_after_partial_chunks_persists_is_complete_false_against_sqlite()
 }
 
 // ===========================================================================
-// 1b. Cancellation preserves streamed parts — a part the plugin emitted
-//     before the cancel is persisted alongside the partial text, not dropped.
+// 1d. Cancellation preserves what was streamed — a part and a citation the
+//     plugin emitted before the cancel are persisted alongside the partial
+//     text, not dropped.
 // ===========================================================================
 
 #[tokio::test]
-async fn cancel_persists_parts_streamed_before_the_cancel_against_sqlite() {
+async fn cancel_persists_parts_and_citations_streamed_before_the_cancel_against_sqlite() {
     let harness = db::setup_sqlite().await;
     let plugin_id = "cancel-parts-plugin";
     let session_type_id = db::seed_session_type(&harness, plugin_id).await;
@@ -244,6 +246,20 @@ async fn cancel_persists_parts_streamed_before_the_cancel_against_sqlite() {
                     link_citations: vec![],
                     references: vec![],
                 },
+            }),
+            StreamingEvent::Citation(StreamingCitationEvent {
+                message_id: placeholder,
+                part_number: 0,
+                file_citations: vec![
+                    serde_json::from_value(serde_json::json!({
+                        "document_id": "doc-1",
+                        "document_name": "Doc One",
+                        "quote": "the answer is 42",
+                    }))
+                    .expect("build file citation"),
+                ],
+                link_citations: vec![],
+                references: vec![],
             }),
             StreamingEvent::Chunk(StreamingChunkEvent {
                 message_id: placeholder,
@@ -286,6 +302,14 @@ async fn cancel_persists_parts_streamed_before_the_cancel_against_sqlite() {
         parts[1].2["arguments"]["city"], "Berlin",
         "the preserved part must keep its content verbatim",
     );
+
+    let cites = db::file_citations_for_message(&harness.db, row.message_id).await;
+    assert_eq!(
+        cites.len(),
+        1,
+        "a mid-stream citation must persist against the partial text part",
+    );
+    assert_eq!(cites[0]["document_id"], "doc-1");
 }
 
 // ===========================================================================
