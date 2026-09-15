@@ -92,7 +92,7 @@ async fn submit_with_owner(
             force: false,
         }],
     };
-    let context = AcceptanceContext {
+    let acceptance_ctx = AcceptanceContext {
         policy: &policy,
         config: &config,
         metrics: &common::metrics(),
@@ -102,7 +102,7 @@ async fn submit_with_owner(
             &stores(),
             &provider,
             &allow_all(),
-            &context,
+            &acceptance_ctx,
             &dispatch,
             &request,
             owning_gear,
@@ -114,7 +114,7 @@ async fn submit_with_owner(
             &stores(),
             &provider,
             &allow_all(),
-            &context,
+            &acceptance_ctx,
             &dispatch,
             &request,
             NOW,
