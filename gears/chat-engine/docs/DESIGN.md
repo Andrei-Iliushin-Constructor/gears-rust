@@ -1,5 +1,5 @@
 Created:  2026-03-06 by Constructor Tech
-Updated:  2026-09-11 by Constructor Tech
+Updated:  2026-09-15 by Constructor Tech
 # Technical Design: Chat Engine
 
 
@@ -471,7 +471,7 @@ Fields: `id` (UUID PK), `message_id` (UUID FK → messages, CASCADE), `type` (`M
 - **Immutability**: like the message tree, persisted parts are append-mostly; the streaming text part is filled in as chunks arrive, then frozen on completion.
 - **Input vs persisted**: `MessagePartInput {type, content}` is the wire/plugin shape (no `id`/`number`); Chat Engine assigns `id` and `number` on persist and returns the full `MessagePart`.
 
-**MessagePartType** — Enum: `text`, `code`, `images`, `videos`, `links`, `statuses`, `tool_call`, `tool_result`. The set is extensible by plugin vendors via GTS (`cpt-cf-chat-engine-fr-schema-extensibility`); `audio` / `document` / `table` are out of initial scope (§5).
+**MessagePartType** — Enum: `text`, `code`, `images`, `videos`, `links`, `statuses`, `tool_call`, `tool_result`. The set is **closed**: the REST layer rejects an unknown `type` with 400 and the persisted enum cannot hold one, so a new discriminant means a code change, not a configuration one. Vendor-defined discriminants via GTS (`cpt-cf-chat-engine-fr-schema-extensibility`) remain **unimplemented** — no registration, validation, or forwarding path exists — so vendor extension happens inside `content` today; `audio` / `document` / `table` are out of initial scope (§5).
 
 **Per-type `content` shapes** (validated structurally by Chat Engine, semantics owned by plugins):
 - **text** — `{ text: string, title?: string }`
@@ -2020,7 +2020,7 @@ Aspects acknowledged and intentionally excluded from this DESIGN.
 | **Redis stream buffer** | Redis-backed resume buffer (`XADD`/`XREAD`) | The default resume buffer is the DB table (`cpt-cf-chat-engine-dbtable-stream-events`), keeping the gear within `cpt-cf-chat-engine-constraint-single-database`. Redis Streams is an optional, config-gated backend that relaxes that constraint; not enabled by default |
 | **Durable stream replay** | Long-term replay of historical streams | The event buffer is short-TTL (live-reconnect window only); historical reads use the persisted message (`GET /messages/{id}`), not the stream |
 | **Citation position computation** | Engine-side scanning of part text to compute `[N]` marker offsets | `text_positions` / anchors are forwarded verbatim from the plugin (`cpt-cf-chat-engine-principle-zero-business-logic`); the engine never parses message text to derive citation positions |
-| **Extra part types** | `audio`, `document`, `table` part types | Out of initial scope; the `MessagePartType` set starts at text/code/images/videos/links/statuses/tool_call/tool_result and is extensible via GTS (`cpt-cf-chat-engine-fr-schema-extensibility`) |
+| **Extra part types** | `audio`, `document`, `table` part types, and vendor-defined discriminants via GTS | Out of initial scope; the `MessagePartType` set is closed at text/code/images/videos/links/statuses/tool_call/tool_result. GTS-based vendor discriminants (`cpt-cf-chat-engine-fr-schema-extensibility`) are not implemented; adding a type is a code change until they are |
 | **Accessibility** | UI/UX accessibility requirements | Backend service; client application responsibility |
 | **Internationalization** | Multi-language UI, locale handling | Not applicable; message content is opaque to Chat Engine |
 | **Rate Limiting** | Throttling algorithms, quota management | Handled at API gateway layer upstream of Chat Engine |

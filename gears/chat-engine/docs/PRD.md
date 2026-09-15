@@ -1,5 +1,5 @@
 Created:  2026-03-06 by Constructor Tech
-Updated:  2026-09-11 by Constructor Tech
+Updated:  2026-09-15 by Constructor Tech
 # PRD — Chat Engine
 
 
@@ -664,7 +664,7 @@ The system **SHOULD** provide extensible, versioned base schemas for all core do
 
 | Category | Base Schemas | Extension Point |
 |---|---|---|
-| **Message part types** | `text`, `code`, `images`, `videos`, `links`, `statuses`, `tool_call`, `tool_result` (`MessagePart`, see FR-022) | Plugins declare custom `MessagePartType` values and part `content` schemas |
+| **Message part types** | `text`, `code`, `images`, `videos`, `links`, `statuses`, `tool_call`, `tool_result` (`MessagePart`, see FR-022) | Plugins declare part `content` schemas within a base type. Custom `MessagePartType` values are **not** supported yet — the discriminant set is closed and unknown values are rejected (consistent with the Non-Goal below: base enums are not extensible) |
 | **Event types** | `MessageNewEvent`, `SessionCreatedEvent`, `StreamingChunkEvent`, etc. | Plugins emit custom typed events via webhook response extensions |
 | **Error types** | `ErrorResponse`, `ErrorCode` | Plugins define domain-specific error codes in the `ErrorCode` enum space |
 | **Session / Message metadata** | `Session.metadata`, `Message.metadata` | Plugins store and validate typed custom metadata blobs |
@@ -710,7 +710,7 @@ The system **MUST** represent a message body as an **ordered list of typed parts
 - Parts are **ordered** within a message and the order is stable across reads (persisted ordinal).
 - Media parts (`images`, `videos`) reference files by UUID via the File Storage Service (`cpt-cf-chat-engine-fr-attach-files`); Chat Engine never stores or fetches the bytes.
 - Streaming assistant responses are delivered as incremental deltas per part (text token-by-token, richer parts as they open); the engine persists the assembled parts on completion (see FR-024).
-- The part type set is **extensible** by plugin vendors via GTS without forking Chat Engine core (`cpt-cf-chat-engine-fr-schema-extensibility`).
+- The part type set is **closed**: a part whose `type` is outside the supported set is rejected (see the acceptance criteria). Vendor-defined discriminants via GTS (`cpt-cf-chat-engine-fr-schema-extensibility`) are a **future** extension — there is no registration or forwarding path for them yet, so until one exists a vendor extends a part through its `content`, which the engine validates structurally and otherwise treats as opaque.
 - A `tool_result` part pairs with its `tool_call` part by `tool_call_id`, not by position; the pair may span two messages (the call on an assistant message, the result on the following one). The engine forwards both verbatim and does not execute tools itself.
 - Deleting a message deletes its parts (cascade); parts are not independently addressable for deletion.
 

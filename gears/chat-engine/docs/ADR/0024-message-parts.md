@@ -1,5 +1,5 @@
 Created:  2026-06-30 by Constructor Tech
-Updated:  2026-09-11 by Constructor Tech
+Updated:  2026-09-15 by Constructor Tech
 # ADR-0024: Parts-Based Message Model
 
 
@@ -47,7 +47,7 @@ An assistant answer is rarely just one blob of text: it can interleave prose, co
 
 ## Decision Outcome
 
-Chosen option: "Ordered list of typed parts in a child table". A message body is an ordered list of `MessagePart` rows (`cpt-cf-chat-engine-design-entity-message-part`), each carrying a `type` (`text`, `code`, `images`, `videos`, `links`, `statuses`, `tool_call`, `tool_result`), a typed `content` JSON whose shape is determined by `type`, and a 0-based `number` that is unique per message (`UNIQUE(message_id, number)`). The former scalar `content` field/column is removed; on read, the SDK `Message` carries `parts: Vec<MessagePart>` ordered by `number`. Ordinals are assigned as `MAX(number)+1` within the insert transaction, reusing the SERIALIZABLE-retry machinery from variant indexing (`cpt-cf-chat-engine-adr-variant-indexing`). The streaming text part is filled as chunks arrive and frozen on completion; the part-type set is extensible by plugin vendors via GTS. Chat Engine validates `content` structurally but leaves semantics to plugins (`cpt-cf-chat-engine-principle-zero-business-logic`).
+Chosen option: "Ordered list of typed parts in a child table". A message body is an ordered list of `MessagePart` rows (`cpt-cf-chat-engine-design-entity-message-part`), each carrying a `type` (`text`, `code`, `images`, `videos`, `links`, `statuses`, `tool_call`, `tool_result`), a typed `content` JSON whose shape is determined by `type`, and a 0-based `number` that is unique per message (`UNIQUE(message_id, number)`). The former scalar `content` field/column is removed; on read, the SDK `Message` carries `parts: Vec<MessagePart>` ordered by `number`. Ordinals are assigned as `MAX(number)+1` within the insert transaction, reusing the SERIALIZABLE-retry machinery from variant indexing (`cpt-cf-chat-engine-adr-variant-indexing`). The streaming text part is filled as chunks arrive and frozen on completion. Vendor extensibility of the part-type set via GTS was a driver, but no registration or forwarding path was built: the discriminant set is closed, an unknown `type` is rejected, and vendor extension happens inside the part's `content` until that path exists. Chat Engine validates `content` structurally but leaves semantics to plugins (`cpt-cf-chat-engine-principle-zero-business-logic`).
 
 ### Consequences
 
@@ -59,6 +59,7 @@ Chosen option: "Ordered list of typed parts in a child table". A message body is
 * Bad, because reading a message requires joining/loading a child table (more rows per message).
 * Bad, because ordinal assignment needs the SERIALIZABLE-retry path under concurrent inserts.
 * Bad, because the wire/persisted shapes diverge (`MessagePartInput` vs `MessagePart`).
+* Bad, because the GTS extensibility driver went unmet — a vendor that needs a genuinely new discriminant has to change Chat Engine core, so each such need lands as a core enum addition (as `tool_call` / `tool_result` did) until the registration path is designed.
 
 ### Confirmation
 
