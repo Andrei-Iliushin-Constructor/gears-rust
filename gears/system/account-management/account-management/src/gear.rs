@@ -745,7 +745,7 @@ impl Gear for AccountManagementGear {
                 })?;
 
             info!(
-                target: "am.root_type",
+                target: "am.root_tenant_type",
                 root_tenant_type = %root_cfg.gts_id,
                 ?outcome,
                 "root tenant type reconciled with authoritative Types Registry storage"
