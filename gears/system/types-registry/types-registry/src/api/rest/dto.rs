@@ -521,7 +521,7 @@ pub struct DeleteEntityDto {
     /// answers `400` — and it would disagree with the DELETE route, which declares
     /// the same precondition as a non-nullable `integer` query parameter.
     #[serde(default)]
-    #[schema(required, value_type = i64)]
+    #[schema(required, value_type = i64, minimum = 1)]
     pub expected_resource_version: Option<i64>,
 }
 

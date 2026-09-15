@@ -6,7 +6,7 @@ use axum::{Extension, Router};
 use toolkit::api::OpenApiRegistry;
 use toolkit::api::canonical_prelude::StatusCode;
 use toolkit::api::operation_builder::{
-    CORE_GLOBAL_BASE_LICENSE_FEATURE, LicenseFeature, OperationBuilder, ParamLocation, ParamSpec,
+    CORE_GLOBAL_BASE_LICENSE_FEATURE, LicenseFeature, OperationBuilder, ParamSpec,
     ResponseHeaderSpec, ResponseHeaderType,
 };
 
@@ -67,21 +67,17 @@ pub fn register_routes(
     router.layer(Extension(service)).layer(Extension(registry))
 }
 
-/// Declare the required mutation header via `param`; `OperationBuilder` has
-/// no `header_param` helper (upstream #4614).
+/// Declare the required mutation header via `param`. `OperationBuilder` still
+/// has no `header_param` helper beside `path_param` / `query_param` (upstream
+/// #4614), but `ParamSpec::header` now names the location, so the capability no
+/// longer has to be found by reading `ParamLocation`.
 fn idempotency_key_param() -> ParamSpec {
-    ParamSpec {
-        name: "Idempotency-Key".to_owned(),
-        location: ParamLocation::Header,
-        required: true,
-        description: Some(
+    ParamSpec::header("Idempotency-Key")
+        .required(true)
+        .description(
             "Caller-supplied key scoping the retry of this submission. A replay with the same \
-             body returns the same operation; a different body under the same key is a conflict."
-                .to_owned(),
-        ),
-        param_type: "string".to_owned(),
-        array: false,
-    }
+             body returns the same operation; a different body under the same key is a conflict.",
+        )
 }
 
 /// The pre-database v1 contract, verbatim from `main` (T9a).
@@ -395,13 +391,21 @@ fn register_delete_entity(mut router: Router, openapi: &dyn OpenApiRegistry) -> 
             "A GTS identifier (e.g. gts.acme.core.events.user_created.v1~) or a Registry \
              Reference UUID",
         )
-        // `query_param_typed` takes description before type; swapping them silently emits `string`.
-        .query_param_typed(
-            "expected_resource_version",
-            true,
-            "Required and positive: the resource_version the caller observed. Absent, \
-             non-numeric or zero is a 400; a mismatch is reported on the operation item",
-            "integer",
+        // Declared as a `ParamSpec` rather than through `query_param_typed`: that
+        // helper cannot carry `format`/`minimum`, and its positional `description`
+        // before `param_type` is easy to swap silently into a `string`. Named
+        // setters state the same precondition the batch DTO declares — a positive
+        // `int64` — so a generated client rejects what acceptance would reject.
+        .param(
+            ParamSpec::query("expected_resource_version")
+                .required(true)
+                .param_type("integer")
+                .format("int64")
+                .minimum(1.0)
+                .description(
+                    "Required and positive: the resource_version the caller observed. Absent, \
+                     non-numeric or zero is a 400; a mismatch is reported on the operation item",
+                ),
         )
         .query_param_typed(
             "dry_run",

@@ -4669,6 +4669,7 @@
           "expected_resource_version": {
             "description": "Required positive version. Optional in Rust so acceptance returns the same\n`400 deletion_requires_version` on both deletion routes rather than letting\nthe extractor answer first.\n\n`value_type = i64` alongside `required` is what keeps the generated schema a\nplain `integer`: `required` on its own leaves the property nullable, so the\ndocument would promise that an explicit `null` is accepted while acceptance\nanswers `400` — and it would disagree with the DELETE route, which declares\nthe same precondition as a non-nullable `integer` query parameter.",
             "format": "int64",
+            "minimum": 1,
             "type": "integer"
           },
           "key": {
@@ -53257,6 +53258,8 @@
             "name": "expected_resource_version",
             "required": true,
             "schema": {
+              "format": "int64",
+              "minimum": 1,
               "type": "integer"
             }
           },
