@@ -401,6 +401,13 @@ impl ChatEngineBackendPlugin for ScriptPlugin {
         }
     }
 
+    async fn on_message_recreate(
+        &self,
+        ctx: MessagePluginCtx,
+    ) -> std::result::Result<PluginStream, PluginError> {
+        self.on_message(ctx).await
+    }
+
     fn plugin_instance_id(&self) -> &str {
         &self.id
     }
@@ -795,6 +802,61 @@ async fn mid_stream_error_persists_parts_streamed_before_the_failure() {
                 &vec![MessagePartType::Links],
                 "the streamed part must survive the failure",
             );
+        }
+        other => panic!("expected Errored finalize, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn recreate_pre_stream_failure_finalizes_the_stub_as_errored() {
+    // `dispatch_to_plugin` is the recreate/branch entry point (variant_service
+    // calls it). A plugin that fails before yielding a stream must still leave
+    // the pre-allocated assistant stub finalized — with nothing to preserve,
+    // since no part or citation was streamed.
+    let plugin_id = "plugin-recreate-pre-err";
+    let session_type_id = Uuid::new_v4();
+    let plugin = ScriptPlugin::new(
+        plugin_id,
+        PluginScript::PreError(PluginError::internal("boom")),
+    );
+    let plugin_dyn: Arc<dyn ChatEngineBackendPlugin> = plugin;
+    let (svc, sessions, messages) = make_service(plugin_id, plugin_dyn, session_type_id, None);
+
+    let identity = Identity::new(OWNER_TENANT.to_string(), OWNER_USER.to_string(), None)
+        .expect("identity from owner pair");
+    let assistant_message_id = Uuid::new_v4();
+    let err = svc
+        .dispatch_to_plugin(
+            &identity,
+            sessions.session_id(),
+            session_type_id,
+            plugin_id.to_owned(),
+            assistant_message_id,
+            vec![],
+            None,
+            MessageEventKind::Recreate,
+            CancellationToken::new(),
+        )
+        .await;
+    let err = match err {
+        Ok(_) => panic!("pre-stream plugin failure must surface to the caller"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("boom"), "got {err}");
+
+    let calls = messages.finalize_calls.lock().clone();
+    assert_eq!(calls.len(), 1, "the stub must be finalized exactly once");
+    assert_eq!(calls[0].0, assistant_message_id);
+    match &calls[0].1 {
+        FinalizeOutcomeSnapshot::Errored {
+            text,
+            part_types,
+            citation_count,
+            ..
+        } => {
+            assert!(text.is_empty(), "nothing streamed, so no text");
+            assert!(part_types.is_empty(), "nothing streamed, so no parts");
+            assert_eq!(*citation_count, 0, "nothing streamed, so no citations");
         }
         other => panic!("expected Errored finalize, got {other:?}"),
     }
