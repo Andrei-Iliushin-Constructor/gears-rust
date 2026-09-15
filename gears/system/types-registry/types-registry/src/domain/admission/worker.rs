@@ -7,7 +7,6 @@
 //! Process items in dependency order. Failed dependencies block their downstream;
 //! independent candidates proceed. Stored preconditions select creation or revision.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -20,11 +19,10 @@ use uuid::Uuid;
 
 use super::batch::{self, order_deletions};
 use super::deletion;
+use super::dry_run;
 pub use super::errors::{ItemFailure, WorkerError};
 use super::graph::BatchOrder;
-use super::publish;
 use super::revision::{CommittedUnit, RevisionCommit};
-use super::simulate::{self, Predicted};
 pub use super::tuning::Tuning;
 use super::tuning::effective_force;
 use super::unit::{CommitRequest, EvaluationTarget, PreparedUnit, commit_prepared_in, evaluate};
@@ -122,7 +120,7 @@ async fn run_operation_inner(
     // A dry run of either kind is predicted whole — one snapshot, one overlay,
     // no entity-state write — and its outcomes are published afterwards.
     if operation.dry_run {
-        return dry_run_pass(stores, db, scope, tuning, &operation, &items, now).await;
+        return dry_run::run_batch(stores, db, scope, tuning, &operation, &items, now).await;
     }
 
     commit_pass(stores, db, scope, tuning, &operation, &items, now).await
@@ -186,68 +184,6 @@ async fn commit_pass(
             .zip(outcomes)
             .map(|(item, outcome)| outcome.map_or_else(|| stored_outcome(item), Ok))
             .collect::<Result<Vec<_>, _>>()?,
-    })
-}
-
-/// Predict one dry-run batch and record what it predicted.
-///
-/// Simulation uses the shared batch traversal inside one snapshot; publication
-/// then records all outcomes and completion atomically (see [`publish`]).
-async fn dry_run_pass(
-    stores: &Arc<dyn Stores>,
-    db: &DBProvider<WorkerError>,
-    scope: &AccessScope,
-    tuning: Tuning<'_>,
-    operation: &OperationRow,
-    items: &Arc<[OperationItemRow]>,
-    now: OffsetDateTime,
-) -> Result<OperationOutcome, WorkerError> {
-    let operation_id = operation.id;
-    let predictions =
-        simulate::simulate_batch(stores, db, scope, tuning, operation, Arc::clone(items), now)
-            .await?;
-    let published =
-        publish::publish(stores, db, scope, operation_id, items, &predictions, now).await?;
-    // A lost compare-and-swap means an overlapping pass terminalized the item
-    // first; its stored outcome stands, as it does on the real path. All of them
-    // are in the same post-publication state, so read the items once instead of
-    // once per lost item, which was one transaction and one full item scan each.
-    let terminalized: HashMap<i64, OperationItemRow> = if published.recorded.contains(&false) {
-        read_operation(stores, db, scope, operation_id)
-            .await?
-            .1
-            .into_iter()
-            .map(|row| (row.id, row))
-            .collect()
-    } else {
-        HashMap::new()
-    };
-    let mut outcomes = Vec::with_capacity(items.len());
-    for ((item, prediction), won) in items.iter().zip(&predictions).zip(published.recorded) {
-        if !won {
-            let row = terminalized
-                .get(&item.id)
-                .ok_or(WorkerError::OperationNotFound { operation_id })?;
-            outcomes.push(stored_outcome(row)?);
-            continue;
-        }
-        let reported = publish::published_outcome(operation_id, item, prediction, tuning.metrics);
-        outcomes.push(ItemOutcome {
-            gts_id: item.gts_id.clone(),
-            status: reported.status,
-            gts_uuid: reported.gts_uuid,
-            resource_version: reported.resource_version,
-            revision_no: reported.revision_no,
-            failure: match prediction {
-                Predicted::Refused(failure) => Some(failure.clone()),
-                Predicted::Terminal { .. } => None,
-            },
-        });
-    }
-    Ok(OperationOutcome {
-        operation_id,
-        already_terminal: false,
-        items: outcomes,
     })
 }
 
@@ -922,7 +858,7 @@ async fn stored_item(
 /// # Errors
 /// [`WorkerError::OperationNotFound`] when the id names no row — an unknown
 /// operation is an infrastructure fault, not a candidate outcome.
-async fn read_operation(
+pub(super) async fn read_operation(
     stores: &Arc<dyn Stores>,
     db: &DBProvider<WorkerError>,
     scope: &AccessScope,
@@ -1004,7 +940,7 @@ async fn mark_completed(
 /// Reconstruct a terminal outcome, deriving `gts_uuid` via `GtsId::to_uuid`.
 /// ADR-0012 requires the Registry Reference on success, including replay;
 /// refusals carry none.
-fn stored_outcome(item: &OperationItemRow) -> Result<ItemOutcome, WorkerError> {
+pub(super) fn stored_outcome(item: &OperationItemRow) -> Result<ItemOutcome, WorkerError> {
     let terminal_success = matches!(
         item.status,
         OperationItemStatus::Succeeded | OperationItemStatus::Unchanged

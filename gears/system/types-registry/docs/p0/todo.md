@@ -1738,7 +1738,7 @@ is untested; the deletion refusal itself is covered.
 **Dependencies:** T19
 **Main files:**
 - `TR/src/domain/admission/deletion.rs`, `worker.rs`, `graph.rs`, `acceptance.rs`
-- `TR/src/domain/admission/simulate.rs`, `publish.rs`, `view/`
+- `TR/src/domain/admission/dry_run/` (`mod.rs`, `publish.rs`, `view/`)
 - `TR/src/domain/ports/metrics.rs`, `TR/src/infra/metrics.rs`, `TR/src/observability.rs`
 - `TR/src/infra/storage/repo/dependency_repo.rs`, `operation_repo.rs`
 - `TR/tests/deletion_test.rs`, `dry_run_test.rs`, `deletion_backends_test.rs`
