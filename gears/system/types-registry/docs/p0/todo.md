@@ -669,7 +669,7 @@ Outcome and evidence: the criteria below.
 - [x] **v1 is intact and the new surface is additive (T9a).** Both v1 routes are restored verbatim from `main` and the async surface sits under `/v2/`; three handlers take `TypesRegistryService`, three take `Option<Arc<RegistryService>>`, and neither falls back to the other. `make e2e-local` is green with **no e2e file edited for T9a** — the one e2e file this branch touches, `account_management/conftest.py`, belongs to the envelope fix above and would have been needed with or without T9a
 - [x] **Review follow-up: unsupported dry-run fails synchronously, and replays are explicit.** Before T20, unsupported `dry_run: true` was rejected during admission with a canonical `400` field violation, before an operation can be created or stranded in `running`. Successful idempotency replays now include `Idempotency-Replayed: true`; first submissions omit it. Domain and REST regression tests pin both contracts
 - [ ] **Human review — everything after this widens the path rather than reshaping it.** Five open items, none of them a failing check:
-  - **Another gear owns part of `/types-registry/v1/*`.** `resource-group` registers five routes — `POST|GET /types`, `GET|PUT|DELETE /types/{code}` — inside this gear's service namespace, from `gears/system/resource-group/.../api/rest/routes/types.rs`. T20a, T22a and T28 widen that namespace, so a collision waits for whichever gear registers a conflicting path first. Decide: report to the resource-group owners now, or carry it as a known hazard into T20a/T22a/T28
+  - **Another gear owns part of `/types-registry/v1/*`.** `resource-group` registers five routes — `POST|GET /types`, `GET|PUT|DELETE /types/{code}` — inside this gear's service namespace, from `gears/system/resource-group/.../api/rest/routes/types.rs`. T20a, T22a and T28 widen that namespace, so a collision waits for whichever gear registers a conflicting path first. Decide: report to the resource-group owners now, or carry it as a known hazard into T20a/T22a/T28. **T20a's widening did not collide** — it added two `/v2/entities*` routes, and `resource-group` owns only `/v1/types*`; see T20a's *Resolved hazard*. The decision for T22a and T28 is still open
   - ~~**`Idempotency-Key` cannot be declared in OpenAPI.**~~ **Retracted — the claim was false and is now fixed.** `ParamLocation::Header` exists and `openapi_registry.rs:200` already maps it onto utoipa's `ParameterIn::Header`; the generic `OperationBuilder::param(ParamSpec)` declares it. What misled us is that there is no `header_param` convenience beside `path_param` / `query_param`, so the capability is discoverable only by reading the enum. `POST /v2/entities` now declares the header as a required parameter, pinned by `the_idempotency_key_header_is_declared_as_a_required_parameter` and mutation-checked. The remaining toolkit gap is the missing convenience method — filed upstream as constructorfabric/gears-rust#4614
   - **T2's three lowering decisions were flagged *worth review* and never signed off:** MySQL `DATETIME(6)` rather than `TIMESTAMP(6)`; three extra boolean-domain CHECKs on SQLite and MySQL; MySQL's four indexes declared inline as `KEY`
   - **The migration changed after T2 was marked done** (the uuid binding). Nothing to migrate forward — no deployment had run it — but the "done" marker moved
@@ -1748,63 +1748,119 @@ is untested; the deletion refusal itself is covered.
 
 ---
 
-### - [ ] T20a: REST deletion and dry run
+### - [x] T20a: REST deletion and dry run
 
 **Description:** Expose single/batch deletion on `/v2/` with dry run on all mutations.
 Uses inline admission until T21. Read completion belongs to T22a (P17).
 
 **Acceptance criteria:**
 
-- [ ] Batch `items` use `key` parsed by `EntityKey::parse`; outcomes use `gts_id` in request
+- [x] Batch `items` use `key` parsed by `EntityKey::parse`; outcomes use `gts_id` in request
   order, including UUID submissions
-- [ ] `:batchDelete` requires positive `expected_resource_version` per item; absence is `400`
-- [ ] `DELETE /entities/{entity_key}` uses the one-item batch domain path, GET's key resolution
+- [x] `:batchDelete` requires positive `expected_resource_version` per item; absence is `400`
+- [x] `DELETE /entities/{entity_key}` uses the one-item batch domain path, GET's key resolution
   and `Idempotency-Key`; no handler-local deletion/precondition model
-- [ ] Single deletion requires a positive `expected_resource_version` query parameter and
+- [x] Single deletion requires a positive `expected_resource_version` query parameter and
   refuses `If-Match`. Missing, non-numeric or zero yields `400`; mismatch yields `202`
   then item `precondition_failed`, never `412` (DESIGN §3.3)
-- [ ] Single and one-item batch deletion return identical version-mismatch outcomes
-- [ ] `dry_run=false` by default; body field for registration/batch deletion, query for
+- [x] Single and one-item batch deletion return identical version-mismatch outcomes
+- [x] `dry_run=false` by default; body field for registration/batch deletion, query for
   single deletion. Preserve registration's router test and cover both deletion routes
-- [ ] All mutations require `Idempotency-Key`: acceptance returns `202`, `Location` and
+- [x] All mutations require `Idempotency-Key`: acceptance returns `202`, `Location` and
   `Retry-After`; terminal replay returns `200` and `Idempotency-Replayed: true`.
   Dry runs persist outcomes without entity/version changes; dry-run/commit key reuse conflicts
-- [ ] OpenAPI includes deletion routes, RFC-9457 errors, preconditions, idempotency and dry run.
+- [x] OpenAPI includes deletion routes, RFC-9457 errors, preconditions, idempotency and dry run.
   Quickstart covers registration, deletion, dry run and submit-then-poll on internal routes
-- [ ] All mutations keep `exposed = false` until platform identity/PDP checks precede dispatch
-- [ ] `QUICKSTART.md` meets the gear-layout guide: description, features, `/docs` link,
+- [x] All mutations keep `exposed = false` until platform identity/PDP checks precede dispatch
+- [x] `QUICKSTART.md` meets the gear-layout guide: description, features, `/docs` link,
   one or two working `curl` examples
-- [ ] OpenAPI/quickstart identify the global platform-plane API and C8's internal-only
+- [x] OpenAPI/quickstart identify the global platform-plane API and C8's internal-only
   mutations pending `X-ToolKit-Internal-Token`/`PlatformIdentity` and a separate listener;
   no usable gateway mutation example
-- [ ] Handlers only map the domain service (SPEC §8.4)
-- [ ] All routes use `routes::V2` for T24a's promotion
-- [ ] Deletion routes reuse T20's `kind="deletion"` metrics
-- [ ] No e2e edits; `make e2e-local` stays green. Preserve v1 and its in-memory store (P12/P17)
-- [ ] Both breaking changelog entries belong to T24a's promotion
+- [x] Handlers only map the domain service (SPEC §8.4)
+- [x] All routes use `routes::V2` for T24a's promotion
+- [x] Deletion routes reuse T20's `kind="deletion"` metrics
+- [x] No e2e edits; `make e2e-local` stays green. Preserve v1 and its in-memory store (P12/P17)
+- [x] Both breaking changelog entries belong to T24a's promotion
 
 **Verification:**
-- [ ] Gear tests (see [Commands](#commands)), including `TR/tests/api_rest_test.rs` through
+- [x] Gear tests (see [Commands](#commands)), including `TR/tests/api_rest_test.rs` through
       the real router: single/batch deletion parity for GTS Identifier and UUID, malformed
       preconditions, version mismatch and idempotency replay/conflict
-- [ ] Router tests: registration and both deletion spellings with `dry_run=true` reach a
+- [x] Router tests: registration and both deletion spellings with `dry_run=true` reach a
       terminal operation outcome while entity state, revisions and resource versions remain
       unchanged; a committed control request demonstrates the corresponding mutation
-- [ ] `make e2e-local` — unchanged and still green, no e2e file edited (P12)
-- [ ] `make lychee`
-- [ ] Manual: `/cf/docs` renders the mutation contracts; `curl` against `/v2/` for
+- [x] `make e2e-local` — unchanged and still green, no e2e file edited (P12)
+- [x] `make lychee`
+- [x] Manual: `/cf/docs` renders the mutation contracts; `curl` against `/v2/` for
       register → poll → exact read → dry-run delete → exact read → delete → poll → tombstone
+
+**Implementation notes:**
+- One deletion model, two spellings. `RegistryService::delete` takes a `DeleteRequest` of
+  `DeleteTarget { key: EntityKey, expected_resource_version: Option<i64> }` and builds the
+  `SubmitRequest` with `kind = Deletion`; `DELETE` passes one target and `:batchDelete`
+  passes several. No precondition, existence or ordering rule lives in a handler, and the
+  polled `kind` the router tests assert is the same value `PassLabels` labels the T20
+  counters with — a route that passed `Registration` would fail them.
+- **Reverse resolution runs before acceptance, and that is safe for a narrow reason.**
+  Acceptance reads no entity state (SPEC §8.1's ordering invariant), so a UUID `key` cannot
+  be resolved inside it. `RegistryService::resolve_targets` resolves the UUID-spelled
+  targets under one snapshot first; a Registry Reference is a deterministic `UUIDv5` of an
+  identifier, so a row's identifier is fixed for the life of the row and no race can change
+  the answer. An entity that disappears in between is reported by the deletion's own recheck
+  under its locks. A batch spelled entirely in identifiers issues no statement at all.
+- **An unresolvable Registry Reference is a `404`, on both spellings, and it is the one
+  deletion refusal that is synchronous on existence.** It is forced rather than chosen: the
+  reference is not invertible, so there is no identifier to record an outcome under. An
+  absent *identifier* stays `202` plus a terminal `precondition_failed` item. DESIGN §3.3
+  settles the status by defining the deletion path's `entity_key` as "resolved exactly as
+  GET resolves it", and GET answers `404` for the same key.
+- **`expected_resource_version` is `Option` in the DTOs and required in the document.**
+  Modelled as absent-able, absence reaches acceptance and is refused as
+  `deletion_requires_version` — a `400` with a stable reason, identical on both spellings.
+  Declared non-optional, the same mistake would have been a `422` from the JSON extractor on
+  the batch route and a `400` from the query extractor on the single one. `#[schema(required)]`
+  and `query_param_typed(.., required = true, ..)` keep the served document honest.
+- `operation_location` now cuts at the **last** `/entities` segment instead of stripping a
+  `/entities` suffix, which is what lets one function serve `/entities`,
+  `/entities:batchDelete` and `/entities/{entity_key}`. The gateway-prefix test still holds.
+- `register_routes` split into one function per route group (`clippy::too_many_lines`);
+  registration order stays in `register_routes` itself. `idempotency_key` and `receipt` are
+  shared by all three mutation handlers, so the receipt contract cannot drift between them.
+
+**Resolved hazard:** the `resource-group` namespace overlap recorded before T20 did **not**
+collide. That gear owns `/types-registry/v1/types*`; T20a added `/types-registry/v2/entities:batchDelete`
+and `DELETE /types-registry/v2/entities/{entity_key}`. Verified on the served document, which
+lists all five `resource_group.*` type routes beside the seven `types_registry.*` ones with no
+duplicate path-and-method pair. T22a and T28 still widen `/v2/entities*`, which `resource-group`
+does not touch at all.
+
+**Recorded verification:** SQLite 894/894 (44 in `api_rest_test`); PostgreSQL + MySQL 36/36 as
+one `make test-types-registry-db` run. `make fmt`, gear-scoped `cargo clippy --no-deps` and
+`make lychee` (0 errors over its four trees; also run manually over `gears/system/types-registry`)
+passed. The manual `curl` sequence above ran green against a live server on
+`/cf/types-registry/v2/*`, including the `If-Match` and missing-precondition refusals, the
+`404` for an unknown reference, and the `200` + `Idempotency-Replayed: true` replay.
+`make e2e-local`: 324 passed, 19 skipped, no e2e file edited.
+
+**Environment notes, not code findings.** A whole-workspace `cargo clippy` fails in
+`libs/toolkit-security` on `clippy::unused_async_trait_impl`, a 1.98 lint reached because the
+local toolchain shadows the pinned 1.97.0; the file is untouched by this task. `make quickstart`
+(`GEAR=types-registry`) cannot reach ready mode on its own, because v1 seeding needs
+`gts.cf.core.am.tenant_type.v1~` from `account-management`, and the full `make run` dies in
+`file-parser` on a missing ONNX Runtime. The manual check therefore ran with
+`--features account-management,static-authn,static-authz,single-tenant,static-idp`.
 
 **Dependencies:** T20 (deletion and dry run), T9a (interim v2 routes)
 **Files likely touched:**
 - `TR/src/api/rest/routes.rs`
 - `TR/src/api/rest/handlers.rs`
 - `TR/src/api/rest/dto.rs`
+- `TR/src/api/rest/error.rs`
+- `TR/src/domain/registry_service.rs`
 - `TR/tests/api_rest_test.rs`
 - `gears/system/types-registry/QUICKSTART.md`
 **Scope:** M
-
----
 
 ### - [ ] T21: Outbox dispatch wiring
 

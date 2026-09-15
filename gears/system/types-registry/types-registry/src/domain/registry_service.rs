@@ -24,6 +24,7 @@
 //! upgrade is a request-scoped `AccessScope` derived from the `SecurityContext`,
 //! which is why every repository method already takes one.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -36,7 +37,7 @@ use uuid::Uuid;
 use crate::config::TypesRegistryConfig;
 use crate::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
 use crate::domain::admission::worker::{Tuning, WorkerError, run_operation};
-use crate::domain::admission::{Accepted, OperationDispatch, SubmitRequest};
+use crate::domain::admission::{Accepted, Candidate, OperationDispatch, SubmitRequest};
 use crate::domain::enums::{
     EntityKind, LifecycleStatus, OperationItemStatus, OperationKind, OperationStatus,
 };
@@ -72,6 +73,33 @@ impl EntityKey {
             Err(_) => Self::GtsId(key.to_owned()),
         }
     }
+}
+
+/// One entity named for deletion.
+///
+/// The deletion model is one model with two spellings: `:batchDelete` sends an
+/// array of these, and `DELETE /entities/{entity_key}` sends exactly one, spread
+/// across its path and query. Neither transport owns a precondition rule.
+#[domain_model]
+#[derive(Clone, Debug)]
+pub struct DeleteTarget {
+    pub key: EntityKey,
+    /// Required and positive, and every part of that is acceptance's to enforce:
+    /// it owns the [`Precondition`](crate::domain::admission::Precondition)
+    /// vocabulary, so `None` is `deletion_requires_version`, `Some(0)` is
+    /// `zero_precondition` and a negative value is `negative_precondition`. Carried
+    /// as an `Option` for exactly that reason — a transport that cannot represent
+    /// absence would have to invent its own refusal.
+    pub expected_resource_version: Option<i64>,
+}
+
+/// A submitted deletion, before its keys are resolved to identifiers.
+#[domain_model]
+#[derive(Clone, Debug)]
+pub struct DeleteRequest {
+    pub idempotency_key: String,
+    pub dry_run: bool,
+    pub targets: Vec<DeleteTarget>,
 }
 
 /// One operation and its per-candidate outcomes, as a caller polls it.
@@ -151,6 +179,16 @@ pub enum ServiceError {
     Db(#[from] DbError),
     #[error("a stored document could not be read as JSON: {0}")]
     CorruptDocument(String),
+    /// A Registry Reference that names no row.
+    ///
+    /// Deletion's one refusal that is synchronous on existence, and it is forced
+    /// rather than chosen: the reference is a one-way `UUIDv5` derivation of an
+    /// identifier, so a reference with no row behind it cannot be turned into a
+    /// candidate and there is no identifier to record an outcome under. A deletion
+    /// naming an absent *identifier* is still accepted and refused terminally, which
+    /// is why this is not a general "delete what does not exist" check.
+    #[error("no entity has Registry Reference {gts_uuid}")]
+    UnresolvedReference { gts_uuid: Uuid },
 }
 
 /// How accepted operations are driven after their acceptance transaction commits.
@@ -280,6 +318,127 @@ impl RegistryService {
             accepted.status = OperationStatus::Completed;
         }
         Ok(accepted)
+    }
+
+    /// Accept a deletion, and — while admission is inline — admit it.
+    ///
+    /// One deletion path for both REST spellings: `DELETE /entities/{entity_key}`
+    /// passes a one-target request and `:batchDelete` passes several, so neither
+    /// transport carries a precondition or existence rule of its own (SPEC §8.4).
+    ///
+    /// # Errors
+    /// [`ServiceError::UnresolvedReference`] for a Registry Reference that names no
+    /// row, and everything [`Self::submit`] can fail with.
+    pub async fn delete(
+        &self,
+        request: &DeleteRequest,
+        now: OffsetDateTime,
+    ) -> Result<Accepted, ServiceError> {
+        let candidates = self.resolve_targets(&request.targets).await?;
+        self.submit(
+            &SubmitRequest {
+                idempotency_key: request.idempotency_key.clone(),
+                kind: OperationKind::Deletion,
+                dry_run: request.dry_run,
+                candidates,
+            },
+            now,
+        )
+        .await
+    }
+
+    /// Turn deletion targets into candidates, resolving Registry References to the
+    /// identifiers every operation item is keyed by.
+    ///
+    /// **Before acceptance, not inside it.** Acceptance reads no entity state by
+    /// design — SPEC §8.1's ordering invariant is that the policy gate precedes any
+    /// existence lookup — so the reverse resolution cannot move in there. It is safe
+    /// where it is for a reason specific to this mapping rather than a general one:
+    /// a reference is a deterministic `UUIDv5` of an identifier, so a row's
+    /// identifier is fixed for the life of the row. Whatever races this read —
+    /// another deletion, a revision — cannot change the answer, and an entity that
+    /// disappears between resolution and admission is reported by the deletion's own
+    /// recheck under its locks, exactly as it would be for the identifier spelling.
+    ///
+    /// The resolution is also **not** a precondition or an existence check: it
+    /// answers "what is this key called", and every question about whether the
+    /// entity may be deleted stays in the worker.
+    async fn resolve_targets(
+        &self,
+        targets: &[DeleteTarget],
+    ) -> Result<Vec<Candidate>, ServiceError> {
+        let references: Vec<Uuid> = targets
+            .iter()
+            .filter_map(|target| match &target.key {
+                EntityKey::Uuid(gts_uuid) => Some(*gts_uuid),
+                EntityKey::GtsId(_) => None,
+            })
+            .collect();
+        // A batch spelled entirely in identifiers issues no statement at all, which
+        // keeps the common path free of the read.
+        let resolved = if references.is_empty() {
+            BTreeMap::new()
+        } else {
+            self.reverse_resolve(references).await?
+        };
+
+        targets
+            .iter()
+            .map(|target| {
+                let gts_id = match &target.key {
+                    EntityKey::GtsId(gts_id) => gts_id.clone(),
+                    EntityKey::Uuid(gts_uuid) => resolved.get(gts_uuid).cloned().ok_or(
+                        ServiceError::UnresolvedReference {
+                            gts_uuid: *gts_uuid,
+                        },
+                    )?,
+                };
+                Ok(Candidate {
+                    gts_id,
+                    // A deletion takes no document, and acceptance refuses one.
+                    content: None,
+                    expected_resource_version: target.expected_resource_version,
+                    // ADR-0004's waiver is a compatibility concept; a deletion has no
+                    // compatibility check to waive.
+                    force: false,
+                })
+            })
+            .collect()
+    }
+
+    /// The identifiers behind a set of Registry References, under one snapshot.
+    ///
+    /// References with no row are **absent from the map** rather than refused here,
+    /// so the refusal is raised by the caller in request order and names the first
+    /// target a client would look for.
+    ///
+    /// One statement per reference: there is no batch reverse lookup on
+    /// [`EntityStore`](crate::domain::ports::EntityStore), and a deletion batch is
+    /// bounded by `limits.batch_candidates`, so the worst case is that bound and
+    /// only for keys actually spelled as UUIDs.
+    async fn reverse_resolve(
+        &self,
+        references: Vec<Uuid>,
+    ) -> Result<BTreeMap<Uuid, String>, ServiceError> {
+        let provider: DBProvider<ServiceError> = DBProvider::new(self.db.clone());
+        let scope = Self::scope();
+        let stores = Arc::clone(&self.stores);
+        provider
+            .transaction_with_config(snapshot_read(&self.db), move |tx| {
+                Box::pin(async move {
+                    let mut resolved = BTreeMap::new();
+                    for gts_uuid in references {
+                        // Tombstones resolve too: deleting an already-deleted entity
+                        // by reference must reach the same terminal `not_active`
+                        // outcome its identifier spelling reaches, not a `404`.
+                        if let Some(row) = stores.find_by_gts_uuid(tx, &scope, gts_uuid).await? {
+                            resolved.insert(gts_uuid, row.gts_id);
+                        }
+                    }
+                    Ok(resolved)
+                })
+            })
+            .await
     }
 
     /// Read one operation and its per-candidate outcomes.

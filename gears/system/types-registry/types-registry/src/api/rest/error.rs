@@ -134,6 +134,17 @@ impl From<ServiceError> for CanonicalError {
             ServiceError::CorruptDocument(detail) => {
                 opaque_internal(&detail, "stored document parse")
             }
+            // `404`, and the same `404` on both deletion spellings: the key names a
+            // resource, `GET /entities/{entity_key}` answers `404` for that same
+            // key, and DESIGN §3.3 defines the deletion path's `entity_key` as
+            // "resolved exactly as GET resolves it". A `400` would be reporting the
+            // request as malformed, which it is not — it is well-formed and names
+            // nothing.
+            ServiceError::UnresolvedReference { gts_uuid } => TypeRegistryError::not_found(
+                format!("No entity with Registry Reference: {gts_uuid}"),
+            )
+            .with_resource(gts_uuid.to_string())
+            .create(),
         }
     }
 }
@@ -245,6 +256,7 @@ impl From<WorkerError> for CanonicalError {
 /// `field::` constants the SDK already publishes.
 mod violation_field {
     pub const IDEMPOTENCY_KEY: &str = "Idempotency-Key";
+    pub const IF_MATCH: &str = "If-Match";
     pub const ITEMS: &str = "items";
     pub const FORCE: &str = "force";
     pub const EXPECTED_RESOURCE_VERSION: &str = "expected_resource_version";
@@ -269,6 +281,25 @@ pub fn idempotency_key_not_utf8() -> CanonicalError {
     invalid_field(
         violation_field::IDEMPOTENCY_KEY,
         "the Idempotency-Key header is not valid UTF-8".to_owned(),
+        field::VALIDATION_FAILED,
+    )
+}
+
+/// `If-Match` was sent to a deletion route.
+///
+/// Refused rather than ignored, and the refusal names its replacement: a caller
+/// that sent `If-Match` believes the request is conditional in the RFC 9110
+/// §13.1.1 sense, and it is not — the precondition is
+/// `expected_resource_version`, and its failure is an asynchronous item outcome
+/// rather than a `412` (DESIGN §3.3). Ignoring the header would answer a
+/// conditional request unconditionally.
+#[must_use]
+pub fn if_match_not_supported() -> CanonicalError {
+    invalid_field(
+        violation_field::IF_MATCH,
+        "If-Match is not supported on this route; name the precondition in \
+         expected_resource_version, whose failure is reported on the operation item"
+            .to_owned(),
         field::VALIDATION_FAILED,
     )
 }

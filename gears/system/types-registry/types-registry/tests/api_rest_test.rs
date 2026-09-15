@@ -41,9 +41,31 @@ const INVALID_ARGUMENT_TYPE: &str =
     gts_uri!("cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~");
 const HTTP_REQUEST_RESOURCE_TYPE: &str = gts_id!("cf.core.http.request.v1~");
 
-/// One parameter as the generated document will carry it: name, location, and
-/// whether it is required.
-type DeclaredParam = (String, String, bool);
+/// Every mutation `operation_id`, v1's included: ceiling C8 keeps all of them
+/// internal-only.
+const MUTATION_OPERATIONS: [&str; 4] = [
+    "types_registry.register",
+    "types_registry.submit_entities",
+    "types_registry.batch_delete_entities",
+    "types_registry.delete_entity",
+];
+
+/// The v2 mutations, which share one receipt contract: `Idempotency-Key` in,
+/// `Location` / `Retry-After` / `Idempotency-Replayed` out.
+const V2_MUTATION_OPERATIONS: [&str; 3] = [
+    "types_registry.submit_entities",
+    "types_registry.batch_delete_entities",
+    "types_registry.delete_entity",
+];
+
+/// One parameter as the generated document will carry it: name, location, whether
+/// it is required, and its `OpenAPI` scalar type.
+///
+/// The type is in the tuple because `query_param_typed` takes the description
+/// before the type, and swapping them compiles: the document then publishes
+/// `type: string` with the word "integer" as the parameter's description, which no
+/// name-and-required assertion can see.
+type DeclaredParam = (String, String, bool, String);
 /// One response as the generated document will carry it: status and content type.
 type DeclaredResponse = (u16, String);
 /// One response header: status, name, and JSON Schema scalar type.
@@ -55,7 +77,7 @@ type DeclaredResponseHeader = (u16, String, ResponseHeaderType);
 struct TestOpenApi {
     /// `(method, path, operation_id)` in registration order.
     operations: std::sync::Mutex<Vec<(String, String, String)>>,
-    /// `operation_id -> [(param name, location, required)]`.
+    /// `operation_id -> [(param name, location, required, scalar type)]`.
     params: std::sync::Mutex<Vec<(String, Vec<DeclaredParam>)>>,
     /// `operation_id -> [(status, content type)]`.
     responses: std::sync::Mutex<Vec<(String, Vec<DeclaredResponse>)>>,
@@ -76,7 +98,14 @@ impl OpenApiRegistry for TestOpenApi {
             spec.operation_id.clone().unwrap_or_default(),
             spec.params
                 .iter()
-                .map(|p| (p.name.clone(), format!("{:?}", p.location), p.required))
+                .map(|p| {
+                    (
+                        p.name.clone(),
+                        format!("{:?}", p.location),
+                        p.required,
+                        p.param_type.clone(),
+                    )
+                })
                 .collect(),
         ));
         self.responses.lock().expect("responses lock").push((
@@ -1104,6 +1133,16 @@ fn both_versions_are_declared_with_distinct_operation_ids() {
             "/types-registry/v2/entities/{entity_key}",
             "types_registry.get_entity",
         ),
+        (
+            "POST",
+            "/types-registry/v2/entities:batchDelete",
+            "types_registry.batch_delete_entities",
+        ),
+        (
+            "DELETE",
+            "/types-registry/v2/entities/{entity_key}",
+            "types_registry.delete_entity",
+        ),
     ];
     expected.sort_unstable();
 
@@ -1125,7 +1164,7 @@ fn mutation_routes_are_internal_only() {
         types_registry::api::rest::routes::register_routes(Router::new(), &openapi, legacy, None);
 
     let exposure = openapi.exposure.lock().expect("exposure lock");
-    for operation_id in ["types_registry.register", "types_registry.submit_entities"] {
+    for operation_id in MUTATION_OPERATIONS {
         let exposed = exposure
             .iter()
             .find(|(id, _)| id == operation_id)
@@ -1156,16 +1195,71 @@ fn the_idempotency_key_header_is_declared_as_a_required_parameter() {
         types_registry::api::rest::routes::register_routes(Router::new(), &openapi, legacy, None);
 
     let params = openapi.params.lock().expect("params lock").clone();
-    let submit = params
-        .iter()
-        .find(|(id, _)| id == "types_registry.submit_entities")
-        .map(|(_, p)| p.clone())
-        .expect("the submit operation is registered");
+    for operation_id in V2_MUTATION_OPERATIONS {
+        let declared = params
+            .iter()
+            .find(|(id, _)| id == operation_id)
+            .map(|(_, p)| p.clone())
+            .expect("the mutation operation is registered");
 
-    assert!(
-        submit.contains(&("Idempotency-Key".to_owned(), "Header".to_owned(), true)),
-        "submit must declare a required Idempotency-Key header, got: {submit:?}",
-    );
+        assert!(
+            declared.contains(&(
+                "Idempotency-Key".to_owned(),
+                "Header".to_owned(),
+                true,
+                "string".to_owned(),
+            )),
+            "{operation_id} must declare a required Idempotency-Key header, got: {declared:?}",
+        );
+    }
+}
+
+/// The single deletion spelling declares its two query parameters, and the
+/// precondition is declared **required** — a generated client that omits it would
+/// otherwise produce a `400` its own types said was fine.
+#[test]
+fn the_single_deletion_query_parameters_are_declared() {
+    let openapi = TestOpenApi::default();
+    let config = TypesRegistryConfig::default();
+    let legacy = Arc::new(TypesRegistryService::new(
+        Arc::new(InMemoryGtsRepository::new(config.to_gts_config())),
+        config,
+    ));
+    let _router =
+        types_registry::api::rest::routes::register_routes(Router::new(), &openapi, legacy, None);
+
+    let params = openapi.params.lock().expect("params lock").clone();
+    let declared = params
+        .iter()
+        .find(|(id, _)| id == "types_registry.delete_entity")
+        .map(|(_, p)| p.clone())
+        .expect("the single deletion operation is registered");
+
+    for expected in [
+        (
+            "entity_key".to_owned(),
+            "Path".to_owned(),
+            true,
+            "string".to_owned(),
+        ),
+        (
+            "expected_resource_version".to_owned(),
+            "Query".to_owned(),
+            true,
+            "integer".to_owned(),
+        ),
+        (
+            "dry_run".to_owned(),
+            "Query".to_owned(),
+            false,
+            "boolean".to_owned(),
+        ),
+    ] {
+        assert!(
+            declared.contains(&expected),
+            "missing parameter {expected:?}: {declared:?}",
+        );
+    }
 }
 
 #[test]
@@ -1183,32 +1277,34 @@ fn submission_response_headers_are_declared() {
         .response_headers
         .lock()
         .expect("response headers lock");
-    let submit = headers
-        .iter()
-        .find(|(id, _)| id == "types_registry.submit_entities")
-        .map(|(_, headers)| headers)
-        .expect("the submit operation is registered");
+    for operation_id in V2_MUTATION_OPERATIONS {
+        let declared = headers
+            .iter()
+            .find(|(id, _)| id == operation_id)
+            .map(|(_, headers)| headers)
+            .expect("the mutation operation is registered");
 
-    for expected in [
-        (202, "Location", ResponseHeaderType::String),
-        (202, "Retry-After", ResponseHeaderType::Integer),
-        (202, "Idempotency-Replayed", ResponseHeaderType::Boolean),
-        (200, "Location", ResponseHeaderType::String),
-        (200, "Idempotency-Replayed", ResponseHeaderType::Boolean),
-    ] {
+        for expected in [
+            (202, "Location", ResponseHeaderType::String),
+            (202, "Retry-After", ResponseHeaderType::Integer),
+            (202, "Idempotency-Replayed", ResponseHeaderType::Boolean),
+            (200, "Location", ResponseHeaderType::String),
+            (200, "Idempotency-Replayed", ResponseHeaderType::Boolean),
+        ] {
+            assert!(
+                declared.iter().any(|actual| {
+                    actual.0 == expected.0 && actual.1 == expected.1 && actual.2 == expected.2
+                }),
+                "{operation_id} is missing response header {expected:?}: {declared:?}",
+            );
+        }
         assert!(
-            submit.iter().any(|actual| {
-                actual.0 == expected.0 && actual.1 == expected.1 && actual.2 == expected.2
-            }),
-            "missing response header {expected:?}: {submit:?}",
+            !declared
+                .iter()
+                .any(|(status, name, _)| *status == 200 && name == "Retry-After"),
+            "{operation_id}: a terminal replay must not advertise Retry-After: {declared:?}",
         );
     }
-    assert!(
-        !submit
-            .iter()
-            .any(|(status, name, _)| *status == 200 && name == "Retry-After"),
-        "terminal replay must not advertise Retry-After: {submit:?}",
-    );
 }
 
 /// `extract::Json<T>` can reject a request before its handler with three statuses
@@ -1226,7 +1322,11 @@ fn json_extractor_error_statuses_are_declared_for_both_post_operations() {
         types_registry::api::rest::routes::register_routes(Router::new(), &openapi, legacy, None);
 
     let responses = openapi.responses.lock().expect("responses lock");
-    for operation_id in ["types_registry.register", "types_registry.submit_entities"] {
+    for operation_id in [
+        "types_registry.register",
+        "types_registry.submit_entities",
+        "types_registry.batch_delete_entities",
+    ] {
         let declared = responses
             .iter()
             .find(|(id, _)| id == operation_id)
@@ -1239,4 +1339,596 @@ fn json_extractor_error_statuses_are_declared_for_both_post_operations() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Deletion, in both spellings (T20a)
+// ---------------------------------------------------------------------------
+//
+// `DELETE /entities/{entity_key}` is sugar over a one-item `:batchDelete` and not a
+// second deletion model, so most of what follows is asserted as a *pair*: the two
+// routes are given the same entity, the same precondition and the same mode, and
+// the outcomes are compared rather than described twice.
+
+/// `POST {V2}/entities:batchDelete`.
+fn batch_delete(key: Option<&str>, body: &Value) -> Request<Body> {
+    submit_to(&format!("{V2}/entities:batchDelete"), key, body)
+}
+
+/// `DELETE {V2}/entities/{entity_key}`, with `query` spelled by the caller so the
+/// malformed-precondition cases can pass what a client would actually send.
+fn delete_one(key: Option<&str>, entity_key: &str, query: &str) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("DELETE")
+        .uri(format!("{V2}/entities/{entity_key}{query}"));
+    if let Some(key) = key {
+        builder = builder.header("idempotency-key", key);
+    }
+    builder.body(Body::empty()).expect("request")
+}
+
+/// One `:batchDelete` body naming one entity.
+fn one_target(key: &str, expected_resource_version: i64) -> Value {
+    json!({ "items": [{ "key": key, "expected_resource_version": expected_resource_version }] })
+}
+
+/// Register one Type Schema and assert it was accepted.
+async fn register_entity(router: &Router, idempotency_key: &str, gts_id: &str) {
+    let accepted = call(
+        router,
+        submit(Some(idempotency_key), &one_candidate(gts_id)),
+    )
+    .await;
+    assert_eq!(
+        accepted.status,
+        StatusCode::ACCEPTED,
+        "registering {gts_id}: {:?}",
+        accepted.body,
+    );
+}
+
+/// Follow a receipt's `operation_id` to the operation document.
+async fn poll(router: &Router, accepted: &Response) -> Value {
+    let operation_id = accepted.body["operation_id"]
+        .as_str()
+        .expect("a receipt carries an operation_id");
+    let operation = call(router, get(&format!("{V2}/operations/{operation_id}"))).await;
+    assert_eq!(operation.status, StatusCode::OK, "{:?}", operation.body);
+    operation.body
+}
+
+/// A deletion is accepted, polled and leaves an exact-readable tombstone —
+/// Checkpoint 5's first item for the single spelling.
+#[tokio::test]
+async fn a_deletion_is_accepted_polled_and_leaves_a_tombstone() {
+    let router = router_with_db().await;
+    register_entity(&router, "register", CF_TYPE).await;
+
+    let accepted = call(
+        &router,
+        delete_one(Some("delete"), CF_TYPE, "?expected_resource_version=1"),
+    )
+    .await;
+    assert_eq!(
+        accepted.status,
+        StatusCode::ACCEPTED,
+        "a deletion is accepted like any other mutation: {:?}",
+        accepted.body,
+    );
+    let operation_id = accepted.body["operation_id"]
+        .as_str()
+        .expect("operation_id");
+    let location = accepted
+        .location
+        .as_deref()
+        .expect("a 202 carries Location");
+    assert!(
+        location.ends_with(&format!("{V2}/operations/{operation_id}")),
+        "the receipt must point at the operation: {location}",
+    );
+    assert_eq!(accepted.retry_after.as_deref(), Some("1"));
+
+    let operation = poll(&router, &accepted).await;
+    assert_eq!(operation["kind"], json!("deletion"));
+    assert_eq!(operation["dry_run"], json!(false));
+    assert_eq!(operation["status"], json!("completed"));
+    let item = &operation["items"][0];
+    assert_eq!(item["gts_id"], json!(CF_TYPE));
+    assert_eq!(item["status"], json!("succeeded"));
+
+    let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
+    assert_eq!(
+        entity.status,
+        StatusCode::OK,
+        "a tombstone stays exact-readable: {:?}",
+        entity.body,
+    );
+    assert_eq!(entity.body["lifecycle_status"], json!("deleted"));
+}
+
+/// Batch outcomes are in request order, which is the only way a caller that deleted
+/// by Registry Reference can match a result to its request (DESIGN §3.3).
+#[tokio::test]
+async fn a_batch_deletion_reports_outcomes_in_request_order() {
+    let router = router_with_db().await;
+    let second = gts_id!("cf.core.example.other.v1~");
+    register_entity(&router, "register-1", CF_TYPE).await;
+    register_entity(&router, "register-2", second).await;
+
+    let body = json!({
+        "items": [
+            { "key": second, "expected_resource_version": 1 },
+            { "key": CF_TYPE, "expected_resource_version": 1 },
+        ]
+    });
+    let accepted = call(&router, batch_delete(Some("delete-both"), &body)).await;
+    assert_eq!(accepted.status, StatusCode::ACCEPTED, "{:?}", accepted.body);
+
+    let operation = poll(&router, &accepted).await;
+    assert_eq!(operation["kind"], json!("deletion"));
+    assert_eq!(
+        operation["items"][0]["gts_id"],
+        json!(second),
+        "request order, not identifier order: {:?}",
+        operation["items"],
+    );
+    assert_eq!(operation["items"][1]["gts_id"], json!(CF_TYPE));
+    for index in 0..2 {
+        assert_eq!(operation["items"][index]["status"], json!("succeeded"));
+    }
+}
+
+/// Deleting by Registry Reference reports the *identifier* in the outcome, because
+/// every operation keys its items by `gts_id`.
+#[tokio::test]
+async fn deleting_by_registry_reference_reports_the_identifier() {
+    let router = router_with_db().await;
+    register_entity(&router, "register", CF_TYPE).await;
+    let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
+    let reference = entity.body["gts_uuid"]
+        .as_str()
+        .expect("the read carries the Registry Reference")
+        .to_owned();
+
+    let accepted = call(
+        &router,
+        delete_one(Some("delete"), &reference, "?expected_resource_version=1"),
+    )
+    .await;
+    assert_eq!(accepted.status, StatusCode::ACCEPTED, "{:?}", accepted.body);
+
+    let operation = poll(&router, &accepted).await;
+    assert_eq!(
+        operation["items"][0]["gts_id"],
+        json!(CF_TYPE),
+        "the outcome is keyed by identifier even for a UUID submission: {:?}",
+        operation["items"],
+    );
+    assert_eq!(operation["items"][0]["status"], json!("succeeded"));
+}
+
+/// A Registry Reference is a one-way derivation of an identifier, so one that names
+/// no row cannot be turned into a candidate and there is no identifier to record an
+/// outcome under. That makes it the one deletion refusal that is synchronous on
+/// existence: `404`, exactly as `GET /entities/{entity_key}` answers for the same
+/// key (DESIGN §3.3). A *GTS identifier* naming no entity is still `202` and a
+/// terminal item failure — asserted below — because nothing has to be read to
+/// accept it.
+#[tokio::test]
+async fn an_unknown_registry_reference_is_a_not_found_problem() {
+    let router = router_with_db().await;
+    let reference = uuid::Uuid::new_v4().to_string();
+
+    let refused = call(
+        &router,
+        delete_one(Some("delete"), &reference, "?expected_resource_version=1"),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::NOT_FOUND, "{:?}", refused.body);
+    assert_eq!(
+        refused.content_type.as_deref(),
+        Some("application/problem+json"),
+    );
+
+    let batched = call(
+        &router,
+        batch_delete(Some("batch"), &one_target(&reference, 1)),
+    )
+    .await;
+    assert_eq!(
+        batched.status,
+        StatusCode::NOT_FOUND,
+        "one deletion model, one answer: {:?}",
+        batched.body,
+    );
+}
+
+/// An absent *identifier* is accepted and refused terminally, which is the ordinary
+/// deletion path: acceptance reads no entity state, so nothing synchronous can know
+/// the entity is missing. The reason is `precondition_failed` — the caller named a
+/// version for an entity that does not exist, which is the same class of mistake as
+/// naming the wrong one.
+#[tokio::test]
+async fn deleting_an_absent_identifier_is_a_terminal_item_failure() {
+    let router = router_with_db().await;
+
+    let accepted = call(
+        &router,
+        delete_one(Some("delete"), CF_TYPE, "?expected_resource_version=1"),
+    )
+    .await;
+    assert_eq!(accepted.status, StatusCode::ACCEPTED, "{:?}", accepted.body);
+
+    let operation = poll(&router, &accepted).await;
+    assert_eq!(operation["items"][0]["status"], json!("failed"));
+    assert_eq!(
+        operation["items"][0]["error"]["reason"],
+        json!("precondition_failed"),
+        "{:?}",
+        operation["items"],
+    );
+}
+
+/// Each batch item carries its own positive precondition; absence and zero are
+/// envelope errors, not item outcomes.
+#[tokio::test]
+async fn batch_deletion_requires_a_positive_expected_resource_version() {
+    let router = router_with_db().await;
+
+    let missing = call(
+        &router,
+        batch_delete(Some("missing"), &json!({ "items": [{ "key": CF_TYPE }] })),
+    )
+    .await;
+    assert_eq!(
+        missing.status,
+        StatusCode::BAD_REQUEST,
+        "an absent precondition is a 400: {:?}",
+        missing.body,
+    );
+
+    let zero = call(&router, batch_delete(Some("zero"), &one_target(CF_TYPE, 0))).await;
+    assert_eq!(
+        zero.status,
+        StatusCode::BAD_REQUEST,
+        "zero expresses creation, which has no delete meaning: {:?}",
+        zero.body,
+    );
+
+    let negative = call(
+        &router,
+        batch_delete(Some("negative"), &one_target(CF_TYPE, -1)),
+    )
+    .await;
+    assert_eq!(
+        negative.status,
+        StatusCode::BAD_REQUEST,
+        "{:?}",
+        negative.body
+    );
+}
+
+/// The same three refusals through the query string.
+#[tokio::test]
+async fn single_deletion_requires_a_positive_expected_resource_version() {
+    let router = router_with_db().await;
+
+    for (case, query) in [
+        ("absent", ""),
+        ("non-numeric", "?expected_resource_version=seven"),
+        ("zero", "?expected_resource_version=0"),
+        ("negative", "?expected_resource_version=-1"),
+    ] {
+        let refused = call(&router, delete_one(Some(case), CF_TYPE, query)).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::BAD_REQUEST,
+            "a {case} precondition must be a synchronous 400: {:?}",
+            refused.body,
+        );
+    }
+}
+
+/// `If-Match` is refused rather than ignored: a caller that sent one believes the
+/// request is conditional in the RFC 9110 §13.1.1 sense, and it is not — the
+/// precondition is `expected_resource_version` and its failure is asynchronous
+/// (DESIGN §3.3).
+#[tokio::test]
+async fn single_deletion_refuses_an_if_match_header() {
+    let router = router_with_db().await;
+    let request = Request::builder()
+        .method("DELETE")
+        .uri(format!(
+            "{V2}/entities/{CF_TYPE}?expected_resource_version=1"
+        ))
+        .header("idempotency-key", "delete")
+        .header("if-match", "\"1\"")
+        .body(Body::empty())
+        .expect("request");
+
+    let refused = call(&router, request).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::BAD_REQUEST,
+        "{:?}",
+        refused.body
+    );
+    let text = serde_json::to_string(&refused.body).expect("serialize");
+    assert!(
+        text.contains("If-Match"),
+        "the refusal must name the header it refuses: {text}",
+    );
+    assert!(
+        text.contains("expected_resource_version"),
+        "and the parameter that replaces it: {text}",
+    );
+}
+
+/// One logical failure, one shape: a stale version is `202` then a terminal
+/// `precondition_failed` item, never `412`, and the two spellings agree field for
+/// field.
+#[tokio::test]
+async fn the_two_deletion_spellings_agree_on_a_version_mismatch() {
+    let router = router_with_db().await;
+    register_entity(&router, "register", CF_TYPE).await;
+
+    let single = call(
+        &router,
+        delete_one(Some("single"), CF_TYPE, "?expected_resource_version=7"),
+    )
+    .await;
+    assert_eq!(single.status, StatusCode::ACCEPTED, "{:?}", single.body);
+    let single_item = poll(&router, &single).await["items"][0].clone();
+
+    let batched = call(
+        &router,
+        batch_delete(Some("batched"), &one_target(CF_TYPE, 7)),
+    )
+    .await;
+    assert_eq!(batched.status, StatusCode::ACCEPTED, "{:?}", batched.body);
+    let batched_item = poll(&router, &batched).await["items"][0].clone();
+
+    assert_eq!(
+        single_item["error"]["reason"],
+        json!("precondition_failed"),
+        "{single_item:?}",
+    );
+    assert_eq!(
+        single_item, batched_item,
+        "DELETE is sugar over a one-item batch, so the outcomes must be identical",
+    );
+
+    let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
+    assert_eq!(entity.body["lifecycle_status"], json!("active"));
+    assert_eq!(entity.body["resource_version"], json!(1));
+}
+
+/// Dry run on both deletion spellings: a terminal outcome, no entity-state change,
+/// and a committed control request that demonstrates the mutation the dry runs
+/// predicted.
+#[tokio::test]
+async fn a_dry_run_deletion_predicts_and_the_commit_performs() {
+    let router = router_with_db().await;
+    register_entity(&router, "register", CF_TYPE).await;
+
+    for (idempotency_key, request) in [
+        (
+            "dry-single",
+            delete_one(
+                Some("dry-single"),
+                CF_TYPE,
+                "?expected_resource_version=1&dry_run=true",
+            ),
+        ),
+        (
+            "dry-batch",
+            batch_delete(
+                Some("dry-batch"),
+                &json!({
+                    "items": [{ "key": CF_TYPE, "expected_resource_version": 1 }],
+                    "dry_run": true,
+                }),
+            ),
+        ),
+    ] {
+        let accepted = call(&router, request).await;
+        assert_eq!(
+            accepted.status,
+            StatusCode::ACCEPTED,
+            "{idempotency_key}: {:?}",
+            accepted.body,
+        );
+        let operation = poll(&router, &accepted).await;
+        assert_eq!(operation["kind"], json!("deletion"), "{idempotency_key}");
+        assert_eq!(operation["dry_run"], json!(true), "{idempotency_key}");
+        assert_eq!(operation["status"], json!("completed"), "{idempotency_key}");
+        let item = &operation["items"][0];
+        assert_eq!(item["gts_id"], json!(CF_TYPE), "{idempotency_key}");
+        assert_eq!(item["status"], json!("succeeded"), "{idempotency_key}");
+
+        let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
+        assert_eq!(
+            entity.body["lifecycle_status"],
+            json!("active"),
+            "{idempotency_key} must leave the entity alone",
+        );
+        assert_eq!(
+            entity.body["resource_version"],
+            json!(1),
+            "{idempotency_key} must not advance resource_version",
+        );
+    }
+
+    // The control: the same request committed does what the dry runs predicted.
+    let committed = call(
+        &router,
+        delete_one(Some("commit"), CF_TYPE, "?expected_resource_version=1"),
+    )
+    .await;
+    assert_eq!(
+        committed.status,
+        StatusCode::ACCEPTED,
+        "{:?}",
+        committed.body
+    );
+    assert_eq!(
+        poll(&router, &committed).await["items"][0]["status"],
+        json!("succeeded"),
+    );
+    let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
+    assert_eq!(entity.body["lifecycle_status"], json!("deleted"));
+}
+
+/// The registration route's dry run, through the real router, reaching a terminal
+/// outcome while leaving nothing readable — the registration half of the pair above.
+#[tokio::test]
+async fn a_dry_run_registration_reaches_a_terminal_outcome_and_writes_nothing() {
+    let router = router_with_db().await;
+    let mut body = one_candidate(CF_TYPE);
+    body["dry_run"] = json!(true);
+
+    let accepted = call(&router, submit(Some("dry-run"), &body)).await;
+    assert_eq!(accepted.status, StatusCode::ACCEPTED, "{:?}", accepted.body);
+
+    let operation = poll(&router, &accepted).await;
+    assert_eq!(operation["kind"], json!("registration"));
+    assert_eq!(operation["dry_run"], json!(true));
+    assert_eq!(operation["status"], json!("completed"));
+    let item = &operation["items"][0];
+    assert_eq!(item["status"], json!("succeeded"));
+    assert!(
+        item["resource_version"].is_null(),
+        "a predicted creation has no resource_version to report: {item:?}",
+    );
+
+    assert_eq!(
+        call(&router, get(&format!("{V2}/entities/{CF_TYPE}")))
+            .await
+            .status,
+        StatusCode::NOT_FOUND,
+    );
+
+    // The control: committed, the same candidate is readable at version 1.
+    let committed = call(&router, submit(Some("commit"), &one_candidate(CF_TYPE))).await;
+    assert_eq!(
+        committed.status,
+        StatusCode::ACCEPTED,
+        "{:?}",
+        committed.body
+    );
+    let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
+    assert_eq!(entity.status, StatusCode::OK);
+    assert_eq!(entity.body["resource_version"], json!(1));
+}
+
+/// Every mutation requires an `Idempotency-Key`, both deletion spellings included.
+#[tokio::test]
+async fn both_deletion_spellings_require_an_idempotency_key() {
+    let router = router_with_db().await;
+
+    let single = call(
+        &router,
+        delete_one(None, CF_TYPE, "?expected_resource_version=1"),
+    )
+    .await;
+    assert_eq!(single.status, StatusCode::BAD_REQUEST, "{:?}", single.body);
+
+    let batched = call(&router, batch_delete(None, &one_target(CF_TYPE, 1))).await;
+    assert_eq!(
+        batched.status,
+        StatusCode::BAD_REQUEST,
+        "{:?}",
+        batched.body
+    );
+}
+
+/// A replay of a terminal deletion answers `200` with `Idempotency-Replayed: true`
+/// and no `Retry-After`; the first submission carries neither.
+#[tokio::test]
+async fn a_terminal_deletion_replay_answers_200_and_marks_the_replay() {
+    let router = router_with_db().await;
+    register_entity(&router, "register", CF_TYPE).await;
+
+    let first = call(
+        &router,
+        delete_one(Some("delete"), CF_TYPE, "?expected_resource_version=1"),
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::ACCEPTED, "{:?}", first.body);
+    assert_eq!(first.idempotency_replayed, None);
+
+    let replay = call(
+        &router,
+        delete_one(Some("delete"), CF_TYPE, "?expected_resource_version=1"),
+    )
+    .await;
+    assert_eq!(replay.status, StatusCode::OK, "{:?}", replay.body);
+    assert_eq!(replay.idempotency_replayed.as_deref(), Some("true"));
+    assert_eq!(replay.retry_after, None);
+    assert_eq!(replay.body["operation_id"], first.body["operation_id"]);
+    assert_eq!(replay.body["replayed"], json!(true));
+}
+
+/// The mode is part of the request fingerprint, so reusing one key for a dry run and
+/// then a commit is a conflict rather than a replay.
+#[tokio::test]
+async fn reusing_one_key_for_a_dry_run_then_a_commit_is_a_conflict() {
+    let router = router_with_db().await;
+    register_entity(&router, "register", CF_TYPE).await;
+
+    let dry = call(
+        &router,
+        delete_one(
+            Some("one-key"),
+            CF_TYPE,
+            "?expected_resource_version=1&dry_run=true",
+        ),
+    )
+    .await;
+    assert_eq!(dry.status, StatusCode::ACCEPTED, "{:?}", dry.body);
+
+    let commit = call(
+        &router,
+        delete_one(Some("one-key"), CF_TYPE, "?expected_resource_version=1"),
+    )
+    .await;
+    assert_eq!(
+        commit.status,
+        StatusCode::CONFLICT,
+        "a dry run and a commit are different requests: {:?}",
+        commit.body,
+    );
+
+    let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
+    assert_eq!(entity.body["lifecycle_status"], json!("active"));
+}
+
+/// The two spellings answer the same way where no database is bound.
+#[tokio::test]
+async fn without_a_database_the_deletion_routes_report_service_unavailable() {
+    let router = router_without_db();
+
+    let single = call(
+        &router,
+        delete_one(Some("delete"), CF_TYPE, "?expected_resource_version=1"),
+    )
+    .await;
+    assert_eq!(
+        single.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{:?}",
+        single.body
+    );
+
+    let batched = call(
+        &router,
+        batch_delete(Some("batch"), &one_target(CF_TYPE, 1)),
+    )
+    .await;
+    assert_eq!(
+        batched.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{:?}",
+        batched.body
+    );
 }

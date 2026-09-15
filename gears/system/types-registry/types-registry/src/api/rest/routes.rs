@@ -11,8 +11,8 @@ use toolkit::api::operation_builder::{
 };
 
 use super::dto::{
-    EntityDto, GtsEntityDto, ListEntitiesResponse, OperationAcceptedDto, OperationDto,
-    RegisterEntitiesRequest, RegisterEntitiesResponse, SubmitEntitiesRequest,
+    DeleteEntitiesRequest, EntityDto, GtsEntityDto, ListEntitiesResponse, OperationAcceptedDto,
+    OperationDto, RegisterEntitiesRequest, RegisterEntitiesResponse, SubmitEntitiesRequest,
 };
 use super::handlers;
 pub use super::paths::{V1, V2};
@@ -58,6 +58,43 @@ pub fn register_routes(
     // so the contract check sees them. T24a changes the path constant only; it must
     // not expose mutation routes while ceiling C8 remains open.
 
+    // Split into one function per route group because `register_routes` is the
+    // route table: `clippy::too_many_lines` is right that a 300-line table is not
+    // readable, and the split is along the seam the comments above already draw.
+    // Each takes and returns the router, so registration order stays explicit here
+    // rather than hidden in a call graph.
+    router = register_v1(router, openapi);
+    router = register_submit(router, openapi);
+    router = register_reads(router, openapi);
+    router = register_batch_delete(router, openapi);
+    router = register_delete_entity(router, openapi);
+
+    router.layer(Extension(service)).layer(Extension(registry))
+}
+
+/// The required `Idempotency-Key` header, declared identically on every mutation.
+///
+/// Declared, not merely enforced. `OperationBuilder` has no `header_param` beside
+/// `path_param` / `query_param` (upstream #4614), but `ParamLocation::Header`
+/// exists and the registry maps it, so `param` does the job — a required header
+/// absent from the document is what a generated client omits.
+fn idempotency_key_param() -> ParamSpec {
+    ParamSpec {
+        name: "Idempotency-Key".to_owned(),
+        location: ParamLocation::Header,
+        required: true,
+        description: Some(
+            "Caller-supplied key scoping the retry of this submission. A replay with the same \
+             body returns the same operation; a different body under the same key is a conflict."
+                .to_owned(),
+        ),
+        param_type: "string".to_owned(),
+        array: false,
+    }
+}
+
+/// The pre-database v1 contract, verbatim from `main` (T9a).
+fn register_v1(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     // -----------------------------------------------------------------------
     // v1 — the pre-database contract, unchanged from `main`
     // -----------------------------------------------------------------------
@@ -135,16 +172,20 @@ pub fn register_routes(
         .problem_response(openapi, StatusCode::NOT_FOUND, "Entity not found")
         .standard_errors(openapi)
         .register(router, openapi);
+    router
+}
 
-    // -----------------------------------------------------------------------
-    // v2 — the database-backed async surface (T9)
-    // -----------------------------------------------------------------------
-    //
-    // Interim: T24a promotes these onto v1 once the in-memory path is deleted.
-    // They are internal-only — no `.exposed()`, so the gateway does not publish
-    // the surface (see the ceiling-C8 note above). The path promotion does not
-    // change that posture for mutations.
+// -----------------------------------------------------------------------
+// v2 — the database-backed async surface (T9)
+// -----------------------------------------------------------------------
+//
+// Interim: T24a promotes these onto v1 once the in-memory path is deleted.
+// They are internal-only — no `.exposed()`, so the gateway does not publish
+// the surface (see the ceiling-C8 note above). The path promotion does not
+// change that posture for mutations.
 
+/// `POST {V2}/entities` (D10).
+fn register_submit(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     // POST /types-registry/v2/entities — submit a registration (D10)
     //
     // The async shape DESIGN specifies: the response is a receipt for an
@@ -160,24 +201,7 @@ pub fn register_routes(
              Idempotency-Key header is required: a replay with the same body returns the same \
              operation, and a different body under the same key is a conflict.",
         )
-        // Declared, not merely enforced. `OperationBuilder` has no `header_param`
-        // beside `path_param` / `query_param` (upstream #4614), but
-        // `ParamLocation::Header` exists and the registry maps it, so `param` does
-        // the job — a required header absent from the document is what a generated
-        // client omits.
-        .param(ParamSpec {
-            name: "Idempotency-Key".to_owned(),
-            location: ParamLocation::Header,
-            required: true,
-            description: Some(
-                "Caller-supplied key scoping the retry of this submission. A replay with the \
-                 same body returns the same operation; a different body under the same key is \
-                 a conflict."
-                    .to_owned(),
-            ),
-            param_type: "string".to_owned(),
-            array: false,
-        })
+        .param(idempotency_key_param())
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -230,7 +254,11 @@ pub fn register_routes(
         // An unbound database is a deployment state, so this 503 has no `Retry-After`.
         .error_503(openapi)
         .register(router, openapi);
+    router
+}
 
+/// The two v2 reads: one operation, one entity.
+fn register_reads(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     // GET /types-registry/v2/operations/{operation_id} — poll an operation
     router = OperationBuilder::get(format!("{V2}/operations/{{operation_id}}"))
         .operation_id("types_registry.get_operation")
@@ -277,6 +305,183 @@ pub fn register_routes(
         .standard_errors(openapi)
         .error_503(openapi)
         .register(router, openapi);
+    router
+}
 
-    router.layer(Extension(service)).layer(Extension(registry))
+/// `POST {V2}/entities:batchDelete` (T20a).
+fn register_batch_delete(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
+    // POST /types-registry/v2/entities:batchDelete — submit a deletion batch
+    //
+    // A custom action rather than `DELETE` on the collection because each item
+    // carries its own precondition and no single header could express several
+    // (DESIGN §3.3). `:batchDelete` rather than `:delete` so the name says what a
+    // reader will find in the body — an array — and so it reads as the sibling of
+    // T22a's `:batchGet`.
+    router = OperationBuilder::post(format!("{V2}/entities:batchDelete"))
+        .operation_id("types_registry.batch_delete_entities")
+        .summary("Submit GTS entities for deletion")
+        .description(
+            "Submit one or more entities for deletion. Each item names its target in `key` \
+             (a canonical GTS identifier or the Registry Reference UUID derived from it) and \
+             carries a required positive `expected_resource_version`. Returns 202 with the \
+             operation's Location; poll GET /types-registry/v2/operations/{operation_id} for \
+             the per-item outcome. Outcomes are keyed by GTS identifier and reported in \
+             request order, so a caller that deleted by Registry Reference matches results to \
+             requests by position. A stale version is not a 412: it is reported as a terminal \
+             `precondition_failed` item on the operation.",
+        )
+        .param(idempotency_key_param())
+        .tag(API_TAG)
+        .authenticated()
+        .require_license_features::<License>([])
+        .json_request::<DeleteEntitiesRequest>(openapi, "Entities to delete")
+        .handler(handlers::batch_delete_entities)
+        .json_response_with_schema::<OperationAcceptedDto>(
+            openapi,
+            StatusCode::ACCEPTED,
+            "Accepted; poll the operation at the returned Location",
+        )
+        .response_header(ResponseHeaderSpec::new(
+            "Location",
+            "URI of the admission operation",
+            ResponseHeaderType::String,
+        ))
+        .response_header(ResponseHeaderSpec::new(
+            "Retry-After",
+            "Suggested delay in seconds before polling the operation",
+            ResponseHeaderType::Integer,
+        ))
+        .response_header(ResponseHeaderSpec::new(
+            "Idempotency-Replayed",
+            "Whether this submission replayed an existing operation",
+            ResponseHeaderType::Boolean,
+        ))
+        .json_response_with_schema::<OperationAcceptedDto>(
+            openapi,
+            StatusCode::OK,
+            "Replay of an operation that is already terminal",
+        )
+        .response_header(ResponseHeaderSpec::new(
+            "Location",
+            "URI of the admission operation",
+            ResponseHeaderType::String,
+        ))
+        .response_header(ResponseHeaderSpec::new(
+            "Idempotency-Replayed",
+            "Whether this submission replayed an existing operation",
+            ResponseHeaderType::Boolean,
+        ))
+        .problem_response(
+            openapi,
+            StatusCode::NOT_FOUND,
+            "An item names a Registry Reference that resolves to no entity",
+        )
+        .problem_response(
+            openapi,
+            StatusCode::CONFLICT,
+            "The Idempotency-Key is bound to a different request",
+        )
+        .standard_errors(openapi)
+        .error_413(openapi)
+        .error_415(openapi)
+        .error_422(openapi)
+        .error_503(openapi)
+        .register(router, openapi);
+    router
+}
+
+/// `DELETE {V2}/entities/{{entity_key}}` (T20a).
+fn register_delete_entity(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
+    // DELETE /types-registry/v2/entities/{entity_key} — delete one entity
+    //
+    // Sugar over a one-item `:batchDelete` and not a second deletion model: the
+    // handler builds the same request the batch route builds. The precondition is
+    // `expected_resource_version` and **not** `If-Match`, which is refused if sent
+    // rather than ignored — a caller that sent one believes the request is
+    // conditional in the RFC 9110 §13.1.1 sense, and the version check is
+    // authoritative only at admission (DESIGN §3.3).
+    router = OperationBuilder::delete(format!("{V2}/entities/{{entity_key}}"))
+        .operation_id("types_registry.delete_entity")
+        .summary("Delete one GTS entity")
+        .description(
+            "Delete a single entity named by canonical GTS identifier or Registry Reference \
+             UUID, resolved exactly as GET /types-registry/v2/entities/{entity_key} resolves \
+             it. One item's worth of :batchDelete. Returns 202 with the operation's Location; \
+             a stale version is reported as a terminal `precondition_failed` item rather than \
+             a 412, and If-Match is refused rather than ignored.",
+        )
+        .param(idempotency_key_param())
+        .tag(API_TAG)
+        .authenticated()
+        .require_license_features::<License>([])
+        .path_param(
+            "entity_key",
+            "A GTS identifier (e.g. gts.acme.core.events.user_created.v1~) or a Registry \
+             Reference UUID",
+        )
+        // `query_param_typed` takes the description *before* the type; passing them
+        // the other way round compiles and silently publishes `type: string` with
+        // the type name as the description. The declaration test pins both.
+        .query_param_typed(
+            "expected_resource_version",
+            true,
+            "Required and positive: the resource_version the caller observed. Absent,              non-numeric or zero is a 400; a mismatch is reported on the operation item",
+            "integer",
+        )
+        .query_param_typed(
+            "dry_run",
+            false,
+            "Run the whole check sequence and commit nothing. Defaults to false",
+            "boolean",
+        )
+        .handler(handlers::delete_entity)
+        .json_response_with_schema::<OperationAcceptedDto>(
+            openapi,
+            StatusCode::ACCEPTED,
+            "Accepted; poll the operation at the returned Location",
+        )
+        .response_header(ResponseHeaderSpec::new(
+            "Location",
+            "URI of the admission operation",
+            ResponseHeaderType::String,
+        ))
+        .response_header(ResponseHeaderSpec::new(
+            "Retry-After",
+            "Suggested delay in seconds before polling the operation",
+            ResponseHeaderType::Integer,
+        ))
+        .response_header(ResponseHeaderSpec::new(
+            "Idempotency-Replayed",
+            "Whether this submission replayed an existing operation",
+            ResponseHeaderType::Boolean,
+        ))
+        .json_response_with_schema::<OperationAcceptedDto>(
+            openapi,
+            StatusCode::OK,
+            "Replay of an operation that is already terminal",
+        )
+        .response_header(ResponseHeaderSpec::new(
+            "Location",
+            "URI of the admission operation",
+            ResponseHeaderType::String,
+        ))
+        .response_header(ResponseHeaderSpec::new(
+            "Idempotency-Replayed",
+            "Whether this submission replayed an existing operation",
+            ResponseHeaderType::Boolean,
+        ))
+        .problem_response(
+            openapi,
+            StatusCode::NOT_FOUND,
+            "The entity_key is a Registry Reference that resolves to no entity",
+        )
+        .problem_response(
+            openapi,
+            StatusCode::CONFLICT,
+            "The Idempotency-Key is bound to a different request",
+        )
+        .standard_errors(openapi)
+        .error_503(openapi)
+        .register(router, openapi);
+    router
 }
