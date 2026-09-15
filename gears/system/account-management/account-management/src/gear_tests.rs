@@ -405,7 +405,9 @@ fn seed_root_at_status(repo: &FakeTenantRepo, status: TenantStatus) {
         name: "platform-root".into(),
         status,
         self_managed: false,
-        tenant_type_uuid: Uuid::from_u128(0xAA),
+        tenant_type_uuid: gts::GtsId::try_new(ROOT_TENANT_TYPE)
+            .expect("valid root type")
+            .to_uuid(),
         depth: 0,
         created_at: now,
         updated_at: now,

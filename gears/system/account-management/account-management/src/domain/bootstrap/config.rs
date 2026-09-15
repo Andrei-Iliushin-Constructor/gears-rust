@@ -6,7 +6,7 @@
 //! IdP-wait backoff envelope at deployment time. Defaults match
 //! FEATURE §3 `algo-platform-bootstrap-idp-wait-with-backoff`:
 //! `idp_retry_backoff_initial = 2s`, `idp_retry_backoff_max = 30s`,
-//! `idp_retry_timeout = 5min`. The envelope bounds the saga retry
+//! `bootstrap.idp_wait_timeout = 5min`. The envelope bounds the saga retry
 //! loop on `IdpUnavailable` raised during `provision_tenant`. The
 //! bootstrap saga itself is gated by
 //! [`BootstrapConfig::strict`] — `true` makes a bootstrap failure
@@ -71,7 +71,7 @@ pub struct BootstrapConfig {
     pub root_tenant_metadata: Option<Value>,
 
     /// Total time the bootstrap saga is allowed to spend waiting for
-    /// `IdP` availability (FEATURE §3 `idp_retry_timeout`, default 300s).
+    /// `IdP` availability (FEATURE §3 `bootstrap.idp_wait_timeout`, default 300s).
     /// Used as the deadline for the saga retry loop on
     /// `IdpUnavailable` raised during step 2 (`provision_tenant`).
     ///

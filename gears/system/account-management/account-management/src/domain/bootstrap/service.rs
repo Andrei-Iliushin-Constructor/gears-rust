@@ -5,8 +5,9 @@
 //!
 //! The saga has three observable phases (FEATURE §3):
 //!
-//! 1. **Idempotency classification** — `find_by_id(root_id)` drives the
-//!    branch decision. Active root → no-op skip; Provisioning root →
+//! 1. **Idempotency classification** — `find_platform_root()` validates the
+//!    configured root ID and type binding, then drives the branch decision.
+//!    Active root → no-op skip; Provisioning root →
 //!    in-band synchronous compensation when age > stuck threshold
 //!    (see [`BootstrapService::attempt_stuck_row_compensation`]) and
 //!    otherwise resume the peer-wait loop; Suspended/Deleted root →
@@ -89,12 +90,9 @@ enum BootstrapClassification {
 }
 
 /// Bound on consecutive `AlreadyExists` retries during the saga's
-/// `Insert` step. A configured `root_id` that drifted away from the
-/// actual DB root collides with `ux_tenants_single_root` on every
-/// insert while the next `classify` (filtered by configured id)
-/// keeps returning `NoRoot`. Without a cap that pair would loop
-/// forever; the cap escalates a drifted config to a clean
-/// `Internal` error instead of spinning init.
+/// `Insert` step. The next `classify` normally observes the concurrent
+/// winner, but the cap prevents an indefinitely stale repository view
+/// from spinning init forever.
 const MAX_ALREADY_EXISTS_STREAK: u32 = 3;
 
 /// Side-effect-free description of "what the saga is about to do
@@ -961,19 +959,42 @@ impl<R: TenantRepo> BootstrapService<R> {
         Ok(())
     }
 
-    /// Read the configured root id and classify the bootstrap state.
+    /// Read the platform root, validate its create-once binding, and classify
+    /// the bootstrap state.
     // @cpt-begin:cpt-cf-account-management-algo-platform-bootstrap-idempotency-detection:p1:inst-algo-idem-classify-root
     // @cpt-begin:cpt-cf-account-management-dod-platform-bootstrap-idempotency:p1:inst-dod-bootstrap-idempotency-classify
     async fn classify(&self, scope: &AccessScope) -> Result<BootstrapClassification, DomainError> {
-        let existing = self.repo.find_by_id(scope, self.cfg.root_id).await?;
-        Ok(match existing {
-            None => BootstrapClassification::NoRoot,
-            Some(t) => match t.status {
-                TenantStatus::Active => BootstrapClassification::ActiveRootExists(t),
-                TenantStatus::Provisioning => BootstrapClassification::ProvisioningRootResume(t),
-                other => BootstrapClassification::InvariantViolation {
-                    observed_status: other,
-                },
+        let Some(existing) = self.repo.find_platform_root(scope).await? else {
+            return Ok(BootstrapClassification::NoRoot);
+        };
+
+        if existing.id != self.cfg.root_id {
+            return Err(DomainError::internal(format!(
+                "platform root already exists with id {}, but configured root_id is {}; an explicit root migration is required",
+                existing.id, self.cfg.root_id
+            )));
+        }
+
+        let configured_type_uuid = gts::GtsId::try_new(self.root_type.gts_id.as_ref())
+            .map_err(|error| DomainError::InvalidTenantType {
+                detail: format!(
+                    "invalid root_type.gts_id chain `{}`: {error}",
+                    self.root_type.gts_id
+                ),
+            })?
+            .to_uuid();
+        if existing.tenant_type_uuid != configured_type_uuid {
+            return Err(DomainError::internal(format!(
+                "platform root {} has tenant_type_uuid={}, but configured root_type.gts_id {} resolves to {}; an explicit root/schema migration is required",
+                existing.id, existing.tenant_type_uuid, self.root_type.gts_id, configured_type_uuid
+            )));
+        }
+
+        Ok(match existing.status {
+            TenantStatus::Active => BootstrapClassification::ActiveRootExists(existing),
+            TenantStatus::Provisioning => BootstrapClassification::ProvisioningRootResume(existing),
+            other => BootstrapClassification::InvariantViolation {
+                observed_status: other,
             },
         })
     }

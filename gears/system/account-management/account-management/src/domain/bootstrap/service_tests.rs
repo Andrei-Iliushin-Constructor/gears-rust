@@ -49,6 +49,12 @@ fn root_id() -> Uuid {
     Uuid::from_u128(ROOT_ID_RAW)
 }
 
+fn root_type_uuid() -> Uuid {
+    gts::GtsId::try_new(ROOT_TENANT_TYPE)
+        .expect("valid root type")
+        .to_uuid()
+}
+
 fn epoch_ts() -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("stable epoch")
 }
@@ -85,7 +91,7 @@ fn seed_root(repo: &FakeTenantRepo, status: TenantStatus) {
         name: "platform-root".into(),
         status,
         self_managed: false,
-        tenant_type_uuid: Uuid::from_u128(TENANT_TYPE_UUID_RAW),
+        tenant_type_uuid: root_type_uuid(),
         depth: 0,
         created_at: now,
         updated_at: now,
@@ -276,6 +282,36 @@ async fn classify_active_root_yields_skip() {
     };
     assert_eq!(model.id, root_id());
     assert!(matches!(model.status, TenantStatus::Active));
+}
+
+#[tokio::test]
+async fn classify_rejects_root_type_binding_drift() {
+    let repo = Arc::new(FakeTenantRepo::new());
+    seed_root(&repo, TenantStatus::Active);
+    let now = epoch_ts();
+    repo.insert_tenant_raw(TenantModel {
+        id: root_id(),
+        parent_id: None,
+        name: "platform-root".into(),
+        status: TenantStatus::Active,
+        self_managed: false,
+        tenant_type_uuid: Uuid::from_u128(TENANT_TYPE_UUID_RAW),
+        depth: 0,
+        created_at: now,
+        updated_at: now,
+        deleted_at: None,
+    });
+    let (_idp, svc) = make_bootstrap(repo, FakeOutcome::Ok);
+
+    let error = svc
+        .classify(&AccessScope::allow_all())
+        .await
+        .expect_err("root type drift must fail classification");
+
+    assert!(
+        matches!(error, DomainError::Internal { ref diagnostic, .. } if diagnostic.contains("tenant_type_uuid")),
+        "unexpected error: {error:?}"
+    );
 }
 
 #[tokio::test]
@@ -781,7 +817,7 @@ fn seed_root_with_age(repo: &FakeTenantRepo, age_secs: i64) {
         name: "platform-root".into(),
         status: TenantStatus::Provisioning,
         self_managed: false,
-        tenant_type_uuid: Uuid::from_u128(TENANT_TYPE_UUID_RAW),
+        tenant_type_uuid: root_type_uuid(),
         depth: 0,
         created_at,
         updated_at: now,
@@ -933,7 +969,7 @@ async fn run_with_in_flight_provisioning_root_skips_when_peer_finalizes() {
         name: "platform-root".into(),
         status: TenantStatus::Active,
         self_managed: false,
-        tenant_type_uuid: Uuid::from_u128(TENANT_TYPE_UUID_RAW),
+        tenant_type_uuid: root_type_uuid(),
         depth: 0,
         created_at: now,
         updated_at: now,
@@ -1077,15 +1113,8 @@ fn bootstrap_cfg_long_deadline() -> BootstrapConfig {
     }
 }
 
-#[tokio::test(start_paused = true)]
-async fn run_aborts_after_max_already_exists_streak_when_root_id_drifts() {
-    // Simulate a configured `root_id` that drifted away from the actual
-    // platform root: classify-by-id returns NoRoot for the configured
-    // id, but `insert_root_provisioning` collides with the existing
-    // root via the `parent_id = None` single-root invariant in the
-    // fake repo (which mirrors `ux_tenants_single_root` in production).
-    // The pair would oscillate forever; the streak cap converts that
-    // into a clean Internal after MAX_ALREADY_EXISTS_STREAK = 3 hits.
+#[tokio::test]
+async fn run_rejects_existing_root_id_drift_before_insert() {
     let repo = Arc::new(FakeTenantRepo::new());
     let now = OffsetDateTime::now_utc();
     let drifted_id = Uuid::from_u128(0xDEAD);
@@ -1095,7 +1124,7 @@ async fn run_aborts_after_max_already_exists_streak_when_root_id_drifts() {
         name: "drifted-root".into(),
         status: TenantStatus::Active,
         self_managed: false,
-        tenant_type_uuid: Uuid::from_u128(TENANT_TYPE_UUID_RAW),
+        tenant_type_uuid: root_type_uuid(),
         depth: 0,
         created_at: now,
         updated_at: now,
@@ -1114,12 +1143,12 @@ async fn run_aborts_after_max_already_exists_streak_when_root_id_drifts() {
     let err = svc
         .run()
         .await
-        .expect_err("drifted root_id must abort with Internal once the streak exhausts");
+        .expect_err("drifted root_id must abort with Internal during classification");
 
     match &err {
         DomainError::Internal { diagnostic, .. } => {
             assert!(
-                diagnostic.contains("different id") || diagnostic.contains("config drift"),
+                diagnostic.contains("configured root_id"),
                 "Internal must explain the drift, got: {diagnostic}"
             );
         }
@@ -1128,7 +1157,7 @@ async fn run_aborts_after_max_already_exists_streak_when_root_id_drifts() {
     assert_eq!(
         idp.provision_call_count(),
         0,
-        "drifted-id streak must NOT contact the IdP -- every loss occurs at the local insert"
+        "drifted root id must be rejected before contacting the IdP"
     );
 }
 

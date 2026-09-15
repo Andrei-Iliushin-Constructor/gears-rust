@@ -36,8 +36,8 @@ impl RootTypeConfig {
     /// Validate and return the canonical identifier.
     ///
     /// # Errors
-    /// Returns a diagnostic when the ID is non-canonical, abstract, or outside
-    /// the AM tenant-type chain.
+    /// Returns a diagnostic when the ID is non-canonical, abstract, or not a
+    /// direct child of the AM tenant-type envelope.
     pub fn validated_id(&self) -> Result<&str, String> {
         let type_id = self.gts_id.as_ref();
         let parsed = GtsId::try_new(type_id)
@@ -48,9 +48,9 @@ impl RootTypeConfig {
             ));
         }
         let chain = parsed.chain_ids();
-        if chain.len() < 2 || chain.first().map(String::as_str) != Some(TENANT_TYPE_BASE) {
+        if chain.len() != 2 || chain.first().map(String::as_str) != Some(TENANT_TYPE_BASE) {
             return Err(format!(
-                "root_type.gts_id `{type_id}` must be a concrete type derived from {TENANT_TYPE_BASE}"
+                "root_type.gts_id `{type_id}` must be a concrete type directly derived from {TENANT_TYPE_BASE}"
             ));
         }
         Ok(type_id)
@@ -82,10 +82,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_abstract_or_foreign_type() {
+    fn rejects_abstract_foreign_or_indirect_type() {
         for value in [
             TENANT_TYPE_BASE,
             gts_id!("cf.other.am.tenant_type.v1~cf.core.am.platform.v1~"),
+            gts_id!("cf.core.am.tenant_type.v1~cf.core.am.intermediate.v1~cf.core.am.platform.v1~"),
         ] {
             let cfg = RootTypeConfig {
                 gts_id: gts::GtsTypeId::new(value),
