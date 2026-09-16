@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use authz_resolver_sdk::pep::{AccessRequest, ResourceType};
 use github_mirror::domain::repo::{
-    EntityFingerprintRecord, EntityFingerprintRepository, SyncSessionRecord, SyncSessionRepository,
-    SyncWatermarkRecord, SyncWatermarkRepository,
+    EntityFingerprintRecord, EntityFingerprintRepository, SessionStatus, SyncSessionRecord,
+    SyncSessionRepository, SyncWatermarkRecord, SyncWatermarkRepository,
 };
 use github_mirror::infra::storage::sea_orm_repo::{
     SeaOrmEntityFingerprintRepository, SeaOrmSyncSessionRepository, SeaOrmSyncWatermarkRepository,
@@ -38,12 +38,12 @@ async fn scope_for(ctx: &SecurityContext) -> AccessScope {
         .expect("scope must resolve")
 }
 
-fn session_record(id: Uuid, status: &str, created_at: &str) -> SyncSessionRecord {
+fn session_record(id: Uuid, status: SessionStatus, created_at: &str) -> SyncSessionRecord {
     SyncSessionRecord {
         id,
         repo_full_name: "acme/widget".to_owned(),
         repo_id: None,
-        status: status.to_owned(),
+        status,
         progress_percent: 0,
         error: None,
         summary_json: None,
@@ -67,19 +67,19 @@ async fn a_session_is_created_updated_and_listed_newest_first() {
     repo.upsert(
         &scope,
         tenant,
-        session_record(first, "queued", "2026-08-25T10:00:00Z"),
+        session_record(first, SessionStatus::Queued, "2026-08-25T10:00:00Z"),
     )
     .await
     .expect("first insert");
     repo.upsert(
         &scope,
         tenant,
-        session_record(second, "queued", "2026-08-25T11:00:00Z"),
+        session_record(second, SessionStatus::Queued, "2026-08-25T11:00:00Z"),
     )
     .await
     .expect("second insert");
 
-    let mut finished = session_record(first, "complete", "2026-08-25T10:00:00Z");
+    let mut finished = session_record(first, SessionStatus::Complete, "2026-08-25T10:00:00Z");
     finished.started_at = Some("2026-08-25T10:00:01Z".to_owned());
     finished.ended_at = Some("2026-08-25T10:00:30Z".to_owned());
     finished.progress_percent = 100;
@@ -93,7 +93,7 @@ async fn a_session_is_created_updated_and_listed_newest_first() {
         .await
         .expect("find must succeed")
         .expect("session must exist");
-    assert_eq!(loaded.status, "complete");
+    assert_eq!(loaded.status, SessionStatus::Complete);
     assert_eq!(loaded.progress_percent, 100);
     assert_eq!(
         loaded.summary_json.as_deref(),
@@ -122,7 +122,7 @@ async fn sessions_are_tenant_scoped() {
     repo.upsert(
         &owner_scope,
         owner.subject_tenant_id(),
-        session_record(id, "in_progress", "2026-08-25T10:00:00Z"),
+        session_record(id, SessionStatus::InProgress, "2026-08-25T10:00:00Z"),
     )
     .await
     .expect("owner insert");

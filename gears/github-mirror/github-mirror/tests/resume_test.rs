@@ -12,7 +12,9 @@ use github_mirror::domain::ports::github::{
     ActionsListing, CommitDetail, CommitListing, FetchOptions, GithubPort, IssueDetail,
     IssueDetailWants, IssueListing, MetadataListing, PullDetail, PullListing,
 };
-use github_mirror::domain::repo::{PageWindow, RepoRecord, WorkflowJobRecord};
+use github_mirror::domain::repo::{
+    PageWindow, RepoRecord, RepoRunStatus, SessionStatus, WorkflowJobRecord,
+};
 use github_mirror_sdk::SyncSummary;
 use tokio_util::sync::CancellationToken;
 use toolkit_odata::ODataQuery;
@@ -296,7 +298,8 @@ async fn an_interrupted_sync_resumes_to_the_state_an_uninterrupted_one_reaches()
         .await
         .expect("sessions must list");
     assert_eq!(
-        sessions.items[0].status, "interrupted",
+        sessions.items[0].status,
+        SessionStatus::Interrupted,
         "an interrupted run must not report success"
     );
 
@@ -305,7 +308,8 @@ async fn an_interrupted_sync_resumes_to_the_state_an_uninterrupted_one_reaches()
         .await
         .expect("run statuses must list");
     assert_eq!(
-        statuses.items[0].status, "in_progress",
+        statuses.items[0].status,
+        RepoRunStatus::InProgress,
         "the repository stays in progress, which is what resume looks for"
     );
 
@@ -326,7 +330,7 @@ async fn an_interrupted_sync_resumes_to_the_state_an_uninterrupted_one_reaches()
         .list_repo_sync_status(&ctx, &ODataQuery::default(), None)
         .await
         .expect("run statuses must list");
-    assert_eq!(statuses.items[0].status, "complete");
+    assert_eq!(statuses.items[0].status, RepoRunStatus::Complete);
 }
 
 #[tokio::test]
@@ -585,7 +589,8 @@ async fn a_refinement_left_pending_is_finished_by_the_next_sync_even_when_the_li
         .await
         .expect("the first session must exist");
     assert_eq!(
-        failed.status, "failed",
+        failed.status,
+        SessionStatus::Failed,
         "one refinement failed, so the run did"
     );
 
@@ -598,7 +603,7 @@ async fn a_refinement_left_pending_is_finished_by_the_next_sync_even_when_the_li
         .get_session(&ctx, second)
         .await
         .expect("the second session must exist");
-    assert_eq!(finished.status, "complete");
+    assert_eq!(finished.status, SessionStatus::Complete);
     let summary: SyncSummary = serde_json::from_str(
         finished
             .summary_json

@@ -31,11 +31,11 @@ use super::repo::{
     MilestoneRecord, MilestoneRepository, PageWindow, PullRequestCommitRecord,
     PullRequestCommitRepository, PullRequestFileRecord, PullRequestFileRepository,
     PullRequestRecord, PullRequestRepository, ReleaseRecord, ReleaseRepository, RepoRecord,
-    RepoRepository, RepoSyncStatusRecord, RepoSyncStatusRepository, ReviewCommentRecord,
-    ReviewCommentRepository, ReviewRecord, ReviewRepository, ReviewThreadRecord,
-    ReviewThreadRepository, SyncSessionRecord, SyncSessionRepository, SyncWatermarkRepository,
-    SyncWriter, TagRecord, TagRepository, WorkflowJobRecord, WorkflowJobRepository,
-    WorkflowRunRecord, WorkflowRunRepository,
+    RepoRepository, RepoRunStatus, RepoSyncStatusRecord, RepoSyncStatusRepository,
+    ReviewCommentRecord, ReviewCommentRepository, ReviewRecord, ReviewRepository,
+    ReviewThreadRecord, ReviewThreadRepository, SessionStatus, SyncSessionRecord,
+    SyncSessionRepository, SyncWatermarkRepository, SyncWriter, TagRecord, TagRepository,
+    WorkflowJobRecord, WorkflowJobRepository, WorkflowRunRecord, WorkflowRunRepository,
 };
 use super::scope::ScopeConfig;
 use super::sync::{
@@ -199,20 +199,6 @@ pub(crate) const ISSUE_TIMELINE_RESOURCE: ResourceType = ResourceType::from_stat
     &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
 );
 
-/// Session lifecycle vocabulary, written into `gm_sync_sessions.state`.
-/// Session lifecycle vocabulary, written into `gm_sync_sessions.status`.
-///
-/// `IN_PROGRESS`, `COMPLETE` and `FAILED` are DESIGN §3.7's three states.
-/// `QUEUED` and `INTERRUPTED` are additions the background worker needs:
-/// the design assumed a synchronous library call, where neither can occur.
-pub(crate) mod session_states {
-    pub const QUEUED: &str = "queued";
-    pub const IN_PROGRESS: &str = "in_progress";
-    pub const COMPLETE: &str = "complete";
-    pub const FAILED: &str = "failed";
-    pub const INTERRUPTED: &str = "interrupted";
-}
-
 /// Progress once every mirrored table has been written.
 const PROGRESS_STORED: u8 = 95;
 /// How often the run persists its progress while it is working.
@@ -301,13 +287,6 @@ pub struct SyncJob {
     pub force: bool,
     /// Oldest closed entity worth collecting, from the request.
     pub since: Option<DateTime<Utc>>,
-}
-
-/// Per-repository run status, the durable half of resume-by-rescan.
-/// PRD §5.2 defines exactly two values.
-pub(crate) mod repo_run_states {
-    pub const IN_PROGRESS: &str = "in_progress";
-    pub const COMPLETE: &str = "complete";
 }
 
 pub(crate) const REPO_SYNC_STATUS_RESOURCE: ResourceType = ResourceType::from_static(
@@ -3049,7 +3028,7 @@ impl Service {
         ctx: &SecurityContext,
         repo_full_name: &str,
         session_id: Uuid,
-        status: &str,
+        status: RepoRunStatus,
         synced_at: Option<String>,
     ) -> Result<(), DomainError> {
         let tenant_id = ctx.subject_tenant_id();
@@ -3059,7 +3038,7 @@ impl Service {
         let record = RepoSyncStatusRecord {
             repo_full_name: repo_full_name.to_owned(),
             repo_id: previous.as_ref().and_then(|p| p.repo_id),
-            status: status.to_owned(),
+            status,
             last_session_id: Some(session_id),
             last_synced_at: synced_at.or_else(|| previous.and_then(|p| p.last_synced_at)),
         };
@@ -3077,7 +3056,7 @@ impl Service {
         &self,
         ctx: &SecurityContext,
         query: &ODataQuery,
-        status: Option<&str>,
+        status: Option<RepoRunStatus>,
     ) -> Result<Page<RepoSyncStatusRecord>, DomainError> {
         let scope = self.repo_status_scope(ctx, actions::LIST).await?;
 
@@ -3106,7 +3085,7 @@ impl Service {
         let Some(slug) = only else {
             return self
                 .repo_sync_status
-                .list(&scope, Some(repo_run_states::IN_PROGRESS), RESUME_LIMIT)
+                .list(&scope, Some(RepoRunStatus::InProgress), RESUME_LIMIT)
                 .await;
         };
 
@@ -3114,7 +3093,7 @@ impl Service {
             .repo_sync_status
             .find(&scope, slug)
             .await?
-            .filter(|r| r.status == repo_run_states::IN_PROGRESS)
+            .filter(|r| r.status == RepoRunStatus::InProgress)
             .map_or_else(Vec::new, |r| vec![r]))
     }
 
@@ -3220,7 +3199,7 @@ impl Service {
             id,
             repo_full_name: format!("{owner}/{name}"),
             repo_id: None,
-            status: session_states::QUEUED.to_owned(),
+            status: SessionStatus::Queued,
             progress_percent: 0,
             error: None,
             summary_json: None,
@@ -3235,7 +3214,7 @@ impl Service {
             ctx,
             &session.repo_full_name,
             id,
-            repo_run_states::IN_PROGRESS,
+            RepoRunStatus::InProgress,
             None,
         )
         .await?;
@@ -3252,7 +3231,7 @@ impl Service {
         if let Err(e) = self.sync_tx.try_send(job) {
             self.release_in_flight(&key).await;
             let reason = format!("sync could not be queued: {e}");
-            session_states::FAILED.clone_into(&mut session.status);
+            session.status = SessionStatus::Failed;
             session.ended_at = Some(now_rfc3339());
             session.error = Some(reason.clone());
             self.sync_sessions
@@ -3313,7 +3292,7 @@ impl Service {
             .find_by_id(&scope, job.session_id)
             .await?
             .ok_or(DomainError::NotFound)?;
-        session_states::IN_PROGRESS.clone_into(&mut session.status);
+        session.status = SessionStatus::InProgress;
         session.started_at = Some(now_rfc3339());
         self.sync_sessions
             .upsert(&scope, tenant_id, session.clone())
@@ -3328,16 +3307,15 @@ impl Service {
         match outcome {
             Ok(summary) => {
                 progress.finished();
-                session_states::COMPLETE.clone_into(&mut session.status);
+                session.status = SessionStatus::Complete;
                 session.summary_json = serde_json::to_string(&summary).ok();
             }
             Err(e) => {
-                let ended_as = if cancel.is_cancelled() {
-                    session_states::INTERRUPTED
+                session.status = if cancel.is_cancelled() {
+                    SessionStatus::Interrupted
                 } else {
-                    session_states::FAILED
+                    SessionStatus::Failed
                 };
-                ended_as.clone_into(&mut session.status);
                 session.error = Some(e.to_string());
             }
         }
@@ -3355,7 +3333,7 @@ impl Service {
                 &job.ctx,
                 &repo_full_name,
                 job.session_id,
-                repo_run_states::COMPLETE,
+                RepoRunStatus::Complete,
                 Some(now_rfc3339()),
             )
             .await?;
@@ -3438,9 +3416,9 @@ impl Service {
             .list_by_statuses(
                 &scope,
                 &[
-                    session_states::QUEUED,
-                    session_states::IN_PROGRESS,
-                    session_states::INTERRUPTED,
+                    SessionStatus::Queued,
+                    SessionStatus::InProgress,
+                    SessionStatus::Interrupted,
                 ],
             )
             .await?;
@@ -3449,11 +3427,11 @@ impl Service {
         for (tenant_id, mut session) in stale {
             self.release_stale_sync_lock(tenant_id, &session.repo_full_name)
                 .await;
-            if session.status == session_states::INTERRUPTED {
+            if session.status == SessionStatus::Interrupted {
                 continue;
             }
             count += 1;
-            session_states::INTERRUPTED.clone_into(&mut session.status);
+            session.status = SessionStatus::Interrupted;
             session.ended_at = Some(now_rfc3339());
             session.error = Some("the server restarted while this sync was in flight".to_owned());
             self.sync_sessions

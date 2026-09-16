@@ -15171,6 +15171,13 @@
         ],
         "type": "object"
       },
+      "RepoRunStatusDto": {
+        "enum": [
+          "in_progress",
+          "complete"
+        ],
+        "type": "string"
+      },
       "RepoSyncStatusDto": {
         "description": "Per-repository run status: the durable record resume works from.",
         "properties": {
@@ -15201,8 +15208,8 @@
             "type": "string"
           },
           "status": {
-            "description": "`in_progress` or `complete`.",
-            "type": "string"
+            "$ref": "#/components/schemas/RepoRunStatusDto",
+            "description": "`in_progress` or `complete`."
           }
         },
         "required": [
@@ -16832,6 +16839,16 @@
         ],
         "type": "object"
       },
+      "SessionStatusDto": {
+        "enum": [
+          "queued",
+          "in_progress",
+          "complete",
+          "failed",
+          "interrupted"
+        ],
+        "type": "string"
+      },
       "SetDualControlPolicyRequest": {
         "description": "A new dual-control threshold policy version to write (DC8). `effective_from`\ndefaults to now when omitted; out-of-range D2/A6/TTL is rejected (409, no clamp).",
         "properties": {
@@ -17657,8 +17674,8 @@
             "type": "string"
           },
           "status": {
-            "description": "Always `queued` — the status the session starts in.",
-            "type": "string"
+            "$ref": "#/components/schemas/SessionStatusDto",
+            "description": "Always `queued` — the status the session starts in."
           }
         },
         "required": [
@@ -17715,8 +17732,8 @@
             ]
           },
           "status": {
-            "description": "`queued`, `in_progress`, `complete`, `failed`, or `interrupted`.",
-            "type": "string"
+            "$ref": "#/components/schemas/SessionStatusDto",
+            "description": "`queued`, `in_progress`, `complete`, `failed`, or `interrupted`."
           },
           "summary": {
             "oneOf": [

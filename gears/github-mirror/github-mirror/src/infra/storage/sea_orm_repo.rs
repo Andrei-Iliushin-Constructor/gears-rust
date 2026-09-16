@@ -49,9 +49,9 @@ use crate::domain::repo::{
     WorkflowJobRepository, WorkflowRunRecord, WorkflowRunRepository,
 };
 use crate::domain::repo::{
-    EntityFingerprintRecord, EntityFingerprintRepository, RepoSyncStatusRecord,
-    RepoSyncStatusRepository, SyncSessionRecord, SyncSessionRepository, SyncWatermarkRecord,
-    SyncWatermarkRepository,
+    EntityFingerprintRecord, EntityFingerprintRepository, RepoRunStatus, RepoSyncStatusRecord,
+    RepoSyncStatusRepository, SessionStatus, SyncSessionRecord, SyncSessionRepository,
+    SyncWatermarkRecord, SyncWatermarkRepository,
 };
 use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache};
 use crate::infra::github::compression::{Compression, content_hash};
@@ -4889,6 +4889,12 @@ impl SeaOrmRepoSyncStatusRepository {
     }
 }
 
+fn parse_stored<T: std::str::FromStr>(kind: &str, raw: &str) -> Result<T, DomainError> {
+    raw.parse().map_err(|_| {
+        DomainError::internal(format!("stored {kind} {raw:?} is not one this build knows"))
+    })
+}
+
 fn repo_sync_status_active_model(
     tenant_id: Uuid,
     r: &RepoSyncStatusRecord,
@@ -4897,21 +4903,23 @@ fn repo_sync_status_active_model(
         tenant_id: ActiveValue::Set(tenant_id),
         repo_full_name: ActiveValue::Set(r.repo_full_name.clone()),
         repo_id: ActiveValue::Set(r.repo_id),
-        status: ActiveValue::Set(r.status.clone()),
+        status: ActiveValue::Set(r.status.as_str().to_owned()),
         last_session_id: ActiveValue::Set(r.last_session_id),
         last_synced_at: ActiveValue::Set(r.last_synced_at.clone()),
     }
 }
 
-impl From<repo_sync_status::Model> for RepoSyncStatusRecord {
-    fn from(m: repo_sync_status::Model) -> Self {
-        Self {
+impl TryFrom<repo_sync_status::Model> for RepoSyncStatusRecord {
+    type Error = DomainError;
+
+    fn try_from(m: repo_sync_status::Model) -> Result<Self, DomainError> {
+        Ok(Self {
             repo_full_name: m.repo_full_name,
             repo_id: m.repo_id,
-            status: m.status,
+            status: parse_stored("repository run status", &m.status)?,
             last_session_id: m.last_session_id,
             last_synced_at: m.last_synced_at,
-        }
+        })
     }
 }
 
@@ -4965,19 +4973,19 @@ impl RepoSyncStatusRepository for SeaOrmRepoSyncStatusRepository {
             .await
             .map_err(map_scope_error)?;
 
-        Ok(row.map(Into::into))
+        row.map(TryInto::try_into).transpose()
     }
 
     async fn list(
         &self,
         scope: &AccessScope,
-        status: Option<&str>,
+        status: Option<RepoRunStatus>,
         limit: u64,
     ) -> Result<Vec<RepoSyncStatusRecord>, DomainError> {
         let conn = self.db.conn()?;
         let mut condition = sea_orm::Condition::all();
         if let Some(status) = status {
-            condition = condition.add(repo_sync_status::Column::Status.eq(status));
+            condition = condition.add(repo_sync_status::Column::Status.eq(status.as_str()));
         }
 
         let rows = RepoSyncStatusEntity::find()
@@ -4990,7 +4998,7 @@ impl RepoSyncStatusRepository for SeaOrmRepoSyncStatusRepository {
             .await
             .map_err(map_scope_error)?;
 
-        Ok(rows.into_iter().map(Into::into).collect())
+        rows.into_iter().map(TryInto::try_into).collect()
     }
 }
 
@@ -5011,7 +5019,7 @@ fn sync_session_active_model(tenant_id: Uuid, r: &SyncSessionRecord) -> sync_ses
         id: ActiveValue::Set(r.id),
         repo_full_name: ActiveValue::Set(r.repo_full_name.clone()),
         repo_id: ActiveValue::Set(r.repo_id),
-        status: ActiveValue::Set(r.status.clone()),
+        status: ActiveValue::Set(r.status.as_str().to_owned()),
         progress_percent: ActiveValue::Set(r.progress_percent),
         error: ActiveValue::Set(r.error.clone()),
         summary_json: ActiveValue::Set(r.summary_json.clone()),
@@ -5021,20 +5029,22 @@ fn sync_session_active_model(tenant_id: Uuid, r: &SyncSessionRecord) -> sync_ses
     }
 }
 
-impl From<sync_sessions::Model> for SyncSessionRecord {
-    fn from(m: sync_sessions::Model) -> Self {
-        Self {
+impl TryFrom<sync_sessions::Model> for SyncSessionRecord {
+    type Error = DomainError;
+
+    fn try_from(m: sync_sessions::Model) -> Result<Self, DomainError> {
+        Ok(Self {
             id: m.id,
             repo_full_name: m.repo_full_name,
             repo_id: m.repo_id,
-            status: m.status,
+            status: parse_stored("sync session status", &m.status)?,
             progress_percent: m.progress_percent,
             error: m.error,
             summary_json: m.summary_json,
             created_at: m.created_at,
             started_at: m.started_at,
             ended_at: m.ended_at,
-        }
+        })
     }
 }
 
@@ -5090,7 +5100,7 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
             .await
             .map_err(map_scope_error)?;
 
-        Ok(row.map(Into::into))
+        row.map(TryInto::try_into).transpose()
     }
 
     async fn list_recent(
@@ -5108,16 +5118,16 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
             .await
             .map_err(map_scope_error)?;
 
-        Ok(rows.into_iter().map(Into::into).collect())
+        rows.into_iter().map(TryInto::try_into).collect()
     }
 
     async fn list_by_statuses(
         &self,
         scope: &AccessScope,
-        statuses: &[&str],
+        statuses: &[SessionStatus],
     ) -> Result<Vec<(Uuid, SyncSessionRecord)>, DomainError> {
         let conn = self.db.conn()?;
-        let wanted: Vec<String> = statuses.iter().map(|s| (*s).to_owned()).collect();
+        let wanted: Vec<String> = statuses.iter().map(|s| s.as_str().to_owned()).collect();
         let rows = SyncSessionEntity::find()
             .secure()
             .scope_with(scope)
@@ -5126,7 +5136,9 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
             .await
             .map_err(map_scope_error)?;
 
-        Ok(rows.into_iter().map(|m| (m.tenant_id, m.into())).collect())
+        rows.into_iter()
+            .map(|m| Ok((m.tenant_id, m.try_into()?)))
+            .collect()
     }
 }
 

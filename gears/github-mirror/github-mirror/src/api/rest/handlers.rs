@@ -18,7 +18,9 @@ use url::form_urlencoded;
 
 use crate::api::rest::routes::ConcreteService;
 use crate::domain::error::DomainError;
-use crate::domain::repo::{IssueState, ListingDirection, ListingFilter, ListingSort, PageWindow};
+use crate::domain::repo::{
+    IssueState, ListingDirection, ListingFilter, ListingSort, PageWindow, RepoRunStatus,
+};
 use crate::domain::scope::{CollectionMode, ScopeConfig, SyncScope};
 use crate::domain::validate::{validate_commit_sha, validate_repo_path};
 
@@ -28,8 +30,8 @@ use super::dto::{
     DeploymentDto, GithubMirrorHealthDto, IssueDto, IssueEventDto, IssueReactionDto,
     IssueTimelineEventDto, LabelDto, MilestoneDto, PullRequestDto, PullRequestFileDto, ReleaseDto,
     RepoDto, RepoSyncStatusDto, ResumeAcceptedDto, ReviewCommentDto, ReviewDto, ReviewThreadDto,
-    SyncAcceptedDto, SyncSessionDto, TagDto, WorkflowJobDto, WorkflowJobsPageDto, WorkflowRunDto,
-    WorkflowRunsPageDto,
+    SessionStatusDto, SyncAcceptedDto, SyncSessionDto, TagDto, WorkflowJobDto, WorkflowJobsPageDto,
+    WorkflowRunDto, WorkflowRunsPageDto,
 };
 
 const DEFAULT_PER_PAGE: u64 = 30;
@@ -431,7 +433,7 @@ pub async fn sync_repository(
         Json(SyncAcceptedDto {
             session_id: session_id.to_string(),
             repository: format!("{owner}/{name}"),
-            status: "queued".to_owned(),
+            status: SessionStatusDto::Queued,
         }),
     ))
 }
@@ -996,9 +998,18 @@ pub async fn list_repo_sync_status(
     OData(query): OData,
     Query(filter): Query<RunStatusQuery>,
 ) -> ApiResult<JsonPage<RepoSyncStatusDto>> {
-    let page: Page<_> = svc
-        .list_repo_sync_status(&ctx, &query, filter.status.as_deref())
-        .await?;
+    let status = filter
+        .status
+        .as_deref()
+        .map(|raw| {
+            raw.parse::<RepoRunStatus>()
+                .map_err(|_| DomainError::Validation {
+                    field: "status".to_owned(),
+                    message: format!("`{raw}` is not one of `in_progress`, `complete`"),
+                })
+        })
+        .transpose()?;
+    let page: Page<_> = svc.list_repo_sync_status(&ctx, &query, status).await?;
     Ok(Json(page.map_items(RepoSyncStatusDto::from)))
 }
 

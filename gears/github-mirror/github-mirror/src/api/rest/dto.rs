@@ -14,7 +14,7 @@ use github_mirror_sdk::{
 };
 use github_mirror_sdk::{CountDrift, MirrorStatus, SyncSummary};
 
-use crate::domain::repo::{RepoSyncStatusRecord, SyncSessionRecord};
+use crate::domain::repo::{RepoRunStatus, RepoSyncStatusRecord, SessionStatus, SyncSessionRecord};
 
 /// Deliberately without `api_base_url`: `/health` is registered
 /// `.anonymous()`, and the configured upstream host is infrastructure detail
@@ -963,6 +963,44 @@ impl From<SyncSummary> for SyncSummaryDto {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(response)]
+pub enum SessionStatusDto {
+    Queued,
+    InProgress,
+    Complete,
+    Failed,
+    Interrupted,
+}
+
+impl From<SessionStatus> for SessionStatusDto {
+    fn from(status: SessionStatus) -> Self {
+        match status {
+            SessionStatus::Queued => Self::Queued,
+            SessionStatus::InProgress => Self::InProgress,
+            SessionStatus::Complete => Self::Complete,
+            SessionStatus::Failed => Self::Failed,
+            SessionStatus::Interrupted => Self::Interrupted,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(response)]
+pub enum RepoRunStatusDto {
+    InProgress,
+    Complete,
+}
+
+impl From<RepoRunStatus> for RepoRunStatusDto {
+    fn from(status: RepoRunStatus) -> Self {
+        match status {
+            RepoRunStatus::InProgress => Self::InProgress,
+            RepoRunStatus::Complete => Self::Complete,
+        }
+    }
+}
+
 /// Acknowledgement of an accepted sync request.
 ///
 /// The work has not started yet — only the session row is durable at this
@@ -975,7 +1013,7 @@ pub struct SyncAcceptedDto {
     /// `owner/name` slug the session will sync.
     pub repository: String,
     /// Always `queued` — the status the session starts in.
-    pub status: String,
+    pub status: SessionStatusDto,
 }
 
 /// What one cache-clear removed.
@@ -1007,7 +1045,7 @@ pub struct RepoSyncStatusDto {
     /// GitHub repository id, once a run has fetched it.
     pub repo_id: Option<i64>,
     /// `in_progress` or `complete`.
-    pub status: String,
+    pub status: RepoRunStatusDto,
     /// The run that last wrote this row.
     pub last_session_id: Option<String>,
     /// RFC3339 time of the last run that completed.
@@ -1019,7 +1057,7 @@ impl From<RepoSyncStatusRecord> for RepoSyncStatusDto {
         Self {
             repository: r.repo_full_name,
             repo_id: r.repo_id,
-            status: r.status,
+            status: r.status.into(),
             last_session_id: r.last_session_id.map(|id| id.to_string()),
             last_synced_at: r.last_synced_at,
         }
@@ -1434,7 +1472,7 @@ pub struct SyncSessionDto {
     /// `owner/name` slug the session synced.
     pub repository: String,
     /// `queued`, `in_progress`, `complete`, `failed`, or `interrupted`.
-    pub status: String,
+    pub status: SessionStatusDto,
     /// 0-100, monotonically non-decreasing while the run works.
     pub progress_percent: i32,
     /// Failure detail when `status = failed`.
@@ -1474,7 +1512,7 @@ impl From<SyncSessionRecord> for SyncSessionDto {
         Self {
             id: s.id.to_string(),
             repository: s.repo_full_name,
-            status: s.status,
+            status: s.status.into(),
             progress_percent: s.progress_percent,
             error: s.error,
             summary,

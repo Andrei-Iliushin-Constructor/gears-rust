@@ -1415,11 +1415,28 @@ pub trait IssueTimelineRepository: Send + Sync {
 /// dies leaves `in_progress` here, and the resume operation re-runs every
 /// repository still marked so (PRD §5.2).
 #[domain_model]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumString, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum RepoRunStatus {
+    InProgress,
+    Complete,
+}
+
+impl RepoRunStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
+}
+
+#[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoSyncStatusRecord {
     pub repo_full_name: String,
     pub repo_id: Option<i64>,
-    pub status: String,
+    pub status: RepoRunStatus,
     pub last_session_id: Option<Uuid>,
     pub last_synced_at: Option<String>,
 }
@@ -1444,7 +1461,7 @@ pub trait RepoSyncStatusRepository: Send + Sync {
     async fn list(
         &self,
         scope: &AccessScope,
-        status: Option<&str>,
+        status: Option<RepoRunStatus>,
         limit: u64,
     ) -> Result<Vec<RepoSyncStatusRecord>, DomainError>;
 }
@@ -1457,12 +1474,32 @@ pub trait RepoSyncStatusRepository: Send + Sync {
 /// The middle three come from DESIGN §3.7's `sync_sessions` table; the
 /// other two are additions the background worker needs.
 #[domain_model]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumString, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum SessionStatus {
+    Queued,
+    InProgress,
+    Complete,
+    Failed,
+    Interrupted,
+}
+
+impl SessionStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
+}
+
+#[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncSessionRecord {
     pub id: Uuid,
     pub repo_full_name: String,
     pub repo_id: Option<i64>,
-    pub status: String,
+    pub status: SessionStatus,
     pub progress_percent: i32,
     pub error: Option<String>,
     pub summary_json: Option<String>,
@@ -1500,7 +1537,7 @@ pub trait SyncSessionRepository: Send + Sync {
     async fn list_by_statuses(
         &self,
         scope: &AccessScope,
-        statuses: &[&str],
+        statuses: &[SessionStatus],
     ) -> Result<Vec<(Uuid, SyncSessionRecord)>, DomainError>;
 }
 
