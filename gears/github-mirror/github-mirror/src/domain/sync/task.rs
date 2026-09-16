@@ -147,6 +147,100 @@ impl Default for TaskPriority {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Family {
+    Issues,
+    PullRequests,
+    Commits,
+    Metadata,
+    Actions,
+}
+
+impl Family {
+    pub const SWEPT: [Self; 3] = [Self::Issues, Self::PullRequests, Self::Commits];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Issues => "issues",
+            Self::PullRequests => "pull_requests",
+            Self::Commits => "commits",
+            Self::Metadata => "metadata",
+            Self::Actions => "actions",
+        }
+    }
+}
+
+impl std::fmt::Display for Family {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Entity {
+    Issue,
+    PullRequest,
+    Commit,
+    WorkflowRun,
+}
+
+impl Entity {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Issue => "issue",
+            Self::PullRequest => "pull_request",
+            Self::Commit => "commit",
+            Self::WorkflowRun => "workflow_run",
+        }
+    }
+}
+
+impl std::fmt::Display for Entity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskKind {
+    Discover,
+    Index(Family),
+    Refine(Entity),
+    Verify(Entity),
+}
+
+impl TaskKind {
+    #[must_use]
+    pub const fn phase(self) -> TaskPhase {
+        match self {
+            Self::Discover => TaskPhase::Discovery,
+            Self::Index(_) => TaskPhase::Indexing,
+            Self::Refine(_) => TaskPhase::Refinement,
+            Self::Verify(_) => TaskPhase::Verification,
+        }
+    }
+
+    #[must_use]
+    pub const fn entity_type(self) -> &'static str {
+        match self {
+            Self::Discover => "repository",
+            Self::Index(family) => family.as_str(),
+            Self::Refine(entity) | Self::Verify(entity) => entity.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for TaskKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} {}", self.phase(), self.entity_type())
+    }
+}
+
 /// What [`crate::domain::sync::TaskQueue::enqueue_task`] inserts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewTask {
@@ -154,9 +248,7 @@ pub struct NewTask {
     pub session_id: Uuid,
     /// The tenant the session runs for.
     pub tenant_id: Uuid,
-    pub phase: TaskPhase,
-    /// Entity category (e.g. `"issues"` for a listing, `"issue"` for one).
-    pub entity_type: String,
+    pub kind: TaskKind,
     /// Identifier for single-entity refinement tasks: an issue or pull number,
     /// a commit SHA, a workflow-run id.
     pub entity_id: Option<String>,
@@ -171,13 +263,19 @@ pub struct ExtractionTask {
     pub id: Uuid,
     pub session_id: Uuid,
     pub tenant_id: Uuid,
-    pub phase: TaskPhase,
-    pub entity_type: String,
+    pub kind: TaskKind,
     pub entity_id: Option<String>,
     pub priority: TaskPriority,
     pub attempt: u32,
     pub status: TaskStatus,
     pub created_at: DateTime<Utc>,
+}
+
+impl ExtractionTask {
+    #[must_use]
+    pub const fn phase(&self) -> TaskPhase {
+        self.kind.phase()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -191,11 +289,17 @@ impl Lane {
     pub const ALL: [Self; 3] = [Self::PullRequest, Self::Issue, Self::Generic];
 
     #[must_use]
-    pub fn of_entity_type(entity_type: &str) -> Self {
-        match entity_type {
-            "pull_requests" | "pull_request" => Self::PullRequest,
-            "issues" | "issue" => Self::Issue,
-            _ => Self::Generic,
+    pub const fn of(kind: TaskKind) -> Self {
+        match kind {
+            TaskKind::Index(Family::PullRequests)
+            | TaskKind::Refine(Entity::PullRequest)
+            | TaskKind::Verify(Entity::PullRequest) => Self::PullRequest,
+            TaskKind::Index(Family::Issues)
+            | TaskKind::Refine(Entity::Issue)
+            | TaskKind::Verify(Entity::Issue) => Self::Issue,
+            TaskKind::Discover | TaskKind::Index(_) | TaskKind::Refine(_) | TaskKind::Verify(_) => {
+                Self::Generic
+            }
         }
     }
 

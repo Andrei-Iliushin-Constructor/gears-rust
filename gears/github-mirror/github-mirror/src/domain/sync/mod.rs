@@ -2,7 +2,7 @@
 //! Architecture"), ported from the reference implementation's `engine` and
 //! `scheduler` crates.
 //!
-//! - [`task`]: [`ExtractionTask`], [`TaskPhase`], [`TaskStatus`], [`TaskPriority`], [`Lane`].
+//! - [`task`]: [`ExtractionTask`], [`TaskKind`], [`TaskPhase`], [`TaskStatus`], [`TaskPriority`], [`Lane`].
 //! - [`queue`]: [`TaskQueue`] — indexed in-memory enqueue / claim / complete.
 //! - [`worker`]: [`Worker`] trait and [`WorkerDispatcher`].
 //! - [`runner`]: [`RepoPhaseRunner`] — phase-ordered executor.
@@ -27,8 +27,10 @@ pub mod worker;
 pub use change_gate::{ChangeGate, GateInputs, GateReason};
 pub use mirror_worker::{MirrorWorker, RunState};
 pub use queue::TaskQueue;
-pub use runner::{REPOSITORY_ENTITY, RepoPhaseRunner, RunReport, TaskFailure};
-pub use sweep_watermark::{SweepWatermark, sweep_families};
-pub use task::{ExtractionTask, Lane, NewTask, TaskPhase, TaskPriority, TaskStatus};
+pub use runner::{RepoPhaseRunner, RunReport, TaskFailure};
+pub use sweep_watermark::SweepWatermark;
+pub use task::{
+    Entity, ExtractionTask, Family, Lane, NewTask, TaskKind, TaskPhase, TaskPriority, TaskStatus,
+};
 pub use verification::{CountGap, GapOutcome, MAX_REPAIR};
 pub use worker::{Worker, WorkerContext, WorkerDispatcher};

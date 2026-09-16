@@ -16,12 +16,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::queue::TaskQueue;
-use super::task::{ExtractionTask, Lane, NewTask, TaskPhase, TaskPriority};
+use super::task::{ExtractionTask, Lane, NewTask, TaskKind, TaskPhase, TaskPriority};
 use super::worker::{Worker, WorkerContext, WorkerDispatcher};
 use crate::domain::error::DomainError;
-
-/// The entity type of the single Discovery task every run starts with.
-pub const REPOSITORY_ENTITY: &str = "repository";
 
 /// Pending tasks above which the runner stops claiming until in-flight work
 /// drains: bounds memory growth when Indexing seeds faster than Refinement
@@ -83,15 +80,17 @@ impl RunReport {
 /// One task that did not finish, with the error it stopped on.
 #[derive(Debug)]
 pub struct TaskFailure {
-    pub phase: TaskPhase,
-    pub entity_type: String,
+    pub kind: Option<TaskKind>,
     pub entity_id: Option<String>,
     pub error: DomainError,
 }
 
 impl std::fmt::Display for TaskFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{} {}", self.phase, self.entity_type)?;
+        match self.kind {
+            Some(kind) => write!(formatter, "{kind}")?,
+            None => formatter.write_str("task")?,
+        }
         if let Some(id) = &self.entity_id {
             write!(formatter, " {id}")?;
         }
@@ -200,8 +199,7 @@ impl RepoPhaseRunner {
         self.queue.enqueue_task(&NewTask {
             session_id: self.session_id,
             tenant_id: self.tenant_id,
-            phase: TaskPhase::Discovery,
-            entity_type: REPOSITORY_ENTITY.to_owned(),
+            kind: TaskKind::Discover,
             entity_id: None,
             priority: TaskPriority::NORMAL,
             attempt: 0,
@@ -315,8 +313,7 @@ impl RepoPhaseRunner {
                     {
                         task.attempt += 1;
                         tracing::warn!(
-                            phase = ?task.phase,
-                            entity_type = %task.entity_type,
+                            kind = %task.kind,
                             entity_id = ?task.entity_id,
                             attempt = task.attempt,
                             error = %e,
@@ -344,14 +341,12 @@ impl RepoPhaseRunner {
                 task,
                 error: Some(error),
             }) => TaskFailure {
-                phase: task.phase,
-                entity_type: task.entity_type,
+                kind: Some(task.kind),
                 entity_id: task.entity_id,
                 error,
             },
             Err(join_error) => TaskFailure {
-                phase: TaskPhase::Refinement,
-                entity_type: "task".to_owned(),
+                kind: None,
                 entity_id: None,
                 error: DomainError::internal(format!(
                     "sync task did not finish cleanly: {join_error}"

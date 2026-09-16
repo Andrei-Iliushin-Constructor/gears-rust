@@ -4,16 +4,11 @@ use chrono::{DateTime, Duration, Utc};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
+use super::task::Family;
 use crate::domain::error::DomainError;
 use crate::domain::repo::{SyncWatermarkRecord, SyncWatermarkRepository};
 
 pub const SWEEP_OVERLAP: Duration = Duration::minutes(5);
-
-pub mod sweep_families {
-    pub const ISSUES: &str = "issues";
-    pub const PULL_REQUESTS: &str = "pull_requests";
-    pub const COMMITS: &str = "commits";
-}
 
 #[must_use]
 fn stop_threshold(stored: Option<&SyncWatermarkRecord>, force: bool) -> Option<DateTime<Utc>> {
@@ -68,10 +63,13 @@ impl SweepWatermark {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        family: &str,
+        family: Family,
         force: bool,
     ) -> Result<SweepStart, DomainError> {
-        let stored = self.watermark_store.find(scope, repo_id, family).await?;
+        let stored = self
+            .watermark_store
+            .find(scope, repo_id, family.as_str())
+            .await?;
         Ok(SweepStart {
             updated_after: stop_threshold(stored.as_ref(), force),
             page1_etag: if force {
@@ -89,10 +87,13 @@ impl SweepWatermark {
         scope: &AccessScope,
         tenant_id: Uuid,
         repo_id: i64,
-        family: &str,
+        family: Family,
         candidate: Option<DateTime<Utc>>,
     ) -> Result<(), DomainError> {
-        let stored = self.watermark_store.find(scope, repo_id, family).await?;
+        let stored = self
+            .watermark_store
+            .find(scope, repo_id, family.as_str())
+            .await?;
         let candidate = candidate.map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
         self.watermark_store
             .upsert(
@@ -100,7 +101,7 @@ impl SweepWatermark {
                 tenant_id,
                 SyncWatermarkRecord {
                     repo_id,
-                    family: family.to_owned(),
+                    family: family.as_str().to_owned(),
                     last_seen_updated_at: stored
                         .as_ref()
                         .and_then(|w| w.last_seen_updated_at.clone()),
@@ -126,10 +127,14 @@ impl SweepWatermark {
         scope: &AccessScope,
         tenant_id: Uuid,
         repo_id: i64,
-        family: &str,
+        family: Family,
         page1_etag: Option<String>,
     ) -> Result<(), DomainError> {
-        let Some(stored) = self.watermark_store.find(scope, repo_id, family).await? else {
+        let Some(stored) = self
+            .watermark_store
+            .find(scope, repo_id, family.as_str())
+            .await?
+        else {
             return Ok(());
         };
         let Some(candidate) = stored.candidate_high_water.clone() else {

@@ -17,10 +17,9 @@ use github_mirror_sdk::{CountDrift, SyncSummary};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
-use super::change_gate::{self, ChangeGate, GateInputs, entities};
-use super::runner::REPOSITORY_ENTITY;
-use super::sweep_watermark::{SweepWatermark, high_water, is_stale, sweep_families};
-use super::task::{ExtractionTask, NewTask, TaskPhase, TaskPriority};
+use super::change_gate::{self, ChangeGate, GateInputs};
+use super::sweep_watermark::{SweepWatermark, high_water, is_stale};
+use super::task::{Entity, ExtractionTask, Family, NewTask, TaskKind, TaskPriority};
 use super::verification::{CountGap, GapOutcome, pull_gaps};
 use super::worker::{Worker, WorkerContext};
 use crate::domain::error::DomainError;
@@ -31,15 +30,6 @@ use crate::domain::repo::{
     CommitRecord, IssueRecord, PullRequestRecord, SyncWriter, WorkflowRunRecord,
 };
 use crate::domain::scope::CollectionMode;
-
-/// Entity types of the Indexing tasks, one per family the scope can enable.
-mod families {
-    pub const ISSUES: &str = "issues";
-    pub const PULL_REQUESTS: &str = "pull_requests";
-    pub const COMMITS: &str = "commits";
-    pub const METADATA: &str = "metadata";
-    pub const ACTIONS: &str = "actions";
-}
 
 /// Everything the tasks of one run share.
 ///
@@ -55,7 +45,7 @@ pub struct RunState {
     pub options: FetchOptions,
     repo_id: OnceLock<i64>,
     complete: Mutex<ListingCompleteness>,
-    swept: Mutex<HashMap<&'static str, Option<String>>>,
+    swept: Mutex<HashMap<Family, Option<String>>>,
     summary: Mutex<SyncSummary>,
     drift: Mutex<Vec<CountDrift>>,
 }
@@ -129,7 +119,7 @@ impl RunState {
     /// may be promoted. Independent of [`Self::completeness`]: a walk bounded
     /// by `updated_after` saw everything it asked for without seeing everything there
     /// is, so it may advance the watermark but not drive reconciliation.
-    fn mark_swept(&self, family: &'static str, page1_etag: Option<String>) {
+    fn mark_swept(&self, family: Family, page1_etag: Option<String>) {
         self.swept
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -137,19 +127,19 @@ impl RunState {
     }
 
     #[must_use]
-    pub fn is_swept(&self, family: &str) -> bool {
+    pub fn is_swept(&self, family: Family) -> bool {
         self.swept
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .contains_key(family)
+            .contains_key(&family)
     }
 
     #[must_use]
-    pub fn swept_page1_etag(&self, family: &str) -> Option<String> {
+    pub fn swept_page1_etag(&self, family: Family) -> Option<String> {
         self.swept
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(family)
+            .get(&family)
             .cloned()
             .flatten()
     }
@@ -203,7 +193,7 @@ impl MirrorWorker {
 
     async fn needs_refinement(
         &self,
-        family: &str,
+        entity: Entity,
         entity_id: &str,
         inputs: &GateInputs,
     ) -> Result<bool, DomainError> {
@@ -214,7 +204,7 @@ impl MirrorWorker {
                 &run.scope,
                 run.tenant_id,
                 run.repo_id()?,
-                family,
+                entity,
                 entity_id,
                 inputs,
                 Utc::now(),
@@ -222,19 +212,19 @@ impl MirrorWorker {
             )
             .await?;
         if let Some(reason) = reason {
-            tracing::debug!(family, entity_id, reason = reason.as_str(), "refining");
+            tracing::debug!(entity = %entity, entity_id, reason = reason.as_str(), "refining");
         }
         Ok(reason.is_some())
     }
 
-    async fn mark_refined(&self, family: &str, entity_id: &str) -> Result<(), DomainError> {
+    async fn mark_refined(&self, entity: Entity, entity_id: &str) -> Result<(), DomainError> {
         let run = &self.run;
         self.gate
             .mark_refined(
                 &run.scope,
                 run.tenant_id,
                 run.repo_id()?,
-                family,
+                entity,
                 entity_id,
                 Utc::now(),
             )
@@ -244,19 +234,17 @@ impl MirrorWorker {
     fn seed(
         &self,
         ctx: &WorkerContext,
-        phase: TaskPhase,
-        entity_type: &str,
+        kind: TaskKind,
         entity_id: Option<String>,
         priority: TaskPriority,
     ) {
-        self.seed_attempt(ctx, phase, entity_type, entity_id, priority, 0);
+        self.seed_attempt(ctx, kind, entity_id, priority, 0);
     }
 
     fn seed_attempt(
         &self,
         ctx: &WorkerContext,
-        phase: TaskPhase,
-        entity_type: &str,
+        kind: TaskKind,
         entity_id: Option<String>,
         priority: TaskPriority,
         attempt: u32,
@@ -264,8 +252,7 @@ impl MirrorWorker {
         ctx.queue.enqueue_task(&NewTask {
             session_id: self.run.session_id,
             tenant_id: self.run.tenant_id,
-            phase,
-            entity_type: entity_type.to_owned(),
+            kind,
             entity_id,
             priority,
             attempt,
@@ -290,26 +277,26 @@ impl MirrorWorker {
         let objects = run.options.scope.objects;
         let seeds = [
             (
-                families::PULL_REQUESTS,
+                Family::PullRequests,
                 objects.pull_requests,
                 TaskPriority::OPEN_PR,
             ),
-            (families::ISSUES, objects.issues, TaskPriority::OPEN_ISSUE),
-            (families::COMMITS, objects.commits, TaskPriority::GLOBAL),
+            (Family::Issues, objects.issues, TaskPriority::OPEN_ISSUE),
+            (Family::Commits, objects.commits, TaskPriority::GLOBAL),
             (
-                families::METADATA,
+                Family::Metadata,
                 objects.labels || objects.milestones || objects.releases || objects.branches,
                 TaskPriority::GLOBAL,
             ),
             (
-                families::ACTIONS,
+                Family::Actions,
                 objects.github_actions,
                 TaskPriority::GLOBAL,
             ),
         ];
         for (family, enabled, priority) in seeds {
             if enabled {
-                self.seed(ctx, TaskPhase::Indexing, family, None, priority);
+                self.seed(ctx, TaskKind::Index(family), None, priority);
             }
         }
         Ok(())
@@ -320,12 +307,7 @@ impl MirrorWorker {
         let repo_id = run.repo_id()?;
         let start = self
             .watermark
-            .start_sweep(
-                &run.scope,
-                repo_id,
-                sweep_families::ISSUES,
-                run.options.force,
-            )
+            .start_sweep(&run.scope, repo_id, Family::Issues, run.options.force)
             .await?;
         let updated_after = start.updated_after;
         let collection = run.options.scope.collection;
@@ -352,7 +334,7 @@ impl MirrorWorker {
                 page1_etag.clone_from(&listing.page1_etag);
             }
             if listing.swept_to_end {
-                run.mark_swept(sweep_families::ISSUES, page1_etag.clone());
+                run.mark_swept(Family::Issues, page1_etag.clone());
             }
             let seen: Vec<&str> = listing
                 .issues
@@ -374,7 +356,7 @@ impl MirrorWorker {
                 }
                 let entity_id = issue.number.to_string();
                 if !self
-                    .needs_refinement(entities::ISSUE, &entity_id, &issue_inputs(issue))
+                    .needs_refinement(Entity::Issue, &entity_id, &issue_inputs(issue))
                     .await?
                 {
                     continue;
@@ -386,8 +368,7 @@ impl MirrorWorker {
                 };
                 self.seed(
                     ctx,
-                    TaskPhase::Refinement,
-                    entities::ISSUE,
+                    TaskKind::Refine(Entity::Issue),
                     Some(entity_id),
                     priority,
                 );
@@ -416,13 +397,7 @@ impl MirrorWorker {
         }
 
         self.watermark
-            .stage(
-                &run.scope,
-                run.tenant_id,
-                repo_id,
-                sweep_families::ISSUES,
-                high,
-            )
+            .stage(&run.scope, run.tenant_id, repo_id, Family::Issues, high)
             .await?;
         Ok(())
     }
@@ -449,8 +424,7 @@ impl MirrorWorker {
             s.issue_reactions_synced += reactions;
             s.issue_timeline_synced += timeline;
         });
-        self.mark_refined(entities::ISSUE, &number.to_string())
-            .await
+        self.mark_refined(Entity::Issue, &number.to_string()).await
     }
 
     async fn index_pull_requests(&self, ctx: &WorkerContext) -> Result<(), DomainError> {
@@ -458,12 +432,7 @@ impl MirrorWorker {
         let repo_id = run.repo_id()?;
         let start = self
             .watermark
-            .start_sweep(
-                &run.scope,
-                repo_id,
-                sweep_families::PULL_REQUESTS,
-                run.options.force,
-            )
+            .start_sweep(&run.scope, repo_id, Family::PullRequests, run.options.force)
             .await?;
         let updated_after = start.updated_after;
         let mut high = updated_after;
@@ -488,7 +457,7 @@ impl MirrorWorker {
                 page1_etag.clone_from(&listing.page1_etag);
             }
             if listing.swept_to_end {
-                run.mark_swept(sweep_families::PULL_REQUESTS, page1_etag.clone());
+                run.mark_swept(Family::PullRequests, page1_etag.clone());
             }
             let seen: Vec<&str> = listing
                 .pull_requests
@@ -506,7 +475,7 @@ impl MirrorWorker {
                 }
                 let entity_id = pull.number.to_string();
                 if !self
-                    .needs_refinement(entities::PULL_REQUEST, &entity_id, &pull_inputs(pull))
+                    .needs_refinement(Entity::PullRequest, &entity_id, &pull_inputs(pull))
                     .await?
                 {
                     continue;
@@ -518,8 +487,7 @@ impl MirrorWorker {
                 };
                 self.seed(
                     ctx,
-                    TaskPhase::Refinement,
-                    entities::PULL_REQUEST,
+                    TaskKind::Refine(Entity::PullRequest),
                     Some(entity_id),
                     priority,
                 );
@@ -550,7 +518,7 @@ impl MirrorWorker {
                 &run.scope,
                 run.tenant_id,
                 repo_id,
-                sweep_families::PULL_REQUESTS,
+                Family::PullRequests,
                 high,
             )
             .await?;
@@ -590,7 +558,7 @@ impl MirrorWorker {
         for gap in &gaps {
             self.report_gap(ctx, number, gap, task.attempt);
         }
-        self.mark_refined(entities::PULL_REQUEST, &number.to_string())
+        self.mark_refined(Entity::PullRequest, &number.to_string())
             .await
     }
 
@@ -612,8 +580,7 @@ impl MirrorWorker {
                 );
                 self.seed_attempt(
                     ctx,
-                    TaskPhase::Verification,
-                    entities::PULL_REQUEST,
+                    TaskKind::Verify(Entity::PullRequest),
                     Some(number.to_string()),
                     TaskPriority::NORMAL,
                     attempt + 1,
@@ -644,12 +611,7 @@ impl MirrorWorker {
         let repo_id = run.repo_id()?;
         let start = self
             .watermark
-            .start_sweep(
-                &run.scope,
-                repo_id,
-                sweep_families::COMMITS,
-                run.options.force,
-            )
+            .start_sweep(&run.scope, repo_id, Family::Commits, run.options.force)
             .await?;
         let updated_after = start.updated_after;
         let with_ci = run.options.scope.collection.actions != CollectionMode::None;
@@ -676,7 +638,7 @@ impl MirrorWorker {
                 page1_etag.clone_from(&listing.page1_etag);
             }
             if listing.swept_to_end {
-                run.mark_swept(sweep_families::COMMITS, page1_etag.clone());
+                run.mark_swept(Family::Commits, page1_etag.clone());
             }
             let seen: Vec<&str> = listing
                 .commits
@@ -695,19 +657,14 @@ impl MirrorWorker {
                     continue;
                 }
                 if !self
-                    .needs_refinement(
-                        entities::COMMIT,
-                        &commit.sha,
-                        &commit_inputs(commit, with_ci),
-                    )
+                    .needs_refinement(Entity::Commit, &commit.sha, &commit_inputs(commit, with_ci))
                     .await?
                 {
                     continue;
                 }
                 self.seed(
                     ctx,
-                    TaskPhase::Refinement,
-                    entities::COMMIT,
+                    TaskKind::Refine(Entity::Commit),
                     Some(commit.sha.clone()),
                     TaskPriority::NORMAL,
                 );
@@ -734,13 +691,7 @@ impl MirrorWorker {
         }
 
         self.watermark
-            .stage(
-                &run.scope,
-                run.tenant_id,
-                repo_id,
-                sweep_families::COMMITS,
-                high,
-            )
+            .stage(&run.scope, run.tenant_id, repo_id, Family::Commits, high)
             .await?;
         Ok(())
     }
@@ -770,7 +721,7 @@ impl MirrorWorker {
             s.commit_statuses_synced += statuses;
             s.check_runs_synced += checks;
         });
-        self.mark_refined(entities::COMMIT, sha).await
+        self.mark_refined(Entity::Commit, sha).await
     }
 
     async fn index_metadata(&self) -> Result<(), DomainError> {
@@ -814,7 +765,7 @@ impl MirrorWorker {
                 let entity_id = workflow_run.id.to_string();
                 if !self
                     .needs_refinement(
-                        entities::WORKFLOW_RUN,
+                        Entity::WorkflowRun,
                         &entity_id,
                         &workflow_run_inputs(workflow_run),
                     )
@@ -824,8 +775,7 @@ impl MirrorWorker {
                 }
                 self.seed(
                     ctx,
-                    TaskPhase::Refinement,
-                    entities::WORKFLOW_RUN,
+                    TaskKind::Refine(Entity::WorkflowRun),
                     Some(entity_id),
                     TaskPriority::NORMAL,
                 );
@@ -856,53 +806,31 @@ impl MirrorWorker {
             .write_workflow_jobs(&run.scope, run.tenant_id, jobs)
             .await?;
         run.tally(|s| s.workflow_jobs_synced += count);
-        self.mark_refined(entities::WORKFLOW_RUN, &run_id.to_string())
+        self.mark_refined(Entity::WorkflowRun, &run_id.to_string())
             .await
     }
 }
 
 #[async_trait]
 impl Worker for MirrorWorker {
-    fn handles(&self, phase: TaskPhase, entity_type: &str) -> bool {
-        match phase {
-            TaskPhase::Discovery => entity_type == REPOSITORY_ENTITY,
-            TaskPhase::Indexing => matches!(
-                entity_type,
-                families::ISSUES
-                    | families::PULL_REQUESTS
-                    | families::COMMITS
-                    | families::METADATA
-                    | families::ACTIONS
-            ),
-            TaskPhase::Refinement => matches!(
-                entity_type,
-                entities::ISSUE
-                    | entities::PULL_REQUEST
-                    | entities::COMMIT
-                    | entities::WORKFLOW_RUN
-            ),
-            TaskPhase::Verification => entity_type == entities::PULL_REQUEST,
-            TaskPhase::ChangeDetection => false,
-        }
+    fn handles(&self, _kind: TaskKind) -> bool {
+        true
     }
 
     async fn execute(&self, ctx: &WorkerContext, task: &ExtractionTask) -> Result<(), DomainError> {
-        match (task.phase, task.entity_type.as_str()) {
-            (TaskPhase::Discovery, _) => self.discover(ctx).await,
-            (TaskPhase::Indexing, families::ISSUES) => self.index_issues(ctx).await,
-            (TaskPhase::Indexing, families::PULL_REQUESTS) => self.index_pull_requests(ctx).await,
-            (TaskPhase::Indexing, families::COMMITS) => self.index_commits(ctx).await,
-            (TaskPhase::Indexing, families::METADATA) => self.index_metadata().await,
-            (TaskPhase::Indexing, families::ACTIONS) => self.index_actions(ctx).await,
-            (TaskPhase::Refinement, entities::ISSUE) => self.refine_issue(task).await,
-            (TaskPhase::Refinement | TaskPhase::Verification, entities::PULL_REQUEST) => {
-                self.refine_pull_request(ctx, task).await
-            }
-            (TaskPhase::Refinement, entities::COMMIT) => self.refine_commit(task).await,
-            (TaskPhase::Refinement, entities::WORKFLOW_RUN) => self.refine_workflow_run(task).await,
-            (phase, other) => Err(DomainError::internal(format!(
-                "no handler for {phase} task of type {other}"
-            ))),
+        match task.kind {
+            TaskKind::Discover => self.discover(ctx).await,
+            TaskKind::Index(Family::Issues) => self.index_issues(ctx).await,
+            TaskKind::Index(Family::PullRequests) => self.index_pull_requests(ctx).await,
+            TaskKind::Index(Family::Commits) => self.index_commits(ctx).await,
+            TaskKind::Index(Family::Metadata) => self.index_metadata().await,
+            TaskKind::Index(Family::Actions) => self.index_actions(ctx).await,
+            TaskKind::Refine(entity) | TaskKind::Verify(entity) => match entity {
+                Entity::Issue => self.refine_issue(task).await,
+                Entity::PullRequest => self.refine_pull_request(ctx, task).await,
+                Entity::Commit => self.refine_commit(task).await,
+                Entity::WorkflowRun => self.refine_workflow_run(task).await,
+            },
         }
     }
 }
@@ -985,7 +913,7 @@ fn entity_number(task: &ExtractionTask) -> Result<i64, DomainError> {
         .ok_or_else(|| {
             DomainError::internal(format!(
                 "{} task without a numeric entity id: {:?}",
-                task.entity_type, task.entity_id
+                task.kind, task.entity_id
             ))
         })
 }

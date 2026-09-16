@@ -5,6 +5,7 @@ use chrono::{DateTime, Duration, Utc};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
+use super::task::Entity;
 use crate::domain::error::DomainError;
 use crate::domain::repo::{EntityFingerprintRecord, EntityFingerprintRepository};
 
@@ -78,28 +79,21 @@ fn hash(canonical: &str) -> String {
 }
 
 #[must_use]
-pub fn family_ttl(family: &str, terminal: bool) -> Option<Duration> {
-    match family {
-        entities::COMMIT => (!terminal).then(|| Duration::hours(1)),
-        entities::PULL_REQUEST => Some(if terminal {
+pub fn family_ttl(entity: Entity, terminal: bool) -> Option<Duration> {
+    match entity {
+        Entity::Commit => (!terminal).then(|| Duration::hours(1)),
+        Entity::PullRequest => Some(if terminal {
             Duration::days(7)
         } else {
             Duration::hours(2)
         }),
-        entities::ISSUE => Some(if terminal {
+        Entity::Issue => Some(if terminal {
             Duration::days(7)
         } else {
             Duration::hours(4)
         }),
-        _ => Some(Duration::days(1)),
+        Entity::WorkflowRun => Some(Duration::days(1)),
     }
-}
-
-pub mod entities {
-    pub const ISSUE: &str = "issue";
-    pub const PULL_REQUEST: &str = "pull_request";
-    pub const COMMIT: &str = "commit";
-    pub const WORKFLOW_RUN: &str = "workflow_run";
 }
 
 pub struct ChangeGate {
@@ -121,7 +115,7 @@ impl ChangeGate {
         scope: &AccessScope,
         tenant_id: Uuid,
         repo_id: i64,
-        family: &str,
+        entity: Entity,
         entity_id: &str,
         inputs: &GateInputs,
         now: DateTime<Utc>,
@@ -129,9 +123,9 @@ impl ChangeGate {
     ) -> Result<Option<GateReason>, DomainError> {
         let stored = self
             .fingerprints
-            .find(scope, repo_id, family, entity_id)
+            .find(scope, repo_id, entity.as_str(), entity_id)
             .await?;
-        let reason = evaluate_refinement_gate(stored.as_ref(), inputs, family, now, force);
+        let reason = evaluate_refinement_gate(stored.as_ref(), inputs, entity, now, force);
 
         let refinement_status = if reason.is_some() {
             REFINEMENT_PENDING.to_owned()
@@ -151,7 +145,7 @@ impl ChangeGate {
                 tenant_id,
                 EntityFingerprintRecord {
                     repo_id,
-                    family: family.to_owned(),
+                    family: entity.as_str().to_owned(),
                     entity_id: entity_id.to_owned(),
                     fingerprint: inputs.fingerprint.clone(),
                     updated_at: inputs.updated_at.clone(),
@@ -173,13 +167,13 @@ impl ChangeGate {
         scope: &AccessScope,
         tenant_id: Uuid,
         repo_id: i64,
-        family: &str,
+        entity: Entity,
         entity_id: &str,
         now: DateTime<Utc>,
     ) -> Result<(), DomainError> {
         let Some(stored) = self
             .fingerprints
-            .find(scope, repo_id, family, entity_id)
+            .find(scope, repo_id, entity.as_str(), entity_id)
             .await?
         else {
             return Ok(());
@@ -202,7 +196,7 @@ impl ChangeGate {
 fn evaluate_refinement_gate(
     stored: Option<&EntityFingerprintRecord>,
     inputs: &GateInputs,
-    family: &str,
+    entity: Entity,
     now: DateTime<Utc>,
     force: bool,
 ) -> Option<GateReason> {
@@ -221,7 +215,7 @@ fn evaluate_refinement_gate(
     if stored.refinement_status != REFINEMENT_COMPLETE {
         return Some(GateReason::Incomplete);
     }
-    let ttl = family_ttl(family, inputs.terminal)?;
+    let ttl = family_ttl(entity, inputs.terminal)?;
     let fresh = stored
         .last_refined_at
         .as_deref()

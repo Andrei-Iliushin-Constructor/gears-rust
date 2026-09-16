@@ -19,17 +19,16 @@ use chrono::{DateTime, Utc};
 use strum::IntoEnumIterator as _;
 use uuid::Uuid;
 
-use super::task::{ExtractionTask, Lane, NewTask, TaskPhase, TaskStatus};
+use super::task::{ExtractionTask, Lane, NewTask, TaskKind, TaskPhase, TaskStatus};
 
-/// Idempotency key: a task is unique per `(session, phase, entity_type,
-/// entity_id)`. The session already belongs to exactly one tenant, so tenancy
+/// Idempotency key: a task is unique per `(session, kind, entity_id)`. The
+/// session already belongs to exactly one tenant, so tenancy
 /// is carried by the key without a separate column.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct DedupKey {
     tenant_id: Uuid,
     session_id: Uuid,
-    phase: TaskPhase,
-    entity_type: String,
+    kind: TaskKind,
     entity_id: Option<String>,
     attempt: u32,
 }
@@ -39,8 +38,7 @@ impl DedupKey {
         Self {
             tenant_id: task.tenant_id,
             session_id: task.session_id,
-            phase: task.phase,
-            entity_type: task.entity_type.clone(),
+            kind: task.kind,
             entity_id: task.entity_id.clone(),
             attempt: task.attempt,
         }
@@ -97,7 +95,7 @@ impl TaskQueue {
     }
 
     /// Idempotently insert a new task: a second enqueue of the same
-    /// `(session, phase, entity_type, entity_id)` is a no-op.
+    /// `(session, kind, entity_id)` is a no-op.
     pub fn enqueue_task(&self, task: &NewTask) {
         let mut inner = self.lock();
         let key = DedupKey::of(task);
@@ -108,8 +106,7 @@ impl TaskQueue {
             id: Uuid::new_v4(),
             session_id: task.session_id,
             tenant_id: task.tenant_id,
-            phase: task.phase,
-            entity_type: task.entity_type.clone(),
+            kind: task.kind,
             entity_id: task.entity_id.clone(),
             priority: task.priority,
             attempt: task.attempt,
@@ -118,7 +115,7 @@ impl TaskQueue {
         };
         inner
             .pending
-            .entry((row.session_id, row.phase))
+            .entry((row.session_id, row.kind.phase()))
             .or_default()
             .insert(OrderKey::of(&row), row.id);
         inner.dedup.insert(key, row.id);
@@ -170,7 +167,7 @@ impl TaskQueue {
                             inner
                                 .by_id
                                 .get(id)
-                                .is_some_and(|task| Lane::of_entity_type(&task.entity_type) == lane)
+                                .is_some_and(|task| Lane::of(task.kind) == lane)
                         })
                     })
                     .map(|(k, id)| (p, *k, *id))
@@ -205,7 +202,7 @@ impl TaskQueue {
         let Some(task) = inner.by_id.get(&task_id).cloned() else {
             return;
         };
-        let bucket_key: BucketKey = (task.session_id, task.phase);
+        let bucket_key: BucketKey = (task.session_id, task.kind.phase());
         match task.status {
             TaskStatus::Running => {
                 if let Some(count) = inner.running.get_mut(&bucket_key) {
@@ -257,7 +254,7 @@ impl TaskQueue {
         inner
             .by_id
             .values()
-            .filter(|task| task.session_id == session_id && task.phase == phase)
+            .filter(|task| task.session_id == session_id && task.kind.phase() == phase)
             .count()
             .try_into()
             .unwrap_or(u64::MAX)
@@ -268,7 +265,7 @@ impl TaskQueue {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::domain::sync::task::TaskPriority;
+    use crate::domain::sync::task::{Entity, TaskPriority};
 
     fn all_phases() -> Vec<TaskPhase> {
         TaskPhase::iter().collect()
@@ -278,8 +275,7 @@ mod tests {
         NewTask {
             session_id: session,
             tenant_id: Uuid::nil(),
-            phase: TaskPhase::Discovery,
-            entity_type: "repository".to_owned(),
+            kind: TaskKind::Discover,
             entity_id: None,
             priority: TaskPriority::NORMAL,
             attempt: 0,
@@ -290,20 +286,18 @@ mod tests {
         NewTask {
             session_id: session,
             tenant_id: Uuid::nil(),
-            phase: TaskPhase::Refinement,
-            entity_type: "issue".to_owned(),
+            kind: TaskKind::Refine(Entity::Issue),
             entity_id: Some(entity_id.to_owned()),
             priority,
             attempt: 0,
         }
     }
 
-    fn lane_task(session: Uuid, tenant: Uuid, entity_type: &str, entity_id: &str) -> NewTask {
+    fn lane_task(session: Uuid, tenant: Uuid, entity: Entity, entity_id: &str) -> NewTask {
         NewTask {
             session_id: session,
             tenant_id: tenant,
-            phase: TaskPhase::Refinement,
-            entity_type: entity_type.to_owned(),
+            kind: TaskKind::Refine(entity),
             entity_id: Some(entity_id.to_owned()),
             priority: TaskPriority::NORMAL,
             attempt: 0,
@@ -314,8 +308,8 @@ mod tests {
     fn the_same_task_for_two_tenants_is_kept_apart() {
         let session = Uuid::new_v4();
         let queue = TaskQueue::new();
-        let one = lane_task(session, Uuid::new_v4(), "issue", "11");
-        let other = lane_task(session, Uuid::new_v4(), "issue", "11");
+        let one = lane_task(session, Uuid::new_v4(), Entity::Issue, "11");
+        let other = lane_task(session, Uuid::new_v4(), Entity::Issue, "11");
 
         queue.enqueue_task(&one);
         queue.enqueue_task(&other);
@@ -333,8 +327,8 @@ mod tests {
         let tenant = Uuid::new_v4();
         let queue = TaskQueue::new();
 
-        queue.enqueue_task(&lane_task(session, tenant, "issue", "11"));
-        queue.enqueue_task(&lane_task(session, tenant, "issue", "11"));
+        queue.enqueue_task(&lane_task(session, tenant, Entity::Issue, "11"));
+        queue.enqueue_task(&lane_task(session, tenant, Entity::Issue, "11"));
 
         assert_eq!(queue.count_for_phase(session, TaskPhase::Refinement), 1);
     }
@@ -344,14 +338,14 @@ mod tests {
         let session = Uuid::new_v4();
         let tenant = Uuid::new_v4();
         let queue = TaskQueue::new();
-        queue.enqueue_task(&lane_task(session, tenant, "pull_request", "13"));
-        queue.enqueue_task(&lane_task(session, tenant, "issue", "11"));
+        queue.enqueue_task(&lane_task(session, tenant, Entity::PullRequest, "13"));
+        queue.enqueue_task(&lane_task(session, tenant, Entity::Issue, "11"));
 
         let claimed = queue
             .claim_next_task_in_lane(session, &[TaskPhase::Refinement], Lane::Issue)
             .expect("the issue lane has work");
 
-        assert_eq!(claimed.entity_type, "issue");
+        assert_eq!(claimed.kind, TaskKind::Refine(Entity::Issue));
     }
 
     #[test]
@@ -359,7 +353,7 @@ mod tests {
         let session = Uuid::new_v4();
         let tenant = Uuid::new_v4();
         let queue = TaskQueue::new();
-        queue.enqueue_task(&lane_task(session, tenant, "issue", "11"));
+        queue.enqueue_task(&lane_task(session, tenant, Entity::Issue, "11"));
 
         assert!(
             queue
@@ -370,10 +364,16 @@ mod tests {
 
     #[test]
     fn every_other_family_falls_into_the_generic_lane() {
-        assert_eq!(Lane::of_entity_type("pull_request"), Lane::PullRequest);
-        assert_eq!(Lane::of_entity_type("issue"), Lane::Issue);
-        assert_eq!(Lane::of_entity_type("commit"), Lane::Generic);
-        assert_eq!(Lane::of_entity_type("workflow_run"), Lane::Generic);
+        assert_eq!(
+            Lane::of(TaskKind::Refine(Entity::PullRequest)),
+            Lane::PullRequest
+        );
+        assert_eq!(Lane::of(TaskKind::Refine(Entity::Issue)), Lane::Issue);
+        assert_eq!(Lane::of(TaskKind::Refine(Entity::Commit)), Lane::Generic);
+        assert_eq!(
+            Lane::of(TaskKind::Refine(Entity::WorkflowRun)),
+            Lane::Generic
+        );
     }
     #[test]
     fn enqueue_is_idempotent() {
@@ -428,7 +428,7 @@ mod tests {
         let first = queue
             .claim_next_task_in(session, &all_phases())
             .expect("first claim");
-        assert_eq!(first.phase, TaskPhase::Discovery);
+        assert_eq!(first.kind, TaskKind::Discover);
     }
 
     #[test]

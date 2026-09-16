@@ -39,8 +39,7 @@ use super::repo::{
 };
 use super::scope::ScopeConfig;
 use super::sync::{
-    ChangeGate, MirrorWorker, RepoPhaseRunner, RunState, SweepWatermark, TaskPhase, Worker,
-    sweep_families,
+    ChangeGate, Family, MirrorWorker, RepoPhaseRunner, RunState, SweepWatermark, TaskKind, Worker,
 };
 use super::validate::{repo_full_name, validate_commit_sha};
 
@@ -3664,7 +3663,7 @@ impl Service {
         if let Some(discovery) = report
             .failures
             .iter()
-            .position(|failure| failure.phase == TaskPhase::Discovery)
+            .position(|failure| failure.kind == Some(TaskKind::Discover))
         {
             return Err(report.failures.swap_remove(discovery).error);
         }
@@ -3685,11 +3684,7 @@ impl Service {
             )));
         }
 
-        for family in [
-            sweep_families::ISSUES,
-            sweep_families::PULL_REQUESTS,
-            sweep_families::COMMITS,
-        ] {
+        for family in Family::SWEPT {
             if run.is_swept(family) {
                 self.sweep_watermark
                     .promote(
