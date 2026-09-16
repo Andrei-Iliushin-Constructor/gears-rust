@@ -14,7 +14,9 @@ use uuid::Uuid;
 
 use crate::domain::admission::Precondition;
 use crate::domain::admission::fingerprint::{RequestFingerprint, ScopeHash};
-use crate::domain::ports::{NewOperation, NewOperationItem, OperationItemRow, OperationRow};
+use crate::domain::ports::{
+    ItemSuccess, NewOperation, NewOperationItem, OperationItemRow, OperationRow,
+};
 use crate::infra::storage::entity::enums::{OperationItemStatus, OperationStatus};
 use crate::infra::storage::entity::{operation, operation_item};
 
@@ -303,10 +305,10 @@ impl OperationRepo {
         runner: &impl DBRunner,
         scope: &AccessScope,
         item_id: i64,
-        revision_no: i32,
-        resource_version: i64,
+        outcome: ItemSuccess,
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError> {
+        let (revision_no, resource_version) = outcome.columns();
         let result = operation_item::Entity::update_many()
             .secure()
             .col_expr(
@@ -319,11 +321,11 @@ impl OperationRepo {
             )
             .col_expr(
                 operation_item::Column::ResultRevisionNo,
-                Expr::value(Some(revision_no)),
+                Expr::value(revision_no),
             )
             .col_expr(
                 operation_item::Column::ResultResourceVersion,
-                Expr::value(Some(resource_version)),
+                Expr::value(resource_version),
             )
             .col_expr(operation_item::Column::StartedAt, Expr::value(now))
             .col_expr(operation_item::Column::CompletedAt, Expr::value(now))

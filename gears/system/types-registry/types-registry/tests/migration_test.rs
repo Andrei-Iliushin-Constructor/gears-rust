@@ -66,8 +66,8 @@ fn stmt(db: &DatabaseConnection, sql: impl Into<String>) -> Statement {
     Statement::from_string(db.get_database_backend(), sql.into())
 }
 
-/// Fresh in-memory SQLite with the initial migration applied and FK
-/// enforcement on — SQLite leaves foreign keys off by default, so the
+/// Fresh in-memory `SQLite` with the initial migration applied and FK
+/// enforcement on — `SQLite` leaves foreign keys off by default, so the
 /// composite-FK test would silently no-op without the PRAGMA.
 async fn migrated_db() -> DatabaseConnection {
     let db = Database::connect("sqlite::memory:")
@@ -227,7 +227,7 @@ async fn an_existing_operation_item_gains_compat_forced_reading_false() {
     );
 }
 
-/// SQLite's INTEGER boolean needs an explicit 0/1 check.
+/// `SQLite`'s INTEGER boolean needs an explicit 0/1 check.
 #[tokio::test]
 async fn the_lowered_compat_forced_boolean_refuses_a_value_outside_zero_and_one() {
     let db = migrated_db().await;

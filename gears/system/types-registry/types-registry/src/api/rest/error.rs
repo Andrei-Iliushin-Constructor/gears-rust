@@ -153,6 +153,28 @@ impl From<WorkerError> for CanonicalError {
                 &format!("operation item {item_id} carries no request payload"),
                 "admission",
             ),
+            WorkerError::MissingItemWrite { item_id } => opaque_internal(
+                &format!(
+                    "the commit path for operation item {item_id} recorded no terminal item write"
+                ),
+                "admission",
+            ),
+            WorkerError::MissingPrediction { item_id } => opaque_internal(
+                &format!("the dry-run pass left operation item {item_id} without a prediction"),
+                "admission",
+            ),
+            // Corruption, not input: acceptance canonicalized this identifier
+            // before the row was written.
+            WorkerError::StoredIdentifierUnparsable {
+                item_id,
+                gts_id,
+                reason,
+            } => opaque_internal(
+                &format!(
+                    "operation item {item_id} holds an unparsable stored identifier '{gts_id}': {reason}"
+                ),
+                "admission",
+            ),
             // Kept only for exhaustiveness: `run_operation` catches this one and
             // reports the outcome the winning pass recorded, so it does not reach a
             // handler. If it ever does, it is a worker bug and not a client's.
@@ -224,8 +246,6 @@ impl From<WorkerError> for CanonicalError {
 mod violation_field {
     pub const IDEMPOTENCY_KEY: &str = "Idempotency-Key";
     pub const ITEMS: &str = "items";
-    pub const KIND: &str = "kind";
-    pub const DRY_RUN: &str = "dry_run";
     pub const FORCE: &str = "force";
     pub const EXPECTED_RESOURCE_VERSION: &str = "expected_resource_version";
 }
@@ -291,16 +311,6 @@ impl From<AcceptanceError> for CanonicalError {
                 format!("{count} entities exceeds the limit of {limit} per request"),
                 field::VALIDATION_FAILED,
             ),
-            AcceptanceError::UnsupportedOperationKind => invalid_field(
-                vf::KIND,
-                "only registration is accepted; deletion is not available yet".to_owned(),
-                field::VALIDATION_FAILED,
-            ),
-            AcceptanceError::DryRunNotAccepted => invalid_field(
-                vf::DRY_RUN,
-                "dry_run is not available yet; omit it or set it to false".to_owned(),
-                field::VALIDATION_FAILED,
-            ),
 
             // --- the candidate identifier -------------------------------------
             AcceptanceError::InvalidIdentifier { gts_id, reason } => invalid_candidate(
@@ -354,6 +364,23 @@ impl From<AcceptanceError> for CanonicalError {
                 gts_id,
                 field::ENTITY_FIELD,
                 format!("'{gts_id}' carries no document, which a registration requires"),
+                field::VALIDATION_FAILED,
+            ),
+            // Named on the precondition field rather than on the entity: what is
+            // missing is the version, and "delete if present" is not the fallback.
+            AcceptanceError::DeletionRequiresVersion { gts_id } => invalid_candidate(
+                gts_id,
+                vf::EXPECTED_RESOURCE_VERSION,
+                format!(
+                    "deleting '{gts_id}' requires a positive expected_resource_version; \
+                     an absent one is not a request to delete whatever is there"
+                ),
+                field::VALIDATION_FAILED,
+            ),
+            AcceptanceError::DeletionCarriesContent { gts_id } => invalid_candidate(
+                gts_id,
+                field::ENTITY_FIELD,
+                format!("deleting '{gts_id}' takes no document, and nothing would read one"),
                 field::VALIDATION_FAILED,
             ),
             AcceptanceError::AuthoredDocumentTooLarge {
@@ -523,16 +550,6 @@ mod tests {
             (
                 AcceptanceError::BatchTooLarge { count: 2, limit: 1 },
                 violation_field::ITEMS,
-                field::VALIDATION_FAILED,
-            ),
-            (
-                AcceptanceError::UnsupportedOperationKind,
-                violation_field::KIND,
-                field::VALIDATION_FAILED,
-            ),
-            (
-                AcceptanceError::DryRunNotAccepted,
-                violation_field::DRY_RUN,
                 field::VALIDATION_FAILED,
             ),
             (
