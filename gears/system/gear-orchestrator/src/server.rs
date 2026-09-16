@@ -1219,10 +1219,13 @@ mod tests {
 
         // Enforcing listener, but the entire DirectoryService is exempted — a
         // misconfiguration that must not become an "act on any gear" backdoor.
-        let authenticator = DynInternalAuthenticator::new(SharedSecretInternalAuthenticator::new(
-            SecretString::from("dev-internal-token"),
-            "peer".to_owned(),
-        ));
+        let authenticator = DynInternalAuthenticator::new(
+            SharedSecretInternalAuthenticator::try_new(
+                SecretString::from("dev-internal-token"),
+                "peer".to_owned(),
+            )
+            .expect("a non-empty secret"),
+        );
         let auth_layer = InternalAuthGrpcLayer::new(authenticator)
             .with_exempt_prefixes(vec![format!("/{DIRECTORY_SERVICE_NAME}/")]);
 
