@@ -1317,6 +1317,7 @@ async fn build_internal_authenticator(
             let auth = toolkit_k8s_auth::build_cached_k8s_authenticator(
                 audiences,
                 Some(toolkit_security::DEFAULT_TOKEN_REVIEW_CACHE_TTL),
+                None,
             )
             .await
             .map_err(|e| {

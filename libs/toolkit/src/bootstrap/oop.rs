@@ -768,6 +768,7 @@ async fn build_internal_authenticator(
             let authenticator = toolkit_k8s_auth::build_cached_k8s_authenticator(
                 audiences,
                 Some(toolkit_security::DEFAULT_TOKEN_REVIEW_CACHE_TTL),
+                None,
             )
             .await
             .context("failed to initialize Kubernetes TokenReview authenticator")?;

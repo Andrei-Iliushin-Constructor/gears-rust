@@ -185,7 +185,7 @@ async fn build_internal_authenticator(
             // short-lived positive cache.
             let cache_ttl =
                 (cache_ttl_secs > 0).then(|| std::time::Duration::from_secs(cache_ttl_secs));
-            let auth = toolkit_k8s_auth::build_cached_k8s_authenticator(audiences, cache_ttl)
+            let auth = toolkit_k8s_auth::build_cached_k8s_authenticator(audiences, cache_ttl, None)
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!("failed to init Kubernetes TokenReview authenticator: {e}")

@@ -61,18 +61,24 @@ pub const MAX_TOKEN_REVIEW_CACHE_TTL: Duration = Duration::from_mins(5);
 /// tokens, not to widen any acceptance window.
 const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(1);
 
-/// How long a single backend validation may take before it is abandoned.
+/// Default deadline for the whole [`InternalAuthenticator::authenticate`]
+/// call, overridable per instance with
+/// [`CachingInternalAuthenticator::with_authentication_timeout`].
 ///
-/// The backend call happens while the per-token single-flight lock is held, so
-/// a backend that never answers would otherwise park every caller presenting
-/// that token for as long as it stays unresponsive — with no deadline, since
-/// the waiters are blocked on the lock rather than on the call. Bounding the
-/// call converts an indefinite hang into an `Unavailable` a caller can act on.
+/// The name says "authentication", not "backend": the deadline covers the
+/// per-token single-flight lock wait as well as the backend round-trip. A
+/// backend call alone would not have been enough -- three concurrent callers
+/// presenting the same token against a hung backend each started their own
+/// timer only on reaching the front of the queue, so they finished 1x, 2x and
+/// 3x the deadline apart instead of each failing within one deadline of its
+/// own arrival. Bounding the whole call converts an indefinite hang, or an
+/// indefinite queue, into an `Unavailable` every caller can act on within the
+/// same window.
 ///
-/// This is a request deadline, deliberately unrelated to the cache TTL: it is
-/// sized for how long a `TokenReview` round-trip may reasonably take, not for
-/// how long its answer stays usable.
-pub const TOKEN_REVIEW_BACKEND_TIMEOUT: Duration = Duration::from_secs(10);
+/// A request deadline, deliberately unrelated to the cache TTL: it is sized
+/// for how long a `TokenReview` round-trip (plus queueing behind it) may
+/// reasonably take, not for how long a cached answer stays usable.
+pub const DEFAULT_AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Amortizes the expired-entry sweep: a full scan of the cache runs only
 /// every `SWEEP_INTERVAL`-th insert rather than on every single one.
@@ -330,6 +336,10 @@ fn clamped_expiry(token: &str, now: Instant, ttl: Duration) -> Instant {
 pub struct CachingInternalAuthenticator<A> {
     inner: A,
     ttl: Duration,
+    /// Deadline for the whole `authenticate` call. Defaults to
+    /// [`DEFAULT_AUTHENTICATION_TIMEOUT`]; override with
+    /// [`with_authentication_timeout`](Self::with_authentication_timeout).
+    authentication_timeout: Duration,
     cache: Mutex<ExpiringCache>,
     /// Per-token single-flight locks: concurrent misses for the same token
     /// serialize here instead of each issuing a backend call.
@@ -360,6 +370,7 @@ impl<A> CachingInternalAuthenticator<A> {
         Ok(Self {
             inner,
             ttl,
+            authentication_timeout: DEFAULT_AUTHENTICATION_TIMEOUT,
             cache: Mutex::new(ExpiringCache::new()),
             inflight: Mutex::new(HashMap::new()),
             sweep_counter: AtomicU32::new(0),
@@ -372,10 +383,20 @@ impl<A> CachingInternalAuthenticator<A> {
         Self {
             inner,
             ttl: DEFAULT_TOKEN_REVIEW_CACHE_TTL,
+            authentication_timeout: DEFAULT_AUTHENTICATION_TIMEOUT,
             cache: Mutex::new(ExpiringCache::new()),
             inflight: Mutex::new(HashMap::new()),
             sweep_counter: AtomicU32::new(0),
         }
+    }
+
+    /// Override the deadline applied to the whole `authenticate` call
+    /// (including the per-token lock wait), replacing
+    /// [`DEFAULT_AUTHENTICATION_TIMEOUT`].
+    #[must_use]
+    pub fn with_authentication_timeout(mut self, timeout: Duration) -> Self {
+        self.authentication_timeout = timeout;
+        self
     }
 
     /// Look up a still-applicable cached outcome for `token`, evicting it
@@ -507,13 +528,19 @@ impl<A: InternalAuthenticator> CachingInternalAuthenticator<A> {
         // Single-flight: serialize concurrent misses for the same token so a
         // burst of calls collapses into one backend round-trip.
         let lock = self.token_lock(key);
-        let _guard = lock.lock().await;
-        // Cleans up `inflight` on drop too, so cancellation doesn't leak it.
+        // Constructed *before* the lock is acquired, not after: a caller
+        // cancelled while still waiting for the lock -- not yet holding it --
+        // must still release its `inflight` registration. With the guard built
+        // only after a successful `.lock().await`, a waiter cancelled before
+        // that point had no guard at all, so its registration was never
+        // cleaned up and outlived every other reference to it: an unbounded,
+        // per-cancelled-token leak in `inflight`.
         let _release = ReleaseTokenLockOnDrop {
             owner: self,
             key,
             lock: &lock,
         };
+        let _guard = lock.lock().await;
 
         // Another caller may have populated the cache while this one waited.
         // Refresh the cutoff: `now` predates the lock wait, so a stale value
@@ -586,7 +613,7 @@ impl<A: InternalAuthenticator> InternalAuthenticator for CachingInternalAuthenti
         // both clean up on drop, so an abandoned attempt leaves no lock held
         // and no `inflight` entry behind.
         match tokio::time::timeout(
-            TOKEN_REVIEW_BACKEND_TIMEOUT,
+            self.authentication_timeout,
             self.authenticate_at(token, Instant::now()),
         )
         .await
@@ -766,11 +793,28 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn with_authentication_timeout_overrides_the_default() {
+        // A backend slower than the *shortened* deadline must still time out,
+        // even though it would comfortably fit inside the default 10s.
+        let short = Duration::from_millis(50);
+        let cached = CachingInternalAuthenticator::new(CountingAuth::new(), Duration::from_mins(1))
+            .unwrap()
+            .with_authentication_timeout(short);
+        cached.inner.set_delay(short * 2);
+
+        let err = cached
+            .authenticate("tok")
+            .await
+            .expect_err("a backend slower than the overridden deadline must not resolve");
+        assert!(matches!(err, InternalAuthNError::Unavailable));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_hung_backend_times_out_rather_than_parking_every_caller() {
         let cached =
             CachingInternalAuthenticator::new(CountingAuth::new(), Duration::from_mins(1)).unwrap();
         // Longer than the deadline, i.e. a backend that never answers.
-        cached.inner.set_delay(TOKEN_REVIEW_BACKEND_TIMEOUT * 2);
+        cached.inner.set_delay(DEFAULT_AUTHENTICATION_TIMEOUT * 2);
 
         let err = cached
             .authenticate("tok")
@@ -792,7 +836,7 @@ mod tests {
         let cached = Arc::new(
             CachingInternalAuthenticator::new(CountingAuth::new(), Duration::from_mins(1)).unwrap(),
         );
-        cached.inner.set_delay(TOKEN_REVIEW_BACKEND_TIMEOUT * 10);
+        cached.inner.set_delay(DEFAULT_AUTHENTICATION_TIMEOUT * 10);
 
         // `tokio::time::Instant`, not `std::time::Instant`: under a paused
         // clock, tokio fast-forwards to the next timer with no real-time delay,
@@ -816,7 +860,7 @@ mod tests {
                 "a hung backend must surface as Unavailable, got {outcome:?}"
             );
             assert!(
-                elapsed < TOKEN_REVIEW_BACKEND_TIMEOUT * 2,
+                elapsed < DEFAULT_AUTHENTICATION_TIMEOUT * 2,
                 "caller waited {elapsed:?}, i.e. it queued behind another \
                  caller's deadline instead of holding its own"
             );
@@ -829,7 +873,7 @@ mod tests {
         // a long credential like any other.
         let cached =
             CachingInternalAuthenticator::new(CountingAuth::new(), Duration::from_mins(1)).unwrap();
-        cached.inner.set_delay(TOKEN_REVIEW_BACKEND_TIMEOUT * 2);
+        cached.inner.set_delay(DEFAULT_AUTHENTICATION_TIMEOUT * 2);
 
         let huge = "x".repeat(64 * 1024);
         let err = cached
@@ -843,7 +887,7 @@ mod tests {
     async fn a_timed_out_validation_is_not_cached() {
         let cached =
             CachingInternalAuthenticator::new(CountingAuth::new(), Duration::from_mins(1)).unwrap();
-        cached.inner.set_delay(TOKEN_REVIEW_BACKEND_TIMEOUT * 2);
+        cached.inner.set_delay(DEFAULT_AUTHENTICATION_TIMEOUT * 2);
         drop(cached.authenticate("tok").await);
 
         // The backend recovers; the next call must reach it rather than serve a
@@ -1215,6 +1259,59 @@ mod tests {
             cached.inner.calls(),
             1,
             "a waiter that blocked on the single-flight lock must reuse the result the winner stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_waiter_still_releases_its_inflight_registration() {
+        // Regression: `ReleaseTokenLockOnDrop` used to be constructed *after*
+        // `lock.lock().await`. For 32 distinct tokens: A takes the lock and
+        // enters a very slow backend call; B queues behind A on the same
+        // token. Cancelling A first is fine -- its cleanup sees B still holds
+        // a clone and correctly leaves the entry. But cancelling B *before it
+        // resumes* used to leak: B had no guard yet, so nothing ever asked its
+        // entry to remove itself, and it outlived every reference to it.
+        let cached = Arc::new(
+            CachingInternalAuthenticator::new(CountingAuth::new(), Duration::from_mins(1)).unwrap(),
+        );
+        cached.inner.set_delay(Duration::from_secs(30));
+
+        for i in 0..32 {
+            let token = format!("tok-{i}");
+
+            let a = tokio::spawn({
+                let cached = Arc::clone(&cached);
+                let token = token.clone();
+                async move { cached.authenticate(&token).await }
+            });
+            // Let A win the per-token lock and enter the (slow) backend call.
+            tokio::time::sleep(Duration::from_millis(5)).await;
+
+            let b = tokio::spawn({
+                let cached = Arc::clone(&cached);
+                let token = token.clone();
+                async move { cached.authenticate(&token).await }
+            });
+            // Let B register for the same token and start waiting on the lock
+            // A already holds.
+            tokio::time::sleep(Duration::from_millis(5)).await;
+
+            // Abort both back to back, with no `.await` between them: once a
+            // task is marked aborted, tokio drops its future from whatever
+            // state it was suspended in rather than polling it further, so B
+            // is captured genuinely still waiting for the lock -- not given a
+            // chance to run once A's release wakes it.
+            a.abort();
+            b.abort();
+            drop(a.await);
+            drop(b.await);
+        }
+
+        assert_eq!(
+            cached.inflight.lock().len(),
+            0,
+            "every cancelled waiter -- holding the lock or still queued for it -- \
+             must release its `inflight` registration"
         );
     }
 
