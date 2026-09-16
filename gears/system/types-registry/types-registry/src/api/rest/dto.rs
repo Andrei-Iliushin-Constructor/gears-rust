@@ -476,7 +476,13 @@ pub struct SubmitEntityDto {
     /// exist; a literal `0` is refused. A positive version names a content
     /// revision: the entity must exist at exactly that `resource_version`, and a
     /// mismatch fails the candidate terminally rather than rebasing it.
+    ///
+    /// `minimum = 1` documents the refusal of `0` and negatives that acceptance
+    /// already enforces. No `value_type` here, unlike [`DeleteEntityDto`]: this
+    /// property stays nullable, because omitting it is a meaningful request and
+    /// `serde(default)` accepts an explicit `null` as that same omission.
     #[serde(default)]
+    #[schema(minimum = 1)]
     pub expected_resource_version: Option<i64>,
     /// ADR-0004: waive one cross-minor check when the deployment permits it.
     /// Intra-entity revisions are never waivable. The revision records the

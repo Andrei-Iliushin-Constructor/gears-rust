@@ -311,7 +311,7 @@ impl SystemCapability for TypesRegistryGear {
 
 impl DatabaseCapability for TypesRegistryGear {
     /// Managed-state schema plus `ToolKit`-owned outbox migrations from
-    /// `outbox_migrations_with_prefix("types_registry_outbox")`. Keeping outbox DDL
+    /// `outbox_migrations_with_prefix("types_registry__outbox")`. Keeping outbox DDL
     /// out of the initial migration lets `ToolKit` evolve it without local drift.
     fn migrations(&self) -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
         use sea_orm_migration::MigratorTrait;

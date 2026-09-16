@@ -172,7 +172,7 @@ store-build cache. Everything else comes from the workspace.
 |---|---|
 | GTS semantics | `gts` / `gts-id` / `gts-macros` **0.12.0** — **sole** source, no local approximation (`constraint-gts-implementation`). Upgrade from 0.11.0 is part of this task, §7 |
 | Persistence | SeaORM via `toolkit-db` `DBProvider`, `sea-orm-migration` |
-| Async dispatch | `toolkit-db` outbox, leased mode, table prefix `types_registry_outbox` |
+| Async dispatch | `toolkit-db` outbox, leased mode, table prefix `types_registry__outbox` |
 | REST | Axum via `OperationBuilder`, utoipa, RFC-9457 problem details |
 | Errors | `toolkit-canonical-errors` `CanonicalError`, one `From<DomainError>` ladder |
 | Shared state | none held between admissions — reads go to the database, the `gts-rust` store is transient per admission unit (§8.2, D2) |
@@ -369,6 +369,23 @@ returns `409`.
 outbox shell maps its result to `Ok` / `Retry` / `Reject`. Direct calls keep worker/domain
 tests wait-free (§13) and concurrency cases testable with `#[tokio::test]` on SQLite `:memory:`.
 
+**Partitioning.** The admission queue has eight fixed partitions shared by all pods.
+Normal enqueue and startup recovery both select the partition from the operation UUID's
+last two bytes, interpreted big-endian, modulo eight. Different partitions can evaluate
+concurrently; `entity_write_order` still serializes entity-state commits. The outbox's
+default processor limit permits four concurrent processors per pod. Retries delay only
+their partition. Separate operations have no execution or completion ordering guarantee;
+dependent candidates belong in one batch, or the caller awaits and checks the prerequisite
+operation before submitting the next request.
+
+The partition count is persisted: `toolkit-db` refuses to start against a queue created
+with a different count (`PartitionCountMismatch`). This branch targets disposable dev/test
+databases. When upgrading from the single-partition layout, stop all registry pods and
+recreate the dev database, then run migrations and restart with the same build on every pod.
+If resetting only the outbox, recreate its complete schema through its migration as well
+as its migration bookkeeping; nonterminal operations are re-enqueued on startup, while
+outbox delivery attempts and dead letters are discarded. No live repartitioning is provided.
+
 **Where it runs.** Start the outbox at the end of types-registry's `init()`; retain its
 `OutboxHandle` for shutdown. All gears initialize before any stateful `start`, so deferring
 the worker would leave consumer `init()` submissions `pending`.
@@ -401,8 +418,8 @@ inventory reconciliation. Repeated startup is idempotent; no ready-mode barrier 
 
 Acceptance and admission therefore have different executors. Acceptance is always
 synchronous, in the caller's task, inside registry code: the REST handler for API traffic, or
-the local client for an in-process SDK caller. Admission is performed by exactly one outbox
-worker owned by types-registry — one in the system for a single-binary deployment. Seeding is
+the local client for an in-process SDK caller. Admission is performed by the types-registry
+outbox processors, with a database lease per partition shared across pods. Seeding is
 the exception both ways: types-registry accepts and admits it itself, inline, with no outbox.
 
 **Worker, per admission unit:**
@@ -744,7 +761,8 @@ touched.
 **Why the process-local snapshot was rejected.** A snapshot rebuilt after each local
 admission unit cannot satisfy the multi-pod read criterion of §13 — *"two pods, commit on
 A, B's first post-commit read sees it"* (`nfr-multi-pod-correctness`). P0 has no
-invalidation channel between pods: no pub/sub, and the outbox is the committing pod's own.
+invalidation channel between pods: no pub/sub, and the shared admission outbox distributes
+work through partition leases rather than broadcasting commits to every pod.
 Pod B would serve its stale snapshot indefinitely. Admission is protected against exactly
 this by the commit-time revision-vector guard (D4, §8.1 step 4.3), which makes evaluation
 against possibly-stale data safe; **reads have no such guard**, so for them staleness is
@@ -1089,7 +1107,7 @@ Migration notes:
 - `coordination_state` in its own second migration, `m2026NNNN_000002_coordination_state.rs`,
   seeding `entity_write_order` at sequence zero with a migration timestamp; re-running it
   against a database that already has the table and row preserves both.
-- Outbox tables come from `outbox_migrations_with_prefix("types_registry_outbox")`,
+- Outbox tables come from `outbox_migrations_with_prefix("types_registry__outbox")`,
   not from this migration.
 - `routing` is not seeded, because federation has not landed: its migration will seed
   the `routing` row together with `source_claim`.

@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use test_stores::{
-    CasMissHooks, ClaimHooks, DeletionMissHooks, PauseHooks, PausePoint, StoreHooks, TestStores,
+    CasMissHooks, ClaimHooks, DeletionMissHooks, OperationReadFailureHooks, PauseHooks, PausePoint,
+    SlowAdmissionThenStalledAbandonHooks, StaleFirstFindItemsHooks, StallHooks, StoreHooks,
+    TestStores,
 };
 
 use gts::GtsConfig;

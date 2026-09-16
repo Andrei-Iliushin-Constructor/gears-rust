@@ -16,6 +16,17 @@ pub use crate::policy_config::PolicyEntry;
 /// term together are the lease a shutdown has to wait out.
 pub const LEASE_HEADROOM: Duration = Duration::from_secs(2);
 
+/// Largest delivery budget a message can actually spend.
+///
+/// The outbox stores the attempt count in an `i16` and hands the handler the value
+/// from *before* the current delivery's increment (`lease_acquire` increments, then
+/// the strategy subtracts one). A handler that sees `attempts == N` is therefore
+/// running against a stored `N + 1`, and the largest budget it can observe is one
+/// below what the column holds. At `i16::MAX` the delivery that would spend the
+/// budget never happens — its increment overflows the column first — so the bound
+/// would read as configured while stalling the partition instead of bounding it.
+const MAX_DELIVERY_ATTEMPTS: u32 = i16::MAX as u32 - 1;
+
 /// Configuration for the Types Registry gear.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -157,12 +168,13 @@ pub struct WorkerSettings {
     /// Counts every delivery the outbox starts, including one cut short by the
     /// lease timeout: `lease_acquire` increments `attempts` when it takes the lease,
     /// before the handler runs, and the leased retry path deliberately does not
-    /// increment again. What a timeout bypasses is the decision
-    /// and the metric — the handler never returns, so it never rejects and never
-    /// counts. An admission that keeps hanging therefore keeps timing out and keeps
-    /// the single partition blocked, however high `attempts` climbs. Bounding it
-    /// needs the handler to watch its remaining lease (`Batch::remaining()`) and
-    /// give up on its own; that is not done here.
+    /// increment again.
+    ///
+    /// It bounds the deliveries that *admit*: those are numbered `1..=N`, and a
+    /// delivery that reaches a decision ends the message there. Only deliveries the
+    /// lease timeout cut short leave the count to climb, and the one that follows
+    /// them — delivery `N + 1` — admits nothing. It reads the stored status and acks
+    /// or dead-letters, so `N + 1` is where the message stops either way.
     ///
     /// Counted per message because `infra::outbox` runs the processor with
     /// `batch_size(1)`; the outbox's `attempts` is otherwise a per-partition value
@@ -406,16 +418,13 @@ impl TypesRegistryConfig {
                     .to_owned(),
             ));
         }
-        // The outbox counts attempts in an `i16`, so a larger budget is one the
-        // counter can never reach: it would read as "retry forever" while looking
-        // like a configured bound.
-        if self.worker.max_delivery_attempts > i16::MAX.unsigned_abs().into() {
+        if self.worker.max_delivery_attempts > MAX_DELIVERY_ATTEMPTS {
             return Err(ConfigError::Worker(format!(
-                "worker.max_delivery_attempts ({}) must not exceed {}: the outbox stores the \
-                 attempt count in an i16, so a larger budget is unreachable and the message \
-                 would retry forever",
+                "worker.max_delivery_attempts ({}) must not exceed {MAX_DELIVERY_ATTEMPTS}: the \
+                 outbox stores the attempt count in an i16 and the handler sees the value from \
+                 before its own delivery's increment, so a larger budget is one no delivery can \
+                 reach",
                 self.worker.max_delivery_attempts,
-                i16::MAX,
             )));
         }
         Ok(RegistrationPolicy::compile(&self.registration_policy)?)

@@ -4651,6 +4651,7 @@
             ]
           },
           "items": {
+            "description": "No `max_items`: the ceiling is `limits.batch_candidates`, which a deployment\nconfigures. A literal here would be a second, fixed number that disagrees\nwith the server the moment anyone changes that setting. `RegistryService::delete`\nenforces the real one before reading anything.",
             "items": {
               "$ref": "#/components/schemas/DeleteEntityDto"
             },
@@ -17380,8 +17381,9 @@
             "description": "The authored document."
           },
           "expected_resource_version": {
-            "description": "Optimistic precondition. **Omit** to require that the identifier does not\nexist; a literal `0` is refused. A positive version names a content\nrevision: the entity must exist at exactly that `resource_version`, and a\nmismatch fails the candidate terminally rather than rebasing it.",
+            "description": "Optimistic precondition. **Omit** to require that the identifier does not\nexist; a literal `0` is refused. A positive version names a content\nrevision: the entity must exist at exactly that `resource_version`, and a\nmismatch fails the candidate terminally rather than rebasing it.\n\n`minimum = 1` documents the refusal of `0` and negatives that acceptance\nalready enforces. No `value_type` here, unlike [`DeleteEntityDto`]: this\nproperty stays nullable, because omitting it is a meaningful request and\n`serde(default)` accepts an explicit `null` as that same omission.",
             "format": "int64",
+            "minimum": 1,
             "type": [
               "integer",
               "null"

@@ -24,6 +24,7 @@ mod unchanged;
 
 pub mod fingerprint;
 mod graph;
+mod outcome;
 pub mod refresh;
 pub mod revision;
 mod tuning;

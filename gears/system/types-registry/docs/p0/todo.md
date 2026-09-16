@@ -100,7 +100,7 @@ standalone `routing_config` table is never created in any phase.
 - [x] All 9 tables, their PKs, FKs, UNIQUE and CHECK constraints, and the 4 indexes from `database.sql` are created — `idx_tr_operation_status`, `idx_tr_entity_family`, `idx_tr_entity_visibility`, `idx_tr_dependency_to`. Conformance was **measured**, not argued: the Postgres list reproduced `database.sql`'s P0 constraint set 48 for 48 and all three dialects declared the same columns in the same order. That was a one-time measurement — the standing guard behind it was removed after Checkpoint 1
 - [x] Identifier columns are `varchar(1024)` with binary collation and ASCII charset where the backend default is multi-byte — `family_key`, `entity.gts_id`, `operation_item.gts_id`: `varchar(1024) COLLATE "C"` on Postgres, `VARCHAR(1024) CHARACTER SET ascii COLLATE ascii_bin` on `MySQL`, `TEXT COLLATE BINARY` on `SQLite` (its default, stated so a later `COLLATE NOCASE` cannot creep in)
 - [x] Enumerations stored as smallint with CHECKs enumerating allowed values. Two forms, both present and both tested: an explicit `IN` list for `kind`, `status`, `entity_kind` and `dependency.kind`; and the branch CHECK for `ownership_scope`, `plane` and `lifecycle_status`, where no branch matches a third value — `ck_tr_version_family_owner`, `ck_tr_entity_owner`, `ck_tr_operation_plane` and `ck_tr_entity_lifecycle` already close those domains, so adding an `IN` list would have been a constraint `database.sql` does not have
-- [x] `DatabaseCapability::migrations()` returns the Migrator; outbox tables come from `outbox_migrations_with_prefix("types_registry_outbox")`, not from this migration. Both halves are tested: one test asserts the initial migration alone creates **no** outbox table, another applies the gear capability's full set and asserts the 9 managed tables and the prefixed outbox tables all exist
+- [x] `DatabaseCapability::migrations()` returns the Migrator; outbox tables come from `outbox_migrations_with_prefix("types_registry__outbox")`, not from this migration. Both halves are tested: one test asserts the initial migration alone creates **no** outbox table, another applies the gear capability's full set and asserts the 9 managed tables and the prefixed outbox tables all exist
 - [x] Raw SQL appears only in migration infrastructure (`11_database_patterns.md` invariant) — the three statement lists plus the drop list live in `m20260817_000001_initial.rs`, and `m20260904_000002_coordination_state.rs` carries its own three lists plus drop list the same way; no gear code gained SQL
 
 **Verification:**
@@ -1842,7 +1842,7 @@ With `PATH="$HOME/.cargo/bin:$PATH"`, whole-workspace `make clippy`
 
 ### - [x] T21: Outbox dispatch wiring
 
-**Description:** Wire `toolkit-db`'s leased outbox (`types_registry_outbox`) through a
+**Description:** Wire `toolkit-db`'s leased outbox (`types_registry__outbox`) through a
 `LeasedMessageHandler` mapping worker results to `Ok`/`Retry`/`Reject`. Payload: operation UUID only.
 
 **Acceptance criteria:**
@@ -1893,7 +1893,7 @@ them. Worker/domain tests call directly; the passing suite retains its 5 s budge
   `StoreBuild` splits rather than picking a side: `StoreBuildError::is_transient()` retries a
   failed closure read (the same contention `Storage` retries) and treats the parse and shape
   failures as permanent.
-- Retries block the single partition. `worker.max_delivery_attempts` (default 8, capped at
+- Retries block their partition. `worker.max_delivery_attempts` (default 8, capped at
   `i16::MAX` because the outbox stores the count in an `i16`) makes the last attempt reject.
   The processor runs with `batch_size(1)`: `attempts` is per-partition and is handed to every
   message in a read batch, so a larger batch would let unrelated messages share and reset the
@@ -1924,7 +1924,10 @@ them. Worker/domain tests call directly; the passing suite retains its 5 s budge
   Keysets advance while previously returned rows remain non-terminal awaiting admission.
 - `OutboxDispatch` holds a weak reference to break the handler/service/dispatch/outbox
   cycle. Submissions fail after the pipeline is dropped.
-- One partition preserves operation order; `entity_write_order` serializes commits.
+- Eight partitions route by operation UUID tail in both enqueue and recovery, allowing
+  concurrent evaluation across operations/pods; `entity_write_order` serializes commits.
+  Separate operations have no ordering guarantee. Existing single-partition dev outboxes
+  must be recreated (SPEC §8.1).
   `low_latency` avoids pacing consumers waiting during `init()`.
 - Runtime and tests share `infra::outbox::start` settings.
 

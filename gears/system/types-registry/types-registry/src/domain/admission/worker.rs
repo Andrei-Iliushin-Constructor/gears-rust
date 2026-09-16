@@ -13,7 +13,6 @@ use std::time::Instant;
 use time::OffsetDateTime;
 use toolkit_db::secure::{AccessScope, ScopeError};
 use toolkit_db::{DBProvider, DbError};
-use toolkit_macros::domain_model;
 use tracing::{Instrument, Span};
 use uuid::Uuid;
 
@@ -22,6 +21,8 @@ use super::deletion;
 use super::dry_run;
 pub use super::errors::{ItemFailure, WorkerError};
 use super::graph::BatchOrder;
+pub use super::outcome::{ItemOutcome, OperationOutcome};
+use super::outcome::{read_operation, stored_outcome};
 use super::revision::{CommittedUnit, RevisionCommit};
 pub use super::tuning::Tuning;
 use super::tuning::effective_force;
@@ -33,30 +34,6 @@ use crate::domain::enums::{OperationItemStatus, OperationKind, OperationStatus};
 use crate::domain::ports::metrics::{AdmissionMetrics, RefusalStage, TerminalStatus};
 use crate::domain::ports::{OperationItemRow, OperationRow, Stores, commit_write, snapshot_read};
 use crate::observability;
-
-/// What one pass over an operation produced.
-#[domain_model]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OperationOutcome {
-    pub operation_id: Uuid,
-    /// `true` when this pass found the operation already terminal and did nothing.
-    /// A redelivered outbox message lands here.
-    pub already_terminal: bool,
-    pub items: Vec<ItemOutcome>,
-}
-
-/// One candidate's outcome.
-#[domain_model]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ItemOutcome {
-    pub gts_id: String,
-    pub status: OperationItemStatus,
-    /// The Registry Reference of the admitted entity, on success.
-    pub gts_uuid: Option<Uuid>,
-    pub resource_version: Option<i64>,
-    pub revision_no: Option<i32>,
-    pub failure: Option<ItemFailure>,
-}
 
 /// Perform one full admission pass over an operation.
 ///
@@ -340,17 +317,6 @@ async fn commit_prepared(
         .await
 }
 
-/// Names deletion's item-CAS race explicitly instead of hiding it in a nested
-/// `Result<Result<Option<_>, _>, _>`; registration uses [`WorkerError::ItemAlreadyTerminal`].
-enum DeletionCommitOutcome {
-    /// The tombstone and the item's terminal outcome were written together.
-    Recorded(deletion::DeletionCommit),
-    /// Another pass terminalized the item first, so this pass wrote no outcome.
-    /// Its entity write is committed either way — the CAS guards the item row, not
-    /// the tombstone — so the stored outcome is the one to report.
-    LostToAnotherPass,
-}
-
 /// Commit deletion or record refusal. Retry contention safely: all decisions
 /// re-read within the transaction and rollback undoes the attempt. No external
 /// evaluation means no revalidation loop.
@@ -413,16 +379,19 @@ async fn process_deletion(
                 .await?;
                 match committed {
                     Ok(commit) => {
-                        // Commit tombstone and outcome together so leased redelivery sees a terminal item.
+                        // Tombstone and item outcome must commit together: if the item
+                        // CAS loses (another pass already terminalized it), rolling back
+                        // the whole transaction ensures the tombstone does not outlive
+                        // the outcome that should accompany it.
                         let outcome = commit.item_outcome(dry_run);
                         let marked = tx_stores
                             .mark_item_succeeded(tx, &tx_scope, item_id, outcome, now)
                             .await?;
-                        Ok(Ok(if marked {
-                            DeletionCommitOutcome::Recorded(commit)
+                        if marked {
+                            Ok(Ok(commit))
                         } else {
-                            DeletionCommitOutcome::LostToAnotherPass
-                        }))
+                            Err(WorkerError::ItemAlreadyTerminal { item_id })
+                        }
                     }
                     Err(failure) => Ok(Err(failure)),
                 }
@@ -432,7 +401,7 @@ async fn process_deletion(
 
     let committed = match committed {
         Ok(committed) => committed,
-        // Another pass terminalized the item; this pass rolled back.
+        // Another pass terminalized the item; this pass rolled back (including tombstone).
         Err(WorkerError::ItemAlreadyTerminal { item_id }) => {
             return stored_item(stores, db, scope, operation_id, item_id).await;
         }
@@ -440,7 +409,7 @@ async fn process_deletion(
     };
 
     match committed {
-        Ok(DeletionCommitOutcome::Recorded(commit)) => {
+        Ok(commit) => {
             tracing::info!(
                 %operation_id,
                 operation_item_id = item.id,
@@ -462,11 +431,6 @@ async fn process_deletion(
                 revision_no,
                 failure: None,
             })
-        }
-        // Another pass terminalized the item while this pass was committing.
-        // The entity write is already committed, so report the stored outcome.
-        Ok(DeletionCommitOutcome::LostToAnotherPass) => {
-            stored_item(stores, db, scope, operation_id, item.id).await
         }
         Err(failure) => {
             record_failure(
@@ -824,34 +788,6 @@ async fn stored_item(
         .and_then(stored_outcome)
 }
 
-/// Read the operation and its items under one snapshot.
-///
-/// # Errors
-/// [`WorkerError::OperationNotFound`] when the id names no row — an unknown
-/// operation is an infrastructure fault, not a candidate outcome.
-pub(super) async fn read_operation(
-    stores: &Arc<dyn Stores>,
-    db: &DBProvider<WorkerError>,
-    scope: &AccessScope,
-    operation_id: Uuid,
-) -> Result<(OperationRow, Vec<OperationItemRow>), WorkerError> {
-    let stores_tx = Arc::clone(stores);
-    let scope_tx = scope.clone();
-    let found = db
-        .transaction_with_config(snapshot_read(&db.db()), move |tx| {
-            Box::pin(async move {
-                let Some(operation) = stores_tx.find_by_id(tx, &scope_tx, operation_id).await?
-                else {
-                    return Ok(None);
-                };
-                let items = stores_tx.find_items(tx, &scope_tx, operation_id).await?;
-                Ok(Some((operation, items)))
-            })
-        })
-        .await?;
-    found.ok_or(WorkerError::OperationNotFound { operation_id })
-}
-
 /// Move to `running`, ignoring CAS `false`: it cannot distinguish an active pass
 /// from an interrupted one. Before T21's lease/`worker.operation_timeout`, same-key
 /// `Idempotency-Key` replay was the only recovery driver. Proceeding permits duplicate
@@ -898,39 +834,6 @@ async fn mark_completed(
         })
     })
     .await
-}
-
-/// Reconstruct a terminal outcome, deriving `gts_uuid` via `GtsId::to_uuid`.
-/// ADR-0012 requires the Registry Reference on success, including replay;
-/// refusals carry none.
-pub(super) fn stored_outcome(item: &OperationItemRow) -> Result<ItemOutcome, WorkerError> {
-    let terminal_success = matches!(
-        item.status,
-        OperationItemStatus::Succeeded | OperationItemStatus::Unchanged
-    );
-    // Report corrupt identifiers: `.ok()` would hide the cause and return
-    // `gts_uuid: None` on success, violating ADR-0012.
-    let gts_uuid = if terminal_success {
-        Some(
-            gts::GtsId::try_new(&item.gts_id)
-                .map_err(|reason| WorkerError::StoredIdentifierUnparsable {
-                    item_id: item.id,
-                    gts_id: item.gts_id.clone(),
-                    reason: reason.to_string(),
-                })?
-                .to_uuid(),
-        )
-    } else {
-        None
-    };
-    Ok(ItemOutcome {
-        gts_id: item.gts_id.clone(),
-        status: item.status,
-        gts_uuid,
-        resource_version: item.result_resource_version,
-        revision_no: item.result_revision_no,
-        failure: item.error_payload.as_deref().map(ItemFailure::from_payload),
-    })
 }
 
 #[cfg(test)]

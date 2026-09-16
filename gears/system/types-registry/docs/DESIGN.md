@@ -422,6 +422,8 @@ The pipeline is the sole writer of entity state. It owns request identity, opera
 
 The endpoint has one successful acceptance shape: `202 Accepted` with an operation UUID, never an inline result. Admission is asynchronous because dependent revalidation is intentionally unbounded; P2 hooks may add further long-running work. For registration, the caller first batch-reads its identifiers, omits equal authored content, and submits missing entities without `expected_resource_version` and updates with the version it observed. Deletion always supplies the positive version observed for the existing entity. Tenant ownership comes from `SecurityContext`; global registration uses `PlatformSecurityContext`.
 
+Separate operations, including requests accepted in sequence, have no execution or completion ordering guarantee. Dependency ordering applies within one batch. Callers needing a dependency across requests must await and inspect the prerequisite operation's results before submitting the dependent request.
+
 Acceptance reads no registry entity state. It decides only from the request, plane, and startup configuration, so the following failures are synchronous:
 
 1. **Envelope and batch size** — refuses more than 100 candidates.
@@ -1902,7 +1904,7 @@ Registry Source Plugins are registered as well-known GTS Instances and resolved 
 
 #### Platform database
 
-The single authoritative store of §3.7, served by many pods, on SQLite, PostgreSQL, or MySQL. Durable dispatch uses the `toolkit-db` outbox with the `types_registry_outbox` table prefix, currently gated by the experimental `toolkit-db/preview-outbox` feature. `cpt-cf-types-registry-constraint-multi-backend` governs how portability is preserved across the three backends.
+The single authoritative store of §3.7, served by many pods, on SQLite, PostgreSQL, or MySQL. Durable dispatch uses the `toolkit-db` outbox with the `types_registry__outbox` table prefix, currently gated by the experimental `toolkit-db/preview-outbox` feature. `cpt-cf-types-registry-constraint-multi-backend` governs how portability is preserved across the three backends.
 
 #### External Registry Sources
 

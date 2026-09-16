@@ -370,8 +370,10 @@ fn the_enforced_limits_are_never_reported_as_inert() {
     );
 }
 
-/// The outbox counts attempts in an `i16`, so a larger budget is one the counter
-/// can never reach: it would read as "retry forever" while looking like a bound.
+/// The outbox stores the attempt count in an `i16` and hands the handler the value
+/// from before the current delivery's own increment, so the largest budget any
+/// delivery can observe is `i16::MAX - 1`. A budget the counter cannot reach reads
+/// as configured while stalling the partition instead of bounding it.
 #[test]
 fn a_delivery_budget_above_the_outbox_counter_is_rejected() {
     let error = serde_json::from_value::<TypesRegistryConfig>(json!({
@@ -386,10 +388,19 @@ fn a_delivery_budget_above_the_outbox_counter_is_rejected() {
         "got: {error}"
     );
 
+    // `i16::MAX` itself is out: spending that budget needs a delivery whose
+    // increment writes 32768, which the column cannot hold.
+    serde_json::from_value::<TypesRegistryConfig>(json!({
+        "worker": { "max_delivery_attempts": 32767 }
+    }))
+    .expect("deserialize config")
+    .validate()
+    .expect_err("no delivery can reach a budget of 32767, so it must fail the boot");
+
     // The boundary itself is accepted, so this is a ceiling and not a stricter
     // rule than it claims.
     serde_json::from_value::<TypesRegistryConfig>(json!({
-        "worker": { "max_delivery_attempts": 32767 }
+        "worker": { "max_delivery_attempts": 32766 }
     }))
     .expect("deserialize config")
     .validate()

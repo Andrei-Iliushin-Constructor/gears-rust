@@ -8,9 +8,10 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::macros::datetime;
-use toolkit_db::outbox::{LeasedMessageHandler, MessageResult, OutboxHandle, OutboxMessage};
+use toolkit_db::outbox::{MessageResult, OutboxHandle, OutboxMessage};
 use toolkit_db::{DBProvider, DbError};
 use toolkit_gts::gts_id;
+use tracing::instrument::WithSubscriber;
 use uuid::Uuid;
 
 use types_registry::config::TypesRegistryConfig;
@@ -92,6 +93,30 @@ const LAST_ATTEMPT: i16 = 2;
 
 /// Attempt budget used by the handler tests below; a first delivery is `attempts = 0`.
 const MAX_ATTEMPTS: u32 = LAST_ATTEMPT as u32 + 1;
+
+/// A delivery past the budget, which only the lease timeout can produce: a
+/// delivery the handler decides either acks or rejects, so it never comes back.
+const PAST_BUDGET: i16 = LAST_ATTEMPT + 1;
+
+/// Like [`service_without_dispatch`] but with a chosen `operation_timeout`, which
+/// is the budget the handler divides for its own awaits.
+fn service_with_operation_timeout(
+    db: &Arc<DBProvider<DbError>>,
+    ports: Arc<dyn Stores>,
+    operation_timeout: std::time::Duration,
+) -> Arc<RegistryService> {
+    let mut config = TypesRegistryConfig::default();
+    config.worker.operation_timeout = operation_timeout;
+    Arc::new(RegistryService::new(
+        db.db(),
+        ports,
+        RegistrationPolicy::default(),
+        config,
+        Arc::new(NullDispatch),
+        AdmissionMode::Outbox,
+        metrics(),
+    ))
+}
 
 /// Use `NullDispatch` so tests can invoke the handler without a pipeline race.
 fn service_without_dispatch(
@@ -253,7 +278,7 @@ async fn a_storage_failure_during_admission_is_retried() {
     );
 }
 
-/// The attempt budget is what keeps the single partition draining: a transient
+/// The attempt budget is what keeps each partition draining: a transient
 /// failure that never clears must eventually leave the queue.
 #[tokio::test]
 async fn a_transient_failure_on_the_last_attempt_is_dead_lettered() {
@@ -299,6 +324,283 @@ async fn a_transient_failure_on_the_last_attempt_is_dead_lettered() {
         error["reason"],
         json!("admission_abandoned"),
         "the reason must say admission stopped trying, not that the candidate was refused",
+    );
+}
+
+/// A lease timeout drops the handler's future before it decides, so it counts no
+/// outcome — but `lease_acquire` has already incremented `attempts`. Nothing inside
+/// a delivery can bound that; only a later delivery can, by reading how far
+/// `attempts` has run. Past the budget the handler must stop calling `admit` and
+/// terminalize instead, or one admission that keeps hanging keeps its
+/// partition from ever advancing.
+///
+/// `stores()` is the unhooked store here on purpose: admission would *succeed* if
+/// it ran, so a `Reject` can only mean the handler declined to call it.
+#[tokio::test]
+async fn an_admission_past_the_delivery_budget_is_terminalized_without_being_admitted() {
+    let db = test_db_with_outbox().await;
+    let registry = service_without_dispatch(&db, stores());
+    let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
+
+    let accepted = registry
+        .submit(&registration("key", TARGET), NOW)
+        .await
+        .expect("accept");
+    assert_eq!(accepted.status, OperationStatus::Pending);
+
+    let result = handler
+        .admit_payload(accepted.operation_id.to_string().as_bytes(), PAST_BUDGET)
+        .await;
+    assert!(
+        matches!(result, MessageResult::Reject(_)),
+        "a delivery past the budget must leave the queue rather than admit again: {result:?}",
+    );
+
+    let operation = registry
+        .operation(accepted.operation_id)
+        .await
+        .expect("read")
+        .expect("the operation exists");
+    assert_eq!(
+        operation.status,
+        OperationStatus::Completed,
+        "the operation must be terminal, not left running for a delivery that will not come",
+    );
+    assert_eq!(operation.items[0].status, OperationItemStatus::Failed);
+    let error: Value = serde_json::from_str(
+        operation.items[0]
+            .error
+            .as_deref()
+            .expect("an abandoned item carries a stored error payload"),
+    )
+    .expect("the stored payload is JSON");
+    assert_eq!(error["reason"], json!("admission_abandoned"));
+
+    // The entity was never written, which is what "not admitted" has to mean.
+    assert!(
+        registry
+            .entity(&EntityKey::GtsId(TARGET.to_owned()))
+            .await
+            .expect("read")
+            .is_none(),
+        "the handler must not have run admission for a message past its budget",
+    );
+
+    // Out of the recovery set, so the next boot does not re-enqueue it.
+    let recovered = registry
+        .nonterminal_operation_page(None, 128)
+        .await
+        .expect("read the recovery page");
+    assert!(
+        !recovered
+            .iter()
+            .any(|cursor| cursor.id == accepted.operation_id),
+        "an operation abandoned past its budget must not be re-enqueued: {recovered:?}",
+    );
+}
+
+/// The budget counts deliveries, not failures: an earlier delivery may have
+/// admitted the operation and then lost its lease before acking. Abandoning that
+/// one would report failure for work that succeeded, so the status check must ack
+/// it instead — and leave the committed outcomes alone.
+#[tokio::test]
+async fn a_delivery_past_the_budget_acks_an_operation_a_prior_pass_completed() {
+    let db = test_db_with_outbox().await;
+    let registry = service_without_dispatch(&db, stores());
+    let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
+
+    let accepted = registry
+        .submit(&registration("key", TARGET), NOW)
+        .await
+        .expect("accept");
+    registry
+        .admit(accepted.operation_id, NOW)
+        .await
+        .expect("a prior delivery admitted the operation");
+
+    let result = handler
+        .admit_payload(accepted.operation_id.to_string().as_bytes(), PAST_BUDGET)
+        .await;
+    assert!(
+        matches!(result, MessageResult::Ok),
+        "a completed operation must be acked, not dead-lettered, past the budget: {result:?}",
+    );
+
+    let operation = registry
+        .operation(accepted.operation_id)
+        .await
+        .expect("read")
+        .expect("the operation exists");
+    assert_eq!(operation.status, OperationStatus::Completed);
+    assert_eq!(
+        operation.items[0].status,
+        OperationItemStatus::Succeeded,
+        "the prior pass's outcome must survive the budget check unchanged",
+    );
+}
+
+/// The status read past the budget can fail too, and there is nowhere left to put
+/// the message: retrying re-enters the same branch, so a read that keeps failing
+/// would hold its partition forever and drive `attempts` past the `i16` the
+/// outbox stores it in. It must terminalize instead — which is safe in both
+/// directions, since `abandon` touches only undecided items and only a
+/// `pending`/`running` operation row.
+#[tokio::test]
+async fn a_status_read_that_fails_past_the_budget_terminalizes_rather_than_retries() {
+    let db = test_db_with_outbox().await;
+    let registry = service_without_dispatch(&db, common::TestStores::failing_operation_read());
+    let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
+
+    let accepted = registry
+        .submit(&registration("key", TARGET), NOW)
+        .await
+        .expect("accept");
+
+    let result = handler
+        .admit_payload(accepted.operation_id.to_string().as_bytes(), PAST_BUDGET)
+        .await;
+    assert!(
+        matches!(result, MessageResult::Reject(_)),
+        "an unreadable status past the budget must leave the queue, not come back to \
+         the same branch: {result:?}",
+    );
+
+    // Only `find_by_id` is injected, so abandonment — which reads items and writes
+    // through other calls — still lands. Rejecting without terminalizing would also
+    // satisfy the assertion above, so the operation's state is what separates the
+    // two. Read it through an unhooked service, since the hooked one cannot.
+    let unhooked = service_without_dispatch(&db, stores());
+    let operation = unhooked
+        .operation(accepted.operation_id)
+        .await
+        .expect("read")
+        .expect("the operation exists");
+    assert_eq!(
+        operation.status,
+        OperationStatus::Completed,
+        "rejecting the message is not enough; the operation must be terminalized too",
+    );
+    assert_eq!(operation.items[0].status, OperationItemStatus::Failed);
+    let error: Value = serde_json::from_str(
+        operation.items[0]
+            .error
+            .as_deref()
+            .expect("an abandoned item carries a stored error payload"),
+    )
+    .expect("the stored payload is JSON");
+    assert_eq!(
+        error["reason"],
+        json!("admission_abandoned"),
+        "the item must say admission stopped, not that the candidate was refused",
+    );
+}
+
+/// A terminal return value is not enough on its own: `LeasedStrategy` runs the
+/// handler under `timeout_at` and turns a dropped future into `Retry`, so a status
+/// read that never answers would reopen the very loop this branch closes. The
+/// handler has to stop on its own and answer from inside the lease.
+///
+/// Both calls on that path stall, because that is what separates one deadline for
+/// the path from a budget per call: the read stalls, the abandonment that follows
+/// it stalls too, and two individually safe budgets add up to more lease than
+/// there is.
+///
+/// One deadline for the path costs the lease once; a budget per call costs it twice
+/// and overruns. The clock is Tokio's, paused for the measured call: elapsed is then
+/// the timer arithmetic under test and not how busy the machine running it is.
+///
+/// Paused only for that call — the pool's own connect timeout is a timer too, and a
+/// virtual clock that jumps to the next deadline expires it during setup.
+#[tokio::test]
+async fn a_stalled_status_path_is_bounded_by_the_handler_as_a_whole() {
+    const STALL: std::time::Duration = std::time::Duration::from_mins(1);
+    const LEASE: std::time::Duration = std::time::Duration::from_secs(2);
+
+    let db = test_db_with_outbox().await;
+    let registry =
+        service_with_operation_timeout(&db, common::TestStores::stalling_status_path(STALL), LEASE);
+    let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
+
+    let accepted = registry
+        .submit(&registration("key", TARGET), NOW)
+        .await
+        .expect("accept");
+
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    let result = handler
+        .admit_payload(accepted.operation_id.to_string().as_bytes(), PAST_BUDGET)
+        .await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(result, MessageResult::Reject(_)),
+        "a stalled status path must still produce a terminal result: {result:?}",
+    );
+    assert!(
+        elapsed < LEASE,
+        "the handler took {elapsed:?} of a {LEASE:?} lease on a path stalled for {STALL:?}; \
+         the read and the abandonment after it must share one deadline, or two individually \
+         safe budgets spend the lease twice and `timeout_at` decides instead",
+    );
+}
+
+/// The ordinary path spends lease before it abandons anything: admission runs
+/// first, and only its failure leads to the abandonment write. A deadline derived
+/// once admission has returned would hand that write a budget measured from then —
+/// ignoring everything admission spent — and a write that runs past the real
+/// deadline is dropped and returned as a retry, which is what abandoning exists to
+/// avoid. The deadline has to be fixed when the delivery starts.
+///
+/// Sized so the two versions disagree about an outcome rather than about a
+/// duration. Admission spends most of the lease; the abandonment write then takes
+/// longer than the ~200ms actually left but well under the ~900ms a restarted
+/// budget would grant. So the fixed deadline cuts the write off and leaves the
+/// operation for boot recovery, while a restarted one lets it finish and
+/// terminalize. Asserting on which happened needs no clock — real or virtual — and
+/// a virtual one is not available here anyway: this path does enough real database
+/// work that auto-advance jumps to unrelated pool timers.
+#[tokio::test]
+async fn abandoning_after_a_slow_admission_stays_inside_the_delivery_deadline() {
+    const LEASE: std::time::Duration = std::time::Duration::from_secs(1);
+    const SPENT_ADMITTING: std::time::Duration = std::time::Duration::from_millis(700);
+    const ABANDON_STALL: std::time::Duration = std::time::Duration::from_millis(500);
+
+    let db = test_db_with_outbox().await;
+    let registry = service_with_operation_timeout(
+        &db,
+        common::TestStores::slow_admission_then_stalled_abandon(SPENT_ADMITTING, ABANDON_STALL),
+        LEASE,
+    );
+    let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
+
+    let accepted = registry
+        .submit(&registration("key", TARGET), NOW)
+        .await
+        .expect("accept");
+
+    // The last attempt the budget allows, so the failure is abandoned rather than
+    // retried — and the abandonment is on the ordinary path, not the exhausted one.
+    let result = handler
+        .admit_payload(accepted.operation_id.to_string().as_bytes(), LAST_ATTEMPT)
+        .await;
+    assert!(
+        matches!(result, MessageResult::Reject(_)),
+        "a failure on the last attempt must be dead-lettered: {result:?}",
+    );
+
+    let unhooked = service_without_dispatch(&db, stores());
+    let operation = unhooked
+        .operation(accepted.operation_id)
+        .await
+        .expect("read")
+        .expect("the operation exists");
+    assert_eq!(
+        operation.status,
+        OperationStatus::Pending,
+        "the abandonment write must have been cut off by the deadline the delivery started \
+         with; reaching a terminal status here means it ran on a budget measured from when \
+         admission gave up, which is lease the delivery no longer had",
     );
 }
 
@@ -351,11 +653,17 @@ async fn abandoning_an_operation_that_never_ran_still_terminalizes_it() {
     );
 }
 
-/// The stored payload reaches clients through `GET /operations/{id}`, so it carries
-/// a fixed message: the cause is an infrastructure error whose `Display` can name
-/// connection details, SQL and row content.
+/// Infrastructure errors can name connection details, SQL and row content, so
+/// abandonment must sanitize the log, dead-letter reason and client payload.
 #[tokio::test]
-async fn an_abandoned_item_does_not_store_the_infrastructure_cause() {
+async fn abandonment_does_not_expose_the_infrastructure_cause() {
+    let log_dir = common::TestDir::new("abandonment-log");
+    let log_path = log_dir.path().join("admission.log");
+    let log_file = std::fs::File::create(&log_path).expect("create log capture");
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || log_file.try_clone().expect("clone log capture"))
+        .finish();
     let db = test_db_with_outbox().await;
     let registry = service_without_dispatch(&db, common::TestStores::failing_item_success());
     let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
@@ -364,9 +672,23 @@ async fn an_abandoned_item_does_not_store_the_infrastructure_cause() {
         .submit(&registration("key", TARGET), NOW)
         .await
         .expect("accept");
-    handler
+    let result = handler
         .admit_payload(accepted.operation_id.to_string().as_bytes(), LAST_ATTEMPT)
+        .with_subscriber(subscriber)
         .await;
+    let log = std::fs::read_to_string(&log_path).expect("read captured log");
+    assert!(
+        log.contains("types_registry abandoned an admission"),
+        "the abandonment event must be captured: {log}",
+    );
+    assert!(
+        !log.contains("failure injection"),
+        "the infrastructure cause must not reach the log: {log}",
+    );
+    assert!(
+        matches!(result, MessageResult::Reject(ref reason) if reason == "admission_abandoned"),
+        "the dead-letter reason must be stable and sanitized: {result:?}",
+    );
 
     let operation = registry
         .operation(accepted.operation_id)
@@ -379,15 +701,14 @@ async fn an_abandoned_item_does_not_store_the_infrastructure_cause() {
         .expect("an abandoned item carries a stored error payload");
     assert!(
         !stored.contains("failure injection"),
-        "the injected cause must stay in the operator log, not in the client-visible \
-         payload: {stored}",
+        "the injected cause must not reach the client-visible payload: {stored}",
     );
     let error: Value = serde_json::from_str(stored).expect("the stored payload is JSON");
     assert_eq!(error["reason"], json!("admission_abandoned"));
 }
 
-/// Exercise the envelope guard through `LeasedMessageHandler::handle`;
-/// calling `reject_unusable` directly would not detect a missing guard.
+/// Exercise the envelope guard through the body `LeasedHandler::handle` runs per
+/// message; calling `reject_unusable` directly would not detect a missing guard.
 #[tokio::test]
 async fn a_foreign_payload_type_is_rejected_by_the_handler() {
     let db = test_db_with_outbox().await;
@@ -410,7 +731,9 @@ async fn a_foreign_payload_type_is_rejected_by_the_handler() {
         attempts: 0,
     };
 
-    let result = handler.handle(&msg).await;
+    let result = handler
+        .handle_message(&msg, std::time::Duration::from_secs(30))
+        .await;
     assert!(
         matches!(result, MessageResult::Reject(_)),
         "got: {result:?}"
@@ -454,6 +777,154 @@ fn the_payload_is_the_operation_uuid_and_nothing_else() {
 // ---------------------------------------------------------------------------
 // Real delivery
 // ---------------------------------------------------------------------------
+
+/// Fixed UUID tails put these operations in distinct partitions. Use real stored
+/// candidates so completion proves admission, not just consumption of a message.
+async fn seed_partition_operation(
+    db: &Arc<DBProvider<DbError>>,
+    id: Uuid,
+    gts_id: &'static str,
+    dispatch: Arc<dyn OperationDispatch>,
+) {
+    use types_registry::domain::admission::Precondition;
+    use types_registry::domain::admission::fingerprint::{RequestFingerprint, ScopeHash};
+    use types_registry::domain::enums::Plane;
+    use types_registry::domain::ports::{NewOperation, NewOperationItem};
+
+    db.db()
+        .transaction_ref(|tx| {
+            Box::pin(async move {
+                let ports = stores();
+                let scope = common::allow_all();
+                let operation = ports
+                    .insert_operation(
+                        tx,
+                        &scope,
+                        NewOperation {
+                            id,
+                            kind: OperationKind::Registration,
+                            dry_run: false,
+                            plane: Plane::Platform,
+                            tenant_id: None,
+                            principal_id: Uuid::from_u128(1),
+                            idempotency_key: id.to_string(),
+                            idempotency_scope_hash: ScopeHash::from_stored(vec![1; 32]).unwrap(),
+                            request_fingerprint: RequestFingerprint::from_stored(vec![2; 32])
+                                .unwrap(),
+                            now: NOW,
+                        },
+                    )
+                    .await?;
+                ports
+                    .insert_items(
+                        tx,
+                        &scope,
+                        &operation,
+                        &[NewOperationItem {
+                            item_no: 0,
+                            gts_id: gts_id.to_owned(),
+                            precondition: Precondition::MustNotExist,
+                            compat_forced: false,
+                            request_payload: schema(gts_id).to_string(),
+                        }],
+                    )
+                    .await?;
+                dispatch.enqueue(tx, id).await.map_err(DbError::Other)?;
+                Ok(())
+            })
+        })
+        .await
+        .expect("seed operation and dispatch atomically");
+}
+
+/// A stalled admission must not hold independent operations in other partitions.
+/// Exercise both normal enqueue and startup recovery with production wiring.
+async fn assert_partitions_progress_independently(recover_second: bool) {
+    const SECOND: &str = gts_id!("cf.core.outbox.independent.v1~");
+
+    // The paused snapshot owns one connection without taking any DB lock. Keep
+    // one more for active work: SQLite shared-cache cannot run concurrent writer
+    // transactions from multiple sequencers (SQLITE_LOCKED). This test proves
+    // concurrent admission handlers, not concurrent SQLite writers.
+    let dsn = format!(
+        "sqlite:file:tr-partitions-{}?mode=memory&cache=shared",
+        Uuid::new_v4()
+    );
+    let db = common::provider_for_with_outbox(&dsn, 2).await;
+    let first_id = Uuid::from_u128(1);
+    let second_id = Uuid::from_u128(2);
+    seed_partition_operation(&db, first_id, TARGET, Arc::new(NullDispatch)).await;
+
+    let (ports, reached, resume) = common::TestStores::pausing(common::PausePoint::OperationRead);
+    let (registry, dispatch) = service(&db, ports);
+    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
+        .await
+        .expect("start production pipeline");
+    let reached = std::sync::Mutex::new(reached);
+    await_delivery("first admission enters its handler", || async {
+        match reached.lock().unwrap().try_recv() {
+            Ok(()) => Some(()),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+            Err(error) => panic!("admission pause dropped: {error}"),
+        }
+    })
+    .await;
+
+    // Starting a second pipeline also recovers the paused first operation. Its
+    // duplicate must stay on the same leased partition while the second proceeds.
+    let second_handle = if recover_second {
+        seed_partition_operation(&db, second_id, SECOND, Arc::new(NullDispatch)).await;
+        let (_, handle) = started(&db, stores()).await;
+        Some(handle)
+    } else {
+        seed_partition_operation(&db, second_id, SECOND, dispatch).await;
+        None
+    };
+    let operation = await_delivery(
+        "another partition completes while the first is paused",
+        || async {
+            let record = registry.operation(second_id).await.unwrap().unwrap();
+            (record.status == OperationStatus::Completed).then_some(record)
+        },
+    )
+    .await;
+    assert_eq!(operation.items[0].status, OperationItemStatus::Succeeded);
+    assert_eq!(
+        registry
+            .entity(&EntityKey::GtsId(SECOND.to_owned()))
+            .await
+            .unwrap()
+            .unwrap()
+            .resource_version,
+        1
+    );
+    assert_eq!(
+        registry.operation(first_id).await.unwrap().unwrap().status,
+        OperationStatus::Pending
+    );
+
+    resume.send(()).expect("release the first admission");
+    let first = await_delivery("first partition resumes", || async {
+        let record = registry.operation(first_id).await.unwrap().unwrap();
+        (record.status == OperationStatus::Completed).then_some(record)
+    })
+    .await;
+    assert_eq!(first.items[0].status, OperationItemStatus::Succeeded);
+    handle.stop().await;
+    if let Some(handle) = second_handle {
+        handle.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn enqueue_routes_independent_operations_to_different_partitions() {
+    assert_partitions_progress_independently(false).await;
+}
+
+#[tokio::test]
+async fn recovery_preserves_partition_routing_across_pipelines() {
+    assert_partitions_progress_independently(true).await;
+}
 
 /// Prove delivery and readable entity state without a direct worker call or
 /// stateful `start` phase, as required for consumers submitting in `init()` (P3).
