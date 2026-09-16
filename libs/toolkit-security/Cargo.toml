@@ -42,12 +42,6 @@ sha2 = { workspace = true, optional = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 trybuild = { workspace = true }
-tokio = { workspace = true, features = [
-    "macros",
-    "rt",
-    "rt-multi-thread",
-    "time",
-    # `start_paused`: lets the backend-timeout tests run on virtual time instead
-    # of spending the real deadline waiting.
-    "test-util",
-] }
+# "test-util" enables `start_paused`, which lets the backend-timeout tests run
+# on virtual time instead of spending the real deadline waiting.
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "test-util"] }
