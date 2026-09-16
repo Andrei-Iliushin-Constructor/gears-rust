@@ -96,7 +96,7 @@ Three questions deferred by the first phase converge here and are answered toget
 |----------|----------------|
 | **Change Order** | An order carrying `category = change`. Every line targets a subscription that already exists. A change order never spawns a subscription and never replaces one. |
 | **Target Subscription** | The existing subscription a change line applies to, referenced by `targetSubscriptionId` on the line. Owned by Subscriptions; Orders references it and never mutates it directly. |
-| **Change Kind** | The commercial shape of one change line, determined by the **charge kind of the referenced price row**, not by what the target happens to carry already. Two kinds this phase, both increases to the target's **recurring or usage** composition: **`increase_quantity`** (raise the quantity of a `recurring` or `usage` line the target carries) and **`add_component`** (attach a `recurring` or `usage` product or add-on the target does not carry). A line whose charge kind is `one_time` or `one_time_setup` is **not** a change line in either kind — see §5.2. |
+| **Change Kind** | The commercial shape of one change line. Two kinds this phase, both increases to the target's standing composition: **`increase_quantity`** (raise the quantity of a product the target carries) and **`add_component`** (attach a product or add-on the target does not carry). Two separate tests produce it, and they are not interchangeable: the **charge kind** of the referenced price row decides **eligibility** — `recurring` and `usage` are eligible, `one_time` and `one_time_setup` are not change lines at all (§5.2) — and the **target's composition** then decides **which** of the two kinds applies. |
 | **Augment vs Supersede** | An increase **augments**: the target subscription survives with more on it. This is distinct from **supersession** (`supersedesSubscriptionId`), which Subscriptions reserves for a cancel-and-replace pair — cross-currency, cross-region, or frequency change. A change order **MUST NOT** be modeled as a supersession. |
 | **Change Delta** | What the change order adds, per line: an added quantity, or an added component with its own quantity. The delta — not the resulting total — is what is priced, approved, and recorded. |
 | **Delta Price Pin** | The catalog price pin captured on a change line at submit, covering the added quantity only. Structurally the same artifact as the acquisition pin (Lifecycle §1.4); commercially it is the price of growth, not of the original purchase. |
@@ -222,7 +222,13 @@ No module-specific deviations — project defaults apply.
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-changes-fr-chg-line-targeting`
 
-An order with `category = change` **MUST** be accepted, and every one of its lines **MUST** carry a `targetSubscriptionId` identifying an existing subscription. A change line **MUST** additionally carry a **change kind**: `increase_quantity` or `add_component`. Both kinds apply **only** to price rows whose charge kind is `recurring` or `usage`; a line referencing a `one_time` or `one_time_setup` row **MUST** be rejected at submit with a machine-readable reason, because a completed one-time charge has no quantity to raise and repeating it is an acquisition rather than a change (§5.2). A line of kind `increase_quantity` **MUST** reference a recurring or usage product the target already carries and an added quantity; a line of kind `add_component` **MUST** reference a published `skuId`/`planId`/`priceId` of a recurring or usage product the target does not yet carry, and its quantity. The two kinds are distinguished by whether the target already carries the referenced product — a test that is **only** well-defined because both kinds are restricted to standing composition; it is **not** applied to one-time purchases, which are repeatable by nature and would be misclassified on every repeat. The change **MUST** be applied as an **augment** — the target subscription survives, retains its identity, and is not replaced. A change order **MUST NOT** be expressed as a supersession (`supersedesSubscriptionId`), which is reserved for cancel-and-replace pairs owned by Subscriptions. An order **MUST NOT** mix `category = change` lines with acquisition lines.
+An order with `category = change` **MUST** be accepted, and every one of its lines **MUST** carry a `targetSubscriptionId` identifying an existing subscription. A change line **MUST** additionally carry a **change kind**: `increase_quantity` or `add_component`. The kind is established by two tests applied in order.
+
+**Eligibility, by charge kind.** Both kinds apply **only** to price rows whose charge kind is `recurring` or `usage`. A line referencing a `one_time` or `one_time_setup` row **MUST** be rejected at submit with a machine-readable reason, because a completed one-time charge has no quantity to raise and repeating it is an acquisition rather than a change (§5.2).
+
+**Classification, by the target's composition.** For an eligible line, the kind is **derived**: `increase_quantity` where the target already carries the referenced product, `add_component` where it does not. The gate **MUST** derive the kind from the target composition read (`CHG-S4`) and **MUST** validate the caller-supplied kind against the derived one, rejecting a mismatch with a machine-readable reason. The supplied value is an assertion of intent to be checked, **not** a second source of truth: a caller that believes it is adding a component to a target that already carries it has misread the target, and silently reclassifying would apply a different commercial change from the one that was priced and approved.
+
+A line of kind `increase_quantity` **MUST** carry the added quantity; a line of kind `add_component` **MUST** reference a published `skuId`/`planId`/`priceId` and its quantity. Classification by prior carriage is well-defined **only** because eligibility already excluded one-time rows, which are repeatable by nature and would be misclassified on every repeat. The change **MUST** be applied as an **augment** — the target subscription survives, retains its identity, and is not replaced. A change order **MUST NOT** be expressed as a supersession (`supersedesSubscriptionId`), which is reserved for cancel-and-replace pairs owned by Subscriptions. An order **MUST NOT** mix `category = change` lines with acquisition lines.
 
 **Rationale**: The whole point of the motion is that the running service is untouched. Modeling it as a replacement would re-provision what already works and break continuity the buyer is paying to keep.
 
@@ -254,7 +260,7 @@ The order line **MUST** be able to express which plan-scoped **add-ons** were se
 
 At submit, the target subscription **MUST** be non-terminal, **MUST** resolve under the same tenant axes as the change order (`resourceTenantId`, `payerTenantId`, `sellerTenantId`), and **MUST NOT** have another change order in flight against it. The submit-time read **MUST** capture the target's **revision identifier** — the version or composition token Subscriptions exposes for optimistic concurrency — and the change order **MUST** record it.
 
-Eligibility **MUST NOT** be enforced by a caller-side re-check before apply. The expected revision identifier **MUST** be carried on the change intent as a **precondition**, and Subscriptions **MUST** validate it — together with target non-terminality and the add-on bounds of the resulting composition — **inside the transaction that commits the change** (`CHG-S2`, §9.2). A precondition mismatch **MUST** reject the intent with a machine-readable reason and **MUST** leave the target unmodified; Orders then fails the change order or re-derives it against the current revision.
+Eligibility **MUST NOT** be enforced by a caller-side re-check before apply. The expected revision identifier **MUST** be carried on the change intent as a **precondition**, and Subscriptions **MUST** validate it — together with target non-terminality, the add-on bounds of the resulting composition, and the overlap predicate against every **other** subscription — **inside the transaction that commits the change** (`CHG-S2`, §9.2). The overlap predicate is listed separately on purpose: a collision can be created by a third subscription taking the relevant scope key after submit, which leaves the target's revision untouched and therefore passes the precondition. A precondition mismatch **MUST** reject the intent with a machine-readable reason and **MUST** leave the target unmodified; Orders then fails the change order or re-derives it against the current revision.
 
 **Rationale**: A caller-side check "immediately before apply" is a time-of-check-to-time-of-use gap, not a guard. Between that read and the commit the target can be cancelled, transferred, or independently recomposed — and the increase would then duplicate a component, exceed an add-on maximum, or land on a terminal subscription. Only a precondition evaluated by the owner of the data, in the same transaction as the write, actually closes it.
 
@@ -475,7 +481,7 @@ The system **MUST** record 100% of change orders and their outcomes in the audit
 
 **Direction**: Required by Orders Workflow (intent to Subscriptions).
 
-**Description**: Orders Workflow **MUST** submit the change order as a **single** intent carrying the target subscription and its **expected revision identifier**, every line's change kind, added quantity, added components, delta price pin, and requested effective date, plus the order reference (`orderId`, `orderVersion`) and the process correlation identifier. Subscriptions **MUST** validate the expected revision as a precondition and apply the change transactionally, and **MUST** confirm or fail as a whole, echoing the order reference and correlation identifier. Payload shape is defined in Design and the Subscriptions PRD.
+**Description**: Orders Workflow **MUST** submit the change order as a **single** intent carrying the target subscription and its **expected revision identifier**, the order reference (`orderId`, `orderVersion`), and the process correlation identifier. Every line within the intent **MUST** carry its own `orderLineId` alongside the change kind, added quantity, added components, delta price pin, and requested effective date, so each applied delta maps back to the order line that sold it. Subscriptions **MUST** validate the expected revision as a precondition and apply the change transactionally, and **MUST** confirm or fail as a whole, echoing the order reference, the per-line `orderLineId`, and the correlation identifier. Payload shape is defined in Design and the Subscriptions PRD.
 
 **Compatibility**: Governed by the Subscriptions PRD breaking change policy.
 
@@ -490,8 +496,8 @@ The system **MUST** record 100% of change orders and their outcomes in the audit
 | Ask | Obligation |
 |-----|------------|
 | `CHG-S1` | Accept an **order reference** (`orderId`, `orderVersion`, `orderLineId`) on quantity-change and composition-change operations. The existing register covers `create` only; without this, a subscription increased by an order cannot be traced back to it. |
-| `CHG-S2` | Accept a **transactional multi-item change** against one subscription — several quantity increases and component additions applied as one commit, confirmed or failed as a whole — guarded by an **expected-revision precondition** supplied by the caller. Target non-terminality, the precondition, and the add-on bounds of the resulting composition **MUST** be evaluated inside that transaction, not by the caller beforehand (§6.1). A mismatch rejects the intent with a machine-readable reason and leaves the target unmodified. |
-| `CHG-S3` | Evaluate the **overlap rule with an exemption for the subscription being modified**, so a component addition is not rejected as a duplicate of its own target. |
+| `CHG-S2` | Accept a **transactional multi-item change** against one subscription — several quantity increases and component additions applied as one commit, confirmed or failed as a whole — guarded by an **expected-revision precondition** supplied by the caller. Four things **MUST** be evaluated inside that transaction, not by the caller beforehand (§6.1): the precondition, target non-terminality, the add-on bounds of the resulting composition, and the **cross-subscription overlap predicate** of `CHG-S3`. The last one cannot ride on the precondition: another subscription may acquire the relevant scope key after submit without touching the target's revision, so a revision match does not imply the absence of a collision. Any of the four failing rejects the intent with a machine-readable reason and leaves the target unmodified. |
+| `CHG-S3` | Evaluate the **overlap rule with an exemption for the subscription being modified**, so a component addition is not rejected as a duplicate of its own target, while the rule still applies between the target and every **other** subscription. This evaluation is one of the four the commit transaction of `CHG-S2` performs, not a pre-check. |
 | `CHG-S4` | Expose a **composition read** sufficient for the delta gate: what the target currently carries, plus the **revision identifier** the precondition in `CHG-S2` is expressed against, so add-on min/max/step bounds can be evaluated against the resulting composition rather than the line alone. |
 | `CHG-S5` | Accept and honour a **requested effective date** on the change, and own its proration and billing consequences. |
 
@@ -584,6 +590,12 @@ The system **MUST** record 100% of change orders and their outcomes in the audit
 - **When** submission is attempted
 - **Then** the system **MUST** reject it with a machine-readable reason
 
+**3b. Supplied change kind is validated, not trusted**
+- **Given** a line supplied as `add_component` for a product the target already carries
+- **When** the gate derives the kind from the target composition
+- **Then** the derived kind is `increase_quantity` and the system **MUST** reject the line on the mismatch
+- **And** the system **MUST NOT** silently reclassify it, since the priced and approved change would differ from the applied one
+
 **3a. One-time line is not a change line**
 - **Given** a change order line referencing a price row whose charge kind is `one_time` or `one_time_setup`
 - **When** submission is attempted
@@ -630,6 +642,13 @@ The system **MUST** record 100% of change orders and their outcomes in the audit
 - **Then** Subscriptions **MUST** reject it on the precondition, inside the transaction
 - **And** the target **MUST NOT** be modified
 - **And** a caller-side re-check before apply **MUST NOT** be relied on in its place
+
+**9a. Another subscription takes the overlap key after submit**
+- **Given** an approved `add_component` change order whose target is unchanged, so the revision precondition still matches
+- **And** a different subscription has since become active on the relevant overlap scope key
+- **When** the change intent is committed
+- **Then** Subscriptions **MUST** reject it on the overlap predicate, inside the same transaction
+- **And** the exemption **MUST** apply only to the target itself, never to that other subscription
 
 ### Application
 
