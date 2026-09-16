@@ -96,7 +96,7 @@ async fn a_half_acked_batch_is_not_reported_complete(url: &str) {
     let outbox = handle.outbox();
 
     // Register interest before the enqueue commits.
-    let mut sub = outbox.subscribe("split-1").unwrap();
+    let sub = outbox.subscribe("split-1").unwrap();
 
     // Enqueue inside a transaction so the trace insert and its id read share
     // one connection - on MySQL the id comes from `LAST_INSERT_ID()`, which is
@@ -150,20 +150,22 @@ async fn a_half_acked_batch_is_not_reported_complete(url: &str) {
         status.pending
     );
 
-    // And no completion has been delivered to the subscriber.
+    // And no completion has been delivered to the subscriber. Drive the
+    // completion on a task so it can be checked without consuming `sub`.
+    let completion = tokio::spawn(sub.completion());
+    tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(
-        tokio::time::timeout(Duration::from_millis(300), &mut sub)
-            .await
-            .is_err(),
+        !completion.is_finished(),
         "a completion was delivered while an entity was still unprocessed"
     );
 
     // Let the held entity through; now the batch really completes and the
     // subscriber is told exactly once.
     let_through.store(true, Ordering::Release);
-    let outcome = tokio::time::timeout(Duration::from_secs(20), sub)
+    let outcome = tokio::time::timeout(Duration::from_secs(20), completion)
         .await
         .expect("completion arrives after the last entity is acked")
+        .expect("the completion task did not panic")
         .expect("completion is not a dropped-registry None");
     assert_eq!(outcome.entities, 2, "both entities accounted for");
     assert!(outcome.is_clean(), "no entity should have dead-lettered");
@@ -304,12 +306,12 @@ async fn a_completion_reaches_the_submitting_instance(url: &str) {
         .await;
     result.expect("enqueue");
 
-    // B processes and acks; A's notifier must deliver the completion to A.
-    // On MySQL the cross-instance completion is never delivered, so this times
-    // out - the bug. On Postgres it resolves.
-    let outcome = tokio::time::timeout(Duration::from_secs(20), sub)
+    // B processes and acks; A's notifier must deliver the completion to A. The
+    // MySQL claim runs its stamping UPDATE before reading the outcome, so the
+    // owner delivers on every backend.
+    let outcome = tokio::time::timeout(Duration::from_secs(20), sub.completion())
         .await
-        .expect("A is told its batch completed (times out on the MySQL cross-instance bug)")
+        .expect("A is told its batch completed")
         .expect("completion is not a dropped-registry None");
     assert_eq!(outcome.trace, "cross-1");
     assert_eq!(outcome.entities, 1);

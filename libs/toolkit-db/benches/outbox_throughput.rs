@@ -813,6 +813,7 @@ impl BenchState {
         let name = trace.to_owned();
         let handle = tokio::spawn(async move {
             let outcome = subscription
+                .completion()
                 .await
                 .unwrap_or_else(|| panic!("trace {name} lost its notification"));
             let done = processed.load(Ordering::Relaxed);
@@ -1550,10 +1551,13 @@ fn run_profile(
                     let start = Instant::now();
                     produce(&outboxes, &db, &queue_prefix, &profile, &state).await;
                     wait_for_completion(&state, timeout).await;
+                    // Awaiting the trace completions is part of what a traced
+                    // profile costs, so it belongs inside the timed interval. For
+                    // an untraced profile there are no watchers, so this is free.
+                    verify_traces(&state, &profile, timeout).await;
                     total += start.elapsed();
 
                     verify_results(&state, &profile);
-                    verify_traces(&state, &profile, timeout).await;
                     for h in handles {
                         h.stop().await;
                     }

@@ -19,7 +19,7 @@ use super::types::{
     OutboxConfig, OutboxError, OutboxProfile, Partitions, SequencerConfig, WorkerTuning,
 };
 use super::workers::sequencer::{Sequencer, SequencerReport};
-use super::workers::vacuum::{VacuumReport, VacuumTask};
+use super::workers::vacuum::{CollectableTraces, VacuumReport, VacuumTask};
 use crate::Db;
 
 /// Deferred queue declaration — factory, resolved at `start()`.
@@ -57,6 +57,12 @@ struct StartContext<'a> {
 /// Eliminates the duplicated stats-wiring pattern used by sequencer, vacuum, and
 /// processor worker factories.
 type StatsExtractor = Box<dyn Fn(&dyn std::any::Any) -> u64 + Send + Sync>;
+
+/// A stats extractor for workers whose `Directive` payload is a plain `u64`
+/// count (notifier, retry reporter, trace sweeper).
+fn count_payload() -> StatsExtractor {
+    Box::new(|any| any.downcast_ref::<u64>().copied().unwrap_or(0))
+}
 
 pub(super) fn register_stats<P: Send + Sync + 'static>(
     builder: WorkerBuilder<P>,
@@ -374,7 +380,7 @@ impl OutboxBuilder {
     fn spawn_vacuum_workers(
         ctx: &mut StartContext<'_>,
         outbox: &Arc<Outbox>,
-        collectable_traces: &Arc<Notify>,
+        collectable_traces: &CollectableTraces,
         tuning: &WorkerTuning,
         shared_sem: &Arc<Semaphore>,
         count: usize,
@@ -385,7 +391,7 @@ impl OutboxBuilder {
                 ctx.db.clone(),
                 outbox.statements_arc(),
                 tuning.batch_size as usize,
-                Arc::clone(collectable_traces),
+                collectable_traces.clone(),
             );
             let name = format!("vacuum-{i}");
             let (poker_notify, _poker_handle) = poker(tuning.idle_interval, ctx.cancel.clone());
@@ -426,7 +432,7 @@ impl OutboxBuilder {
     fn spawn_trace_sweeper(
         ctx: &mut StartContext<'_>,
         outbox: &Arc<Outbox>,
-        collectable_traces: &Arc<Notify>,
+        collectable_traces: &CollectableTraces,
         tuning: &WorkerTuning,
     ) {
         let sweeper = super::workers::trace_sweeper::TraceSweeper {
@@ -437,15 +443,15 @@ impl OutboxBuilder {
         };
         let name = "trace-sweeper";
         let (poker_notify, _poker_handle) = poker(tuning.idle_interval, ctx.cancel.clone());
-        let worker = WorkerBuilder::new(name, ctx.cancel.clone())
+        let builder = WorkerBuilder::new(name, ctx.cancel.clone())
             .pacing(tuning)
-            .notifier(Arc::clone(collectable_traces))
+            .notifier(collectable_traces.wakeup())
             .notifier(poker_notify)
             .notifier(Arc::clone(ctx.start_notify))
             .listener(TracingListener)
-            .on_panic(PanicPolicy::CatchAndRetry)
-            .build(sweeper);
-        ctx.task_set.spawn(name, worker.run());
+            .on_panic(PanicPolicy::CatchAndRetry);
+        let builder = register_stats(builder, ctx.stats_registry.as_ref(), name, count_payload());
+        ctx.task_set.spawn(name, builder.build(sweeper).run());
     }
 
     /// Spawn the notifier: collects completions this instance owns but did not
@@ -462,7 +468,7 @@ impl OutboxBuilder {
             next_look: Duration::from_millis(100),
         };
         let name = "notifier";
-        let worker = WorkerBuilder::new(name, ctx.cancel.clone())
+        let builder = WorkerBuilder::new(name, ctx.cancel.clone())
             .pacing(tuning)
             // No timer. It schedules itself while somebody is waiting, and
             // sleeps on this wakeup when nobody is - a subscription being
@@ -470,37 +476,37 @@ impl OutboxBuilder {
             .notifier(outbox.mailbox().subscriptions().arrivals())
             .notifier(Arc::clone(ctx.start_notify))
             .listener(TracingListener)
-            .on_panic(PanicPolicy::CatchAndRetry)
-            .build(notifier);
-        ctx.task_set.spawn(name, worker.run());
+            .on_panic(PanicPolicy::CatchAndRetry);
+        let builder = register_stats(builder, ctx.stats_registry.as_ref(), name, count_payload());
+        ctx.task_set.spawn(name, builder.build(notifier).run());
     }
 
-    /// Spawn the stall reporter: tells subscribers which of their batches are
+    /// Spawn the retry reporter: tells subscribers which of their batches are
     /// stuck.
     ///
     /// Always spawned and self-gating, like the notifier, but on a stricter
-    /// gate: it runs only while some caller holds a progress receiver, so a
-    /// deployment that never watches for stalls issues no query here ever.
-    fn spawn_stall_reporter(
+    /// gate: it runs only while some caller is watching retries, so a
+    /// deployment that never watches retries issues no query here ever.
+    fn spawn_retry_reporter(
         ctx: &mut StartContext<'_>,
         outbox: &Arc<Outbox>,
         tuning: &WorkerTuning,
     ) {
-        let reporter = super::workers::stall_reporter::StallReporter {
+        let reporter = super::workers::retry_reporter::RetryReporter {
             outbox: Arc::clone(outbox),
             db: ctx.db.clone(),
             batch_size: tuning.batch_size,
         };
-        let name = "stall-reporter";
+        let name = "retry-reporter";
         let (poker_notify, _poker_handle) = poker(tuning.idle_interval, ctx.cancel.clone());
-        let worker = WorkerBuilder::new(name, ctx.cancel.clone())
+        let builder = WorkerBuilder::new(name, ctx.cancel.clone())
             .pacing(tuning)
             .notifier(poker_notify)
             .notifier(Arc::clone(ctx.start_notify))
             .listener(TracingListener)
-            .on_panic(PanicPolicy::CatchAndRetry)
-            .build(reporter);
-        ctx.task_set.spawn(name, worker.run());
+            .on_panic(PanicPolicy::CatchAndRetry);
+        let builder = register_stats(builder, ctx.stats_registry.as_ref(), name, count_payload());
+        ctx.task_set.spawn(name, builder.build(reporter).run());
     }
 
     /// Spawn cold reconciler as a `WorkerAction` (ungated, poker-driven).
@@ -680,14 +686,14 @@ impl OutboxBuilder {
         // 8b. Collect completion mail this instance owns
         Self::spawn_notifier(&mut ctx, &outbox, &tuning.notifier);
 
-        // 8c. Report stalls to callers watching their batches. Paced with the
+        // 8c. Report retries to callers watching their batches. Paced with the
         // notifier on purpose: both are subscription-gated polls of the trace
         // table, and a caller learning its batch is stuck is worth the same
         // latency as learning it finished.
-        Self::spawn_stall_reporter(&mut ctx, &outbox, &tuning.notifier);
+        Self::spawn_retry_reporter(&mut ctx, &outbox, &tuning.notifier);
 
         // 9. Spawn vacuum workers, and the sweeper they tell about their work
-        let collectable_traces = Arc::new(Notify::new());
+        let collectable_traces = CollectableTraces::new();
         Self::spawn_vacuum_workers(
             &mut ctx,
             &outbox,

@@ -13,7 +13,8 @@ use super::prioritizer::SharedPrioritizer;
 use super::record::{Record, RecordItem, Records};
 use super::statements::OutboxStatements;
 use super::store::OutboxStore;
-use super::subscription::{Mailbox, TraceRegistry, TraceSubscription};
+use super::subscription::{Mailbox, TraceRegistry, TraceSubscription, TraceWatch};
+use super::trace::{TraceOutcome, TraceState};
 use super::types::{OutboxConfig, OutboxError, OutboxMessageId};
 use crate::Db;
 use crate::secure::SeaOrmRunner;
@@ -55,7 +56,7 @@ struct TraceStatusRow {
     failures: i64,
     attempts: i64,
     last_error: Option<String>,
-    stalled_since: Option<chrono::DateTime<chrono::Utc>>,
+    retrying_since: Option<chrono::DateTime<chrono::Utc>>,
     created_at: chrono::DateTime<chrono::Utc>,
     completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -85,7 +86,7 @@ impl Outbox {
     pub(crate) fn new_with_backend(config: OutboxConfig, backend: DbBackend) -> Self {
         let statements = Arc::new(OutboxStatements::new(backend, &config.tables));
         let mailbox = Arc::new(Mailbox::new(
-            config.instance_id.as_str().to_owned(),
+            config.instance_id.clone(),
             TraceRegistry::new(),
         ));
         Self {
@@ -132,6 +133,65 @@ impl Outbox {
     pub fn subscribe(&self, trace: &str) -> Result<TraceSubscription, OutboxError> {
         super::validation::validate_trace(trace)?;
         Ok(self.mailbox.subscriptions().subscribe(trace))
+    }
+
+    /// Run `on_complete` when a traced batch finishes, without holding a future.
+    ///
+    /// The callback runs on a spawned task - never inline in a worker - so a
+    /// slow handler cannot stall the pipeline. It is handed `None` if this
+    /// process can no longer answer (the durable answer is then
+    /// [`Outbox::trace_status`]). Dropping the returned [`TraceWatch`] stops the
+    /// watch; keep it for as long as the callback matters.
+    ///
+    /// ```ignore
+    /// let _guard = outbox.watch_trace("import-1", |outcome| match outcome {
+    ///     Some(o) => info!(clean = o.is_clean(), "done"),
+    ///     None => { /* process gone; read trace_status */ }
+    /// })?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutboxError::InvalidTrace`] or [`OutboxError::TraceTooLong`] if
+    /// the trace is not a valid 1-256 byte printable-ASCII id.
+    pub fn watch_trace<F>(&self, trace: &str, on_complete: F) -> Result<TraceWatch, OutboxError>
+    where
+        F: FnOnce(Option<TraceOutcome>) + Send + 'static,
+    {
+        let sub = self.subscribe(trace)?;
+        let handle = tokio::spawn(async move { on_complete(sub.completion().await) });
+        Ok(TraceWatch::new(handle))
+    }
+
+    /// Like [`Outbox::watch_trace`], but the callback also sees every retry
+    /// state, and fires a final time on completion.
+    ///
+    /// The callback runs on a spawned task and stops after the terminal
+    /// [`TraceState::Completed`], or when this process can no longer answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutboxError::InvalidTrace`] or [`OutboxError::TraceTooLong`] if
+    /// the trace is not a valid 1-256 byte printable-ASCII id.
+    pub fn watch_trace_events<F>(
+        &self,
+        trace: &str,
+        mut on_event: F,
+    ) -> Result<TraceWatch, OutboxError>
+    where
+        F: FnMut(TraceState) + Send + 'static,
+    {
+        let mut sub = self.subscribe(trace)?;
+        let handle = tokio::spawn(async move {
+            while let Some(state) = sub.next().await {
+                let done = matches!(state, TraceState::Completed(_));
+                on_event(state);
+                if done {
+                    break;
+                }
+            }
+        });
+        Ok(TraceWatch::new(handle))
     }
 
     /// How many traced batches this instance is currently waiting on.
@@ -208,7 +268,7 @@ impl Outbox {
             failures: row.failures,
             attempts: row.attempts,
             last_error: row.last_error,
-            stalled_since: row.stalled_since,
+            retrying_since: row.retrying_since,
             created_at: row.created_at,
             completed_at: row.completed_at,
         }))
@@ -438,8 +498,10 @@ impl Outbox {
             // `pending` that can never reach zero, so the subscriber would wait
             // for ever. (Unreachable below usize::MAX > i64::MAX, but the type
             // permits it, so it is an error not a silent floor.)
-            let entities = i64::try_from(items.len())
-                .map_err(|_| OutboxError::TracedBatchTooLarge { entities: items.len() })?;
+            let entities =
+                i64::try_from(items.len()).map_err(|_| OutboxError::TracedBatchTooLarge {
+                    entities: items.len(),
+                })?;
             self.insert_trace_row(&runner, trace, queue, entities)
                 .await?;
         }
@@ -467,8 +529,8 @@ impl Outbox {
         if let Some(c) = Self::conn_requiring_composite_write_tx(runner) {
             let txn = c.begin().await?;
             let exec = DatabaseExecutor::Transaction(&txn);
-            let ids = Self::insert_batch_on_conn(&exec, statements, partition_ids, items, trace)
-                .await?;
+            let ids =
+                Self::insert_batch_on_conn(&exec, statements, partition_ids, items, trace).await?;
             txn.commit().await?;
             return Ok(ids);
         }
@@ -814,6 +876,24 @@ mod tests {
             Err(OutboxError::InvalidTrace { .. })
         ));
         assert!(outbox.subscribe("import-2026-09-08").is_ok());
+    }
+
+    #[test]
+    fn outstanding_traces_counts_live_subscriptions() {
+        let outbox = make_default_outbox();
+        assert_eq!(outbox.outstanding_traces(), 0);
+        let sub = outbox.subscribe("t1").unwrap();
+        assert_eq!(
+            outbox.outstanding_traces(),
+            1,
+            "a live subscription is outstanding traced work"
+        );
+        drop(sub);
+        assert_eq!(
+            outbox.outstanding_traces(),
+            0,
+            "dropping the subscription clears the count"
+        );
     }
 
     // -- resolve_partition tests --

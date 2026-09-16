@@ -27,7 +27,7 @@ pub struct OutboxTables {
     idx_dl_status_deadline: String,
     idx_dl_status_failed: String,
     idx_trace_mail: String,
-    idx_trace_stalled: String,
+    idx_trace_retrying: String,
     idx_trace_key: String,
     migration_name: String,
 }
@@ -65,7 +65,7 @@ impl OutboxTables {
             idx_dl_status_deadline: indexed(&prefix, "dl_status_deadline"),
             idx_dl_status_failed: indexed(&prefix, "dl_status_failed"),
             idx_trace_mail: indexed(&prefix, "trace_mail"),
-            idx_trace_stalled: indexed(&prefix, "trace_stalled"),
+            idx_trace_retrying: indexed(&prefix, "trace_retrying"),
             idx_trace_key: indexed(&prefix, "trace_key"),
             migration_name: migration_name(&prefix),
             prefix,
@@ -166,8 +166,8 @@ impl OutboxTables {
         &self.idx_trace_mail
     }
 
-    pub(crate) fn idx_trace_stalled(&self) -> &str {
-        &self.idx_trace_stalled
+    pub(crate) fn idx_trace_retrying(&self) -> &str {
+        &self.idx_trace_retrying
     }
 
     pub(crate) fn idx_trace_key(&self) -> &str {
@@ -198,7 +198,7 @@ impl OutboxTables {
             self.idx_dl_status_deadline(),
             self.idx_dl_status_failed(),
             self.idx_trace_mail(),
-            self.idx_trace_stalled(),
+            self.idx_trace_retrying(),
             self.idx_trace_key(),
         ] {
             if ident.len() > MAX_IDENTIFIER_LEN {

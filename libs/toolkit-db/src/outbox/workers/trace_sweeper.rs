@@ -116,15 +116,25 @@ impl TraceSweeper {
 }
 
 impl WorkerAction for TraceSweeper {
-    type Payload = ();
+    /// How many trace rows were collected this pass, for the stats listener.
+    type Payload = u64;
     type Error = OutboxError;
 
-    async fn execute(&mut self, _cancel: &CancellationToken) -> Result<Directive, Self::Error> {
+    async fn execute(
+        &mut self,
+        _cancel: &CancellationToken,
+    ) -> Result<Directive<u64>, Self::Error> {
         match self.sweep().await {
-            // A full page suggests more is waiting, so keep going rather than
-            // waiting out the interval.
-            Ok(count) if count >= self.batch_size => Ok(Directive::proceed()),
-            Ok(_) => Ok(Directive::idle()),
+            Ok(count) => {
+                let collected = u64::try_from(count).unwrap_or(u64::MAX);
+                // A full page suggests more is waiting, so keep going rather
+                // than waiting out the interval.
+                if count >= self.batch_size {
+                    Ok(Directive::Proceed(collected))
+                } else {
+                    Ok(Directive::Idle(collected))
+                }
+            }
             // Surfaced rather than swallowed: the worker loop clears the
             // backoff on a success and escalates on a failure, so returning
             // `Ok` here would make an outage a warning every second forever.

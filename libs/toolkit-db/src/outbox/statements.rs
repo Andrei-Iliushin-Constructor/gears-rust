@@ -45,7 +45,7 @@ pub(super) struct TraceStatements {
     claim_mail: String,
     claim_mail_outcome: String,
     mail: String,
-    stalled: String,
+    retrying: String,
 }
 
 pub(super) struct SequencerStatements {
@@ -237,7 +237,7 @@ impl TraceStatements {
             claim_mail: trace_claim_mail(dialect, tables),
             claim_mail_outcome: trace_claim_mail_outcome(dialect, tables),
             mail: trace_mail(dialect, tables),
-            stalled: trace_stalled(dialect, tables),
+            retrying: trace_retrying(dialect, tables),
         }
     }
 
@@ -265,8 +265,8 @@ impl TraceStatements {
         &self.mail
     }
 
-    pub(super) fn stalled(&self) -> &str {
-        &self.stalled
+    pub(super) fn retrying(&self) -> &str {
+        &self.retrying
     }
 }
 
@@ -579,8 +579,8 @@ fn allocate_sequences(dialect: Dialect, tables: &OutboxTables) -> AllocSql {
 ///
 /// The subtraction reads the value before this statement, so the completion
 /// stamp lands in the same UPDATE that reaches zero. Guarded on `pending > 0`
-/// so a stray advance cannot drive it negative, and clears the stall fields
-/// because progress is the answer to a stall.
+/// so a stray advance cannot drive it negative, and clears the retry fields
+/// because progress is the answer to a retry.
 ///
 /// `attempts` is cleared by progress for the same reason, *except* on the
 /// advance that completes the batch: the completion is read back from this row
@@ -594,7 +594,7 @@ fn trace_advance(dialect: Dialect, tables: &OutboxTables) -> String {
              SET pending = pending - $1, \
                  failures = failures + $2, \
                  attempts = CASE WHEN pending - $3 <= 0 THEN attempts ELSE 0 END, \
-                 stalled_since = NULL, \
+                 retrying_since = NULL, \
                  last_error = NULL, \
                  completed_at = CASE WHEN pending - $4 <= 0 THEN {now} ELSE completed_at END \
              WHERE trace = $5 AND pending > 0 \
@@ -615,7 +615,7 @@ fn trace_advance(dialect: Dialect, tables: &OutboxTables) -> String {
              SET pending = pending - ?, \
                  failures = failures + ?, \
                  attempts = CASE WHEN pending <= 0 THEN attempts ELSE 0 END, \
-                 stalled_since = NULL, \
+                 retrying_since = NULL, \
                  last_error = NULL, \
                  completed_at = CASE WHEN pending <= 0 THEN {now} ELSE completed_at END \
              WHERE trace = ? AND pending > 0",
@@ -626,7 +626,7 @@ fn trace_advance(dialect: Dialect, tables: &OutboxTables) -> String {
 
 /// Record that a trace is being retried rather than progressing.
 ///
-/// `stalled_since` keeps the *first* stall time, so a consumer sees how long
+/// `retrying_since` keeps the *first* retry time, so a consumer sees how long
 /// the trace has been stuck rather than when it was last attempted.
 fn trace_retry(dialect: Dialect, tables: &OutboxTables) -> String {
     let now = now_expr(dialect);
@@ -635,7 +635,7 @@ fn trace_retry(dialect: Dialect, tables: &OutboxTables) -> String {
             "UPDATE {} \
              SET attempts = attempts + 1, \
                  last_error = $1, \
-                 stalled_since = COALESCE(stalled_since, {now}) \
+                 retrying_since = COALESCE(retrying_since, {now}) \
              WHERE trace = $2 AND completed_at IS NULL",
             tables.trace()
         ),
@@ -643,7 +643,7 @@ fn trace_retry(dialect: Dialect, tables: &OutboxTables) -> String {
             "UPDATE {} \
              SET attempts = attempts + 1, \
                  last_error = ?, \
-                 stalled_since = COALESCE(stalled_since, {now}) \
+                 retrying_since = COALESCE(retrying_since, {now}) \
              WHERE trace = ? AND completed_at IS NULL",
             tables.trace()
         ),
@@ -661,7 +661,7 @@ fn trace_status(dialect: Dialect, tables: &OutboxTables) -> String {
     };
     format!(
         "SELECT trace, queue, entities, pending, failures, attempts, last_error, \
-                stalled_since, created_at, completed_at \
+                retrying_since, created_at, completed_at \
          FROM {} \
          WHERE trace = {placeholder} \
          ORDER BY created_at DESC, id DESC \
@@ -756,22 +756,22 @@ fn trace_mail(dialect: Dialect, tables: &OutboxTables) -> String {
 /// This instance's traces that are stuck rather than merely slow.
 ///
 /// A trace appears here from the moment a handler first retried one of its
-/// entities until the batch makes progress again, which clears `stalled_since`
+/// entities until the batch makes progress again, which clears `retrying_since`
 /// in the same UPDATE that counts the batch down. On Postgres the supporting
 /// index is partial on exactly this predicate, so a healthy instance probes an
 /// empty index.
-fn trace_stalled(dialect: Dialect, tables: &OutboxTables) -> String {
+fn trace_retrying(dialect: Dialect, tables: &OutboxTables) -> String {
     let (owner, limit) = match dialect {
         Dialect::Postgres | Dialect::Sqlite => ("$1", "$2"),
         Dialect::MySql => ("?", "?"),
     };
     format!(
-        "SELECT trace, entities, pending, failures, attempts, last_error, stalled_since \
+        "SELECT trace, entities, pending, failures, attempts, last_error, retrying_since \
          FROM {} \
          WHERE owner_instance = {owner} \
            AND completed_at IS NULL \
-           AND stalled_since IS NOT NULL \
-         ORDER BY stalled_since LIMIT {limit}",
+           AND retrying_since IS NOT NULL \
+         ORDER BY retrying_since LIMIT {limit}",
         tables.trace()
     )
 }
@@ -1272,7 +1272,11 @@ mod tests {
                 my.trace().claim_mail(),
             ),
             ("trace_mail", pg.trace().mail(), my.trace().mail()),
-            ("trace_stalled", pg.trace().stalled(), my.trace().stalled()),
+            (
+                "trace_retrying",
+                pg.trace().retrying(),
+                my.trace().retrying(),
+            ),
             (
                 "select_collectable_traces",
                 pg.sweep().select_collectable_traces(),
@@ -1409,7 +1413,7 @@ mod tests {
             pg.trace().status().to_owned(),
             pg.trace().claim_mail().to_owned(),
             pg.trace().mail().to_owned(),
-            pg.trace().stalled().to_owned(),
+            pg.trace().retrying().to_owned(),
             pg.processor().advance_processed_seq().to_owned(),
             pg.processor().record_retry().to_owned(),
             pg.processor().lease_ack_advance().to_owned(),

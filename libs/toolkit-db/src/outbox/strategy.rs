@@ -257,7 +257,7 @@ fn deliver_claimed(
 
 /// The traces still represented past `upto_seq`, i.e. the ones a retry leaves
 /// stuck. A trace entirely inside the acked prefix is progressing, not
-/// stalling, and must not be marked.
+/// retrying, and must not be marked.
 fn traces_beyond(msgs: &[OutboxMessage], trace_ids: &TraceIds, upto_seq: i64) -> TraceIds {
     msgs.iter()
         .filter(|m| m.seq > upto_seq)
@@ -266,7 +266,7 @@ fn traces_beyond(msgs: &[OutboxMessage], trace_ids: &TraceIds, upto_seq: i64) ->
 }
 
 /// Record that every trace in this batch is being retried rather than
-/// progressing, so a consumer can tell a stalled batch from a slow one.
+/// progressing, so a consumer can tell a retrying batch from a slow one.
 async fn record_trace_retry(
     conn: &DatabaseExecutor<'_>,
     store: &OutboxStore<'_>,
@@ -339,7 +339,7 @@ async fn ack(
             .await?;
 
             // Nothing reached a terminal state, so nothing is counted down -
-            // the traces are recorded as stalled instead.
+            // the traces are recorded as retrying instead.
             record_trace_retry(conn, store, trace_ids, reason).await?;
         }
         HandlerResult::Reject { reason } => {
@@ -697,10 +697,10 @@ async fn lease_guarded_ack(
                     );
                     // Only the traces still represented in the retried tail.
                     // A trace whose entities were all in the acked prefix is
-                    // making progress, and marking it stalled here would undo
+                    // making progress, and marking it retrying here would undo
                     // the clearing the line above just did.
-                    let stalled = traces_beyond(msgs, trace_ids, advance_seq);
-                    record_trace_retry(&ack_exec, &ctx.store, &stalled, reason).await?;
+                    let retrying = traces_beyond(msgs, trace_ids, advance_seq);
+                    record_trace_retry(&ack_exec, &ctx.store, &retrying, reason).await?;
                 }
                 ok
             } else {
@@ -902,5 +902,96 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1));
         let id2 = generate_worker_id("q");
         assert_ne!(id1, id2, "worker IDs should differ: {id1} vs {id2}");
+    }
+
+    // -- ack bookkeeping helpers --
+
+    fn msg(seq: i64) -> OutboxMessage {
+        OutboxMessage {
+            partition_id: 1,
+            seq,
+            payload: Vec::new(),
+            payload_type: "t".to_owned(),
+            created_at: chrono::Utc::now(),
+            attempts: 0,
+        }
+    }
+
+    fn trace_ids(pairs: &[(i64, &str)]) -> TraceIds {
+        pairs.iter().map(|&(seq, t)| (seq, t.to_owned())).collect()
+    }
+
+    #[test]
+    fn trace_progress_counts_terminal_and_failed_entities_up_to_the_cursor() {
+        let msgs = [msg(1), msg(2), msg(3)];
+        let ids = trace_ids(&[(1, "a"), (2, "a"), (3, "b")]);
+        let failed = HashSet::from([2]);
+        // Only seqs <= upto_seq (2) count; seq 3 ("b") is still past the cursor.
+        let progress = trace_progress(&msgs, &ids, 2, &failed);
+        assert_eq!(progress.len(), 1);
+        assert_eq!(progress[0].trace, "a");
+        assert_eq!(progress[0].terminal, 2);
+        assert_eq!(progress[0].failures, 1);
+    }
+
+    #[test]
+    fn trace_progress_is_sorted_by_trace_to_avoid_deadlock() {
+        let msgs = [msg(1), msg(2)];
+        let ids = trace_ids(&[(1, "z"), (2, "a")]);
+        let progress = trace_progress(&msgs, &ids, 2, &HashSet::new());
+        let order: Vec<&str> = progress.iter().map(|c| c.trace.as_str()).collect();
+        assert_eq!(
+            order,
+            ["a", "z"],
+            "row locks must be taken in a stable order"
+        );
+    }
+
+    #[test]
+    fn trace_progress_of_an_untraced_batch_is_empty() {
+        let msgs = [msg(1), msg(2)];
+        assert!(trace_progress(&msgs, &TraceIds::new(), 2, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn traces_beyond_keeps_only_traces_past_the_cursor() {
+        let msgs = [msg(1), msg(2), msg(3)];
+        let ids = trace_ids(&[(1, "a"), (2, "b"), (3, "c")]);
+        let beyond = traces_beyond(&msgs, &ids, 1);
+        assert_eq!(beyond.len(), 2);
+        assert_eq!(beyond.get(&2).map(String::as_str), Some("b"));
+        assert_eq!(beyond.get(&3).map(String::as_str), Some("c"));
+        assert!(
+            !beyond.contains_key(&1),
+            "a trace inside the acked prefix is progressing, not retrying"
+        );
+    }
+
+    #[test]
+    fn rejected_seqs_maps_rejection_indices_to_seqs() {
+        use super::super::batch::Rejection;
+        let msgs = [msg(10), msg(20), msg(30)];
+        let rejections = [
+            Rejection {
+                index: 0,
+                reason: "x".to_owned(),
+            },
+            Rejection {
+                index: 2,
+                reason: "y".to_owned(),
+            },
+        ];
+        assert_eq!(rejected_seqs(&msgs, &rejections), HashSet::from([10, 30]));
+    }
+
+    #[test]
+    fn rejected_seqs_ignores_an_out_of_range_index() {
+        use super::super::batch::Rejection;
+        let msgs = [msg(10)];
+        let rejections = [Rejection {
+            index: 5,
+            reason: "oob".to_owned(),
+        }];
+        assert!(rejected_seqs(&msgs, &rejections).is_empty());
     }
 }

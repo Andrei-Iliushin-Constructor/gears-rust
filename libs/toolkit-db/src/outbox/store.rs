@@ -1,4 +1,7 @@
-use sea_orm::{ConnectionTrait, DatabaseExecutor, DbBackend, DbErr, Statement, TransactionTrait};
+use sea_orm::{
+    ConnectionTrait, DatabaseExecutor, DbBackend, DbErr, FromQueryResult, Statement,
+    TransactionTrait,
+};
 
 use super::dialect::{AllocSql, ClaimSql, Dialect, VacuumSql};
 use super::statements::{MySqlIdReservationStatements, OutboxStatements};
@@ -9,6 +12,20 @@ use super::trace::TraceAdvance;
 ///
 pub(super) struct OutboxStore<'a> {
     statements: &'a OutboxStatements,
+}
+
+/// The claim's returned columns, read by name.
+///
+/// `trace_claim_mail` (RETURNING) and `trace_claim_mail_outcome` (SELECT) both
+/// return exactly these columns; mapping by name keeps this decoupled from their
+/// order.
+#[derive(FromQueryResult)]
+struct OutcomeRow {
+    trace: String,
+    entities: i64,
+    failures: i64,
+    attempts: i64,
+    completed_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl<'a> OutboxStore<'a> {
@@ -343,8 +360,8 @@ impl<'a> OutboxStore<'a> {
         self.statements.trace().mail()
     }
 
-    pub(super) fn trace_stalled(&self) -> &str {
-        self.statements.trace().stalled()
+    pub(super) fn trace_retrying(&self) -> &str {
+        self.statements.trace().retrying()
     }
 
     /// Claim one completed trace as delivered, returning what to deliver, or
@@ -500,22 +517,15 @@ impl<'a> OutboxStore<'a> {
     }
 
     fn outcome_from_row(row: &sea_orm::QueryResult) -> Result<super::trace::TraceOutcome, DbErr> {
+        // Read by column name (see `OutcomeRow`), so a reordered SELECT/RETURNING
+        // list cannot silently swap two same-typed columns.
+        let row = OutcomeRow::from_query_result(row, "")?;
         Ok(super::trace::TraceOutcome {
-            trace: row
-                .try_get_by_index(0)
-                .map_err(|e| DbErr::Custom(format!("trace column: {e}")))?,
-            entities: row
-                .try_get_by_index(1)
-                .map_err(|e| DbErr::Custom(format!("entities column: {e}")))?,
-            failures: row
-                .try_get_by_index(2)
-                .map_err(|e| DbErr::Custom(format!("failures column: {e}")))?,
-            attempts: row
-                .try_get_by_index(3)
-                .map_err(|e| DbErr::Custom(format!("attempts column: {e}")))?,
-            completed_at: row
-                .try_get_by_index(4)
-                .map_err(|e| DbErr::Custom(format!("completed_at column: {e}")))?,
+            trace: row.trace,
+            entities: row.entities,
+            failures: row.failures,
+            attempts: row.attempts,
+            completed_at: row.completed_at,
         })
     }
 

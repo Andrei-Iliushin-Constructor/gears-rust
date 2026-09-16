@@ -16,6 +16,34 @@ const DIRTY_PAGE_SIZE: usize = 64;
 /// SQL LIMIT value for dirty-partition page size.
 const DIRTY_PAGE_LIMIT: i64 = 64;
 
+/// The vacuum's downstream nudge: fired when bodies were deleted, which is what
+/// can make a trace collectable ahead of its own clock.
+///
+/// A named type rather than a bare `Arc<Notify>` so it cannot be transposed with
+/// the other notify channels (start, per-partition, arrivals) at construction,
+/// and so its two roles read for what they are.
+#[derive(Clone, Default)]
+pub struct CollectableTraces(Arc<tokio::sync::Notify>);
+
+impl CollectableTraces {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Signal that a sweep may have made traces collectable.
+    pub fn notify(&self) {
+        self.0.notify_one();
+    }
+
+    /// The underlying wakeup, to hand a worker as a notification source (or to
+    /// await in a test).
+    #[must_use]
+    pub fn wakeup(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.0)
+    }
+}
+
 /// Report emitted by a vacuum sweep.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -46,7 +74,7 @@ pub struct VacuumTask {
     batch_size: usize,
     /// Nudged when bodies were actually deleted, since that is what can make a
     /// trace collectable ahead of its own clock.
-    collectable_traces: Arc<tokio::sync::Notify>,
+    collectable_traces: CollectableTraces,
 }
 
 impl VacuumTask {
@@ -54,7 +82,7 @@ impl VacuumTask {
         db: Db,
         statements: Arc<OutboxStatements>,
         batch_size: usize,
-        collectable_traces: Arc<tokio::sync::Notify>,
+        collectable_traces: CollectableTraces,
     ) -> Self {
         assert!(
             batch_size > 0,
@@ -123,7 +151,7 @@ impl WorkerAction for VacuumTask {
         // trace alive. Told conditionally: a sweep that collected nothing
         // cannot have made any trace collectable, so it says nothing.
         if total_deleted > 0 {
-            self.collectable_traces.notify_one();
+            self.collectable_traces.notify();
         }
 
         let report = VacuumReport {

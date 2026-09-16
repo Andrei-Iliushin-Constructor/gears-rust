@@ -38,18 +38,6 @@ impl<'a> Record<'a> {
         RecordTarget { queue, partition }
     }
 
-    /// The queue this entity goes to.
-    #[must_use]
-    pub const fn queue(&self) -> &'a str {
-        self.queue
-    }
-
-    /// Payload bytes this entity contributes to its queue's backlog.
-    #[must_use]
-    pub fn bytes(&self) -> usize {
-        self.item.payload.len()
-    }
-
     pub(crate) fn into_parts(self) -> (&'a str, RecordItem<'a>, Option<&'a str>) {
         (self.queue, self.item, self.trace)
     }

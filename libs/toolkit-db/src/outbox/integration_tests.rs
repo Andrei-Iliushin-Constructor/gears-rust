@@ -32,6 +32,7 @@ use super::store::OutboxStore;
 use super::strategy::{LeasedStrategy, ProcessContext, ProcessingStrategy, TransactionalStrategy};
 use super::tables::OutboxTables;
 use super::taskward::{Directive, WorkerAction};
+use super::trace::TraceState;
 use super::types::{LeaseConfig, OutboxConfig, SequencerConfig, WorkerTuning};
 use super::workers::sequencer::Sequencer;
 use super::{Outbox, OutboxError, Partitions};
@@ -147,9 +148,9 @@ fn test_trace_sweeper(
     }
 }
 
-/// The vacuum's downstream channel: the nudge that traces may be collectable.
-fn test_collectable_traces() -> Arc<tokio::sync::Notify> {
-    Arc::new(tokio::sync::Notify::new())
+/// The vacuum's downstream nudge that traces may be collectable.
+fn test_collectable_traces() -> super::workers::vacuum::CollectableTraces {
+    super::workers::vacuum::CollectableTraces::new()
 }
 
 fn make_shared_prioritizer() -> Arc<SharedPrioritizer> {
@@ -1028,7 +1029,7 @@ async fn a_traced_batch_counts_down_to_completion_as_it_is_processed() {
         (2, 2, 0)
     );
     assert!(!before.is_complete());
-    assert!(!before.is_stalled());
+    assert!(!before.is_retrying());
     assert!(before.completed_at.is_none());
 
     outbox.flush();
@@ -1153,13 +1154,90 @@ async fn a_traced_batch_enqueued_on_a_standalone_conn_still_delivers_completion(
     let cancel = tokio_util::sync::CancellationToken::new();
     notifier.execute(&cancel).await.unwrap();
 
-    let outcome = tokio::time::timeout(Duration::from_secs(1), waiting)
+    let outcome = tokio::time::timeout(Duration::from_secs(1), waiting.completion())
         .await
         .expect("the submitter is told its traced batch completed")
         .expect("the completion carries an outcome");
     assert_eq!(outcome.trace, "standalone-1");
     assert_eq!(outcome.entities, 2);
     assert_eq!(outcome.failures, 0);
+    assert!(outcome.is_clean());
+
+    handle.stop().await;
+}
+
+#[tokio::test]
+async fn a_single_traced_record_delivers_its_completion() {
+    // The one-entity path: `Record::to(..).trace(..)` through `Outbox::enqueue`,
+    // rather than a `Records` batch through `enqueue_batch`. It writes a
+    // one-entity trace row and must complete and deliver just the same.
+    let db = setup_db("ch2b_trace_single_record").await;
+
+    let handle = Outbox::builder(db.clone())
+        .processor_tuning(WorkerTuning::processor_default().idle_interval(Duration::from_mins(1)))
+        .sequencer_tuning(
+            WorkerTuning::sequencer_default().idle_interval(Duration::from_millis(20)),
+        )
+        .processors(1)
+        .maintenance(1, 1)
+        .queue("single-q", Partitions::of(1))
+        .leased(AckAllHandler)
+        .start()
+        .await
+        .unwrap();
+    let outbox = Arc::clone(handle.outbox());
+
+    let waiting = outbox.subscribe("single-1").unwrap();
+
+    let conn = db.conn().unwrap();
+    let record = Record::to("single-q", 0)
+        .payload(b"only".to_vec(), "test/msg")
+        .trace("single-1")
+        .build()
+        .unwrap();
+    outbox.enqueue(&conn, record).await.unwrap();
+
+    outbox.flush();
+
+    let status = outbox
+        .trace_status(&conn, "single-1")
+        .await
+        .unwrap()
+        .expect("the trace exists as soon as it is enqueued");
+    assert_eq!(status.entities, 1, "a single record is a one-entity trace");
+
+    let mut status = status;
+    for _ in 0..250 {
+        if status.is_complete() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        status = outbox
+            .trace_status(&conn, "single-1")
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert!(
+        status.is_complete(),
+        "the single-entity batch must complete"
+    );
+
+    let mut notifier = super::workers::notifier::Notifier {
+        outbox: Arc::clone(&outbox),
+        db: db.clone(),
+        batch_size: 100,
+        next_look: Duration::from_millis(100),
+    };
+    let cancel = tokio_util::sync::CancellationToken::new();
+    notifier.execute(&cancel).await.unwrap();
+
+    let outcome = tokio::time::timeout(Duration::from_secs(1), waiting.completion())
+        .await
+        .expect("the submitter is told its single-record trace completed")
+        .expect("the completion carries an outcome");
+    assert_eq!(outcome.trace, "single-1");
+    assert_eq!(outcome.entities, 1);
     assert!(outcome.is_clean());
 
     handle.stop().await;
@@ -1372,7 +1450,7 @@ async fn a_completion_is_delivered_only_to_the_instance_that_submitted_it() {
     let cancel = tokio_util::sync::CancellationToken::new();
     notifier.execute(&cancel).await.unwrap();
 
-    let outcome = tokio::time::timeout(Duration::from_secs(1), waiting)
+    let outcome = tokio::time::timeout(Duration::from_secs(1), waiting.completion())
         .await
         .expect("A is told")
         .expect("with an outcome");
@@ -1386,8 +1464,15 @@ async fn a_completion_is_delivered_only_to_the_instance_that_submitted_it() {
         "the claim stamps delivery so it cannot happen twice"
     );
 
-    // A second pass finds nothing: delivery is at most once.
+    // A second pass finds nothing: delivery is at most once. The delivered
+    // stamp is what proves it, so assert it does not move.
+    let before = read_notified_at(&db, "cross-instance-1").await;
     notifier.execute(&cancel).await.unwrap();
+    assert_eq!(
+        read_notified_at(&db, "cross-instance-1").await,
+        before,
+        "a second collection pass must not re-stamp or re-deliver the completion"
+    );
 
     handle_b.stop().await;
 }
@@ -1469,6 +1554,48 @@ async fn a_partial_countdown_does_not_try_to_claim() {
             .iter()
             .any(|sql| sql.contains("SET notified_at")),
         "the advance that reached zero must attempt it: {after_second:#?}"
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn the_notifier_with_no_subscriptions_issues_no_query() {
+    // The headline property that keeps the mail poll free when nobody is
+    // waiting: with an empty registry the notifier returns idle without a
+    // single statement.
+    let (db, recorder) = crate::test_support::connect_with_recorder(
+        "sqlite:file:ch2b_notifier_idle?mode=memory&cache=shared",
+        ConnectOpts {
+            max_conns: Some(1),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("connect");
+    run_migrations_for_testing(&db, super::outbox_migrations())
+        .await
+        .expect("migrations");
+    let t = make_default_test_outbox().await;
+
+    let mut notifier = super::workers::notifier::Notifier {
+        outbox: Arc::clone(&t.outbox),
+        db: db.clone(),
+        batch_size: 100,
+        next_look: Duration::from_millis(100),
+    };
+    let cancel = tokio_util::sync::CancellationToken::new();
+
+    assert!(
+        t.outbox.mailbox().subscriptions().is_idle(),
+        "no subscriptions were taken"
+    );
+    recorder.clear();
+    notifier.execute(&cancel).await.unwrap();
+
+    let events: Vec<String> = recorder.events().into_iter().map(|q| q.sql).collect();
+    assert!(
+        !events.iter().any(|sql| sql.contains("notified_at IS NULL")),
+        "an instance with nothing waiting must not query for mail: {events:#?}"
     );
 }
 
@@ -1689,11 +1816,11 @@ async fn a_trace_that_produced_dead_letters_is_kept_longer() {
 }
 
 #[tokio::test]
-async fn a_stalled_trace_is_visible_before_it_completes() {
+async fn a_retrying_trace_is_visible_before_it_completes() {
     // The batch is the unit of notification, so a consumer hears nothing until
     // every entity is terminal. That would leave "still working" and "wedged
-    // for an hour" indistinguishable, which is what the stall fields answer.
-    let db = setup_db("ch2b_trace_stalled").await;
+    // for an hour" indistinguishable, which is what the retry fields answer.
+    let db = setup_db("ch2b_trace_retrying").await;
 
     let handle = Outbox::builder(db.clone())
         .processor_tuning(
@@ -1707,7 +1834,7 @@ async fn a_stalled_trace_is_visible_before_it_completes() {
         )
         .processors(1)
         .maintenance(1, 1)
-        .queue("stall-q", Partitions::of(1))
+        .queue("retry-q", Partitions::of(1))
         .leased(AlwaysRetryHandler)
         .start()
         .await
@@ -1715,7 +1842,7 @@ async fn a_stalled_trace_is_visible_before_it_completes() {
 
     let outbox = handle.outbox();
     let conn = db.conn().unwrap();
-    let batch = Records::to("stall-q")
+    let batch = Records::to("retry-q")
         .payload_type("test/msg")
         .trace("stuck-1")
         .push(0, b"never succeeds".to_vec())
@@ -1724,7 +1851,7 @@ async fn a_stalled_trace_is_visible_before_it_completes() {
     outbox.enqueue_batch(&conn, batch).await.unwrap();
     outbox.flush();
 
-    // Wait for the handler to have been tried at least twice, so the stall is
+    // Wait for the handler to have been tried at least twice, so the retry is
     // a fact about the batch rather than a first attempt in progress.
     let mut status = outbox
         .trace_status(&conn, "stuck-1")
@@ -1748,9 +1875,9 @@ async fn a_stalled_trace_is_visible_before_it_completes() {
         "the retry count must be visible, got {}",
         status.attempts
     );
-    assert!(status.is_stalled(), "a retrying batch reports a stall");
+    assert!(status.is_retrying(), "a retrying batch reports it");
     assert!(
-        status.stalled_since.is_some(),
+        status.retrying_since.is_some(),
         "and says since when, so a consumer can act on the duration"
     );
     assert_eq!(status.pending, 1, "nothing reached a terminal state");
@@ -1758,11 +1885,12 @@ async fn a_stalled_trace_is_visible_before_it_completes() {
     assert!(!status.is_complete(), "a retried batch is never complete");
     assert!(status.completed_at.is_none());
 
-    // The first stall time is kept, not the latest attempt: what a consumer
+    // The first retry time is kept, not the latest attempt: what a consumer
     // needs is how long it has been stuck.
-    let first_seen = status.stalled_since;
+    let first_seen = status.retrying_since;
     let attempts_then = status.attempts;
-    for _ in 0..100 {
+    let mut checked_a_further_attempt = false;
+    for _ in 0..200 {
         let later = outbox
             .trace_status(&conn, "stuck-1")
             .await
@@ -1770,13 +1898,20 @@ async fn a_stalled_trace_is_visible_before_it_completes() {
             .unwrap();
         if later.attempts > attempts_then {
             assert_eq!(
-                later.stalled_since, first_seen,
-                "stalled_since must not move with each new attempt"
+                later.retrying_since, first_seen,
+                "retrying_since must not move with each new attempt"
             );
+            checked_a_further_attempt = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    // Guard the invariant: if the handler never retried again the assert above
+    // would never run and the test would pass vacuously.
+    assert!(
+        checked_a_further_attempt,
+        "the handler must retry again so the retrying_since-stability invariant is actually checked"
+    );
 
     handle.stop().await;
 }
@@ -1931,48 +2066,64 @@ async fn enqueue_transaction_helper_no_flush_on_rollback() {
 }
 
 // ---------------------------------------------------------------------------
-// Ch2e: stalls, pushed to whoever is watching
+// Ch2e: retries, pushed to whoever is watching
 // ---------------------------------------------------------------------------
 
 /// Retries a fixed number of times before letting the batch through, so a
-/// stall can be observed and then observed to clear.
-struct StubbornHandler {
-    remaining_retries: Arc<std::sync::atomic::AtomicUsize>,
+/// retry can be observed deterministically and then observed to clear.
+///
+/// Retries every entity until the test opens the gate, so the batch cannot
+/// complete before a retry has been reported - no dependence on how fast the
+/// handler relents.
+struct GatedRetryHandler {
+    let_through: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[async_trait::async_trait]
-impl LeasedMessageHandler for StubbornHandler {
+impl LeasedMessageHandler for GatedRetryHandler {
     async fn handle(&self, _msg: &OutboxMessage) -> MessageResult {
-        use std::sync::atomic::Ordering;
-        if self
-            .remaining_retries
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                if n > 0 { Some(n - 1) } else { None }
-            })
-            .is_ok()
-        {
-            return MessageResult::Retry;
+        if self.let_through.load(std::sync::atomic::Ordering::Acquire) {
+            MessageResult::Ok
+        } else {
+            MessageResult::Retry
         }
-        MessageResult::Ok
     }
 }
 
-fn test_stall_reporter(
+fn test_retry_reporter(
     outbox: &Arc<Outbox>,
     db: &Db,
-) -> super::workers::stall_reporter::StallReporter {
-    super::workers::stall_reporter::StallReporter {
+) -> super::workers::retry_reporter::RetryReporter {
+    super::workers::retry_reporter::RetryReporter {
         outbox: Arc::clone(outbox),
         db: db.clone(),
         batch_size: 100,
     }
 }
 
-#[tokio::test]
-async fn a_retrying_batch_reports_its_stall_and_withdraws_it_on_progress() {
-    let db = setup_db("ch2e_stall_reported").await;
+/// Follow a subscription's state changes into a channel, stopping after
+/// `Completed`. The first `next()` arms the retry query, exactly as the real
+/// callback path does.
+fn watch_states(
+    mut sub: super::subscription::TraceSubscription,
+) -> tokio::sync::mpsc::UnboundedReceiver<TraceState> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(state) = sub.next().await {
+            let done = matches!(state, TraceState::Completed(_));
+            if tx.send(state).is_err() || done {
+                break;
+            }
+        }
+    });
+    rx
+}
 
-    let remaining = Arc::new(std::sync::atomic::AtomicUsize::new(3));
+#[tokio::test]
+async fn a_retrying_batch_is_reported_and_completes_cleanly() {
+    let db = setup_db("ch2e_retry_reported").await;
+
+    let let_through = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let handle = Outbox::builder(db.clone())
         .processor_tuning(
             WorkerTuning::processor_default()
@@ -1985,21 +2136,21 @@ async fn a_retrying_batch_reports_its_stall_and_withdraws_it_on_progress() {
         )
         .processors(1)
         .maintenance(1, 1)
-        .queue("stall-q", Partitions::of(1))
-        .leased(StubbornHandler {
-            remaining_retries: Arc::clone(&remaining),
+        .queue("retry-q", Partitions::of(1))
+        .leased(GatedRetryHandler {
+            let_through: Arc::clone(&let_through),
         })
         .start()
         .await
         .unwrap();
     let outbox = Arc::clone(handle.outbox());
 
-    // Interest, and the receiver that makes this instance look for stalls.
+    // Follow the state changes; the first next() arms the retry query.
     let waiting = outbox.subscribe("stubborn-1").unwrap();
-    let mut stalls = waiting.progress();
+    let mut states = watch_states(waiting);
 
     let conn = db.conn().unwrap();
-    let batch = Records::to("stall-q")
+    let batch = Records::to("retry-q")
         .payload_type("test/msg")
         .trace("stubborn-1")
         .push(0, b"work".to_vec())
@@ -2009,116 +2160,119 @@ async fn a_retrying_batch_reports_its_stall_and_withdraws_it_on_progress() {
     outbox.enqueue_batch(&conn, batch).await.unwrap();
 
     // The reporter is driven by hand so the test does not race its timer.
-    let mut reporter = test_stall_reporter(&outbox, &db);
+    let mut reporter = test_retry_reporter(&outbox, &db);
     let cancel = tokio_util::sync::CancellationToken::new();
 
-    let mut seen: Option<super::trace::TraceProgress> = None;
-    for _ in 0..200 {
+    // The gate is shut, so the batch cannot complete: drive the reporter until a
+    // Retrying state is observed. This is deterministic - no dependence on the
+    // handler's timing.
+    let mut retrying = None;
+    for _ in 0..300 {
         reporter.execute(&cancel).await.unwrap();
-        if let Some(progress) = stalls.current() {
-            seen = Some(progress);
-            break;
+        match tokio::time::timeout(Duration::from_millis(100), states.recv()).await {
+            Ok(Some(TraceState::Retrying {
+                entities,
+                pending,
+                failures,
+                attempts,
+                ..
+            })) => {
+                retrying = Some((entities, pending, failures, attempts));
+                break;
+            }
+            Ok(Some(TraceState::Completed(_))) => {
+                panic!("the batch completed before a retry was reported, but the gate was shut")
+            }
+            _ => {} // InFlight or timeout: drive the reporter again
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let stalled = seen.expect("a batch being retried must be reported as stalled");
-    assert_eq!(stalled.trace, "stubborn-1");
-    assert_eq!(stalled.entities, 2, "the whole batch is what stalled");
-    assert_eq!(
-        stalled.pending, 2,
-        "nothing reached a terminal state while the handler kept retrying"
-    );
-    assert_eq!(stalled.failures, 0, "a retry is not a failure");
-    assert!(
-        stalled.attempts > 0,
-        "the report must say how hard the handler has tried"
-    );
-    assert!(
-        stalled.stalled_for() >= chrono::TimeDelta::zero(),
-        "the stall must be dated in the past"
-    );
+    let (entities, pending, failures, attempts) =
+        retrying.expect("a retrying batch must be reported while the gate is shut");
+    assert_eq!(entities, 2, "the whole batch is what is retrying");
+    assert_eq!(pending, 2, "nothing reached a terminal state yet");
+    assert_eq!(failures, 0, "a retry is not a failure");
+    assert!(attempts > 0, "the report must say how hard it has tried");
 
-    // The handler relents. Once the batch has moved, the trace row no longer
-    // matches the reporter's predicate and the stall is withdrawn - checked
-    // before the completion consumes the subscription.
-    let mut withdrawn = false;
-    for _ in 0..200 {
+    // Open the gate; now the batch completes and the watcher is told once.
+    let_through.store(true, std::sync::atomic::Ordering::Release);
+    let mut outcome = None;
+    for _ in 0..300 {
         reporter.execute(&cancel).await.unwrap();
-        if stalls.current().is_none() {
-            withdrawn = true;
-            break;
+        match tokio::time::timeout(Duration::from_millis(100), states.recv()).await {
+            Ok(Some(TraceState::Completed(o))) => {
+                outcome = Some(o);
+                break;
+            }
+            Ok(None) => panic!("the watch closed without a completion"),
+            _ => {} // Retrying/InFlight/timeout: drive the reporter again
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(
-        withdrawn,
-        "a batch that is moving again must stop being reported as stalled"
-    );
-
-    let outcome = tokio::time::timeout(Duration::from_secs(5), waiting)
-        .await
-        .expect("the batch finishes once the handler relents")
-        .expect("with an outcome");
+    let outcome = outcome.expect("the batch completes once the gate opens");
     assert!(outcome.is_clean(), "retries are not failures: {outcome:?}");
-    assert_eq!(remaining.load(std::sync::atomic::Ordering::SeqCst), 0);
 
     handle.stop().await;
 }
 
 #[tokio::test]
-async fn a_stalled_trace_nobody_watches_is_not_reported() {
-    // The gate is `TraceRegistry::wants_progress`: a caller that only awaits
-    // completion never takes a progress receiver, so the reporter returns
-    // without a statement even though a matching row is sitting there.
-    let db = setup_db("ch2e_stall_unwatched").await;
+async fn a_retrying_trace_nobody_watches_is_not_reported() {
+    // The gate is `TraceRegistry::wants_retry_reports`: a caller that only awaits
+    // completion never asks for state changes, so the reporter returns without a
+    // statement even though a matching row is sitting there.
+    let db = setup_db("ch2e_retry_unwatched").await;
     let t = make_default_test_outbox().await;
     t.outbox.register_queue(&db, "q", 1).await.unwrap();
 
-    insert_stalled_trace(&db, "unwatched-1", t.outbox.instance_id()).await;
+    insert_retrying_trace(&db, "unwatched-1", t.outbox.instance_id()).await;
 
-    // Interest in the completion, but no interest in progress.
+    // Interest in the completion, but no interest in retry states.
     let waiting = t.outbox.subscribe("unwatched-1").unwrap();
     assert!(
-        !t.outbox.mailbox().subscriptions().wants_progress(),
-        "awaiting a completion must not arm the stall query"
+        !t.outbox.mailbox().subscriptions().wants_retry_reports(),
+        "awaiting a completion must not arm the retry query"
     );
 
-    let mut reporter = test_stall_reporter(&t.outbox, &db);
+    let mut reporter = test_retry_reporter(&t.outbox, &db);
     let cancel = tokio_util::sync::CancellationToken::new();
     reporter.execute(&cancel).await.unwrap();
 
-    assert!(
-        waiting.progress().current().is_none(),
-        "nothing was published while nobody was watching"
-    );
-
-    // Watching arms it, and the same row is then reported.
-    let mut stalls = waiting.progress();
-    assert!(t.outbox.mailbox().subscriptions().wants_progress());
+    // Now follow state changes: that arms it, and the same row is reported.
+    let mut states = watch_states(waiting);
+    while !t.outbox.mailbox().subscriptions().wants_retry_reports() {
+        tokio::task::yield_now().await;
+    }
     reporter.execute(&cancel).await.unwrap();
-    let seen = stalls
-        .current()
-        .expect("the row was always there; only the watcher was missing");
-    assert_eq!(seen.trace, "unwatched-1");
-    assert_eq!(seen.attempts, 7);
-    assert_eq!(seen.last_error.as_deref(), Some("upstream refused"));
+    let seen = tokio::time::timeout(Duration::from_secs(2), states.recv())
+        .await
+        .expect("the watcher is armed, so the row is reported")
+        .expect("with a retry state");
+    match seen {
+        TraceState::Retrying {
+            attempts,
+            last_error,
+            ..
+        } => {
+            assert_eq!(attempts, 7);
+            assert_eq!(last_error.as_deref(), Some("upstream refused"));
+        }
+        other => panic!("expected a Retrying state, got {other:?}"),
+    }
 }
 
-/// Insert a trace that is incomplete and stalled, the state the reporter looks
+/// Insert a trace that is incomplete and retrying, the state the reporter looks
 /// for, without waiting for a handler to fail its way there.
-async fn insert_stalled_trace(db: &Db, trace: &str, owner: &str) {
+async fn insert_retrying_trace(db: &Db, trace: &str, owner: &str) {
     let conn = db.sea_internal();
     conn.execute_raw(Statement::from_sql_and_values(
         DbBackend::Sqlite,
         "INSERT INTO toolkit_outbox_trace \
            (trace, owner_instance, queue, entities, pending, failures, attempts, \
-            last_error, stalled_since, created_at) \
+            last_error, retrying_since, created_at) \
          VALUES ($1, $2, 'q', 4, 3, 0, 7, 'upstream refused', \
                  datetime('now','-30 seconds'), datetime('now','-60 seconds'))",
         [trace.into(), owner.into()],
     ))
     .await
-    .expect("insert stalled trace");
+    .expect("insert retrying trace");
 }
 
 // ======================================================================
@@ -2384,7 +2538,7 @@ async fn run_transactional(
     let tables = OutboxTables::default();
     let statements = super::statements::OutboxStatements::new(backend, &tables);
     let mailbox = super::subscription::Mailbox::new(
-        "test-instance".to_owned(),
+        super::types::InstanceId::new("test-instance"),
         super::subscription::TraceRegistry::new(),
     );
     let ctx = ProcessContext {
@@ -2516,7 +2670,7 @@ async fn run_leased(
     let tables = OutboxTables::default();
     let statements = super::statements::OutboxStatements::new(backend, &tables);
     let mailbox = super::subscription::Mailbox::new(
-        "test-instance".to_owned(),
+        super::types::InstanceId::new("test-instance"),
         super::subscription::TraceRegistry::new(),
     );
     let ctx = ProcessContext {
@@ -2624,9 +2778,11 @@ async fn a_lost_lease_before_ack_delivers_no_completion() {
     t.outbox.enqueue_batch(&conn, batch).await.unwrap();
     run_sequencer_once(&t, &db).await;
 
-    let mailbox =
-        super::subscription::Mailbox::new("owner".to_owned(), super::subscription::TraceRegistry::new());
-    let mut sub = mailbox.subscriptions().subscribe("lease-lost-1");
+    let mailbox = super::subscription::Mailbox::new(
+        super::types::InstanceId::new("owner"),
+        super::subscription::TraceRegistry::new(),
+    );
+    let sub = mailbox.subscriptions().subscribe("lease-lost-1");
 
     let result = run_leased_sharing_mailbox(
         &db,
@@ -2663,7 +2819,7 @@ async fn a_lost_lease_before_ack_delivers_no_completion() {
     assert_eq!(row.notified, 0, "notified_at must not be stamped");
 
     assert!(
-        tokio::time::timeout(Duration::from_millis(200), &mut sub)
+        tokio::time::timeout(Duration::from_millis(200), sub.completion())
             .await
             .is_err(),
         "a rolled-back ack must leave the subscriber waiting"
@@ -2755,7 +2911,7 @@ async fn dropping_the_handle_resolves_a_waiting_subscription() {
     drop(handle);
 
     // The subscription must resolve to None promptly, not hang.
-    let outcome = tokio::time::timeout(Duration::from_secs(5), sub)
+    let outcome = tokio::time::timeout(Duration::from_secs(5), sub.completion())
         .await
         .expect("a dropped handle must resolve the subscription, not hang");
     assert!(
@@ -4178,12 +4334,23 @@ async fn custom_prefix_vacuum_cleans_custom_tables() {
         db.sea_internal().get_database_backend(),
         &tables,
     ));
-    let mut vacuum = VacuumTask::new(db.clone(), statements, 10_000, test_collectable_traces());
+    let collectable = test_collectable_traces();
+    let mut vacuum = VacuumTask::new(db.clone(), statements, 10_000, collectable.clone());
     vacuum.execute(&cancel).await.unwrap();
 
     assert_eq!(count_rows(&db, tables.outgoing()).await, 0);
     assert_eq!(count_rows(&db, tables.body()).await, 0);
     assert!(!table_exists(&db, "toolkit_outbox_outgoing").await);
+
+    // Deleting bodies may have been the last thing keeping a trace alive, so the
+    // sweep must nudge the trace sweeper - the notify is armed and ready.
+    let wakeup = collectable.wakeup();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), wakeup.notified())
+            .await
+            .is_ok(),
+        "a sweep that deleted rows must signal that traces may be collectable"
+    );
 }
 
 #[tokio::test]
@@ -5412,7 +5579,7 @@ async fn vacuum_concurrent_workers_safe() {
         db.clone(),
         Arc::clone(&statements),
         10_000,
-        Arc::clone(&collectable),
+        collectable.clone(),
     );
     let mut vac2 = VacuumTask::new(db.clone(), statements, 10_000, collectable);
 

@@ -128,22 +128,24 @@ impl Notifier {
 }
 
 impl WorkerAction for Notifier {
-    type Payload = ();
+    /// How many completions were delivered this pass, for the stats listener.
+    type Payload = u64;
     type Error = OutboxError;
 
-    async fn execute(&mut self, cancel: &CancellationToken) -> Result<Directive, Self::Error> {
+    async fn execute(&mut self, cancel: &CancellationToken) -> Result<Directive<u64>, Self::Error> {
         if self.outbox.mailbox().subscriptions().is_idle() {
             // Nothing outstanding: no query, no round trip, nothing. Sleep
             // until a subscription is taken, and be tight again when it is.
             self.next_look = FIRST_LOOK;
-            return Ok(Directive::idle());
+            return Ok(Directive::Idle(0));
         }
 
-        if self.collect(cancel).await? > 0 {
+        let delivered = self.collect(cancel).await?;
+        if delivered > 0 {
             // Mail was waiting, so more may be: look again at once, and stay
             // tight afterwards.
             self.next_look = FIRST_LOOK;
-            return Ok(Directive::proceed());
+            return Ok(Directive::Proceed(delivered));
         }
 
         // Somebody is still waiting and there was nothing yet. Widen, so a
@@ -151,6 +153,6 @@ impl WorkerAction for Notifier {
         // that `Sleep` wakes early if a new subscription arrives.
         let wait = self.next_look;
         self.next_look = self.next_look.saturating_mul(2).min(WIDEST_LOOK);
-        Ok(Directive::sleep(wait))
+        Ok(Directive::Sleep(wait, 0))
     }
 }

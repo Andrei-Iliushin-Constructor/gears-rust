@@ -241,7 +241,7 @@ async fn create_trace(
                 failures       BIGINT NOT NULL DEFAULT 0,
                 attempts       BIGINT NOT NULL DEFAULT 0,
                 last_error     TEXT,
-                stalled_since  TIMESTAMPTZ,
+                retrying_since  TIMESTAMPTZ,
                 created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
                 completed_at   TIMESTAMPTZ,
                 notified_at    TIMESTAMPTZ
@@ -260,7 +260,7 @@ async fn create_trace(
                 failures       INTEGER NOT NULL DEFAULT 0,
                 attempts       INTEGER NOT NULL DEFAULT 0,
                 last_error     TEXT,
-                stalled_since  TEXT,
+                retrying_since  TEXT,
                 created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
                 completed_at   TEXT,
                 notified_at    TEXT
@@ -279,7 +279,7 @@ async fn create_trace(
                 failures       BIGINT NOT NULL DEFAULT 0,
                 attempts       BIGINT NOT NULL DEFAULT 0,
                 last_error     TEXT,
-                stalled_since  TIMESTAMP(6) NULL,
+                retrying_since  TIMESTAMP(6) NULL,
                 created_at     TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
                 completed_at   TIMESTAMP(6) NULL,
                 notified_at    TIMESTAMP(6) NULL
@@ -311,18 +311,18 @@ async fn create_trace(
 
     // Traces of this instance that are stuck rather than merely slow. Partial
     // on Postgres for the same reason as the mail index: a healthy instance
-    // has none, so the stall reporter's poll touches an empty index.
-    let stalled_filter = matches!(backend, DatabaseBackend::Postgres)
-        .then_some("completed_at IS NULL AND stalled_since IS NOT NULL");
+    // has none, so the retry reporter's poll touches an empty index.
+    let retrying_filter = matches!(backend, DatabaseBackend::Postgres)
+        .then_some("completed_at IS NULL AND retrying_since IS NOT NULL");
     create_index_if_absent(
         conn,
         backend,
         &IndexSpec {
             unique: false,
-            name: tables.idx_trace_stalled(),
+            name: tables.idx_trace_retrying(),
             table: tables.trace(),
             columns: "owner_instance",
-            filter: stalled_filter,
+            filter: retrying_filter,
         },
     )
     .await?;
@@ -1171,10 +1171,7 @@ mod tests {
             // Trace identity reaches both the body and its dead letter.
             for table in [tables.body(), tables.dead_letters()] {
                 assert!(
-                    columns_of(&conn, table)
-                        .await
-                        .iter()
-                        .any(|c| c == "trace"),
+                    columns_of(&conn, table).await.iter().any(|c| c == "trace"),
                     "{table} is missing trace"
                 );
             }
@@ -1193,7 +1190,7 @@ mod tests {
                 "owner_instance",
                 "pending",
                 "queue",
-                "stalled_since",
+                "retrying_since",
                 "trace",
             ] {
                 assert!(
@@ -1206,7 +1203,7 @@ mod tests {
             for index in [
                 tables.idx_trace_mail(),
                 tables.idx_trace_key(),
-                tables.idx_trace_stalled(),
+                tables.idx_trace_retrying(),
             ] {
                 assert!(
                     indexes.iter().any(|i| i == index),

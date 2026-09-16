@@ -33,38 +33,37 @@ impl TraceOutcome {
     }
 }
 
-/// What a subscriber is told while its batch is still in flight.
+/// Everything a caller can learn about a traced batch while it is in flight, over
+/// one channel.
 ///
-/// Pushed only when the batch is *stuck* rather than merely slow: it appears
-/// once a handler has retried one of the batch's entities, and is withdrawn
-/// when the batch moves again. A batch that flows straight through produces no
-/// progress at all, which is why subscribing to it costs nothing until
-/// something goes wrong.
+/// A subscription carries a single watch of this state. `Retrying` appears only
+/// when the batch is *stuck* rather than merely slow - once a handler has retried
+/// one of its entities - and reverts to `InFlight` when the batch moves again. A
+/// batch that flows straight through is only ever `InFlight` then `Completed`,
+/// which is why watching one costs nothing until something goes wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct TraceProgress {
-    /// The trace the caller supplied.
-    pub trace: String,
-    /// How many entities the batch held.
-    pub entities: i64,
-    /// How many have not yet reached a terminal state.
-    pub pending: i64,
-    /// How many reached a terminal state by being dead-lettered.
-    pub failures: i64,
-    /// Handler attempts against the entity currently blocking the batch.
-    pub attempts: i64,
-    /// Why the blocking entity was last retried.
-    pub last_error: Option<String>,
-    /// When the batch first stopped making progress.
-    pub stalled_since: chrono::DateTime<chrono::Utc>,
-}
-
-impl TraceProgress {
-    /// How long the batch has been stuck, as of now.
-    #[must_use]
-    pub fn stalled_for(&self) -> chrono::TimeDelta {
-        chrono::Utc::now() - self.stalled_since
-    }
+pub enum TraceState {
+    /// Moving normally: every entity so far reached a terminal state without a
+    /// handler having to retry the one now in flight.
+    InFlight,
+    /// A handler keeps failing one entity, so the batch is stuck retrying it.
+    Retrying {
+        /// How many entities the batch held.
+        entities: i64,
+        /// How many have not yet reached a terminal state.
+        pending: i64,
+        /// How many reached a terminal state by being dead-lettered.
+        failures: i64,
+        /// Handler attempts against the entity currently blocking the batch.
+        attempts: i64,
+        /// Why the blocking entity was last retried.
+        last_error: Option<String>,
+        /// When the batch first stopped making progress.
+        retrying_since: chrono::DateTime<chrono::Utc>,
+    },
+    /// Every entity reached a terminal state. Terminal: the channel closes after
+    /// this, and the durable answer stays available from `Outbox::trace_status`.
+    Completed(TraceOutcome),
 }
 
 /// What an ack's countdown did to a trace.
@@ -104,7 +103,7 @@ pub struct TraceStatus {
     /// Why the blocking entity was last retried.
     pub last_error: Option<String>,
     /// When the batch first stopped making progress, cleared when it resumes.
-    pub stalled_since: Option<chrono::DateTime<chrono::Utc>>,
+    pub retrying_since: Option<chrono::DateTime<chrono::Utc>>,
     /// When the batch was enqueued.
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// When every entity had reached a terminal state.
@@ -118,9 +117,9 @@ impl TraceStatus {
         self.pending == 0
     }
 
-    /// Whether the batch is stuck rather than merely slow.
+    /// Whether the batch is stuck retrying an entity rather than merely slow.
     #[must_use]
-    pub const fn is_stalled(&self) -> bool {
-        self.stalled_since.is_some()
+    pub const fn is_retrying(&self) -> bool {
+        self.retrying_since.is_some()
     }
 }

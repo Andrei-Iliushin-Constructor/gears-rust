@@ -18,15 +18,15 @@
 //!
 //! A batch may be submitted under a caller-supplied **trace**, and the
 //! instance that submitted it is told once every entity in the batch has
-//! reached a terminal state, and can watch it for stalls while it is in
-//! flight - see [`Outbox::subscribe`], [`TraceSubscription::progress`] and
+//! reached a terminal state, and can follow its retries while it is in
+//! flight - see [`Outbox::subscribe`], [`Outbox::watch_trace`] and
 //! [`Outbox::trace_status`]. It is opt-in: a submission with no trace records
 //! nothing.
 //!
 //! The trace is the caller's own string and the caller must make it **unique**
 //! per batch - a UUID or an otherwise collision-free id. The outbox does not
 //! detect or resolve collisions: two live batches sharing a trace are
-//! indistinguishable to completion delivery and stall reporting, so whichever
+//! indistinguishable to completion delivery and retry reporting, so whichever
 //! finishes first can resolve the other's waiter. Uniqueness is the caller's to
 //! guarantee, not the library's.
 //!
@@ -53,7 +53,7 @@
 //! | trace sweeper | collects finished trace rows | - |
 //! | cold reconciler | rediscovers pending partitions from the incoming table | the sequencer |
 //! | notifier | collects this instance's completion mail | the caller waiting on it |
-//! | stall reporter | reports this instance's stuck batches | the caller watching one |
+//! | retry reporter | reports this instance's retrying batches | the caller watching one |
 //!
 //! The telling is **conditional**, and the bar is not "something happened" but
 //! "the receiver could not otherwise find out, and has a reason to act". The
@@ -102,7 +102,7 @@
 //! letter. Four tables, one commit, one fact.
 //!
 //! Reading another stage's table is unremarkable and several tasks do it - the
-//! notifier and the stall reporter read the trace table that the ack writes.
+//! notifier and the retry reporter read the trace table that the ack writes.
 //!
 //! # Processing modes
 //!
@@ -238,8 +238,8 @@ pub use handler::{
 pub use manager::{OutboxBuilder, OutboxHandle};
 pub use migrations::{outbox_migrations, outbox_migrations_with_prefix};
 pub use record::{Record, RecordBuilder, RecordTarget, Records, RecordsBuilder, RecordsTarget};
-pub use subscription::{TraceProgressWatch, TraceSubscription};
-pub use trace::{TraceOutcome, TraceProgress, TraceStatus};
+pub use subscription::{TraceSubscription, TraceWatch};
+pub use trace::{TraceOutcome, TraceState, TraceStatus};
 pub use types::{
     LeaseConfig, OutboxError, OutboxMessageId, OutboxProfile, Partitions, WorkerTuning,
 };

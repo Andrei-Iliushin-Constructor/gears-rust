@@ -8,26 +8,25 @@
 //! when nobody is waiting.
 
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
-use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::task::{Context, Poll};
 
-use tokio::sync::{oneshot, watch};
+use tokio::sync::watch;
 
-use super::trace::{TraceOutcome, TraceProgress};
+use super::trace::{TraceOutcome, TraceState};
+use super::types::InstanceId;
 
 /// What an ack needs to deliver a completion in-process: who this instance is,
 /// and who is waiting.
 #[derive(Debug)]
 pub struct Mailbox {
-    instance_id: String,
+    instance_id: InstanceId,
     subscriptions: Arc<TraceRegistry>,
 }
 
 impl Mailbox {
     #[must_use]
-    pub fn new(instance_id: String, subscriptions: Arc<TraceRegistry>) -> Self {
+    pub fn new(instance_id: InstanceId, subscriptions: Arc<TraceRegistry>) -> Self {
         Self {
             instance_id,
             subscriptions,
@@ -36,7 +35,7 @@ impl Mailbox {
 
     #[must_use]
     pub fn instance_id(&self) -> &str {
-        &self.instance_id
+        self.instance_id.as_str()
     }
 
     #[must_use]
@@ -56,14 +55,16 @@ struct Interest {
     /// entry - so both callers would be told `None` and the completion would
     /// be claimed and discarded.
     generation: u64,
-    /// Taken when the completion is delivered, so a second delivery finds
-    /// nothing to send and cannot double-notify.
-    outcome: Option<oneshot::Sender<TraceOutcome>>,
-    /// The batch's current stall, or `None` while it is moving. A watch rather
-    /// than a queue because a subscriber wants the situation now, not every
-    /// retry that led to it, and a slow subscriber must not accumulate a
-    /// backlog it will never read.
-    progress: Arc<watch::Sender<Option<TraceProgress>>>,
+    /// The single sender for this trace's [`TraceState`]. It lives only here, so
+    /// completion (or a sweep, or `close`) drops it and the subscriber's
+    /// receiver closes - there is no second sender to leak. A watch rather than
+    /// a queue because a subscriber wants the situation now, not every retry
+    /// that led to it, and a slow subscriber must not accumulate a backlog.
+    tx: watch::Sender<TraceState>,
+    /// Whether this subscriber will actually read `Retrying` states. A caller
+    /// that only awaits completion never sets it, so the retry reporter can skip
+    /// the query entirely for an instance whose callers all do that.
+    wants_retries: Arc<AtomicBool>,
 }
 
 /// Every trace this process is currently waiting on.
@@ -86,8 +87,8 @@ impl std::fmt::Debug for Interest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Interest")
             .field("generation", &self.generation)
-            .field("waiting", &self.outcome.is_some())
-            .field("watching_progress", &(self.progress.receiver_count() > 0))
+            .field("receivers", &self.tx.receiver_count())
+            .field("wants_retries", &self.wants_retries.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -122,15 +123,9 @@ impl TraceRegistry {
     /// A completion cannot precede that commit, so there is no race: the
     /// registration is in place before anything could deliver to it.
     pub fn subscribe(self: &Arc<Self>, trace: &str) -> TraceSubscription {
-        let (tx, rx) = oneshot::channel();
-        // The initial receiver is dropped straight away, so the channel starts
-        // with none. `receiver_count() > 0` is then exactly "this caller asked
-        // for progress", which is what gates the stall query.
-        let (progress_tx, _) = watch::channel(None);
-        let progress = Arc::new(progress_tx);
-        let generation = self
-            .generations
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = watch::channel(TraceState::InFlight);
+        let wants_retries = Arc::new(AtomicBool::new(false));
+        let generation = self.generations.fetch_add(1, Ordering::Relaxed);
         // A subscription taken after the outbox stopped keeps no entry, so its
         // sender drops here and awaiting it yields `None` at once rather than
         // waiting on a pipeline that will never run. The `closed` check is read
@@ -139,16 +134,18 @@ impl TraceRegistry {
         // close could insert into the map close() already cleared.
         {
             let mut entries = self.entries();
-            if !self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            if !self.closed.load(Ordering::Acquire) {
                 entries.insert(
                     trace.to_owned(),
                     Interest {
                         generation,
-                        outcome: Some(tx),
-                        progress: Arc::clone(&progress),
+                        tx,
+                        wants_retries: Arc::clone(&wants_retries),
                     },
                 );
             }
+            // If closed, `tx` is dropped here, so `rx` sees the channel closed
+            // and the subscription resolves to `None` at once.
         }
         // Tell the collector there is now a reason to look.
         self.arrived.notify_one();
@@ -156,8 +153,8 @@ impl TraceRegistry {
             trace: trace.to_owned(),
             generation,
             registry: Arc::downgrade(self),
-            rx: Some(rx),
-            progress,
+            rx,
+            wants_retries,
         }
     }
 
@@ -190,63 +187,75 @@ impl TraceRegistry {
     /// retained.
     pub fn deliver(&self, outcome: TraceOutcome) -> bool {
         let mut entries = self.entries();
-        let Some(interest) = entries.get_mut(&outcome.trace) else {
+        let Some(interest) = entries.get(&outcome.trace) else {
             return false;
         };
-        let Some(tx) = interest.outcome.take() else {
-            return false;
-        };
-        tx.send(outcome).is_ok()
+        // Publish the terminal state, then remove the entry so the only sender
+        // drops and the receiver closes once it has observed `Completed`. A
+        // second delivery finds no entry and returns false, so a completion is
+        // announced at most once.
+        let trace = outcome.trace.clone();
+        let sent = interest.tx.send(TraceState::Completed(outcome)).is_ok();
+        entries.remove(&trace);
+        sent
     }
 
-    /// Whether any live subscription is watching for stalls.
+    /// Whether any live subscription will actually read `Retrying` states.
     ///
-    /// The stall reporter's gate. A caller that only awaits completion never
-    /// takes a progress receiver, so an instance full of such callers issues
-    /// no stall query at all - the feature costs nothing until it is used.
+    /// The retry reporter's gate. A caller that only awaits completion never
+    /// sets this, so an instance full of such callers issues no retry query at
+    /// all - the feature costs nothing until it is used.
     #[must_use]
-    pub fn wants_progress(&self) -> bool {
+    pub fn wants_retry_reports(&self) -> bool {
         self.entries()
             .values()
-            .any(|interest| interest.progress.receiver_count() > 0)
+            .any(|interest| interest.wants_retries.load(Ordering::Relaxed))
     }
 
-    /// Report a stall to whoever is watching this trace.
+    /// Report that this trace is stuck retrying an entity, to whoever is
+    /// watching it.
     ///
-    /// Returns whether anyone was. Sending the same stall twice is harmless -
-    /// the receiver sees a change only when the value differs.
-    pub fn publish_progress(&self, progress: TraceProgress) -> bool {
+    /// Returns whether the state changed. Reporting the same retry twice is
+    /// harmless - the receiver sees a change only when the value differs.
+    pub fn publish_retry(&self, trace: &str, retrying: TraceState) -> bool {
         let entries = self.entries();
-        let Some(interest) = entries.get(&progress.trace) else {
+        let Some(interest) = entries.get(trace) else {
             return false;
         };
-        if interest.progress.receiver_count() == 0 {
+        if !interest.wants_retries.load(Ordering::Relaxed) {
             return false;
         }
-        interest.progress.send_if_modified(|current| {
-            if current.as_ref() == Some(&progress) {
+        interest.tx.send_if_modified(|current| {
+            if *current == retrying {
                 false
             } else {
-                *current = Some(progress);
+                *current = retrying;
                 true
             }
         })
     }
 
-    /// Withdraw the stall from every watched trace outside `still_stalled`,
-    /// because those batches are moving again.
-    pub fn withdraw_progress_except(&self, still_stalled: &HashSet<String>) {
-        let entries = self.entries();
-        for (trace, interest) in entries.iter() {
-            if still_stalled.contains(trace) || interest.progress.receiver_count() == 0 {
-                continue;
-            }
-            interest.progress.send_if_modified(|current| {
-                if current.is_none() {
-                    false
-                } else {
-                    *current = None;
+    /// Move every trace outside `still_retrying` back to `InFlight`, because
+    /// those batches are moving again.
+    pub fn clear_retries_except(&self, still_retrying: &HashSet<String>) {
+        // Collect the senders to clear under the lock, then release it before
+        // writing: `send_if_modified` takes a watch write lock and wakes wakers,
+        // and `deliver` contends for this same mutex on every completion.
+        let to_clear: Vec<watch::Sender<TraceState>> = {
+            let entries = self.entries();
+            entries
+                .iter()
+                .filter(|(trace, _)| !still_retrying.contains(*trace))
+                .map(|(_, interest)| interest.tx.clone())
+                .collect()
+        };
+        for tx in to_clear {
+            tx.send_if_modified(|current| {
+                if matches!(current, TraceState::Retrying { .. }) {
+                    *current = TraceState::InFlight;
                     true
+                } else {
+                    false
                 }
             });
         }
@@ -281,127 +290,74 @@ impl TraceRegistry {
     }
 }
 
-/// A view of one batch's stalls while it is in flight.
+/// One batch's live state, and the means of following it.
 ///
-/// A wrapper, not the channel itself: exposing `tokio::sync::watch::Receiver`
-/// would make its version part of this crate's public contract, and would hand
-/// callers a borrow guard that blocks the sender if it is held across an await.
-/// [`TraceProgressWatch::current`] returns by value instead.
-pub struct TraceProgressWatch(watch::Receiver<Option<TraceProgress>>);
-
-impl TraceProgressWatch {
-    /// Wait until the stall state changes.
-    ///
-    /// Returns `false` once nothing can change it again - the batch finished,
-    /// or the subscription was dropped.
-    ///
-    /// Cancel-safe: it wraps [`watch::Receiver::changed`], so dropping the
-    /// future mid-await loses no notification.
-    #[must_use = "returns false once the watch is closed; a loop that ignores it spins"]
-    pub async fn changed(&mut self) -> bool {
-        self.0.changed().await.is_ok()
-    }
-
-    /// The batch's current stall, or `None` while it is moving.
-    ///
-    /// Marks the value seen, so a following [`TraceProgressWatch::changed`]
-    /// waits for the next change rather than returning this one again.
-    #[must_use]
-    pub fn current(&mut self) -> Option<TraceProgress> {
-        self.0.borrow_and_update().clone()
-    }
-
-    /// Whether a change has landed that [`TraceProgressWatch::current`] has
-    /// not yet been shown.
-    #[must_use]
-    pub fn pending_change(&self) -> bool {
-        self.0.has_changed().unwrap_or(false)
-    }
-}
-
-impl std::fmt::Debug for TraceProgressWatch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TraceProgressWatch").finish()
-    }
-}
-
-/// Interest in one trace's completion, and the means of awaiting it.
+/// A single channel of [`TraceState`]: the batch is `InFlight`, occasionally
+/// `Retrying` while a handler is stuck on one entity, and finally `Completed`.
+/// [`completion`](Self::completion) awaits just the result; [`next`](Self::next)
+/// yields every state change for a caller that also cares about retries.
 ///
-/// Awaiting yields `None` when this process can no longer answer - the outbox
+/// Either resolves to `None` when this process can no longer answer - the outbox
 /// was stopped, or this registry outlived the caller. The durable answer is
-/// always available from
-/// [`Outbox::trace_status`](super::Outbox::trace_status), which reads the trace
-/// row rather than this process's memory.
+/// always available from [`Outbox::trace_status`](super::Outbox::trace_status),
+/// which reads the trace row rather than this process's memory.
 ///
-/// Dropping the subscription releases it, with no statement issued. Mail that
-/// arrives afterwards is marked delivered and discarded.
+/// Dropping the subscription releases it, with no statement issued.
 pub struct TraceSubscription {
     trace: String,
     generation: u64,
     registry: Weak<TraceRegistry>,
-    /// Taken once it resolves. `oneshot::Receiver` panics if polled after it
-    /// is ready, and this future is public, named and `Unpin` - so
-    /// `(&mut sub).await` twice would panic rather than answer.
-    rx: Option<oneshot::Receiver<TraceOutcome>>,
-    progress: Arc<watch::Sender<Option<TraceProgress>>>,
+    rx: watch::Receiver<TraceState>,
+    /// Shared with the registry entry; set the first time the caller asks for a
+    /// state change, so the retry reporter only runs for callers that read it.
+    wants_retries: Arc<AtomicBool>,
 }
 
 impl TraceSubscription {
-    /// The trace being awaited.
+    /// The trace being followed.
     #[must_use]
     pub fn trace(&self) -> &str {
         &self.trace
     }
 
-    /// Watch the batch for stalls while waiting for it to finish.
+    /// Await the batch's outcome, ignoring intermediate retry states.
     ///
-    /// The receiver holds `None` while the batch is moving and
-    /// `Some(`[`TraceProgress`]`)` while a handler is retrying one of its
-    /// entities. Taking a receiver is what makes this instance look for
-    /// stalls, so a caller that never calls this pays nothing.
+    /// Resolves to `None` if this process can no longer answer, in which case
+    /// the durable answer is [`Outbox::trace_status`](super::Outbox::trace_status).
+    /// Cancel-safe: it waits on [`watch::Receiver::changed`].
+    pub async fn completion(mut self) -> Option<TraceOutcome> {
+        loop {
+            if let TraceState::Completed(outcome) = &*self.rx.borrow_and_update() {
+                return Some(outcome.clone());
+            }
+            if self.rx.changed().await.is_err() {
+                return None;
+            }
+        }
+    }
+
+    /// The next state change, or `None` once the batch has completed or this
+    /// process can no longer answer.
     ///
-    /// The receiver outlives the subscription; once the subscription is
-    /// dropped the value stops changing, and `changed()` resolves with an
-    /// error when the last sender goes.
+    /// Asking for state changes is what makes this instance look for retries, so
+    /// a caller that only uses [`completion`](Self::completion) pays nothing.
+    /// Cancel-safe: it waits on [`watch::Receiver::changed`].
     ///
     /// ```ignore
-    /// let waiting = outbox.subscribe("import-1")?;
-    /// let mut stalls = waiting.progress();
-    /// tokio::spawn(async move {
-    ///     while stalls.changed().await {
-    ///         if let Some(p) = stalls.current() {
-    ///             tracing::warn!(trace = %p.trace, attempts = p.attempts, "batch is stuck");
-    ///         }
+    /// let mut sub = outbox.subscribe("import-1")?;
+    /// while let Some(state) = sub.next().await {
+    ///     match state {
+    ///         TraceState::Retrying { attempts, .. } => tracing::warn!(attempts, "stuck"),
+    ///         TraceState::Completed(outcome)        => { handle(outcome); break; }
+    ///         TraceState::InFlight                  => {}
     ///     }
-    /// });
-    /// let outcome = waiting.await;
+    /// }
     /// ```
-    #[must_use]
-    pub fn progress(&self) -> TraceProgressWatch {
-        TraceProgressWatch(self.progress.subscribe())
-    }
-}
-
-impl Future for TraceSubscription {
-    type Output = Option<TraceOutcome>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Already resolved: answer again rather than panicking.
-        let Some(rx) = self.rx.as_mut() else {
-            return Poll::Ready(None);
-        };
-        match Pin::new(rx).poll(cx) {
-            Poll::Ready(Ok(outcome)) => {
-                self.rx = None;
-                Poll::Ready(Some(outcome))
-            }
-            // The sender went away without delivering: this process cannot
-            // answer, and the caller should ask the trace row instead.
-            Poll::Ready(Err(_)) => {
-                self.rx = None;
-                Poll::Ready(None)
-            }
-            Poll::Pending => Poll::Pending,
+    pub async fn next(&mut self) -> Option<TraceState> {
+        self.wants_retries.store(true, Ordering::Relaxed);
+        match self.rx.changed().await {
+            Ok(()) => Some(self.rx.borrow_and_update().clone()),
+            Err(_) => None,
         }
     }
 }
@@ -411,6 +367,36 @@ impl Drop for TraceSubscription {
         if let Some(registry) = self.registry.upgrade() {
             registry.release(&self.trace, self.generation);
         }
+    }
+}
+
+/// A running callback watch over one trace, returned by
+/// [`Outbox::watch_trace`](super::Outbox::watch_trace) and
+/// [`Outbox::watch_trace_events`](super::Outbox::watch_trace_events).
+///
+/// The callback runs on a spawned task, not inline in a worker, so a slow
+/// handler cannot stall the pipeline. Dropping the guard aborts that task and
+/// releases the subscription; keep it alive for as long as the callback matters.
+#[must_use = "dropping the guard immediately stops the watch"]
+pub struct TraceWatch {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl TraceWatch {
+    pub(super) fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self { handle }
+    }
+}
+
+impl Drop for TraceWatch {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+impl std::fmt::Debug for TraceWatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TraceWatch").finish()
     }
 }
 
@@ -429,6 +415,41 @@ mod tests {
         }
     }
 
+    fn retrying(attempts: i64) -> TraceState {
+        TraceState::Retrying {
+            entities: 4,
+            pending: 3,
+            failures: 0,
+            attempts,
+            last_error: Some("upstream refused".to_owned()),
+            retrying_since: chrono::Utc::now(),
+        }
+    }
+
+    /// Spawn a task that follows a subscription's state changes into a channel,
+    /// stopping after `Completed`. Modelling the real callback path, this is
+    /// also what arms the retry query (the first `next()` sets `wants_retries`).
+    fn spawn_watcher(
+        mut sub: TraceSubscription,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<TraceState> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(state) = sub.next().await {
+                let done = matches!(state, TraceState::Completed(_));
+                if tx.send(state).is_err() || done {
+                    break;
+                }
+            }
+        });
+        rx
+    }
+
+    async fn arm_retries(registry: &Arc<TraceRegistry>) {
+        while !registry.wants_retry_reports() {
+            tokio::task::yield_now().await;
+        }
+    }
+
     #[tokio::test]
     async fn a_subscription_receives_its_completion() {
         let registry = TraceRegistry::new();
@@ -437,7 +458,7 @@ mod tests {
         assert!(!registry.is_idle());
 
         assert!(registry.deliver(outcome("t1")));
-        let received = sub.await.expect("delivered");
+        let received = sub.completion().await.expect("delivered");
         assert_eq!(received.trace, "t1");
         assert_eq!(received.entities, 2);
         assert!(received.is_clean());
@@ -453,7 +474,7 @@ mod tests {
             !registry.deliver(outcome("t1")),
             "a second delivery must find nothing to send"
         );
-        assert!(sub.await.is_some());
+        assert!(sub.completion().await.is_some());
     }
 
     #[test]
@@ -482,104 +503,77 @@ mod tests {
         assert!(!registry.deliver(outcome("never-subscribed")));
     }
 
-    fn stall(trace: &str, attempts: i64) -> TraceProgress {
-        TraceProgress {
-            trace: trace.to_owned(),
-            entities: 4,
-            pending: 3,
-            failures: 0,
-            attempts,
-            last_error: Some("upstream refused".to_owned()),
-            stalled_since: chrono::Utc::now(),
-        }
-    }
-
     #[test]
-    fn awaiting_a_completion_does_not_arm_the_stall_query() {
+    fn only_awaiting_completion_arms_no_retry_query() {
         let registry = TraceRegistry::new();
         let _sub = registry.subscribe("t1");
         assert!(
-            !registry.wants_progress(),
-            "a caller that only awaits completion pays for no stall query"
+            !registry.wants_retry_reports(),
+            "a caller that only awaits completion pays for no retry query"
         );
     }
 
-    #[test]
-    fn taking_a_progress_receiver_arms_the_stall_query() {
+    #[tokio::test]
+    async fn following_state_changes_arms_the_retry_query() {
         let registry = TraceRegistry::new();
-        let sub = registry.subscribe("t1");
-        let watching = sub.progress();
-        assert!(registry.wants_progress());
-        drop(watching);
+        let _rx = spawn_watcher(registry.subscribe("t1"));
+        arm_retries(&registry).await;
+        assert!(registry.wants_retry_reports());
+    }
+
+    #[tokio::test]
+    async fn a_retry_reaches_a_watcher_clears_and_the_watch_closes_at_completion() {
+        let registry = TraceRegistry::new();
+        let mut rx = spawn_watcher(registry.subscribe("t1"));
+        arm_retries(&registry).await;
+
+        // A retry reaches the watcher.
+        assert!(registry.publish_retry("t1", retrying(3)));
         assert!(
-            !registry.wants_progress(),
-            "the last watcher going disarms it again"
+            matches!(
+                rx.recv().await,
+                Some(TraceState::Retrying { attempts: 3, .. })
+            ),
+            "the retry reaches the watcher"
         );
-    }
 
-    #[test]
-    fn a_stall_reaches_a_watcher_and_is_withdrawn_when_the_batch_moves() {
-        let registry = TraceRegistry::new();
-        let sub = registry.subscribe("t1");
-        let mut watching = sub.progress();
-        assert!(watching.current().is_none(), "nothing is wrong yet");
-
-        // The reporter re-reads the same row every tick, so the same stall is
-        // republished verbatim; `stalled_since` comes from the row and does
-        // not drift.
-        let unchanged = stall("t1", 3);
-        assert!(registry.publish_progress(unchanged.clone()));
-        assert_eq!(watching.current().unwrap().attempts, 3);
-
-        // Republishing it is not a change, so a watcher polling on
-        // `changed()` is not woken for it.
-        assert!(!registry.publish_progress(unchanged));
-        assert!(!watching.pending_change());
-
-        // A worse stall is.
-        assert!(registry.publish_progress(stall("t1", 4)));
-        assert_eq!(watching.current().unwrap().attempts, 4);
-
-        registry.withdraw_progress_except(&HashSet::new());
+        // The batch moves again: the retry is cleared back to InFlight.
+        registry.clear_retries_except(&HashSet::new());
         assert!(
-            watching.current().is_none(),
-            "a batch that moved again is no longer stalled"
+            matches!(rx.recv().await, Some(TraceState::InFlight)),
+            "a batch that moved again is no longer retrying"
+        );
+
+        // Completion is the terminal state, and the channel closes after it -
+        // the watcher sees Completed then None and stops (no leaked task).
+        assert!(registry.deliver(outcome("t1")));
+        assert!(matches!(rx.recv().await, Some(TraceState::Completed(_))));
+        assert!(
+            rx.recv().await.is_none(),
+            "the watch closes at completion instead of waiting for ever"
         );
     }
 
-    #[test]
-    fn a_stall_still_listed_is_not_withdrawn() {
-        let registry = TraceRegistry::new();
-        let sub = registry.subscribe("t1");
-        let mut watching = sub.progress();
-        registry.publish_progress(stall("t1", 3));
-
-        let still = HashSet::from(["t1".to_owned()]);
-        registry.withdraw_progress_except(&still);
-        assert!(watching.current().is_some());
-    }
-
-    #[test]
-    fn a_stall_for_a_trace_nobody_watches_goes_nowhere() {
+    #[tokio::test]
+    async fn a_retry_for_an_unwatched_trace_goes_nowhere() {
         let registry = TraceRegistry::new();
         let _sub = registry.subscribe("t1");
         assert!(
-            !registry.publish_progress(stall("t1", 3)),
-            "subscribed, but not watching progress"
+            !registry.publish_retry("t1", retrying(3)),
+            "subscribed, but not following state changes"
         );
-        assert!(!registry.publish_progress(stall("never-subscribed", 3)));
+        assert!(!registry.publish_retry("never-subscribed", retrying(3)));
     }
 
     #[tokio::test]
     async fn two_subscriptions_on_one_trace_do_not_destroy_each_other() {
         // `trace_status` documents duplicate traces as legal, and the registry
-        // is keyed by the trace string, so both must survive independently.
+        // is keyed by the trace string, so dropping the older must not evict the
+        // newer one's entry.
         let registry = TraceRegistry::new();
         let first = registry.subscribe("t1");
         let second = registry.subscribe("t1");
 
-        // The newer entry is the live one, and dropping the OLDER must not
-        // evict it.
         drop(first);
         assert_eq!(
             registry.len(),
@@ -590,7 +584,7 @@ mod tests {
             registry.deliver(outcome("t1")),
             "and its completion still has somewhere to go"
         );
-        assert!(second.await.is_some());
+        assert!(second.completion().await.is_some());
     }
 
     #[test]
@@ -616,7 +610,7 @@ mod tests {
         let waiting = registry.subscribe("t1");
         registry.close();
         assert!(
-            waiting.await.is_none(),
+            waiting.completion().await.is_none(),
             "a caller waiting when the outbox stops is told so, rather than waiting for ever"
         );
     }
@@ -626,7 +620,7 @@ mod tests {
         let registry = TraceRegistry::new();
         registry.close();
         assert!(
-            registry.subscribe("t1").await.is_none(),
+            registry.subscribe("t1").completion().await.is_none(),
             "there is no pipeline left to answer, so do not pretend to wait for one"
         );
         assert!(registry.is_idle(), "and nothing is left registered");
@@ -638,7 +632,7 @@ mod tests {
         let sub = registry.subscribe("t1");
         drop(registry);
         assert!(
-            sub.await.is_none(),
+            sub.completion().await.is_none(),
             "this process can no longer answer; the trace row still can"
         );
     }

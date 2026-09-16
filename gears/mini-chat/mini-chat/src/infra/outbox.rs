@@ -55,7 +55,9 @@ fn outbox_message(
             // fault: queue and payload type are gear constants here, so this is
             // the only build rejection a caller can actually provoke.
             toolkit_db::outbox::OutboxError::PayloadTooLarge { size, max } => {
-                DomainError::validation(format!("payload too large: {size} bytes exceeds max {max}"))
+                DomainError::validation(format!(
+                    "payload too large: {size} bytes exceeds max {max}"
+                ))
             }
             other => DomainError::internal(format!("outbox request: {other}")),
         })

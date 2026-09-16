@@ -182,7 +182,7 @@ batch is the unit: you are told once, not per message.
 ```rust
 // Subscribe before the transaction commits. A completion cannot precede that
 // commit, so registering first means nothing can be missed.
-let waiting = outbox.subscribe("import-2026-09-08");
+let waiting = outbox.subscribe("import-2026-09-08")?;
 
 db.in_transaction(|txn| async move {
     orders_repo.insert(txn, &orders).await?;
@@ -194,7 +194,7 @@ db.in_transaction(|txn| async move {
         .build()?).await
 }).await?;
 
-match waiting.await {
+match waiting.completion().await {
     Some(outcome) if outcome.is_clean() => info!(entities = outcome.entities, "all delivered"),
     Some(outcome) => warn!(failures = outcome.failures, "batch finished with failures"),
     // This process can no longer answer - it was stopped, for instance.
@@ -209,7 +209,7 @@ nothing.
 
 The trace is your own id and must be unique per batch - use a UUID or similar.
 The outbox does not detect or resolve collisions: if two live batches share a
-trace, completion delivery and stall reporting cannot tell them apart, so one
+trace, completion delivery and retry reporting cannot tell them apart, so one
 batch finishing can resolve the other's subscriber. Keeping traces unique is the
 caller's responsibility.
 
@@ -238,38 +238,42 @@ by the sweep, and a restarted process asks `trace_status` instead.
 
 ### Being told when a batch is stuck
 
-Waiting on a subscription tells you nothing until the batch is done, which is
-no help when it is stuck rather than slow. Ask the subscription for a progress
-receiver and you are told while it is in flight:
+A subscription is one channel of state: `InFlight`, `Retrying` while a handler
+keeps failing one entity, and finally `Completed`. `completion()` awaits just
+the result; `next()` yields every change, so you hear about retries while the
+batch is in flight:
 
 ```rust
-let waiting = outbox.subscribe("import-2026-09-08");
-let mut stalls = waiting.progress();
-tokio::spawn(async move {
-    while stalls.changed().await {
-        match stalls.current() {
-            Some(stalled) => warn!(
-                attempts = stalled.attempts,
-                for_secs = stalled.stalled_for().num_seconds(),
-                error = ?stalled.last_error,
-                "import is stuck"
-            ),
-            None => info!("import is moving again"),
-        }
+let mut sub = outbox.subscribe("import-2026-09-08")?;
+while let Some(state) = sub.next().await {
+    match state {
+        TraceState::Retrying { attempts, last_error, .. } =>
+            warn!(attempts, error = ?last_error, "import is stuck"),
+        TraceState::Completed(outcome) => { handle(outcome); break; }
+        TraceState::InFlight => {} // moving again
     }
-});
-let outcome = waiting.await;
+}
 ```
 
-The receiver holds `None` while the batch is moving and `Some(TraceProgress)`
-while a handler is retrying one of its entities; the outbox decides nothing
-about what a stall means, which is the point - a batch retrying for ten seconds
-against a rate-limited API is healthy, and the same batch retrying for an hour
-is not.
+Or hand a callback to `watch_trace` (completion only) or `watch_trace_events`
+(every state); both run on a spawned task and return a `TraceWatch` guard that
+stops the watch when dropped:
 
-Taking a receiver is what makes an instance look for stalls. A caller that only
-awaits the completion never takes one, and an instance whose callers all do that
-issues no stall query at all.
+```rust
+let _guard = outbox.watch_trace("import-2026-09-08", |outcome| match outcome {
+    Some(o) if o.is_clean() => info!("done"),
+    Some(o)                 => warn!(failures = o.failures, "done with failures"),
+    None                    => { /* process gone; read trace_status */ }
+})?;
+```
+
+The outbox decides nothing about what a retry means, which is the point - a
+batch retrying for ten seconds against a rate-limited API is healthy, and the
+same batch retrying for an hour is not.
+
+Following state changes is what makes an instance look for retries. A caller
+that only awaits the completion never does, and an instance whose callers all do
+that issues no retry query at all.
 
 ### Asking instead of waiting
 
@@ -278,15 +282,15 @@ submitted them, so it is also the durable answer after a restart:
 
 ```rust
 if let Some(status) = outbox.trace_status(&conn, "import-2026-09-08").await? {
-    if status.is_stalled() {
+    if status.is_retrying() {
         // A batch stuck retrying rather than merely slow: `attempts`,
-        // `stalled_since` and `last_error` say why and for how long.
-        warn!(attempts = status.attempts, since = ?status.stalled_since, "import stalled");
+        // `retrying_since` and `last_error` say why and for how long.
+        warn!(attempts = status.attempts, since = ?status.retrying_since, "import stuck");
     }
 }
 ```
 
-`stalled_since` keeps the *first* stall time rather than the latest attempt, so
+`retrying_since` keeps the *first* retry time rather than the latest attempt, so
 what you read is how long it has been stuck. Progress clears it.
 
 Which entities failed is answerable too: a dead letter carries the trace it
