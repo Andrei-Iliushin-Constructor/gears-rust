@@ -144,6 +144,9 @@ impl KeyGate {
             return Some(permit);
         }
         // No free slot: take a backlog slot and wait for one to free up.
+        // cancel-safe: both permits are `OwnedSemaphorePermit` RAII guards and
+        // tokio's `acquire_owned` is cancel-safe, so dropping this future while
+        // it waits releases `_backlog_slot` and never leaks an in-flight permit.
         let _backlog_slot = Arc::clone(&self.backlog).try_acquire_owned().ok()?;
         if let Ok(Ok(permit)) =
             tokio::time::timeout(backlog_timeout, Arc::clone(&self.inflight).acquire_owned()).await
@@ -270,7 +273,7 @@ impl ThrottlingMap {
     /// Prefer [`build_maps`] when constructing both partitions so that a zone
     /// referenced from both shares a single limiter instance. This constructor
     /// builds an isolated partition (its zone runtimes are not shared with any
-    /// pre-auth map) and is intended for standalone use such as tests.
+    /// pre-auth map) and is only used by the unit tests.
     ///
     /// # Errors
     /// Returns an error if an entry references an undefined zone, an invalid
@@ -278,7 +281,8 @@ impl ThrottlingMap {
     /// that allows anonymous access, or an identity-keyed zone while
     /// `auth_disabled` is true. The dry-run consistency check is skipped here;
     /// only [`build_maps`] performs it.
-    pub fn from_specs(specs: &[OperationSpec], cfg: &ApiGatewayConfig) -> Result<Self> {
+    #[cfg(test)]
+    fn from_specs(specs: &[OperationSpec], cfg: &ApiGatewayConfig) -> Result<Self> {
         let mut rate_zones = HashMap::new();
         let mut inflight_zones = HashMap::new();
         Ok(Self {
@@ -298,8 +302,7 @@ impl ThrottlingMapNoAuth {
     ///
     /// Prefer [`build_maps`] when constructing both partitions so that a zone
     /// referenced from both shares a single limiter instance. This constructor
-    /// builds an isolated partition and is intended for standalone use such as
-    /// tests.
+    /// builds an isolated partition and is only used by the unit tests.
     ///
     /// # Errors
     /// Returns an error if an entry references an undefined zone, an invalid
@@ -308,7 +311,8 @@ impl ThrottlingMapNoAuth {
     /// rules — an operation that allows anonymous access, or `auth_disabled =
     /// true` — cannot be reached here. The dry-run consistency check is
     /// skipped here; only [`build_maps`] performs it.
-    pub fn from_specs(specs: &[OperationSpec], cfg: &ApiGatewayConfig) -> Result<Self> {
+    #[cfg(test)]
+    fn from_specs(specs: &[OperationSpec], cfg: &ApiGatewayConfig) -> Result<Self> {
         let mut rate_zones = HashMap::new();
         let mut inflight_zones = HashMap::new();
         Ok(Self {
@@ -372,6 +376,7 @@ pub fn build_maps(
 /// turning a distinct-key flood into a per-request all-shard write-locking
 /// scan. Call [`ThrottleKeyPruner::spawn`] once the gear's lifecycle token is
 /// available.
+#[derive(Clone)]
 pub struct ThrottleKeyPruner {
     rate_zones: Vec<Arc<RateZone>>,
     inflight_zones: Vec<Arc<InFlightZone>>,

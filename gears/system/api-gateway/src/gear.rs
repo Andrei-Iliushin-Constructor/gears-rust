@@ -780,9 +780,28 @@ impl ApiGateway {
         // (attacker-influenced) key with no eviction, and pruning off the hot
         // path avoids per-request all-shard write-locking scans under a flood.
         if let Some(pruner) = self.throttle_key_pruner.lock().take() {
-            // The task self-terminates when `cancel` fires, so the handle is
-            // intentionally discarded rather than joined.
-            drop(pruner.spawn(cancel.clone()));
+            // The sweep task self-terminates when `cancel` fires; a supervisor
+            // respawns it after a panic, because a dead pruner silently stops
+            // all key eviction and new keys are refused once `max_keys` is
+            // reached.
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                while !cancel.is_cancelled() {
+                    let Some(handle) = pruner.clone().spawn(cancel.clone()) else {
+                        break;
+                    };
+                    match handle.await {
+                        Ok(()) => break,
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "throttling key pruner task panicked; restarting (until then new keys are refused once max_keys is reached)"
+                            );
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+                    }
+                }
+            });
         }
 
         // Bind the main socket.
@@ -1675,6 +1694,36 @@ mod tests {
         let _router = api
             .apply_middleware_stack(Router::new(), None)
             .expect("stack builds with the platform-plane layer");
+    }
+
+    /// `build_router` always builds fresh: an earlier revision short-circuited
+    /// to `router_cache`, so a later build returned the stale router.
+    #[tokio::test]
+    async fn build_router_rebuilds_instead_of_returning_cached_router() {
+        use tower::ServiceExt;
+
+        let config = ApiGatewayConfig {
+            auth_disabled: true,
+            ..Default::default()
+        };
+        let api = ApiGateway::new(config);
+        let _first = api.build_router().expect("first build");
+
+        // Poison the cache with a router nothing should ever serve.
+        api.router_cache
+            .store(Router::new().route("/stale", axum::routing::get(|| async { "stale" })));
+
+        let second = api.build_router().expect("second build");
+        let resp = second
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/stale")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
     }
 
     /// `connect_directory` fails fast (before any network attempt) when the

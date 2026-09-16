@@ -377,8 +377,9 @@ pub struct OperationSpec {
     /// may still require a JWT.
     pub exposed: bool,
     /// Optional zone-based throttling configuration for this operation.
-    /// Binds the operation to gateway throttling zones and supplies the
-    /// identity extractor for identity-keyed zones.
+    /// Binds the operation to gateway throttling zones and carries the
+    /// `require_security_context` / `dry_run` flags. Zone keying is decided by
+    /// the zone config, not here.
     pub throttling: Option<ThrottlingSpec>,
     /// Optional whitelist of allowed request Content-Type values (without parameters).
     /// Example: Some(vec!["application/json", "multipart/form-data", "application/pdf"])

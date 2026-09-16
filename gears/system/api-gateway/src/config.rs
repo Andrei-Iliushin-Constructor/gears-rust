@@ -519,7 +519,7 @@ impl Serialize for RetryAfter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyType {
-    /// Key by a per-operation identity (supplied in code via `ThrottlingSpec`).
+    /// Key by the authenticated subject (`SecurityContext::subject_id()`).
     /// Identity keying requires authentication, so identity-keyed zones may only
     /// be referenced by operations marked `require_security_context = true`.
     Identity,

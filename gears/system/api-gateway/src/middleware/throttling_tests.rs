@@ -263,6 +263,21 @@ fn compute_key_identity_requires_security_context() {
 }
 
 #[test]
+fn compute_key_identity_returns_subject_id() {
+    let sc = SecurityContext::builder()
+        .subject_id(uuid::Uuid::from_u128(42))
+        .subject_tenant_id(uuid::Uuid::from_u128(1))
+        .build()
+        .unwrap();
+    let mut req = Request::builder().body(Body::empty()).unwrap();
+    req.extensions_mut().insert(sc);
+    assert_eq!(
+        compute_key(KeyType::Identity, &req, 0),
+        Some("00000000-0000-0000-0000-00000000002a".to_owned())
+    );
+}
+
+#[test]
 fn identity_zone_rejects_anonymous_operation_and_auth_disabled() {
     let mut cfg = cfg_with_rate("id", rate_zone_cfg(10, 10, KeyType::Identity));
     let mut anon = op(Method::GET, "/x", Some(thr("id", "", true)));
