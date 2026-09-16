@@ -41,7 +41,7 @@ use super::scope::ScopeConfig;
 use super::sync::{
     ChangeGate, Family, MirrorWorker, RepoPhaseRunner, RunState, SweepWatermark, TaskKind, Worker,
 };
-use super::validate::{repo_full_name, validate_commit_sha};
+use super::validate::{repo_full_name, validate_commit_sha, validate_owner, validate_repo_path};
 
 /// The gear's name, taken from the `#[toolkit::gear]` attribute so the
 /// literal exists in exactly one place.
@@ -2947,6 +2947,10 @@ impl Service {
         owner: &str,
         name: Option<&str>,
     ) -> Result<u64, DomainError> {
+        match name {
+            Some(name) => validate_repo_path(owner, name)?,
+            None => validate_owner(owner)?,
+        }
         // Clearing a tenant's own cache is a sync-scoped action: it changes
         // nothing anyone can read, only what the next sync will re-fetch.
         let tenant_id = ctx.subject_tenant_id();

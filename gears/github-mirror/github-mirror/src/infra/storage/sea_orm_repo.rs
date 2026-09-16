@@ -22,6 +22,7 @@ use github_mirror_sdk::{
     ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
 use sea_orm::prelude::DateTimeUtc;
+use sea_orm::sea_query::LikeExpr;
 use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, Order};
 use toolkit_db::odata::sea_orm_filter::{LimitCfg, paginate_odata};
 use toolkit_db::secure::{
@@ -4865,11 +4866,23 @@ impl HttpCache for SeaOrmHttpCache {
     async fn clear(&self, tenant_id: Uuid, url_prefix: &str) -> Result<u64, DomainError> {
         let scope = AccessScope::for_tenant(tenant_id);
         let conn = self.db.conn()?;
+        let escaped = url_prefix
+            .replace('!', "!!")
+            .replace('%', "!%")
+            .replace('_', "!_");
+        let below = |boundary: char| {
+            http_cache::Column::Url.like(LikeExpr::new(format!("{escaped}{boundary}%")).escape('!'))
+        };
 
         let result = HttpCacheEntity::delete_many()
             .secure()
             .scope_with(&scope)
-            .filter(sea_orm::Condition::all().add(http_cache::Column::Url.starts_with(url_prefix)))
+            .filter(
+                sea_orm::Condition::any()
+                    .add(http_cache::Column::Url.eq(url_prefix))
+                    .add(below('/'))
+                    .add(below('?')),
+            )
             .exec(&conn)
             .await
             .map_err(map_scope_error)?;

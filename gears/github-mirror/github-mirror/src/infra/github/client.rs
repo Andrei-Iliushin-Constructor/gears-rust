@@ -154,6 +154,7 @@ fn next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
 pub struct GithubClient {
     http: reqwest::Client,
     api_base_url: String,
+    api_origin: url::Origin,
     token: Option<String>,
     cache: Arc<dyn HttpCache>,
     /// Ceiling on requests in flight, shared by every sync using this client.
@@ -190,9 +191,13 @@ impl GithubClient {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|e| DomainError::internal(format!("failed to build HTTP client: {e}")))?;
+        let api_origin = url::Url::parse(&api_base_url)
+            .map_err(|e| DomainError::internal(format!("invalid GitHub API base URL: {e}")))?
+            .origin();
         Ok(Self {
             http,
             api_base_url,
+            api_origin,
             token,
             cache,
             permits: Semaphore::new(DEFAULT_MAX_CONCURRENT_REQUESTS),
@@ -303,6 +308,7 @@ impl GithubClient {
         url: &str,
         options: &FetchOptions,
     ) -> Result<FetchedPage<T>, DomainError> {
+        self.check_origin(url)?;
         let key = CacheKey::compute("GET", url, ACCEPT_JSON);
         let cached = self.cached_entry(options, url, &key).await;
 
@@ -428,6 +434,20 @@ impl GithubClient {
 
     fn absolute(&self, path: &str) -> String {
         format!("{}{path}", self.api_base_url.trim_end_matches('/'))
+    }
+
+    fn check_origin(&self, url: &str) -> Result<(), DomainError> {
+        let target = url::Url::parse(url).map_err(|e| {
+            DomainError::internal(format!("GitHub handed back an unusable URL: {e}"))
+        })?;
+        if target.origin() == self.api_origin {
+            return Ok(());
+        }
+        Err(DomainError::internal(format!(
+            "refusing to follow a link off {}: {}",
+            self.api_base_url,
+            redacted_word(url)
+        )))
     }
 
     /// GET `path` and every page after it, concatenated, plus whether the
@@ -2461,7 +2481,7 @@ impl GithubPort for GithubClient {
         let base = self.api_base_url.trim_end_matches('/');
         let prefix = match name {
             Some(name) => format!("{base}/repos/{owner}/{name}"),
-            None => format!("{base}/repos/{owner}/"),
+            None => format!("{base}/repos/{owner}"),
         };
         self.cache.clear(tenant_id, &prefix).await
     }

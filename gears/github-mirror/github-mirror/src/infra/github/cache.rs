@@ -100,10 +100,12 @@ pub trait HttpCache: Send + Sync {
         entry: CachedResponse,
     ) -> Result<(), DomainError>;
 
-    /// Drop every entry whose URL starts with `url_prefix`, returning how many
-    /// went. This is `clear_cache(session, scope)` from DESIGN §4: the prefix
-    /// is how an org or a single repository is named, since the key itself is
-    /// an opaque hash.
+    /// Drop every entry for the resource at `url_prefix` and everything below
+    /// it: the URL itself, `url_prefix?...` and `url_prefix/...`, so clearing
+    /// `.../repos/acme/widget` leaves `.../repos/acme/widget-fork` alone.
+    /// Returns how many went. This is `clear_cache(session, scope)` from
+    /// DESIGN §4: the prefix is how an org or a single repository is named,
+    /// since the key itself is an opaque hash.
     ///
     /// # Errors
     /// Storage failures.
