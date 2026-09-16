@@ -412,7 +412,10 @@ the exception both ways: types-registry accepts and admits it itself, inline, wi
    because it has no resolved form. The in-batch graph is not acyclic by construction — the
    overlay lets candidates see each other — so the ordering detects a cycle and fails its
    members with `invalid_schema`. Past that refusal there is no condensation step and no
-   atomic group.
+   atomic group. If predecessor edges still prevent ordering, identify the actual cyclic
+   components in the remaining ordering graph and refuse only their members. Candidates
+   downstream of either kind of cycle remain ordered and receive `blocked_by_dependency`
+   or `blocked_by_predecessor` according to their failed blocker; they are not cycle members.
 3. Build the unit's transient `gts-rust` store (D2): the candidates, plus the transitive
    closure of what they consume, read `gts_id`-sorted from the database. Evaluate outside
    any transaction against it: resolution, compat vs
@@ -697,8 +700,15 @@ optional and it is not merely early — a deletion whose recheck runs before it 
 check-then-act on state that can still move, which is the failure the recheck exists to
 prevent.
 
-Dry Run follows the same path in a rollback-only evaluation transaction, then records
-the predicted outcome in a separate short transaction.
+**Dry Run predicts the whole batch without entity-state writes.** Run the same checks in
+dependency order over one read-only snapshot plus earlier successful candidates' virtual
+changes. Merge each tentative layer on success; discard it on refusal or error.
+
+Do not write `version_family`, `entity`, revision, current-pointer or `dependency` rows,
+or claim `entity_write_order`: a prediction must not serialize real writers behind a batch.
+Verify this with an adapter that rejects write attempts; unchanged tables alone permit rollback.
+Operation, outcome, idempotency and dispatch records remain durable. Publish outcomes and
+completion atomically after releasing the snapshot, preserving payloads for recovery on failure.
 
 ### 8.2 Read path, and why no store is held between admissions
 
@@ -1091,7 +1101,7 @@ because other documents cite the numbers.
 | C3 | **Struck by D11.** Was: the inventory pull model is in-process-only (§8.4) and `owning_gear` a hardcoded constant, which **blocks** out-of-process gears rather than degrading them | Resolved in P0 — `owning_gear` lands on the inventory records (T22) and every gear pushes its own (T23–T25) |
 | C4 | **Struck by D2.** Was: startup reads the whole table on the platform boot path, so startup time is linear in entity count | Resolved in P0 — no warm-up read; startup cost is the seed set, not the table (§8.2) |
 | C5 | No operation-retention sweep: terminal operations accumulate | The §3.2 sweep, once volume justifies it |
-| C6 | **No PDP.** Reads and writes are authenticated but not authorized, deviating from `06`'s *"every sensitive DB access MUST be covered by a PDP decision"*. Entities are `#[secure(unrestricted)]`, so a tenant-scoped query fails closed rather than leaking. **The sharpest edge is the revision path**: §8.1 step 3 asks the registration policy of creations only — correctly, since the policy governs which regions gain members — and nothing takes its place for an edit, so a caller that reaches the submit route can replace the authored content of any entity the registry holds, a platform-seeded `cf.core.*` schema included, in a region the deployment has closed. Bounded in P0 by transport rather than by policy: the mutation routes are internal-only (C8) | Tracked as C6 in the P1 epic #4628 — prerequisite 1 (the deferred identity-to-permission binding), then an owner/principal check before `unit::commit_revision`, and `tenant_col` + `PolicyEnforcer` (§12) |
+| C6 | **No PDP.** Access is authenticated but not authorized, contrary to `06`. `#[secure(unrestricted)]` entities reject tenant-scoped queries. Registration policy covers creations only (§8.1 step 3); callers reaching mutations can revise or tombstone eligible entities, including `cf.core.*`, even in closed regions. Lifecycle, version and dependant checks provide no authority check. P0 limits access through internal-only mutation routes (C8) | P1 epic #4628: identity-to-permission binding first, then owner/principal checks before `unit::commit_revision` and `deletion::commit_deletion`, plus `tenant_col` + `PolicyEnforcer` (§12) |
 | C7 | **The validator has no tenant or projection dimensions.** P0's validator digests `resource_version`, `resolution_fingerprint` and a fixed default-projection marker (§8.5); the SDK cache key likewise carries visibility context and projection as constants. Correct while every read is platform-plane and no `$select` exists, and wrong the moment either arrives | The wire form is a **versioned** JSON object, so P1 adds the chain versions and the real projection digest under a new version and refuses to honour a P0 token |
 | C8 | **Platform-plane mutations are internal-only.** Every P0 operation is platform-plane (`plane = 1`), but an in-process gear has no inbound platform-identity validator, api-gateway has no platform listener, and `OperationBuilder` cannot mark a route platform-only (§8.4). Registration and deletion therefore keep `exposed = false`; internal and non-mutating calls retain authentication, because `.anonymous()` without a platform identity would be a regression | A platform listener with `X-ToolKit-Internal-Token` / `PlatformIdentity`, a declarative platform-plane route marker, and a platform-principal/PDP decision before mutation dispatch. Only then may mutation routes be exposed. This is toolkit/api-gateway work outside this gear, and ADR-0006/0008 already ask for the listener |
 | C9 | **Implementation sequencing.** T14 adds reverse-impact refresh; T17 adds compatibility checks and effective waiver provenance, replacing the temporary `force` refusal. ADR-0004 still permanently forbids content revisions of minor-bearing Type Schemas; creation is admissible (§8.1 step 4). C8 keeps mutations internal | Remove this row when Checkpoints 3 and 4 are complete, before T24 exposes consumers. The ADR-0004 restriction remains |
@@ -1708,6 +1718,8 @@ identifier profile refusals, topological order, baseline selection.
 | `list_instances` helper over a content-free page | hydrates through `batchGet` and returns payloads, so the call shape consumers use is preserved |
 | Two pods, concurrent dependency change | commit-time revision-vector mismatch rolls back and retries |
 | Dry Run | full check sequence runs, nothing committed, `resource_version` unmoved |
+| Dry Run of a batch | matches real-run statuses/reasons on identical initial state; admits a referrer to an in-batch base and refuses an Instance invalidated by an in-batch revision |
+| Dry Run write attempts | instrumented storage observes no entity-state write or `entity_write_order` claim |
 | Delete with live direct dependent | refused; count reported without identities |
 | Deleted entity | exact read returns it as deleted; list excludes it |
 

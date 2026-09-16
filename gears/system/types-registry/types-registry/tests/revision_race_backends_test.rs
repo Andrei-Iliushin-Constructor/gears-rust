@@ -38,8 +38,9 @@ use types_registry::domain::admission::unit::{EvaluatedOutcome, EvaluatedUnit, c
 use types_registry::domain::admission::vector::RevisionVector;
 use types_registry::domain::admission::worker::{ItemFailure, WorkerError};
 use types_registry::domain::artifacts::{MaterializedArtifacts, content_hash};
-use types_registry::domain::enums::{DependencyKind, EntityKind, OwnershipScope};
+use types_registry::domain::enums::{DependencyKind, EntityKind, OperationKind, OwnershipScope};
 use types_registry::domain::family::family_key;
+use types_registry::domain::ports::metrics::PassLabels;
 use types_registry::domain::ports::{NewEntity, NewRevision, ReverseImpact, commit_write};
 use types_registry::infra::storage::entity::{operation_item, type_schema, type_schema_revision};
 use types_registry::infra::storage::repo::{
@@ -102,6 +103,8 @@ fn unit(gts_id: &str, body: &str, operation_item_id: i64) -> EvaluatedUnit {
         // No waiver: this fixture races two commits, and the compatibility verdict
         // is not what it is about.
         compat_forced: false,
+        // A committing registration: this file is about commit order, not modes.
+        labels: PassLabels::new(OperationKind::Registration, false),
         edges: Vec::new(),
         // The vector a real evaluation of this fixture would record, spelled out: the closure over
         // the candidate's own identifier resolves to the candidate and nothing else, and nothing
