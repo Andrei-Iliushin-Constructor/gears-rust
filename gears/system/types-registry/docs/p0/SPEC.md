@@ -369,6 +369,35 @@ returns `409`.
 outbox shell maps its result to `Ok` / `Retry` / `Reject`. Direct calls keep worker/domain
 tests wait-free (§13) and concurrency cases testable with `#[tokio::test]` on SQLite `:memory:`.
 
+**Admission failures and delivery failures.** A missing base, conforming Type Schema or
+schema `$ref` target is a terminal candidate refusal on the first evaluation. Store
+`reason: dependency_not_found`, a human-readable `message`, `dependency_id`, and
+`dependency_kind` (`base`, `conforming_type`, `ref`) on the item. Complete the operation
+once all items are terminal and acknowledge the outbox message. Malformed schema/value,
+compatibility and precondition refusals follow the same successful-dispatch path.
+An in-batch dependency is evaluated first; a failed one blocks its dependants. No retry
+waits for a dependency from a separate submission.
+
+Delivery retry is restricted to recognized temporary DB contention, connection loss and
+connection-acquisition timeout. Scope/configuration/SQL failures, evaluation panics,
+corruption and broken invariants are permanent system failures. Cancelled evaluation is
+recoverable; stale evaluation uses `max_revalidation_attempts`. Missing entity identity
+at edge commit is an invariant failure, unlike an absent input dependency at evaluation.
+
+Only system failures and unusable internal messages enter dead letters. On permanent
+failure or exhausted recovery, mark unfinished items `failed` with `admission_abandoned`
+and complete the operation, preserving prior terminal outcomes. Store a safe `error_code`
+and `operation_id` in both the client-visible error and the dead-letter reason; use that
+operation ID in logs. Do not serialize raw infrastructure errors. Failure to write the
+terminal state leaves the operation eligible for startup recovery. No automatic dead-letter
+replay restarts a completed operation.
+
+The default delivery policy allows eight admission attempts. Processor backoff starts at
+100 ms, doubles to a 10 s cap, and is local/interruption-sensitive, not a persisted retry
+deadline. Seven uninterrupted pauses total 12.7 s plus execution time. `operation_timeout`
+(default 5 min) limits each leased handler invocation, not the operation's total lifetime.
+After repeated lease timeouts, delivery `N + 1` decides from stored status without admitting.
+
 **Partitioning.** The admission queue has eight fixed partitions shared by all pods.
 Normal enqueue and startup recovery both select the partition from the operation UUID's
 last two bytes, interpreted big-endian, modulo eight. Different partitions can evaluate

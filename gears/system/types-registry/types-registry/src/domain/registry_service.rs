@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::config::TypesRegistryConfig;
 use crate::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
-use crate::domain::admission::worker::{ItemFailure, Tuning, WorkerError, run_operation};
+use crate::domain::admission::worker::{Tuning, WorkerError, run_operation};
 use crate::domain::admission::{
     Accepted, AdmissionFailureReason, Candidate, OperationDispatch, SubmitRequest,
 };
@@ -208,6 +208,11 @@ impl RegistryService {
         self.config.worker.operation_timeout
     }
 
+    /// Classify admission failures against the database engine that produced them.
+    pub(crate) fn retryable(&self, error: &WorkerError) -> bool {
+        error.transient(self.db.backend())
+    }
+
     /// Delivery attempts the outbox handler may spend on one operation.
     pub(crate) fn max_delivery_attempts(&self) -> u32 {
         self.config.worker.max_delivery_attempts
@@ -249,23 +254,20 @@ impl RegistryService {
         &self,
         operation_id: Uuid,
         now: OffsetDateTime,
+        error_code: &'static str,
     ) -> Result<(), ServiceError> {
         let provider: DBProvider<ServiceError> = DBProvider::new(self.db.clone());
         let stores = Arc::clone(&self.stores);
         let scope = Self::scope();
-        // Says only that admission stopped, not why: this reaches the caller through
-        // `GET /operations/{id}`, and the cause is an infrastructure error whose
-        // `Display` can carry connection strings, SQL and row content —
-        // `api/rest/error.rs` keeps every other infrastructure failure opaque for
-        // the same reason. It also must not claim the attempt budget ran out: a
-        // permanent failure is abandoned on the first delivery.
-        let payload = ItemFailure::new(
-            AdmissionFailureReason::AdmissionAbandoned,
-            "admission stopped before deciding this candidate; see the operator log \
-             and the outbox dead-letter row for the cause"
-                .to_owned(),
-        )
-        .to_payload();
+        // Safe diagnostic codes correlate the operation and dead letter with logs.
+        // Never expose an infrastructure error's Display (SQL/credentials/content).
+        let payload = serde_json::json!({
+            "reason": AdmissionFailureReason::AdmissionAbandoned.as_str(),
+            "message": "admission could not complete because of a system failure",
+            "error_code": error_code,
+            "operation_id": operation_id,
+        })
+        .to_string();
         provider
             .transaction(move |tx| {
                 Box::pin(async move {

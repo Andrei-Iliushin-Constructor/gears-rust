@@ -1,7 +1,7 @@
-//! Outbox delivery on PostgreSQL and MySQL, with SQLite as a control.
+//! Outbox delivery on `PostgreSQL` and `MySQL`, with `SQLite` as a control.
 //!
 //! Exercise dialect-specific claim, acknowledgement and cursor SQL, including
-//! MySQL ID allocation hidden by SQLite's single-writer model.
+//! `MySQL` ID allocation hidden by `SQLite`'s single-writer model.
 //!
 //! `assert_single_admission_under_two_pipelines` runs two pipelines over one
 //! database and asserts the candidate is admitted once. It pins the outcome, not

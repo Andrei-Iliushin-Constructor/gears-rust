@@ -4,8 +4,9 @@
 //! Leased handlers run outside a transaction so admission can open its own.
 //! Delivery is at-least-once; completed operations and terminal items are skipped.
 //!
+//! Candidate refusals (including missing dependencies) are stored on items and acked.
 //! Retries block only their partition's cursor (see [`PARTITIONS`]). Permanent
-//! failures are dead-lettered immediately; transient failures exhaust
+//! system failures are dead-lettered immediately; transient failures exhaust
 //! `worker.max_delivery_attempts` first. Terminalizing as `admission_abandoned`
 //! gives callers a readable outcome and prevents recovery on every boot.
 //!
@@ -25,8 +26,8 @@
 use std::sync::{Arc, OnceLock, Weak};
 
 use toolkit_db::outbox::{
-    Batch, EnqueueMessage, HandlerResult, LeaseConfig, LeasedHandler, MessageResult, Outbox,
-    OutboxError, OutboxHandle, OutboxMessage, OutboxProfile, Partitions, WorkerTuning,
+    Batch, HandlerResult, LeaseConfig, LeasedHandler, MessageResult, Outbox, OutboxError,
+    OutboxHandle, OutboxMessage, OutboxProfile, Partitions, Record, Records, WorkerTuning,
 };
 use toolkit_db::{Db, DbError, DbTx};
 use tracing::{error, info, warn};
@@ -92,13 +93,6 @@ pub enum ParsePayloadError {
     NotAUuid { text: String },
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("the outbox payload type '{actual}' is not '{expected}'")]
-struct UnexpectedPayloadType<'a> {
-    actual: &'a str,
-    expected: &'static str,
-}
-
 /// Startup failures: outbox setup (table prefix or migration) and recovery.
 /// Keeps recovery types and `anyhow`-backed [`DbError`] causes that conversion
 /// to `OutboxError::Database(DbErr::Custom)` would erase.
@@ -159,15 +153,10 @@ impl OperationDispatch for OutboxDispatch {
             .get()
             .and_then(Weak::upgrade)
             .ok_or_else(|| anyhow::anyhow!("the admission outbox is not running"))?;
-        outbox
-            .enqueue(
-                tx,
-                QUEUE,
-                partition(operation_id),
-                payload(operation_id),
-                PAYLOAD_TYPE,
-            )
-            .await?;
+        let record = Record::to(QUEUE, partition(operation_id))
+            .payload(payload(operation_id), PAYLOAD_TYPE)
+            .build()?;
+        outbox.enqueue(tx, record).await?;
         Ok(())
     }
 }
@@ -208,11 +197,7 @@ impl AdmissionHandler {
         lease: std::time::Duration,
     ) -> MessageResult {
         if msg.payload_type != PAYLOAD_TYPE {
-            let cause = UnexpectedPayloadType {
-                actual: &msg.payload_type,
-                expected: PAYLOAD_TYPE,
-            };
-            return reject_unusable(self.registry.metrics(), &cause);
+            return reject_unusable(self.registry.metrics(), "unexpected_payload_type", None);
         }
         self.admit_payload_within(&msg.payload, msg.attempts, lease)
             .await
@@ -240,10 +225,9 @@ impl AdmissionHandler {
         attempts: i16,
         lease: std::time::Duration,
     ) -> MessageResult {
-        let operation_id = match parse_payload(payload) {
-            Ok(operation_id) => operation_id,
-            // Permanent by construction: no redelivery changes the bytes.
-            Err(e) => return reject_unusable(self.registry.metrics(), &e),
+        // Permanent by construction: no redelivery changes the bytes.
+        let Ok(operation_id) = parse_payload(payload) else {
+            return reject_unusable(self.registry.metrics(), "invalid_operation_payload", None);
         };
 
         let now = time::OffsetDateTime::now_utc();
@@ -266,10 +250,19 @@ impl AdmissionHandler {
 
         match self.registry.admit(operation_id, now).await {
             Ok(()) => MessageResult::Ok,
-            Err(ServiceError::Worker(e)) if e.transient() && self.may_retry(attempts) => {
-                self.retry(operation_id, attempts, &e)
+            Err(ServiceError::Worker(e))
+                if self.registry.retryable(&e) && self.may_retry(attempts) =>
+            {
+                self.retry(operation_id, attempts, e.code())
             }
-            Err(_) => self.abandon(operation_id, attempts, now, deadline).await,
+            Err(error) => {
+                let code = match &error {
+                    ServiceError::Worker(error) => error.code(),
+                    _ => "admission_service_failure",
+                };
+                self.abandon(operation_id, attempts, now, deadline, code)
+                    .await
+            }
         }
     }
 
@@ -306,13 +299,11 @@ impl AdmissionHandler {
                 );
                 MessageResult::Ok
             }
-            Ok(Ok(None)) => {
-                let cause = format!(
-                    "operation {operation_id} not found at budget exhaustion; \
-                     the message cannot be associated with any known operation"
-                );
-                reject_unusable(self.registry.metrics(), &cause)
-            }
+            Ok(Ok(None)) => reject_unusable(
+                self.registry.metrics(),
+                "operation_not_found",
+                Some(operation_id),
+            ),
             // Unfinished or no status to go on: abandon.
             // Safe either way: `abandon` fails only undecided items and
             // `mark_abandoned` moves only a `pending`/`running` row, so an operation
@@ -320,7 +311,14 @@ impl AdmissionHandler {
             // dead-letter row. If the write fails too, the operation stays
             // non-terminal and boot recovery re-enqueues it.
             Ok(Ok(Some(_)) | Err(_)) | Err(_) => {
-                self.abandon(operation_id, attempts, now, deadline).await
+                self.abandon(
+                    operation_id,
+                    attempts,
+                    now,
+                    deadline,
+                    "delivery_budget_exhausted",
+                )
+                .await
             }
         }
     }
@@ -332,17 +330,12 @@ impl AdmissionHandler {
     }
 
     /// Retry an infrastructure failure that still has attempts left.
-    fn retry(
-        &self,
-        operation_id: Uuid,
-        attempts: i16,
-        cause: &dyn std::fmt::Display,
-    ) -> MessageResult {
+    fn retry(&self, operation_id: Uuid, attempts: i16, error_code: &'static str) -> MessageResult {
         warn!(
             %operation_id,
             attempts,
             max_attempts = self.max_attempts,
-            error = %cause,
+            error_code,
             "types_registry admission failed transiently; the message will be redelivered"
         );
         self.registry
@@ -359,23 +352,29 @@ impl AdmissionHandler {
         attempts: i16,
         now: time::OffsetDateTime,
         deadline: tokio::time::Instant,
+        error_code: &'static str,
     ) -> MessageResult {
         // Infrastructure errors can contain connection details or row content.
         // Use the same stable reason for the operator log and dead letter.
-        let reason = "admission_abandoned";
+        let reason = serde_json::json!({
+            "reason": "admission_abandoned",
+            "error_code": error_code,
+            "operation_id": operation_id,
+        })
+        .to_string();
         error!(
             %operation_id,
             attempts,
             max_attempts = self.max_attempts,
-            error = %reason,
+            error_code,
             "types_registry abandoned an admission; the message is dead-lettered"
         );
         self.registry
             .metrics()
             .admission_delivery(DeliveryOutcome::DeadLettered);
-        self.terminalize_abandoned(operation_id, now, deadline)
+        self.terminalize_abandoned(operation_id, now, deadline, error_code)
             .await;
-        MessageResult::Reject(reason.to_owned())
+        MessageResult::Reject(reason)
     }
 
     /// Terminalize an abandoned operation, best effort, stopping at `deadline`.
@@ -390,13 +389,17 @@ impl AdmissionHandler {
         operation_id: Uuid,
         now: time::OffsetDateTime,
         deadline: tokio::time::Instant,
+        error_code: &'static str,
     ) {
-        let written =
-            tokio::time::timeout_at(deadline, self.registry.abandon(operation_id, now)).await;
-        let failure: &dyn std::fmt::Display = match &written {
+        let written = tokio::time::timeout_at(
+            deadline,
+            self.registry.abandon(operation_id, now, error_code),
+        )
+        .await;
+        let failure = match &written {
             Ok(Ok(())) => return,
-            Ok(Err(e)) => e,
-            Err(elapsed) => elapsed,
+            Ok(Err(_)) => "abandonment_write_failed",
+            Err(_) => "abandonment_write_timeout",
         };
         error!(
             %operation_id,
@@ -421,10 +424,23 @@ fn work_deadline(lease: std::time::Duration) -> tokio::time::Instant {
 /// Takes `metrics` because the counter must fire here too: an unusable message is a
 /// dead letter like any other, and leaving it uncounted puts a blind spot in the
 /// series an operator alerts on.
-fn reject_unusable(metrics: &dyn AdmissionMetrics, cause: &dyn std::fmt::Display) -> MessageResult {
-    error!(error = %cause, "types_registry received an unusable admission message");
+fn reject_unusable(
+    metrics: &dyn AdmissionMetrics,
+    error_code: &'static str,
+    operation_id: Option<Uuid>,
+) -> MessageResult {
+    error!(
+        error_code,
+        ?operation_id,
+        "types_registry received an unusable admission message"
+    );
     metrics.admission_delivery(DeliveryOutcome::DeadLettered);
-    MessageResult::Reject(cause.to_string())
+    MessageResult::Reject(
+        serde_json::json!({
+            "error_code": error_code, "operation_id": operation_id,
+        })
+        .to_string(),
+    )
 }
 
 /// Drives the batch directly rather than through the [`LeasedMessageHandler`]
@@ -529,20 +545,19 @@ async fn recover_nonterminal_operations(
         after = page.last().copied();
         let short = u64::try_from(page.len()).unwrap_or(u64::MAX) < RECOVERY_PAGE;
 
-        let messages: Vec<EnqueueMessage<'_>> = page
+        let records = page
             .iter()
-            .map(|cursor| EnqueueMessage {
-                partition: partition(cursor.id),
-                payload: payload(cursor.id),
-                payload_type: PAYLOAD_TYPE,
-            })
-            .collect();
-        total += messages.len();
+            .fold(
+                Records::to(QUEUE).payload_type(PAYLOAD_TYPE),
+                |batch, cursor| batch.push(partition(cursor.id), payload(cursor.id)),
+            )
+            .build()?;
+        total += records.len();
         db.transaction_ref(|tx| {
             let outbox = Arc::clone(outbox);
             Box::pin(async move {
                 outbox
-                    .enqueue_batch(tx, QUEUE, &messages)
+                    .enqueue_batch(tx, records)
                     .await
                     .map_err(|error| DbError::Other(anyhow::Error::new(error)))?;
                 Ok(())

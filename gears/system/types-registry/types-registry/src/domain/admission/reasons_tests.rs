@@ -21,6 +21,7 @@ fn known() -> Vec<Reason> {
         Reason::BlockedByDependency,
         Reason::BlockedByPredecessor,
         Reason::CompatibilityUndecidable,
+        Reason::DependencyNotFound,
         Reason::DependentInvalid,
         Reason::DialectChanged,
         Reason::EntityDeleted,
@@ -49,7 +50,7 @@ fn known() -> Vec<Reason> {
 
 /// The count [`known`] must have. Bumped deliberately, which is the point: a
 /// variant added without a thought about the dashboards reading it fails here.
-const KNOWN_VARIANTS: usize = 30;
+const KNOWN_VARIANTS: usize = 31;
 
 /// Read variant names from the enum source, failing on unexpected syntax
 /// rather than returning an incomplete vocabulary.
@@ -120,6 +121,7 @@ fn variant_name(reason: &Reason) -> &'static str {
             Reason::BlockedByDependency => "BlockedByDependency",
             Reason::BlockedByPredecessor => "BlockedByPredecessor",
             Reason::CompatibilityUndecidable => "CompatibilityUndecidable",
+            Reason::DependencyNotFound => "DependencyNotFound",
             Reason::DependentInvalid => "DependentInvalid",
             Reason::DialectChanged => "DialectChanged",
             Reason::EntityDeleted => "EntityDeleted",

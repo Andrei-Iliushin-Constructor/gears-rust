@@ -685,9 +685,16 @@ async fn abandonment_does_not_expose_the_infrastructure_cause() {
         !log.contains("failure injection"),
         "the infrastructure cause must not reach the log: {log}",
     );
-    assert!(
-        matches!(result, MessageResult::Reject(ref reason) if reason == "admission_abandoned"),
-        "the dead-letter reason must be stable and sanitized: {result:?}",
+    let MessageResult::Reject(reason) = result else {
+        panic!("exhausted system failure must be rejected: {result:?}");
+    };
+    let diagnostic: Value =
+        serde_json::from_str(&reason).expect("structured dead-letter diagnostic");
+    assert_eq!(diagnostic["reason"], "admission_abandoned");
+    assert_eq!(diagnostic["error_code"], "storage_failure");
+    assert_eq!(
+        diagnostic["operation_id"],
+        accepted.operation_id.to_string()
     );
 
     let operation = registry
@@ -705,6 +712,38 @@ async fn abandonment_does_not_expose_the_infrastructure_cause() {
     );
     let error: Value = serde_json::from_str(stored).expect("the stored payload is JSON");
     assert_eq!(error["reason"], json!("admission_abandoned"));
+    assert_eq!(error["error_code"], diagnostic["error_code"]);
+    assert_eq!(error["operation_id"], diagnostic["operation_id"]);
+}
+
+#[tokio::test]
+async fn invalid_scope_is_dead_lettered_on_the_first_delivery_with_a_system_diagnostic() {
+    let db = test_db_with_outbox().await;
+    let registry = service_without_dispatch(&db, common::TestStores::failing_running());
+    let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
+    let accepted = registry
+        .submit(&registration("key", TARGET), NOW)
+        .await
+        .expect("accept");
+    let result = handler
+        .admit_payload(accepted.operation_id.to_string().as_bytes(), 0)
+        .await;
+    let MessageResult::Reject(reason) = result else {
+        panic!("invalid scope cannot be repaired by redelivery: {result:?}");
+    };
+    let diagnostic: Value = serde_json::from_str(&reason).expect("safe diagnostic");
+    assert_eq!(diagnostic["error_code"], "storage_failure");
+    assert_eq!(
+        diagnostic["operation_id"],
+        accepted.operation_id.to_string()
+    );
+    let operation = registry
+        .operation(accepted.operation_id)
+        .await
+        .expect("read")
+        .expect("exists");
+    assert_eq!(operation.status, OperationStatus::Completed);
+    assert_eq!(operation.items[0].status, OperationItemStatus::Failed);
 }
 
 /// Exercise the envelope guard through the body `LeasedHandler::handle` runs per

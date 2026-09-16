@@ -8,6 +8,8 @@ use uuid::Uuid;
 
 use super::AdmissionFailureReason;
 use super::drift::VectorDrift;
+use crate::domain::dependency::DependencyEdge;
+use crate::domain::enums::DependencyKind;
 use crate::domain::gts_store::StoreBuildError;
 
 /// Infrastructure failures; [`Self::transient`] classifies retryability.
@@ -36,12 +38,6 @@ pub enum WorkerError {
     StoreBuild(#[source] StoreBuildError),
     #[error("the blocking evaluation task failed: {0}")]
     EvaluationTask(#[source] tokio::task::JoinError),
-    /// An Instance's conforming Type Schema has no committed current revision.
-    /// Retryable: redelivery can see the type once committed, avoiding dependence
-    /// on submission order. Before T21's outbox this surfaced inline as an opaque
-    /// `500`, like write contention surfaced as a storage error.
-    #[error("instance '{gts_id}' conforms to '{type_id}', which has no current revision")]
-    ConformingTypeAbsent { gts_id: String, type_id: String },
     /// Missing or wrong-kind current-state row. D3 writes entity, revision and
     /// current state atomically, so this is corruption, not a race or candidate fault.
     #[error("entity '{gts_id}' (id {entity_id}) has no current-state row of its kind")]
@@ -91,34 +87,17 @@ pub enum WorkerError {
 }
 
 impl WorkerError {
-    /// Whether redelivery can change the outcome. Exhaustive matching forces an
-    /// explicit decision for every new variant, despite `#[non_exhaustive]`.
-    ///
-    /// Retries cover [`Self::Storage`]/[`Self::Db`] contention, transport or scope
-    /// validation; an uncommitted [`Self::ConformingTypeAbsent`]; stale evaluation
-    /// ([`Self::RevalidationRequired`]); a concurrently removed
-    /// [`Self::DependencyTargetAbsent`]; or a cancelled/lost [`Self::EvaluationTask`].
-    ///
-    /// [`Self::StoreBuild`] splits by its inner error: a failed closure read is
-    /// contention, the parse and shape failures are about the stored data.
-    ///
-    /// Corruption, invariant violations, exhausted counters and prior refusals
-    /// cannot improve on reread. Neither can a missing operation: it commits with
-    /// its message. These dead-letter on the first attempt, remaining visible in
-    /// the dead-letter table without blocking the single admission partition.
+    /// Retry only identified storage contention/transport failures or stale evaluation.
+    /// Missing dependencies are candidate refusals and never reach this type.
     #[must_use]
-    pub const fn transient(&self) -> bool {
+    pub fn transient(&self, backend: toolkit_db::DbBackend) -> bool {
         match self {
-            Self::Storage(_)
-            | Self::Db(_)
-            | Self::ConformingTypeAbsent { .. }
-            | Self::RevalidationRequired(_)
-            | Self::DependencyTargetAbsent { .. }
-            | Self::EvaluationTask(_) => true,
-            // Not the whole variant: `StoreBuildError` wraps a `ScopeError` for a
-            // failed closure read, which is the same contention `Self::Storage`
-            // retries. Its other variants are about the stored data.
-            Self::StoreBuild(e) => e.is_transient(),
+            Self::Storage(error) => toolkit_db::retry::scope(error, backend),
+            Self::Db(error) => toolkit_db::retry::database(error, backend),
+            Self::StoreBuild(error) => error.is_transient(backend),
+            Self::RevalidationRequired(_) => true,
+            // A cancelled task can be recovered on redelivery; a panic cannot.
+            Self::EvaluationTask(error) => error.is_cancelled(),
             Self::OperationNotFound { .. }
             | Self::MissingPayload { .. }
             | Self::MissingItemWrite { .. }
@@ -128,9 +107,35 @@ impl WorkerError {
             | Self::EntityVanished { .. }
             | Self::StoredIdentifierUnparsable { .. }
             | Self::BaselineUnparsable { .. }
+            | Self::DependencyTargetAbsent { .. }
             | Self::ResourceVersionExhausted { .. }
             | Self::RevisionNumberExhausted { .. }
             | Self::RefusedAfterWrite(_) => false,
+        }
+    }
+
+    /// Safe, bounded diagnostic code. Never formats SQL, documents or credentials.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::OperationNotFound { .. } => "operation_not_found",
+            Self::MissingPayload { .. } => "missing_payload",
+            Self::MissingItemWrite { .. } => "missing_item_write",
+            Self::MissingPrediction { .. } => "missing_prediction",
+            Self::ItemAlreadyTerminal { .. } => "unexpected_terminal_item",
+            Self::StoreBuild(_) => "store_build_failed",
+            Self::EvaluationTask(_) => "evaluation_task_failed",
+            Self::CurrentStateMissing { .. } => "current_state_missing",
+            Self::EntityVanished { .. } => "entity_vanished",
+            Self::StoredIdentifierUnparsable { .. } => "stored_identifier_unparsable",
+            Self::BaselineUnparsable { .. } => "baseline_unparsable",
+            Self::DependencyTargetAbsent { .. } => "dependency_target_vanished",
+            Self::ResourceVersionExhausted { .. } => "resource_version_exhausted",
+            Self::RevisionNumberExhausted { .. } => "revision_number_exhausted",
+            Self::RefusedAfterWrite(_) => "unhandled_candidate_refusal",
+            Self::RevalidationRequired(_) => "revalidation_required",
+            Self::Storage(_) => "storage_failure",
+            Self::Db(_) => "database_failure",
         }
     }
 }
@@ -142,6 +147,8 @@ pub struct ItemFailure {
     /// A stable machine reason, preserving unknown codes read from storage.
     pub reason: AdmissionFailureReason,
     pub message: String,
+    /// Identifies a missing dependency without asking clients to parse the message.
+    pub dependency: Option<DependencyEdge>,
 }
 
 impl std::fmt::Display for ItemFailure {
@@ -154,14 +161,42 @@ impl std::fmt::Display for ItemFailure {
 impl ItemFailure {
     #[must_use]
     pub fn new(reason: AdmissionFailureReason, message: String) -> Self {
-        Self { reason, message }
+        Self {
+            reason,
+            message,
+            dependency: None,
+        }
+    }
+
+    /// A missing dependency is a final candidate refusal, not a delivery failure.
+    #[must_use]
+    pub fn missing_dependency(dependency: DependencyEdge) -> Self {
+        let role = match dependency.kind {
+            DependencyKind::Derivation => "base type",
+            DependencyKind::InstanceOf => "conforming type",
+            DependencyKind::SchemaRef => "$ref target",
+        };
+        Self {
+            reason: AdmissionFailureReason::DependencyNotFound,
+            message: format!("{role} '{}' is not registered", dependency.target),
+            dependency: Some(dependency),
+        }
     }
 
     /// The stored `error_payload`: structured, so the reason survives the round
     /// trip as a field rather than as a substring.
     #[must_use]
     pub fn to_payload(&self) -> String {
-        json!({ "reason": self.reason.as_str(), "message": self.message }).to_string()
+        let mut payload = json!({ "reason": self.reason.as_str(), "message": self.message });
+        if let Some(dependency) = &self.dependency {
+            payload["dependency_id"] = json!(dependency.target);
+            payload["dependency_kind"] = json!(match dependency.kind {
+                DependencyKind::Derivation => "base",
+                DependencyKind::InstanceOf => "conforming_type",
+                DependencyKind::SchemaRef => "ref",
+            });
+        }
+        payload.to_string()
     }
 
     /// Inverse of [`Self::to_payload`]: preserves `{reason, message}` on redelivery
@@ -178,6 +213,25 @@ impl ItemFailure {
                     (Some(reason), Some(message)) => Self {
                         reason: AdmissionFailureReason::from_wire(reason),
                         message: message.to_owned(),
+                        dependency: value
+                            .get("dependency_id")
+                            .and_then(serde_json::Value::as_str)
+                            .zip(
+                                value
+                                    .get("dependency_kind")
+                                    .and_then(serde_json::Value::as_str),
+                            )
+                            .and_then(|(target, kind)| {
+                                Some(DependencyEdge {
+                                    kind: match kind {
+                                        "base" => DependencyKind::Derivation,
+                                        "conforming_type" => DependencyKind::InstanceOf,
+                                        "ref" => DependencyKind::SchemaRef,
+                                        _ => return None,
+                                    },
+                                    target: target.to_owned(),
+                                })
+                            }),
                     },
                     _ => Self::new(
                         AdmissionFailureReason::UnrecognizedPayload,
@@ -197,17 +251,59 @@ impl ItemFailure {
 mod tests {
     use super::*;
 
+    #[test]
+    fn invalid_scope_is_not_a_temporary_database_failure() {
+        assert!(
+            !WorkerError::Storage(ScopeError::Invalid("invalid scope"))
+                .transient(sea_orm::DbBackend::Sqlite)
+        );
+        assert!(
+            !WorkerError::Storage(ScopeError::Denied("not allowed"))
+                .transient(sea_orm::DbBackend::Sqlite)
+        );
+        assert!(
+            !WorkerError::StoreBuild(StoreBuildError::Storage(ScopeError::Invalid(
+                "invalid scope"
+            )))
+            .transient(sea_orm::DbBackend::Sqlite)
+        );
+    }
+
+    #[test]
+    fn database_configuration_and_query_errors_are_permanent() {
+        assert!(
+            !WorkerError::Db(DbError::InvalidConfig("invalid configuration".into()))
+                .transient(sea_orm::DbBackend::Sqlite)
+        );
+        assert!(
+            !WorkerError::Storage(ScopeError::Db(sea_orm::DbErr::Query(
+                sea_orm::RuntimeErr::Internal("no such table: operation".into())
+            )))
+            .transient(sea_orm::DbBackend::Sqlite)
+        );
+    }
+
+    #[test]
+    fn a_target_disappearing_after_evaluation_is_an_invariant_failure() {
+        assert!(
+            !WorkerError::DependencyTargetAbsent {
+                gts_id: "missing".into()
+            }
+            .transient(sea_orm::DbBackend::Sqlite)
+        );
+    }
+
     /// The split exists because `StoreBuildError` carries both a contention error
     /// and statements about stored data. Treating the whole variant as permanent
     /// dead-letters an operation a redelivery would have admitted.
     #[test]
     fn a_failed_closure_read_inside_store_build_is_retryable() {
-        let contention = WorkerError::StoreBuild(StoreBuildError::Storage(ScopeError::Invalid(
-            "connection reset",
+        let contention = WorkerError::StoreBuild(StoreBuildError::Storage(ScopeError::Db(
+            sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::Timeout),
         )));
 
         assert!(
-            contention.transient(),
+            contention.transient(sea_orm::DbBackend::Sqlite),
             "a closure read that failed on contention must be retried, not dead-lettered",
         );
     }
@@ -219,7 +315,7 @@ mod tests {
         });
 
         assert!(
-            !corrupt.transient(),
+            !corrupt.transient(sea_orm::DbBackend::Sqlite),
             "no redelivery rewrites a missing stored document",
         );
     }

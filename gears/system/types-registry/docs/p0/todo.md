@@ -589,7 +589,7 @@ the last `~`, and the immutable schema-revision pair.
 
 **Acceptance criteria:**
 - [x] An Instance records the exact Type Schema revision that validated it — `(type_schema_entity_id, type_schema_revision_no)` on `instance_revision`, read in **the same snapshot** as the transient store so the recorded pair is the one that actually validated; a second read could see the schema revised in between
-- [x] An Instance whose conforming schema is absent fails retryably, not terminally — `WorkerError::ConformingTypeAbsent`, checked **before** validation so the failure names the real cause rather than reporting a missing schema as a content fault
+- [x] An Instance whose conforming schema is absent fails immediately with `dependency_not_found` and structured dependency ID/kind, before value validation. The refusal is recorded on the item and acknowledged by the outbox.
 - [x] A minor or major 0 in the Instance identifier's last segment is refused at acceptance — **already built and tested in T7**; `an_instance_identifier_must_name_a_stable_major_without_a_minor` covers both halves plus the Type Schema contrast, so this task adds nothing
 - [x] `instance` carries only the current-revision pointer — no derived artifact. The asymmetry with `type_schema` is documented on the entity so it is not "fixed" later: an Instance has no derived state, its value is authored and its schema revision is immutable and pinned by `ON DELETE RESTRICT`, so there is nothing that could change without a new revision and nothing to fingerprint
 - [x] `entity_kind` is derived from the identifier, not passed in. Stronger than removing the literal: `EvaluatedOutcome` is an **enum** whose variant carries the kind-specific payload (artifacts for a schema, the revision pair for an Instance), and `entity_kind()` reads it off the variant. Two `Option` fields beside a `kind` discriminant would have made a mismatch representable; here it is a compile error
@@ -938,11 +938,11 @@ valid value — `an_instance_values_ref_shaped_data_is_data_and_not_an_edge` pin
 **Where the edges travel.** Extracted in `evaluate`, where the document is already parsed and
 no transaction is open, and carried on `EvaluatedUnit::edges` as target *identifiers*. The
 commit resolves them to rows, because that answer changes between evaluation and commit. Every
-edge target must resolve: an absent `$ref` target fails schema resolution, and derivation and
-conformance targets are required by the identifier chain. If a target disappears between
-evaluation and commit, `DependencyTargetAbsent` fails the unit retryably instead of writing an
-incomplete edge set. A malformed `$ref` fails at extraction as `invalid_schema`, the same reason
-code `validate_schema` would reach, so no client sees a new outcome.
+edge target must resolve: an absent base, conforming schema or `$ref` target is a terminal
+`dependency_not_found` candidate refusal. If an entity identity disappears between evaluation
+and commit, `DependencyTargetAbsent` is a permanent system failure: P0 tombstones entities and
+does not physically remove them. No incomplete edge set is written. A malformed `$ref` still
+fails at extraction as `invalid_schema`.
 
 **Verification:**
 - [x] Gear tests, all three backends (see [Commands](#commands)) — 531 on `SQLite`, six consecutive full-suite runs green; `make test-types-registry-db` green on `PostgreSQL` and `MySQL`. No new backend cases: the writes go through `replace_outgoing` and the resolution through `find_by_gts_ids`, both already exercised on both container backends by T4's `closure_walks_a_chain`. T13 adds no new SQL shape
@@ -1470,10 +1470,9 @@ reads as scope rather than as silence.
 3. **Store decorator duplication removed.** `TestStores<H>` forwards all seven port
    traits once. `PauseHooks`, `ClaimHooks`, and `CasMissHooks` customize `StoreHooks`.
    For T19/T20, add a `PausePoint` for timing or a hook for inspection/overrides.
-4. **No stale text survives.** No "wait budget" wording anywhere in the gear. Every remaining
-   mention of redelivery either carries the "until T21 … after it" caveat (SPEC lines 528, 594;
-   `errors.rs`'s `ConformingTypeAbsent`) or describes ADR-0012's target design, which is where it
-   belongs.
+4. **Dependency ordering is explicit.** Missing input dependencies fail immediately.
+   Dependants submitted together follow batch ordering; separate submissions must await the
+   prerequisite operation. Redelivery recovers temporary system failures, not absent inputs.
 
 ---
 
@@ -1885,32 +1884,24 @@ them. Worker/domain tests call directly; the passing suite retains its 5 s budge
 **Implementation notes:**
 - `AdmissionHandler::admit_payload` tests mapping/idempotency directly; pipeline tests
   cover domain delivery, all six REST route/mode combinations and PostgreSQL/MySQL leases.
-- Both drivers share `RegistryService::admit` and tuning. Exhaustive
-  `WorkerError::transient()` matching requires classification of every new variant.
-  Retryable: storage/database contention, uncommitted conforming type, stale evaluation,
-  vanished dependency target, lost evaluation task. Permanent: corruption, worker-invariant
-  violations, exhausted counters, decided refusals, missing operation; dead-letter immediately.
-  `StoreBuild` splits rather than picking a side: `StoreBuildError::is_transient()` retries a
-  failed closure read (the same contention `Storage` retries) and treats the parse and shape
-  failures as permanent.
+- Both drivers share `RegistryService::admit` and tuning. `WorkerError::transient(backend)`
+  retries only recognized temporary storage/transport failures, stale evaluation and cancelled
+  evaluation tasks. Scope/configuration/SQL errors, panics, corruption, vanished commit targets,
+  worker-invariant violations and exhausted counters are permanent. `StoreBuild` uses the same
+  storage classifier. Missing input dependencies are terminal `dependency_not_found` candidate
+  refusals with structured ID/kind, acknowledged without delivery retry or dead-lettering.
 - Retries block their partition. `worker.max_delivery_attempts` (default 8, capped at
   `i16::MAX` because the outbox stores the count in an `i16`) makes the last attempt reject.
   The processor runs with `batch_size(1)`: `attempts` is per-partition and is handed to every
   message in a read batch, so a larger batch would let unrelated messages share and reset the
-  budget. Still unbounded: a delivery cut short by the lease timeout does increment
-  `attempts` — `lease_acquire` does that when it takes the lease, before the handler runs —
-  but the handler's future is dropped before it decides, so it never rejects and never counts
-  an outcome — an admission that keeps hanging keeps the
-  partition blocked however high `attempts` climbs. The fix is handler-side: watch
-  `Batch::remaining()` and give up before the lease does. `RegistryService::abandon` records `admission_abandoned` on
-  non-terminal items and terminalizes the operation through `OperationRepo::mark_abandoned` —
-  one statement from *either* non-terminal status, filling `started_at` by `COALESCE` because
-  `ck_tr_operation_state` requires both timestamps on a completed row. `mark_completed` alone
-  would not do: an operation abandoned before its pass reached `mark_running` is still
-  `pending`, and would keep returning through recovery. The stored message is fixed and
-  non-identifying — it reaches clients through `GET /operations/{id}`, so the cause belongs in
-  the operator log and the dead-letter row, and it must not claim the attempt budget ran out
-  when a permanent failure is abandoned on the first delivery.
+  budget. Lease timeouts increment `attempts` even if the handler never returns. Delivery
+  `N + 1` skips admission and reads the stored status, acknowledging a completed operation or
+  rejecting an unfinished one. Terminal-path reads/writes stop before the remaining lease
+  deadline so cancellation does not turn the terminal decision back into another retry.
+  `RegistryService::abandon` records `admission_abandoned` only on non-terminal items and
+  completes the operation from either `pending` or `running`. Client errors and dead-letter
+  reasons carry safe `error_code` and `operation_id` fields that correlate with logs, without
+  raw infrastructure error text. These are system failures, not ordinary candidate refusals.
   `types_registry_admission_deliveries_total{outcome}` counts retries/dead letters for alerts,
   including the unusable-payload rejection.
 - The lease lasts `operation_timeout + 2s` and handlers ignore cancellation, so shutdown

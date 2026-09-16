@@ -192,14 +192,6 @@ impl From<WorkerError> for CanonicalError {
             WorkerError::EvaluationTask(inner) => {
                 opaque_internal(&inner, "blocking evaluation task")
             }
-            // Deliberately not a `404` or `409`: a retryable condition dressed as a
-            // client error invites the caller to "fix" a request that is correct.
-            WorkerError::ConformingTypeAbsent { gts_id, type_id } => opaque_internal(
-                &format!(
-                    "instance '{gts_id}' conforms to '{type_id}', which has no current revision"
-                ),
-                "admission",
-            ),
             // Corruption, not input: an entity row without the current-state row its
             // own admission transaction wrote. Nothing the caller can act on.
             WorkerError::CurrentStateMissing { gts_id, entity_id } => opaque_internal(
@@ -218,7 +210,7 @@ impl From<WorkerError> for CanonicalError {
                 &format!("the stored baseline document for '{gts_id}' is not valid JSON: {source}"),
                 "admission",
             ),
-            // A retryable snapshot race, not a malformed candidate.
+            // A target disappearing after evaluation violates the persisted-identity invariant.
             WorkerError::DependencyTargetAbsent { gts_id } => opaque_internal(
                 &format!("dependency target '{gts_id}' vanished before its edge was committed"),
                 "admission",
@@ -733,10 +725,6 @@ mod tests {
             worker_problem(WorkerError::StoreBuild(StoreBuildError::Storage(
                 ScopeError::Invalid("store-secret"),
             ))),
-            worker_problem(WorkerError::ConformingTypeAbsent {
-                gts_id: "instance-secret".to_owned(),
-                type_id: "type-secret".to_owned(),
-            }),
             worker_problem(WorkerError::CurrentStateMissing {
                 gts_id: "state-secret".to_owned(),
                 entity_id: 7,

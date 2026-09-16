@@ -200,14 +200,15 @@ pub enum StoreBuildError {
 impl StoreBuildError {
     /// Whether a redelivery can reach a different answer.
     ///
-    /// Only [`Self::Storage`] can: it wraps the closure read's `ScopeError`, which
-    /// is the same contention `WorkerError::Storage` retries. Every other variant
+    /// Only recognized temporary storage failures can change on reread.
+    /// Scope/configuration failures are permanent, as with `WorkerError::Storage`.
+    /// Every other variant
     /// is a statement about stored data or about this unit's own shape, and a
     /// reread produces it again.
     #[must_use]
-    pub const fn is_transient(&self) -> bool {
+    pub fn is_transient(&self, backend: toolkit_db::DbBackend) -> bool {
         match self {
-            Self::Storage(_) => true,
+            Self::Storage(error) => toolkit_db::retry::scope(error, backend),
             Self::MissingDocument { .. }
             | Self::Content { .. }
             | Self::MissingDialect { .. }

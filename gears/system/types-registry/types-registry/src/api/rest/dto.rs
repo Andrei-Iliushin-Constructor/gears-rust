@@ -580,6 +580,9 @@ pub struct OperationItemDto {
     pub resource_version: Option<i64>,
     /// The refusal as `{reason, message}`, when this candidate failed.
     /// `reason` is a stable machine-readable code; `message` is an explanation for humans.
+    /// Missing dependencies also carry `dependency_id` and `dependency_kind`
+    /// (`base`, `conforming_type`, `ref`). System abandonment carries a safe
+    /// `error_code` and `operation_id` for correlation with operator logs.
     /// Compatibility messages include causes and schema locations where available.
     /// Clients must not parse `message` or depend on its wording.
     pub error: Option<serde_json::Value>,

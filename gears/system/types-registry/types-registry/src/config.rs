@@ -163,7 +163,7 @@ pub struct WorkerSettings {
     pub max_revalidation_attempts: u32,
     /// Delivery attempts a failing operation gets before it is dead-lettered and
     /// terminalized as `admission_abandoned`; `1` allows no retry. Bounds persistent
-    /// transient failures so they cannot block the single admission partition.
+    /// transient failures so they cannot block its admission partition.
     ///
     /// Counts every delivery the outbox starts, including one cut short by the
     /// lease timeout: `lease_acquire` increments `attempts` when it takes the lease,

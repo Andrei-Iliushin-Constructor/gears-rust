@@ -896,9 +896,12 @@ impl<H: StoreHooks> OperationStore for TestStores<H> {
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError> {
         if self.hooks.fail_mark_completed() {
-            return Err(ScopeError::Invalid(
-                "this pass's operation completion is under failure injection",
-            ));
+            return Err(ScopeError::Db(sea_orm::DbErr::Query(
+                sea_orm::RuntimeErr::Internal(
+                    "(code: 5) database is locked: operation completion failure injection"
+                        .to_owned(),
+                ),
+            )));
         }
         self.inner.mark_completed(tx, scope, id, now).await
     }
@@ -925,9 +928,11 @@ impl<H: StoreHooks> OperationStore for TestStores<H> {
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError> {
         if self.hooks.fail_mark_item_succeeded() {
-            return Err(ScopeError::Invalid(
-                "this item's success write is under failure injection",
-            ));
+            return Err(ScopeError::Db(sea_orm::DbErr::Query(
+                sea_orm::RuntimeErr::Internal(
+                    "(code: 5) database is locked: item success failure injection".to_owned(),
+                ),
+            )));
         }
         self.inner
             .mark_item_succeeded(tx, scope, item_id, outcome, now)

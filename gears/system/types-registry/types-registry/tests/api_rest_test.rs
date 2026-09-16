@@ -962,10 +962,15 @@ async fn a_candidate_refused_by_admission_surfaces_through_the_operation() {
     assert_eq!(item["status"], json!("failed"));
     assert_eq!(
         item["error"]["reason"],
-        json!("invalid_schema"),
+        json!("dependency_not_found"),
         "the reason travels as a field, not as prose: {:?}",
         item["error"],
     );
+    assert_eq!(
+        item["error"]["dependency_id"],
+        gts_id!("cf.core.absent.type.v1~")
+    );
+    assert_eq!(item["error"]["dependency_kind"], "ref");
 }
 
 // ---------------------------------------------------------------------------

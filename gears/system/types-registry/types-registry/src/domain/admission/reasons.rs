@@ -8,8 +8,8 @@ use toolkit_macros::domain_model;
 #[non_exhaustive]
 pub enum AdmissionFailureReason {
     ActivationWriteSetExceeded,
-    /// Outbox delivery gave up on the operation after its attempt budget, so the
-    /// candidate was never decided. Distinct from every other reason here, which
+    /// A permanent system failure or exhausted delivery budget stopped admission,
+    /// so the candidate was never decided. Distinct from every other reason here, which
     /// states something about the candidate: this one states that admission
     /// stopped trying.
     AdmissionAbandoned,
@@ -25,6 +25,8 @@ pub enum AdmissionFailureReason {
     BlockedByPredecessor,
     /// `compare_documents` returned `Unknown`, distinct from an incompatible verdict.
     CompatibilityUndecidable,
+    /// A required base, conforming type or schema reference is absent.
+    DependencyNotFound,
     DependentInvalid,
     /// The declared dialect differs from the major's pinned dialect (ADR-0014).
     DialectChanged,
@@ -76,6 +78,7 @@ impl AdmissionFailureReason {
             "blocked_by_dependency" => Self::BlockedByDependency,
             "blocked_by_predecessor" => Self::BlockedByPredecessor,
             "compatibility_undecidable" => Self::CompatibilityUndecidable,
+            "dependency_not_found" => Self::DependencyNotFound,
             "dependent_invalid" => Self::DependentInvalid,
             "dialect_changed" => Self::DialectChanged,
             "entity_deleted" => Self::EntityDeleted,
@@ -123,6 +126,7 @@ impl AdmissionFailureReason {
             Self::BlockedByDependency => "blocked_by_dependency",
             Self::BlockedByPredecessor => "blocked_by_predecessor",
             Self::CompatibilityUndecidable => "compatibility_undecidable",
+            Self::DependencyNotFound => "dependency_not_found",
             Self::DependentInvalid => "dependent_invalid",
             Self::DialectChanged => "dialect_changed",
             Self::EntityDeleted => "entity_deleted",
