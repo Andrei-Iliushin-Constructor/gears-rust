@@ -16,9 +16,10 @@ use types_registry::domain::enums::{DependencyKind, EntityKind, OwnershipScope};
 use types_registry::domain::family::FamilyKey;
 use types_registry::domain::ports::{
     CurrentDocument, CurrentInstanceRow, CurrentInstanceValue, CurrentSchemaCas,
-    CurrentSchemaProjection, CurrentTypeSchemaRow, DependencyClosure, DependencyStore, EntityRow,
-    EntityStore, EntityWriteOrderStore, InstanceStore, NewCurrentInstance, NewCurrentTypeSchema,
-    NewEntity, NewInstanceRevision, NewOperation, NewOperationItem, NewRevision, OperationItemRow,
+    CurrentSchemaProjection, CurrentTypeSchemaRow, DependencyClosure, DependencyEdgeRow,
+    DependencyStore, EdgeSide, EntityEdge, EntityRow, EntityStore, EntityWriteOrderStore,
+    InstanceStore, ItemSuccess, NewCurrentInstance, NewCurrentTypeSchema, NewEntity,
+    NewInstanceRevision, NewOperation, NewOperationItem, NewRevision, OperationItemRow,
     OperationRow, OperationStore, ReverseImpact, Stores, TypeSchemaStore, VersionFamilyRow,
     VersionFamilyStore,
 };
@@ -48,6 +49,27 @@ pub trait StoreHooks: Send + Sync {
 
     /// Return `true` to simulate a schema CAS miss without a database write.
     fn refuse_schema_cas(&self, _entity_id: i64) -> bool {
+        false
+    }
+
+    /// Called before each entity-state write or write-order claim; allows by default.
+    /// No-write tests reject attempts, since final-state equality also permits rollback.
+    fn entity_write(&self, _call: &'static str) -> Result<(), ScopeError> {
+        Ok(())
+    }
+
+    /// Return `true` to fail the operation's completion write, which is how the
+    /// atomicity of publication is put under test.
+    fn fail_mark_completed(&self) -> bool {
+        false
+    }
+
+    /// Return `true` to simulate a deletion losing its race: the entity read
+    /// inside the commit saw `ACTIVE` at the expected version, and the write
+    /// then matched nothing. Both preconditions live in the statement's
+    /// `WHERE`, so this is the only way to reach that arm without a second
+    /// writer that ignores the `entity_write_order` claim — and there is none.
+    fn refuse_deletion(&self, _entity_id: i64) -> bool {
         false
     }
 }
@@ -114,6 +136,90 @@ pub struct CasMissHooks {
 impl StoreHooks for CasMissHooks {
     fn refuse_schema_cas(&self, entity_id: i64) -> bool {
         entity_id == self.refuse_for_entity_id
+    }
+}
+
+/// Refuses every `mark_deleted` for one entity, so the deletion commit sees the
+/// row move between its read and its write.
+pub struct DeletionMissHooks {
+    refuse_for_entity_id: i64,
+}
+
+impl StoreHooks for DeletionMissHooks {
+    fn refuse_deletion(&self, entity_id: i64) -> bool {
+        entity_id == self.refuse_for_entity_id
+    }
+}
+
+/// Records every entity-state write attempt, and optionally refuses it.
+///
+/// Refusing rather than only recording is deliberate: a pass that writes and
+/// rolls back leaves the same tables behind as one that never wrote, so an
+/// assertion on the tables cannot tell them apart. This one fails the attempt.
+#[derive(Default)]
+pub struct EntityWriteSpy {
+    attempts: std::sync::Mutex<Vec<&'static str>>,
+    forbid: bool,
+}
+
+impl StoreHooks for EntityWriteSpy {
+    fn entity_write(&self, call: &'static str) -> Result<(), ScopeError> {
+        self.attempts
+            .lock()
+            .expect("the spy's record is never poisoned")
+            .push(call);
+        if self.forbid {
+            return Err(ScopeError::Invalid(
+                "this pass must issue no entity-state write",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl TestStores<EntityWriteSpy> {
+    /// Ports that refuse — and record — every entity-state write and the
+    /// write-order claim, while serving every read from real storage.
+    #[must_use]
+    pub fn forbidding_entity_writes() -> Arc<Self> {
+        Arc::new(Self {
+            inner: stores(),
+            hooks: EntityWriteSpy {
+                attempts: std::sync::Mutex::new(Vec::new()),
+                forbid: true,
+            },
+        })
+    }
+
+    /// Every entity-state write attempted so far, in call order.
+    #[must_use]
+    pub fn entity_write_attempts(&self) -> Vec<&'static str> {
+        self.hooks
+            .attempts
+            .lock()
+            .expect("the spy's record is never poisoned")
+            .clone()
+    }
+}
+
+/// Fails the operation's completion write and nothing else.
+pub struct CompletionFailureHooks;
+
+impl StoreHooks for CompletionFailureHooks {
+    fn fail_mark_completed(&self) -> bool {
+        true
+    }
+}
+
+impl TestStores<CompletionFailureHooks> {
+    /// Ports whose `mark_completed` always fails, so a publication that includes
+    /// it must leave every item write behind with it.
+    #[must_use]
+    pub fn failing_completion() -> Arc<Self> {
+        Arc::new(Self {
+            inner: stores(),
+            hooks: CompletionFailureHooks,
+        })
     }
 }
 
@@ -199,6 +305,19 @@ impl TestStores<CasMissHooks> {
     }
 }
 
+impl TestStores<DeletionMissHooks> {
+    /// Refuse `refuse_for_entity_id`'s lifecycle transition to `DELETED`.
+    #[must_use]
+    pub fn deletion_miss(refuse_for_entity_id: i64) -> Arc<Self> {
+        Arc::new(Self {
+            inner: stores(),
+            hooks: DeletionMissHooks {
+                refuse_for_entity_id,
+            },
+        })
+    }
+}
+
 // Port implementations.
 
 #[async_trait]
@@ -209,6 +328,7 @@ impl<H: StoreHooks> EntityWriteOrderStore for TestStores<H> {
         scope: &AccessScope,
         now: OffsetDateTime,
     ) -> Result<(), ScopeError> {
+        self.hooks.entity_write("claim_entity_write_order")?;
         self.hooks.at(PausePoint::BeforeEntityWriteOrderClaim).await;
         self.inner.claim_entity_write_order(tx, scope, now).await?;
         self.hooks.at(PausePoint::AfterEntityWriteOrderClaim).await;
@@ -218,6 +338,15 @@ impl<H: StoreHooks> EntityWriteOrderStore for TestStores<H> {
 
 #[async_trait]
 impl<H: StoreHooks> VersionFamilyStore for TestStores<H> {
+    async fn find_family_by_key(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        family_key: &FamilyKey,
+    ) -> Result<Option<VersionFamilyRow>, ScopeError> {
+        self.inner.find_family_by_key(tx, scope, family_key).await
+    }
+
     async fn create_or_get(
         &self,
         tx: &DbTx<'_>,
@@ -227,6 +356,7 @@ impl<H: StoreHooks> VersionFamilyStore for TestStores<H> {
         owner_tenant_id: Option<Uuid>,
         now: OffsetDateTime,
     ) -> Result<(VersionFamilyRow, bool), ScopeError> {
+        self.hooks.entity_write("create_or_get")?;
         let out = self
             .inner
             .create_or_get(tx, scope, family_key, ownership_scope, owner_tenant_id, now)
@@ -257,6 +387,15 @@ impl<H: StoreHooks> EntityStore for TestStores<H> {
         self.inner.find_by_gts_ids(tx, scope, gts_ids).await
     }
 
+    async fn find_by_ids(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_ids: &[i64],
+    ) -> Result<Vec<EntityRow>, ScopeError> {
+        self.inner.find_by_ids(tx, scope, entity_ids).await
+    }
+
     async fn find_by_gts_uuid(
         &self,
         tx: &DbTx<'_>,
@@ -281,6 +420,7 @@ impl<H: StoreHooks> EntityStore for TestStores<H> {
         scope: &AccessScope,
         new: NewEntity,
     ) -> Result<Option<EntityRow>, ScopeError> {
+        self.hooks.entity_write("insert_entity")?;
         self.inner.insert_entity(tx, scope, new).await
     }
 
@@ -292,8 +432,27 @@ impl<H: StoreHooks> EntityStore for TestStores<H> {
         expected_resource_version: i64,
         now: OffsetDateTime,
     ) -> Result<Option<i64>, ScopeError> {
+        self.hooks.entity_write("compare_and_swap_version")?;
         self.inner
             .compare_and_swap_version(tx, scope, entity_id, expected_resource_version, now)
+            .await
+    }
+
+    async fn mark_deleted(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_id: i64,
+        expected_resource_version: i64,
+        now: OffsetDateTime,
+    ) -> Result<Option<i64>, ScopeError> {
+        self.hooks.entity_write("mark_deleted")?;
+        if self.hooks.refuse_deletion(entity_id) {
+            // Simulate the row moving after the commit read it.
+            return Ok(None);
+        }
+        self.inner
+            .mark_deleted(tx, scope, entity_id, expected_resource_version, now)
             .await
     }
 }
@@ -337,6 +496,7 @@ impl<H: StoreHooks> TypeSchemaStore for TestStores<H> {
         scope: &AccessScope,
         new: NewRevision,
     ) -> Result<(), ScopeError> {
+        self.hooks.entity_write("insert_schema_revision")?;
         self.inner.insert_schema_revision(tx, scope, new).await
     }
 
@@ -346,6 +506,7 @@ impl<H: StoreHooks> TypeSchemaStore for TestStores<H> {
         scope: &AccessScope,
         new: NewCurrentTypeSchema,
     ) -> Result<(), ScopeError> {
+        self.hooks.entity_write("insert_current_schema")?;
         self.inner.insert_current_schema(tx, scope, new).await
     }
 
@@ -356,6 +517,7 @@ impl<H: StoreHooks> TypeSchemaStore for TestStores<H> {
         new: NewCurrentTypeSchema,
         expected: CurrentSchemaCas,
     ) -> Result<bool, ScopeError> {
+        self.hooks.entity_write("update_current_schema")?;
         if self.hooks.refuse_schema_cas(new.entity_id) {
             // Simulate the projection moving after its token was captured.
             return Ok(false);
@@ -392,6 +554,7 @@ impl<H: StoreHooks> InstanceStore for TestStores<H> {
         scope: &AccessScope,
         new: NewInstanceRevision,
     ) -> Result<(), ScopeError> {
+        self.hooks.entity_write("insert_instance_revision")?;
         self.inner.insert_instance_revision(tx, scope, new).await
     }
 
@@ -401,6 +564,7 @@ impl<H: StoreHooks> InstanceStore for TestStores<H> {
         scope: &AccessScope,
         new: NewCurrentInstance,
     ) -> Result<(), ScopeError> {
+        self.hooks.entity_write("insert_current_instance")?;
         self.inner.insert_current_instance(tx, scope, new).await
     }
 
@@ -410,6 +574,7 @@ impl<H: StoreHooks> InstanceStore for TestStores<H> {
         scope: &AccessScope,
         new: NewCurrentInstance,
     ) -> Result<bool, ScopeError> {
+        self.hooks.entity_write("update_current_instance")?;
         self.inner.update_current_instance(tx, scope, new).await
     }
 }
@@ -482,6 +647,11 @@ impl<H: StoreHooks> OperationStore for TestStores<H> {
         id: Uuid,
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError> {
+        if self.hooks.fail_mark_completed() {
+            return Err(ScopeError::Invalid(
+                "this pass's operation completion is under failure injection",
+            ));
+        }
         self.inner.mark_completed(tx, scope, id, now).await
     }
 
@@ -490,12 +660,11 @@ impl<H: StoreHooks> OperationStore for TestStores<H> {
         tx: &DbTx<'_>,
         scope: &AccessScope,
         item_id: i64,
-        revision_no: i32,
-        resource_version: i64,
+        outcome: ItemSuccess,
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError> {
         self.inner
-            .mark_item_succeeded(tx, scope, item_id, revision_no, resource_version, now)
+            .mark_item_succeeded(tx, scope, item_id, outcome, now)
             .await
     }
 
@@ -539,6 +708,54 @@ impl<H: StoreHooks> DependencyStore for TestStores<H> {
             .await
     }
 
+    async fn live_direct_dependents(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_id: i64,
+        bound: usize,
+    ) -> Result<usize, ScopeError> {
+        self.inner
+            .live_direct_dependents(tx, scope, entity_id, bound)
+            .await
+    }
+
+    async fn edge_page(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_ids: &[i64],
+        side: EdgeSide,
+        after: Option<&DependencyEdgeRow>,
+        limit: usize,
+    ) -> Result<Vec<DependencyEdgeRow>, ScopeError> {
+        self.inner
+            .edge_page(tx, scope, entity_ids, side, after, limit)
+            .await
+    }
+
+    async fn live_direct_dependent_ids(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_id: i64,
+        kind: Option<DependencyKind>,
+        limit: usize,
+    ) -> Result<Vec<i64>, ScopeError> {
+        self.inner
+            .live_direct_dependent_ids(tx, scope, entity_id, kind, limit)
+            .await
+    }
+
+    async fn edges_within(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        entity_ids: &[i64],
+    ) -> Result<Vec<EntityEdge>, ScopeError> {
+        self.inner.edges_within(tx, scope, entity_ids).await
+    }
+
     async fn closure(
         &self,
         tx: &DbTx<'_>,
@@ -567,6 +784,7 @@ impl<H: StoreHooks> DependencyStore for TestStores<H> {
         from_entity_id: i64,
         edges: &[(DependencyKind, i64)],
     ) -> Result<(), ScopeError> {
+        self.hooks.entity_write("replace_outgoing")?;
         self.inner
             .replace_outgoing(tx, scope, from_entity_id, edges)
             .await

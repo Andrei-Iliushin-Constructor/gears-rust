@@ -6,38 +6,128 @@ sidebar:
   order: 1
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 This page incorporates the current repository quickstart. For the source quickstart, see [QUICKSTART_GUIDE.md](https://github.com/constructorfabric/gears-rust/blob/main/docs/QUICKSTART_GUIDE.md).
 
 When you're ready to write code, continue to [Build your first gear](./your-first-gear/).
 
-## Prerequisites
+## Prepare environment
 
-- A recent **stable Rust toolchain** (`rustup` + `cargo`).
-- `git`, `make`, and `curl` available on your machine.
-- The Gears framework repository checked out locally.
-- Optional: build with `--features fips` when you need the FIPS-aware TLS provider path.
+Choose your operating system and run the commands in order. `rustup` installs Rust and Cargo together, then `rustup default stable` selects the Rust toolchain used by this repository.
+
+<Tabs syncKey="os">
+<TabItem label="macOS" icon="apple">
+
+### 1. Install system tools
+
+Run this in Terminal. If `xcode-select --install` opens an installer, complete it, reopen Terminal, and run the remaining commands.
+
+```bash
+xcode-select --install
+
+# Install system tools
+brew install git make cmake protobuf python pipx
+
+# Install rustup, Rust, and Cargo
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+rustup default stable
+rustup component add clippy rustfmt
+```
+
+### 2. Optional: install Constructor Studio
+
+Constructor Studio is installed automatically when a target such as `make all` needs it. Run these commands now only if you want to install `cfs` yourself:
+
+```bash
+pipx ensurepath
+source ~/.zshrc
+pipx install git+https://github.com/constructorfabric/studio.git
+```
+
+</TabItem>
+<TabItem label="Linux" icon="linux">
+
+Debian/Ubuntu instructions. For another distribution, install equivalent packages before running the Rust commands.
+
+### 1. Install system tools
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential cmake protobuf-compiler python3 python3-pip pipx curl git make pkg-config libssl-dev
+
+# Install rustup, Rust, and Cargo
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+rustup default stable
+rustup component add clippy rustfmt
+```
+
+### 2. Optional: install Constructor Studio
+
+```bash
+pipx ensurepath
+source ~/.profile
+pipx install git+https://github.com/constructorfabric/studio.git
+```
+
+</TabItem>
+<TabItem label="Windows" icon="seti:windows">
+
+The supported full workflow uses WSL 2 with Ubuntu because the repository Makefile expects a POSIX shell.
+
+### 1. Install WSL 2
+
+Open PowerShell as Administrator and run:
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+Restart when prompted, then open the **Ubuntu** application from the Start menu.
+
+### 2. Install system tools in Ubuntu
+
+Copy this block into the Ubuntu terminal:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential cmake protobuf-compiler python3 python3-pip pipx curl git make pkg-config libssl-dev
+
+# Install rustup, Rust, and Cargo
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+rustup default stable
+rustup component add clippy rustfmt
+```
+
+### 3. Optional: install Constructor Studio in Ubuntu
+
+```bash
+pipx ensurepath
+source ~/.profile
+pipx install git+https://github.com/constructorfabric/studio.git
+```
+
+</TabItem>
+</Tabs>
+
+## Build and run
 
 :::caution[No published crate yet]
 The example server is built from the framework repository. There is no crate to `cargo install` at this stage. Clone the repository and run the commands below from its root.
 :::
 
-## Clone the repository
-
 ```sh
 git clone --recurse-submodules https://github.com/constructorfabric/gears-rust
-```
-
-Run the following commands from the repository root.
-
-## Start the server
-
-```sh
-# With example gears such as tenant-resolver and users-info
-make example
-
-# Or minimal runtime with no example gears
+cd gears-rust
+make setup
+make build
 make quickstart
 ```
+
+`make quickstart` starts the minimal SQLite runtime. Use `make example` instead for example gears such as tenant-resolver and users-info.
 
 Both targets run `cf-gears-example-server` with `config/quickstart.yaml`. The server listens on `http://127.0.0.1:8087`.
 
@@ -63,14 +153,14 @@ Use `make example` when you want runnable example endpoints. Use `make quickstar
 Check detailed health:
 
 ```sh
-curl -s http://127.0.0.1:8087/health
+curl -s http://127.0.0.1:8087/cf/health
 # {"status":"healthy","timestamp":"..."}
 ```
 
 Check liveness:
 
 ```sh
-curl -s http://127.0.0.1:8087/healthz
+curl -s http://127.0.0.1:8087/cf/healthz
 # ok
 ```
 

@@ -24,7 +24,7 @@ COMMA := ,
 EXAMPLE_SERVER_BIN ?= cf-gears-example-server
 EXAMPLE_SERVER_DEBUG_BINARY ?= target/debug/$(EXAMPLE_SERVER_BIN)
 EXAMPLE_SERVER_MANIFEST ?= apps/cf-gears-example-server/Cargo.toml
-EXAMPLE_SERVER_FEATURE_EXCLUDES ?= default fips k8s otel oop-example timescaledb-usage-collector
+EXAMPLE_SERVER_FEATURE_EXCLUDES ?= default fips k8s otel oop-example timescaledb-usage-collector magika
 EXAMPLE_SERVER_ALL_FEATURES := $(strip $(shell cargo gears ls features --manifest $(EXAMPLE_SERVER_MANIFEST) 2>/dev/null))
 EXAMPLE_SERVER_FEATURES ?= $(subst $(SPACE),$(COMMA),$(filter-out $(EXAMPLE_SERVER_FEATURE_EXCLUDES),$(EXAMPLE_SERVER_ALL_FEATURES)))
 EXAMPLE_SERVER_FEATURE_ARGS ?= $(if $(EXAMPLE_SERVER_FEATURES),--features $(EXAMPLE_SERVER_FEATURES),)
@@ -214,7 +214,7 @@ setup: .setup-stamp py-env
 	@echo "Installing required development tools..."
 	rustup component add clippy
 	cargo install lychee
-	cargo install cargo-geigerfi
+	cargo install cargo-geiger
 	cargo install cargo-deny
 	cargo install cargo-gears
 	cargo install cargo-fuzz
@@ -662,7 +662,7 @@ GEAR_COVERAGE_ARGS := $(if $(GEAR),--package $(firstword $(subst -p ,,$(GEAR_PKG
 
 # --- Server feature selection for run / openapi ---
 # Base features always enabled when running a focused server.
-GEAR_SERVER_BASE_FEATURES ?= static-tenants,static-authn,static-authz
+GEAR_SERVER_BASE_FEATURES ?= static-tenants,static-authn,static-authz,account-management
 # System gears that are non-optional deps of the example server (always linked).
 GEAR_SERVER_ALWAYS_LINKED ?= api-gateway gear-orchestrator types-registry tenant-resolver authn-resolver authz-resolver
 # Check whether GEAR is a valid example-server feature or an always-linked gear.

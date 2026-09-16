@@ -497,10 +497,10 @@ pub struct SubmitEntityDto {
 pub struct SubmitEntitiesRequest {
     #[schema(min_items = 1)]
     pub items: Vec<SubmitEntityDto>,
-    /// Reserved for T20 rollback-only evaluation. `true` is synchronously refused
-    /// until dry runs are implemented. The field is already part of the request
-    /// fingerprint, so a future dry run and commit cannot share one idempotency
-    /// identity.
+    /// Predict the batch using one snapshot and an overlay of prior candidates' effects.
+    /// Record outcomes without entity-state writes or reservations.
+    ///
+    /// Defaults to `false`; participates in the idempotency fingerprint.
     #[serde(default)]
     pub dry_run: Option<bool>,
 }
