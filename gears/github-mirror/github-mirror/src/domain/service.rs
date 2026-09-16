@@ -39,7 +39,8 @@ use super::repo::{
 };
 use super::scope::ScopeConfig;
 use super::sync::{
-    ChangeGate, Family, MirrorWorker, RepoPhaseRunner, RunState, SweepWatermark, TaskKind, Worker,
+    ChangeGate, Family, MirrorWorker, RepoPhaseRunner, RunState, SweepWatermark, TaskFailure,
+    TaskKind, Worker,
 };
 use super::validate::{repo_full_name, validate_commit_sha, validate_owner, validate_repo_path};
 
@@ -3211,17 +3212,24 @@ impl Service {
             started_at: None,
             ended_at: None,
         };
-        self.sync_sessions
-            .upsert(&scope, tenant_id, session.clone())
-            .await?;
-        self.mark_repo_status(
-            ctx,
-            &session.repo_full_name,
-            id,
-            RepoRunStatus::InProgress,
-            None,
-        )
-        .await?;
+        let recorded = async {
+            self.sync_sessions
+                .upsert(&scope, tenant_id, session.clone())
+                .await?;
+            self.mark_repo_status(
+                ctx,
+                &session.repo_full_name,
+                id,
+                RepoRunStatus::InProgress,
+                None,
+            )
+            .await
+        }
+        .await;
+        if let Err(e) = recorded {
+            self.release_in_flight(&key).await;
+            return Err(e);
+        }
 
         let job = SyncJob {
             session_id: id,
@@ -3320,7 +3328,7 @@ impl Service {
                 } else {
                     SessionStatus::Failed
                 };
-                session.error = Some(e.to_string());
+                session.error = Some(e.public_text());
             }
         }
         session.progress_percent = i32::from(progress.percent());
@@ -3650,7 +3658,11 @@ impl Service {
             return Err(report.failures.swap_remove(discovery).error);
         }
         if !report.failures.is_empty() {
-            let detail: Vec<String> = report.failures.iter().map(ToString::to_string).collect();
+            let detail: Vec<String> = report
+                .failures
+                .iter()
+                .map(TaskFailure::public_text)
+                .collect();
             return Err(DomainError::internal(format!(
                 "{} of {} sync tasks failed: {}",
                 report.tasks_failed(),

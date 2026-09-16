@@ -85,16 +85,27 @@ pub struct TaskFailure {
     pub error: DomainError,
 }
 
+impl TaskFailure {
+    fn label(&self) -> String {
+        let mut label = self
+            .kind
+            .map_or_else(|| "task".to_owned(), |kind| kind.to_string());
+        if let Some(id) = &self.entity_id {
+            label.push(' ');
+            label.push_str(id);
+        }
+        label
+    }
+
+    #[must_use]
+    pub fn public_text(&self) -> String {
+        format!("{}: {}", self.label(), self.error.public_text())
+    }
+}
+
 impl std::fmt::Display for TaskFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.kind {
-            Some(kind) => write!(formatter, "{kind}")?,
-            None => formatter.write_str("task")?,
-        }
-        if let Some(id) = &self.entity_id {
-            write!(formatter, " {id}")?;
-        }
-        write!(formatter, ": {}", self.error)
+        write!(formatter, "{}: {}", self.label(), self.error)
     }
 }
 

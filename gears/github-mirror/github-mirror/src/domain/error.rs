@@ -39,6 +39,19 @@ impl DomainError {
     }
 
     #[must_use]
+    pub fn public_text(&self) -> String {
+        match self {
+            Self::NotFound | Self::Validation { .. } | Self::Conflict(_) => self.to_string(),
+            Self::Forbidden(_) => "access forbidden".to_owned(),
+            Self::AccessLost(_) => {
+                "GitHub refused the mirror's credentials for this repository".to_owned()
+            }
+            Self::Internal(msg) => crate::redact::redacted(msg),
+            Self::Database(_) => "a storage error stopped the work".to_owned(),
+        }
+    }
+
+    #[must_use]
     pub fn is_transient(&self) -> bool {
         match self {
             Self::Database(toolkit_db::DbError::Sea(e)) => [

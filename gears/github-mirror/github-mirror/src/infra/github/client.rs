@@ -2155,36 +2155,21 @@ impl GithubPort for GithubClient {
             .map(|c| pull_request_commit_record(repo_id, number, c))
             .collect();
 
-        // A GraphQL failure must not veto the REST data already fetched for
-        // this pull: review threads are one supplementary dataset among many,
-        // so a failure is logged and the threads are left empty.
-        let review_threads = match self
+        let threads = self
             .post_graphql(
                 REVIEW_THREADS_QUERY,
                 review_threads_variables(owner, name, number),
             )
-            .await
-        {
-            Ok(threads) => threads["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
-                .as_array()
-                .map(|nodes| {
-                    nodes
-                        .iter()
-                        .filter_map(|n| review_thread_record(repo_id, number, n))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            Err(e) => {
-                tracing::warn!(
-                    owner,
-                    name,
-                    pull_number = number,
-                    error = %e,
-                    "review threads (GraphQL) failed for this pull request; sync continues without them"
-                );
-                Vec::new()
-            }
-        };
+            .await?;
+        let review_threads = threads["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+            .as_array()
+            .map(|nodes| {
+                nodes
+                    .iter()
+                    .filter_map(|n| review_thread_record(repo_id, number, n))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         Ok(PullDetail {
             pull_request,
