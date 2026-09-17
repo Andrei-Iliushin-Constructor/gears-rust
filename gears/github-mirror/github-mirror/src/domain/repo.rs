@@ -869,6 +869,22 @@ pub struct ContributorRecord {
     pub last_seen_at: Option<DateTime<Utc>>,
 }
 
+impl ContributorRecord {
+    pub fn absorb(&mut self, other: Self) {
+        for role in other.roles {
+            if !self.roles.contains(&role) {
+                self.roles.push(role);
+            }
+        }
+        self.roles.sort();
+        self.first_seen_at = match (self.first_seen_at, other.first_seen_at) {
+            (Some(mine), Some(theirs)) => Some(mine.min(theirs)),
+            (mine, theirs) => mine.or(theirs),
+        };
+        self.last_seen_at = self.last_seen_at.max(other.last_seen_at);
+    }
+}
+
 #[async_trait]
 pub trait ContributorRepository: Send + Sync {
     async fn upsert(
@@ -1686,6 +1702,19 @@ pub trait SyncWriter: Send + Sync {
         tenant_id: Uuid,
         jobs: Vec<WorkflowJobRecord>,
     ) -> Result<(), DomainError>;
+
+    /// Merge the people one run met into `gm_contributors`, unioning roles
+    /// with what earlier runs stored; returns how many rows were written.
+    ///
+    /// # Errors
+    /// Storage failures.
+    async fn write_contributors(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        contributors: Vec<ContributorRecord>,
+    ) -> Result<u64, DomainError>;
 
     /// Hard-delete rows of every complete listing that this sync did not
     /// touch (`extracted_at` before `watermark`); returns how many went.

@@ -3648,6 +3648,14 @@ impl Service {
             progress.handle(),
         );
         let mut report = runner.run().await;
+        let contributors = run.take_contributors();
+        let contributors_synced = if contributors.is_empty() {
+            0
+        } else {
+            self.sync_writer
+                .write_contributors(&run.scope, run.tenant_id, run.repo_id()?, contributors)
+                .await?
+        };
         // Discovery failing is the repository failing: GitHub's own answer
         // (404, 403 ...) is the sync's outcome, not a task statistic.
         if let Some(discovery) = report
@@ -3706,6 +3714,7 @@ impl Service {
         progress.stored();
 
         let mut summary = run.summary();
+        summary.contributors_synced = contributors_synced;
         summary.stale_rows_deleted = stale_rows_deleted;
         summary.accepted_drift = run.drift();
         Ok(summary)

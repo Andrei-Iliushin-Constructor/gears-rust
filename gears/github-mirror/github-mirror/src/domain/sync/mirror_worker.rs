@@ -8,6 +8,7 @@
 //! entity's detail, in its own transaction, so a run interrupted anywhere
 //! leaves nothing half-written.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
@@ -27,7 +28,7 @@ use crate::domain::ports::github::{
     FetchOptions, GithubPort, IssueDetailWants, ListingCompleteness,
 };
 use crate::domain::repo::{
-    CommitRecord, IssueRecord, PullRequestRecord, SyncWriter, WorkflowRunRecord,
+    CommitRecord, ContributorRecord, IssueRecord, PullRequestRecord, SyncWriter, WorkflowRunRecord,
 };
 use crate::domain::scope::CollectionMode;
 
@@ -48,6 +49,7 @@ pub struct RunState {
     swept: Mutex<HashMap<Family, Option<String>>>,
     summary: Mutex<SyncSummary>,
     drift: Mutex<Vec<CountDrift>>,
+    contributors: Mutex<HashMap<i64, ContributorRecord>>,
 }
 
 impl RunState {
@@ -75,6 +77,7 @@ impl RunState {
                 ..SyncSummary::default()
             }),
             drift: Mutex::new(Vec::new()),
+            contributors: Mutex::new(HashMap::new()),
         }
     }
 
@@ -157,6 +160,30 @@ impl RunState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    fn absorb_contributors(&self, records: Vec<ContributorRecord>) {
+        let mut known = self
+            .contributors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for record in records {
+            match known.entry(record.user_id) {
+                Entry::Vacant(slot) => {
+                    slot.insert(record);
+                }
+                Entry::Occupied(mut slot) => slot.get_mut().absorb(record),
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn take_contributors(&self) -> Vec<ContributorRecord> {
+        let mut known = self
+            .contributors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(&mut *known).into_values().collect()
     }
 
     fn tally(&self, add: impl FnOnce(&mut SyncSummary)) {
@@ -317,7 +344,7 @@ impl MirrorWorker {
         let mut continue_from: Option<String> = None;
 
         while !ctx.cancel.is_cancelled() {
-            let listing = self
+            let mut listing = self
                 .github
                 .list_issues(
                     &run.owner,
@@ -374,11 +401,11 @@ impl MirrorWorker {
                 );
             }
 
-            let (issues, comments, events, people) = (
+            run.absorb_contributors(std::mem::take(&mut listing.contributors));
+            let (issues, comments, events) = (
                 count(&listing.issues),
                 count(&listing.comments),
                 count(&listing.issue_events),
-                count(&listing.contributors),
             );
             let next = listing.next.clone();
             self.writer
@@ -388,7 +415,6 @@ impl MirrorWorker {
                 s.issues_synced += issues;
                 s.comments_synced += comments;
                 s.issue_events_synced += events;
-                s.contributors_synced += people;
             });
             match next {
                 Some(next) => continue_from = Some(next),
@@ -441,7 +467,7 @@ impl MirrorWorker {
         let mut continue_from: Option<String> = None;
 
         while !ctx.cancel.is_cancelled() {
-            let listing = self
+            let mut listing = self
                 .github
                 .list_pull_requests(
                     &run.owner,
@@ -493,10 +519,10 @@ impl MirrorWorker {
                 );
             }
 
-            let (pulls, comments, people) = (
+            run.absorb_contributors(std::mem::take(&mut listing.contributors));
+            let (pulls, comments) = (
                 count(&listing.pull_requests),
                 count(&listing.review_comments),
-                count(&listing.contributors),
             );
             let next = listing.next.clone();
             self.writer
@@ -505,7 +531,6 @@ impl MirrorWorker {
             run.tally(|s| {
                 s.pull_requests_synced += pulls;
                 s.review_comments_synced += comments;
-                s.contributors_synced += people;
             });
             match next {
                 Some(next) => continue_from = Some(next),
@@ -533,17 +558,17 @@ impl MirrorWorker {
         let run = &self.run;
         let repo_id = run.repo_id()?;
         let number = entity_number(task)?;
-        let detail = self
+        let mut detail = self
             .github
             .refine_pull_request(&run.owner, &run.name, repo_id, number, &run.options)
             .await?;
         let gaps = pull_gaps(&detail);
-        let (reviews, files, commits, threads, people) = (
+        run.absorb_contributors(std::mem::take(&mut detail.contributors));
+        let (reviews, files, commits, threads) = (
             count(&detail.reviews),
             count(&detail.files),
             count(&detail.commits),
             count(&detail.review_threads),
-            count(&detail.contributors),
         );
         self.writer
             .write_pull_detail(&run.scope, run.tenant_id, repo_id, detail)
@@ -553,7 +578,6 @@ impl MirrorWorker {
             s.pull_request_files_synced += files;
             s.pull_request_commits_synced += commits;
             s.review_threads_synced += threads;
-            s.contributors_synced += people;
         });
         for gap in &gaps {
             self.report_gap(ctx, number, gap, task.attempt);
@@ -621,7 +645,7 @@ impl MirrorWorker {
         let mut continue_from: Option<String> = None;
 
         while !ctx.cancel.is_cancelled() {
-            let listing = self
+            let mut listing = self
                 .github
                 .list_commits(
                     &run.owner,
@@ -670,11 +694,8 @@ impl MirrorWorker {
                 );
             }
 
-            let (commits, comments, people) = (
-                count(&listing.commits),
-                count(&listing.commit_comments),
-                count(&listing.contributors),
-            );
+            run.absorb_contributors(std::mem::take(&mut listing.contributors));
+            let (commits, comments) = (count(&listing.commits), count(&listing.commit_comments));
             let next = listing.next.clone();
             self.writer
                 .write_commit_listing(&run.scope, run.tenant_id, repo_id, listing)
@@ -682,7 +703,6 @@ impl MirrorWorker {
             run.tally(|s| {
                 s.commits_synced += commits;
                 s.commit_comments_synced += comments;
-                s.contributors_synced += people;
             });
             match next {
                 Some(next) => continue_from = Some(next),

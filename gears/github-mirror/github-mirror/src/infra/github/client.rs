@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
@@ -92,6 +93,12 @@ const GITHUB_API_VERSION: &str = "2022-11-28";
 /// task gives up. A limit is a wait, not an error, so this is generous: at
 /// [`MAX_RETRY_SLEEP`] a request rides out a whole hourly window.
 const RATE_LIMIT_RETRIES: u32 = 30;
+const UPSTREAM_RETRIES: u32 = 3;
+const UPSTREAM_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn upstream_backoff(attempt: u32) -> std::time::Duration {
+    UPSTREAM_BACKOFF.saturating_mul(1u32 << attempt.min(8))
+}
 /// Requests in flight a client allows before the gear config says otherwise.
 /// Matches the PRD's "parallelism <= 8" rate-limit threshold.
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 8;
@@ -313,18 +320,34 @@ impl GithubClient {
         let cached = self.cached_entry(options, url, &key).await;
 
         let mut attempt: u32 = 0;
+        let mut upstream_attempt: u32 = 0;
         // `_permit` lives until this function returns, so a request counts
         // against the ceiling until its body has been read. A retry gives its
         // permit up first: a request asleep on a backoff is not in flight.
         let (response, rate_limited, _permit) = loop {
             let permit = self.request_permit().await?;
-            let response = self
-                .conditional_request(url, cached.as_ref())
-                .send()
-                .await
-                .map_err(|e| DomainError::internal(format!("GitHub request failed: {e}")))?;
+            let response = match self.conditional_request(url, cached.as_ref()).send().await {
+                Ok(response) => response,
+                Err(e) if upstream_attempt < UPSTREAM_RETRIES => {
+                    drop(permit);
+                    self.back_off_upstream(url, &e.to_string(), upstream_attempt)
+                        .await;
+                    upstream_attempt += 1;
+                    continue;
+                }
+                Err(e) => {
+                    return Err(DomainError::internal(format!("GitHub request failed: {e}")));
+                }
+            };
 
             let status = response.status();
+            if status.is_server_error() && upstream_attempt < UPSTREAM_RETRIES {
+                drop(permit);
+                self.back_off_upstream(url, &status.to_string(), upstream_attempt)
+                    .await;
+                upstream_attempt += 1;
+                continue;
+            }
             let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
                 || (status == reqwest::StatusCode::FORBIDDEN
                     && is_rate_limited(response.headers()));
@@ -436,6 +459,18 @@ impl GithubClient {
         format!("{}{path}", self.api_base_url.trim_end_matches('/'))
     }
 
+    async fn back_off_upstream(&self, url: &str, reason: &str, attempt: u32) {
+        let delay = upstream_backoff(attempt);
+        tracing::warn!(
+            url = %redacted_word(url),
+            reason,
+            attempt,
+            delay_secs = delay.as_secs(),
+            "GitHub did not answer properly; retrying"
+        );
+        tokio::time::sleep(delay).await;
+    }
+
     fn check_origin(&self, url: &str) -> Result<(), DomainError> {
         let target = url::Url::parse(url).map_err(|e| {
             DomainError::internal(format!("GitHub handed back an unusable URL: {e}"))
@@ -525,6 +560,7 @@ impl GithubClient {
         let url = format!("{}/graphql", self.api_base_url.trim_end_matches('/'));
 
         let mut attempt: u32 = 0;
+        let mut upstream_attempt: u32 = 0;
         // GraphQL shares the REST ceiling: both spend the same token's budget.
         let (response, _permit) = loop {
             let permit = self.request_permit().await?;
@@ -535,11 +571,30 @@ impl GithubClient {
             if let Some(token) = &self.token {
                 request = request.bearer_auth(token);
             }
-            let response = request.send().await.map_err(|e| {
-                DomainError::internal(format!("GitHub GraphQL request failed: {e}"))
-            })?;
+            let response = match request.send().await {
+                Ok(response) => response,
+                Err(e) if upstream_attempt < UPSTREAM_RETRIES => {
+                    drop(permit);
+                    self.back_off_upstream(&url, &e.to_string(), upstream_attempt)
+                        .await;
+                    upstream_attempt += 1;
+                    continue;
+                }
+                Err(e) => {
+                    return Err(DomainError::internal(format!(
+                        "GitHub GraphQL request failed: {e}"
+                    )));
+                }
+            };
 
             let status = response.status();
+            if status.is_server_error() && upstream_attempt < UPSTREAM_RETRIES {
+                drop(permit);
+                self.back_off_upstream(&url, &status.to_string(), upstream_attempt)
+                    .await;
+                upstream_attempt += 1;
+                continue;
+            }
             let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
                 || (status == reqwest::StatusCode::FORBIDDEN
                     && is_rate_limited(response.headers()));
@@ -1458,35 +1513,29 @@ impl DerivedContributors {
     fn track(&mut self, repo_id: i64, actor: Option<&GhActor>, role: &str, at: Option<&str>) {
         let Some(actor) = actor else { return };
         let Some(user_id) = actor.id else { return };
-
-        let entry = self
-            .by_user
-            .entry(user_id)
-            .or_insert_with(|| ContributorRecord {
-                repo_id,
-                user_id,
-                login: Some(actor.login.clone()),
-                account_type: actor.user_type.clone().unwrap_or_else(|| "User".to_owned()),
-                avatar_url: actor.avatar_url.clone(),
-                html_url: actor.html_url.clone(),
-                roles: Vec::new(),
-                first_seen_at: None,
-                last_seen_at: None,
-            });
-
-        if !entry.roles.iter().any(|r| r == role) {
-            entry.roles.push(role.to_owned());
-        }
         let at = at.and_then(parse_github_timestamp);
-        merge_seen_window(entry, at, at);
+        let sighting = ContributorRecord {
+            repo_id,
+            user_id,
+            login: Some(actor.login.clone()),
+            account_type: actor.user_type.clone().unwrap_or_else(|| "User".to_owned()),
+            avatar_url: actor.avatar_url.clone(),
+            html_url: actor.html_url.clone(),
+            roles: vec![role.to_owned()],
+            first_seen_at: at,
+            last_seen_at: at,
+        };
+        match self.by_user.entry(user_id) {
+            Entry::Vacant(slot) => {
+                slot.insert(sighting);
+            }
+            Entry::Occupied(mut slot) => slot.get_mut().absorb(sighting),
+        }
     }
 
     /// Stable output: by user id, each record's roles sorted.
     fn into_records(self) -> Vec<ContributorRecord> {
         let mut records: Vec<ContributorRecord> = self.by_user.into_values().collect();
-        for record in &mut records {
-            record.roles.sort();
-        }
         records.sort_by_key(|r| r.user_id);
         records
     }
@@ -1554,24 +1603,6 @@ fn parse_github_timestamp(raw: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(raw)
         .ok()
         .map(|stamp| stamp.with_timezone(&Utc))
-}
-
-/// Widen a record's first/last-seen window with another observation.
-fn merge_seen_window(
-    record: &mut ContributorRecord,
-    first_seen_at: Option<DateTime<Utc>>,
-    last_seen_at: Option<DateTime<Utc>>,
-) {
-    if let Some(first) = first_seen_at
-        && record.first_seen_at.is_none_or(|held| first < held)
-    {
-        record.first_seen_at = Some(first);
-    }
-    if let Some(last) = last_seen_at
-        && record.last_seen_at.is_none_or(|held| last > held)
-    {
-        record.last_seen_at = Some(last);
-    }
 }
 
 fn workflow_run_record(repo_id: i64, w: GhWorkflowRun) -> WorkflowRunRecord {

@@ -4303,11 +4303,6 @@ async fn issue_timeline_list_by_issue_in<C: DBRunner>(
 /// cannot widen the rows it did not see.
 const CONTRIBUTOR_MERGE_LIMIT: u64 = 10_000;
 
-/// The earlier of two optional instants, ignoring a missing one.
-fn earliest(a: Option<DateTimeUtc>, b: Option<DateTimeUtc>) -> Option<DateTimeUtc> {
-    [a, b].into_iter().flatten().min()
-}
-
 /// One mirrored table's upsert pass: writes every fetched record and reports
 /// how many rows it wrote.
 macro_rules! sync_table {
@@ -4338,26 +4333,32 @@ async fn merge_known_contributors<C: DBRunner>(
         PageWindow::first(CONTRIBUTOR_MERGE_LIMIT),
     )
     .await?;
-    let known: std::collections::HashMap<i64, Contributor> =
+    let mut known: std::collections::HashMap<i64, Contributor> =
         known.into_iter().map(|c| (c.user_id, c)).collect();
 
     Ok(derived
         .into_iter()
         .map(|mut record| {
-            let Some(stored) = known.get(&record.user_id) else {
-                return record;
-            };
-            for role in &stored.roles {
-                if !record.roles.iter().any(|held| held == role) {
-                    record.roles.push(role.clone());
-                }
+            if let Some(stored) = known.remove(&record.user_id) {
+                record.absorb(stored_contributor_record(stored));
             }
-            record.roles.sort();
-            record.first_seen_at = earliest(record.first_seen_at, stored.first_seen_at);
-            record.last_seen_at = record.last_seen_at.max(stored.last_seen_at);
             record
         })
         .collect())
+}
+
+fn stored_contributor_record(stored: Contributor) -> ContributorRecord {
+    ContributorRecord {
+        repo_id: stored.repo_id,
+        user_id: stored.user_id,
+        login: stored.login,
+        account_type: stored.account_type,
+        avatar_url: stored.avatar_url,
+        html_url: stored.html_url,
+        roles: stored.roles,
+        first_seen_at: stored.first_seen_at,
+        last_seen_at: stored.last_seen_at,
+    }
 }
 
 async fn reconcile_stale<C: DBRunner>(
@@ -4433,6 +4434,26 @@ impl SyncWriter for SeaOrmSyncWriter {
                 Box::pin(async move { repo_upsert_in(tx, &scope, tenant_id, repository).await })
             })
             .await
+    }
+
+    async fn write_contributors(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        contributors: Vec<ContributorRecord>,
+    ) -> Result<u64, DomainError> {
+        let scope = scope.clone();
+        let written = u64::try_from(contributors.len()).unwrap_or(u64::MAX);
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    write_contributors_in(tx, &scope, tenant_id, repo_id, contributors).await
+                })
+            })
+            .await?;
+        Ok(written)
     }
 
     async fn write_issue_listing(
