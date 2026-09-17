@@ -3060,6 +3060,29 @@ impl Service {
     }
 
     /// Scope for this tenant's per-repository run-status rows.
+    /// GitHub's id for a mirrored repository, once Discovery has stored it.
+    /// A repository not yet mirrored, or a lookup the caller may not make,
+    /// simply leaves the run-status row without an id.
+    async fn stored_repo_id(&self, ctx: &SecurityContext, repo_full_name: &str) -> Option<i64> {
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &REPO_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await
+            .ok()?;
+        self.repo
+            .find_by_full_name(&scope, repo_full_name)
+            .await
+            .ok()?
+            .map(|repo| repo.id)
+    }
+
     async fn repo_status_scope(
         &self,
         ctx: &SecurityContext,
@@ -3092,9 +3115,13 @@ impl Service {
         let scope = self.repo_status_scope(ctx, actions::UPSERT).await?;
 
         let previous = self.repo_sync_status.find(&scope, repo_full_name).await?;
+        let repo_id = match previous.as_ref().and_then(|p| p.repo_id) {
+            Some(id) => Some(id),
+            None => self.stored_repo_id(ctx, repo_full_name).await,
+        };
         let record = RepoSyncStatusRecord {
             repo_full_name: repo_full_name.to_owned(),
-            repo_id: previous.as_ref().and_then(|p| p.repo_id),
+            repo_id,
             status,
             last_session_id: Some(session_id),
             last_synced_at: synced_at.or_else(|| previous.and_then(|p| p.last_synced_at)),
@@ -3474,13 +3501,14 @@ impl Service {
     ///
     /// # Errors
     /// `Database` when the sweep cannot read or write the session table.
-    pub async fn sweep_interrupted_sessions(&self) -> Result<usize, DomainError> {
-        let scope = AccessScope::allow_all();
-
+    pub async fn sweep_interrupted_sessions(
+        &self,
+        scope: &AccessScope,
+    ) -> Result<usize, DomainError> {
         let stale = self
             .sync_sessions
             .list_by_statuses(
-                &scope,
+                scope,
                 &[
                     SessionStatus::Queued,
                     SessionStatus::InProgress,
@@ -3500,9 +3528,7 @@ impl Service {
             session.status = SessionStatus::Interrupted;
             session.ended_at = Some(now_rfc3339());
             session.error = Some("the server restarted while this sync was in flight".to_owned());
-            self.sync_sessions
-                .upsert(&scope, tenant_id, session)
-                .await?;
+            self.sync_sessions.upsert(scope, tenant_id, session).await?;
         }
 
         Ok(count)

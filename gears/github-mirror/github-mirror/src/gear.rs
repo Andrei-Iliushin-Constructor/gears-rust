@@ -374,7 +374,10 @@ impl RunnableCapability for GithubMirrorGear {
             })?
             .clone();
 
-        match service.sweep_interrupted_sessions().await {
+        match service
+            .sweep_interrupted_sessions(&toolkit_security::AccessScope::allow_all())
+            .await
+        {
             Ok(0) => {}
             Ok(swept) => info!(sessions = swept, "closed out interrupted sync sessions"),
             Err(e) => warn!(error = %e, "could not sweep interrupted sync sessions"),

@@ -2669,6 +2669,86 @@ async fn review_comment_list_by_pull_in<C: DBRunner>(
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
+async fn review_delete_by_pull_in<C: DBRunner>(
+    conn: &C,
+    scope: &AccessScope,
+    repo_id: i64,
+    pull_number: i64,
+) -> Result<u64, DomainError> {
+    let result = ReviewEntity::delete_many()
+        .secure()
+        .scope_with(scope)
+        .filter(
+            sea_orm::Condition::all()
+                .add(reviews::Column::RepoId.eq(repo_id))
+                .add(reviews::Column::PullNumber.eq(pull_number)),
+        )
+        .exec(conn)
+        .await
+        .map_err(map_scope_error)?;
+    Ok(result.rows_affected)
+}
+
+async fn review_thread_delete_by_pull_in<C: DBRunner>(
+    conn: &C,
+    scope: &AccessScope,
+    repo_id: i64,
+    pull_number: i64,
+) -> Result<u64, DomainError> {
+    let result = ReviewThreadEntity::delete_many()
+        .secure()
+        .scope_with(scope)
+        .filter(
+            sea_orm::Condition::all()
+                .add(review_threads::Column::RepoId.eq(repo_id))
+                .add(review_threads::Column::PullNumber.eq(pull_number)),
+        )
+        .exec(conn)
+        .await
+        .map_err(map_scope_error)?;
+    Ok(result.rows_affected)
+}
+
+async fn pull_request_file_delete_by_pull_in<C: DBRunner>(
+    conn: &C,
+    scope: &AccessScope,
+    repo_id: i64,
+    pull_number: i64,
+) -> Result<u64, DomainError> {
+    let result = PullRequestFileEntity::delete_many()
+        .secure()
+        .scope_with(scope)
+        .filter(
+            sea_orm::Condition::all()
+                .add(pull_request_files::Column::RepoId.eq(repo_id))
+                .add(pull_request_files::Column::PullNumber.eq(pull_number)),
+        )
+        .exec(conn)
+        .await
+        .map_err(map_scope_error)?;
+    Ok(result.rows_affected)
+}
+
+async fn pull_request_commit_delete_by_pull_in<C: DBRunner>(
+    conn: &C,
+    scope: &AccessScope,
+    repo_id: i64,
+    pull_number: i64,
+) -> Result<u64, DomainError> {
+    let result = PullRequestCommitEntity::delete_many()
+        .secure()
+        .scope_with(scope)
+        .filter(
+            sea_orm::Condition::all()
+                .add(pull_request_commits::Column::RepoId.eq(repo_id))
+                .add(pull_request_commits::Column::PullNumber.eq(pull_number)),
+        )
+        .exec(conn)
+        .await
+        .map_err(map_scope_error)?;
+    Ok(result.rows_affected)
+}
+
 async fn review_upsert_in<C: DBRunner>(
     conn: &C,
     scope: &AccessScope,
@@ -4566,6 +4646,15 @@ impl SyncWriter for SeaOrmSyncWriter {
             .db()
             .transaction_ref_mapped(move |tx| {
                 Box::pin(async move {
+                    let pull_number = detail.pull_request.number;
+                    // A later refinement of the same pull is the whole truth
+                    // about its children: a file, commit, review or thread
+                    // GitHub no longer reports is gone, not merely unchanged.
+                    review_delete_by_pull_in(tx, &scope, repo_id, pull_number).await?;
+                    review_thread_delete_by_pull_in(tx, &scope, repo_id, pull_number).await?;
+                    pull_request_file_delete_by_pull_in(tx, &scope, repo_id, pull_number).await?;
+                    pull_request_commit_delete_by_pull_in(tx, &scope, repo_id, pull_number).await?;
+
                     pull_request_upsert_in(tx, &scope, tenant_id, detail.pull_request).await?;
                     sync_table!(tx, &scope, tenant_id, review_upsert_in, detail.reviews);
                     sync_table!(

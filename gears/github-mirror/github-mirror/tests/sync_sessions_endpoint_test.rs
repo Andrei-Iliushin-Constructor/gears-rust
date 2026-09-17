@@ -199,7 +199,7 @@ async fn a_restart_closes_out_sessions_left_in_flight() {
         .to_owned();
 
     let swept = service
-        .sweep_interrupted_sessions()
+        .sweep_interrupted_sessions(&toolkit_security::AccessScope::allow_all())
         .await
         .expect("the sweep must succeed");
     assert_eq!(swept, 1);
