@@ -87,14 +87,16 @@ pub enum WorkerError {
 }
 
 impl WorkerError {
-    /// Retry only identified storage contention/transport failures or stale evaluation.
+    /// Whether a redelivery can reach a different answer (see
+    /// [`crate::domain::retry`] for which storage failures those are, and why
+    /// an unrecognized one is retried rather than dead-lettered).
     /// Missing dependencies are candidate refusals and never reach this type.
     #[must_use]
-    pub fn transient(&self, backend: toolkit_db::DbBackend) -> bool {
+    pub fn transient(&self) -> bool {
         match self {
-            Self::Storage(error) => toolkit_db::retry::scope(error, backend),
-            Self::Db(error) => toolkit_db::retry::database(error, backend),
-            Self::StoreBuild(error) => error.is_transient(backend),
+            Self::Storage(error) => crate::domain::retry::scope(error),
+            Self::Db(error) => crate::domain::retry::database(error),
+            Self::StoreBuild(error) => error.is_transient(),
             Self::RevalidationRequired(_) => true,
             // A cancelled task can be recovered on redelivery; a panic cannot.
             Self::EvaluationTask(error) => error.is_cancelled(),
@@ -253,33 +255,24 @@ mod tests {
 
     #[test]
     fn invalid_scope_is_not_a_temporary_database_failure() {
-        assert!(
-            !WorkerError::Storage(ScopeError::Invalid("invalid scope"))
-                .transient(sea_orm::DbBackend::Sqlite)
-        );
-        assert!(
-            !WorkerError::Storage(ScopeError::Denied("not allowed"))
-                .transient(sea_orm::DbBackend::Sqlite)
-        );
+        assert!(!WorkerError::Storage(ScopeError::Invalid("invalid scope")).transient());
+        assert!(!WorkerError::Storage(ScopeError::Denied("not allowed")).transient());
         assert!(
             !WorkerError::StoreBuild(StoreBuildError::Storage(ScopeError::Invalid(
                 "invalid scope"
             )))
-            .transient(sea_orm::DbBackend::Sqlite)
+            .transient()
         );
     }
 
+    /// The query half of this case moved to `domain::retry`, which owns the
+    /// storage-failure direction; what is worth pinning on `WorkerError` is
+    /// that a configuration failure does not inherit the retry default its
+    /// neighbouring engine failures do.
     #[test]
-    fn database_configuration_and_query_errors_are_permanent() {
+    fn a_database_configuration_error_is_permanent() {
         assert!(
-            !WorkerError::Db(DbError::InvalidConfig("invalid configuration".into()))
-                .transient(sea_orm::DbBackend::Sqlite)
-        );
-        assert!(
-            !WorkerError::Storage(ScopeError::Db(sea_orm::DbErr::Query(
-                sea_orm::RuntimeErr::Internal("no such table: operation".into())
-            )))
-            .transient(sea_orm::DbBackend::Sqlite)
+            !WorkerError::Db(DbError::InvalidConfig("invalid configuration".into())).transient()
         );
     }
 
@@ -289,7 +282,7 @@ mod tests {
             !WorkerError::DependencyTargetAbsent {
                 gts_id: "missing".into()
             }
-            .transient(sea_orm::DbBackend::Sqlite)
+            .transient()
         );
     }
 
@@ -303,7 +296,7 @@ mod tests {
         )));
 
         assert!(
-            contention.transient(sea_orm::DbBackend::Sqlite),
+            contention.transient(),
             "a closure read that failed on contention must be retried, not dead-lettered",
         );
     }
@@ -315,7 +308,7 @@ mod tests {
         });
 
         assert!(
-            !corrupt.transient(sea_orm::DbBackend::Sqlite),
+            !corrupt.transient(),
             "no redelivery rewrites a missing stored document",
         );
     }

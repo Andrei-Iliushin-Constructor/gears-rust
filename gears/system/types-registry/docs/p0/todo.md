@@ -1891,11 +1891,19 @@ a scan without waiting for delivery. Worker/domain tests call directly; the pass
 **Implementation notes:**
 - `AdmissionHandler::admit_payload` tests mapping/idempotency directly; pipeline tests
   cover domain delivery, all six REST route/mode combinations and PostgreSQL/MySQL leases.
-- Both drivers share `RegistryService::admit` and tuning. `WorkerError::transient(backend)`
-  retries only recognized temporary storage/transport failures, stale evaluation and cancelled
-  evaluation tasks. Scope/configuration/SQL errors, panics, corruption, vanished commit targets,
-  worker-invariant violations and exhausted counters are permanent. `StoreBuild` uses the same
-  storage classifier. Missing input dependencies are terminal `dependency_not_found` candidate
+- Both drivers share `RegistryService::admit` and tuning. `WorkerError::transient()` retries
+  stale evaluation, cancelled evaluation tasks and any storage failure `domain::retry`
+  does not name as permanent; `StoreBuild` uses the same classifier. Permanent means
+  scope decisions, database *configuration*, panics, corruption, vanished commit targets,
+  worker-invariant violations and exhausted counters. **Lock contention is not decided here**
+  — `commit_prepared` and the deletion commit run under `Db::transaction_with_retry`, which
+  absorbs it with its own budget and jittered backoff, so a redelivery is never the first
+  answer to a busy database. Failures that did reach the engine, including invalid SQL, are
+  retried rather than dead-lettered on sight: `worker.max_delivery_attempts` already bounds
+  them, and the reverse error dead-letters work a reread would have admitted. That direction
+  is deliberate and is what `domain::retry`'s module doc argues; the classifier takes no
+  `DbBackend`, because no engine code changes the answer.
+  Missing input dependencies are terminal `dependency_not_found` candidate
   refusals with structured ID/kind, acknowledged without delivery retry or dead-lettering.
 - Retries block their partition. `worker.max_delivery_attempts` (default 8, capped at
   `i16::MAX` because the outbox stores the count in an `i16`) makes the last attempt reject.

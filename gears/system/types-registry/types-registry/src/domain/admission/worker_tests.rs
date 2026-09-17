@@ -30,12 +30,12 @@ async fn evaluation_panics_are_permanent_but_cancelled_tasks_can_be_recovered() 
     })
     .await
     .expect_err("task panicked");
-    assert!(!WorkerError::EvaluationTask(panicked).transient(sea_orm::DbBackend::Sqlite));
+    assert!(!WorkerError::EvaluationTask(panicked).transient());
 
     let task = tokio::spawn(std::future::pending::<()>());
     task.abort();
     let cancelled = task.await.expect_err("task cancelled");
-    assert!(WorkerError::EvaluationTask(cancelled).transient(sea_orm::DbBackend::Sqlite));
+    assert!(WorkerError::EvaluationTask(cancelled).transient());
 }
 
 #[test]

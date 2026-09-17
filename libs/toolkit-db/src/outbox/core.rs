@@ -732,7 +732,32 @@ impl Outbox {
         *self.prioritizer.write().await = Some(prioritizer);
     }
 
+    /// Sequence one partition's rows now, rather than when the cold reconciler
+    /// next discovers them.
+    ///
+    /// [`flush`](Self::flush) wakes the sequencers without naming a partition,
+    /// which is all a caller that just committed through
+    /// [`transaction`](Self::transaction) can say. A caller that knows which
+    /// partition it filled says so here, and the rows are picked up even when
+    /// the hint [`enqueue`](Self::enqueue) raised was consumed before the
+    /// enclosing transaction committed.
+    ///
+    /// Takes the queue and the queue-local partition index the [`Record`] was
+    /// addressed with, not the `partition_id` those resolve to: that id is a
+    /// row key allocated across every queue, and nothing outside this crate can
+    /// obtain one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the queue is not registered or the partition is out
+    /// of range.
+    pub fn flush_partition(&self, queue: &str, partition: u32) -> Result<(), OutboxError> {
+        self.push_dirty(self.resolve_partition(queue, partition)?);
+        Ok(())
+    }
+
     /// Push a partition into the prioritizer (dirty signal).
+    ///
     /// No-op if the prioritizer is not yet installed (before `start()`).
     fn push_dirty(&self, partition_id: i64) {
         if let Some(guard) = self.prioritizer.try_read().ok()

@@ -200,15 +200,15 @@ pub enum StoreBuildError {
 impl StoreBuildError {
     /// Whether a redelivery can reach a different answer.
     ///
-    /// Only recognized temporary storage failures can change on reread.
-    /// Scope/configuration failures are permanent, as with `WorkerError::Storage`.
-    /// Every other variant
+    /// Storage failures are classified by [`crate::domain::retry`]; scope and
+    /// configuration failures are permanent there, as with
+    /// `WorkerError::Storage`. Every other variant
     /// is a statement about stored data or about this unit's own shape, and a
     /// reread produces it again.
     #[must_use]
-    pub fn is_transient(&self, backend: toolkit_db::DbBackend) -> bool {
+    pub fn is_transient(&self) -> bool {
         match self {
-            Self::Storage(error) => toolkit_db::retry::scope(error, backend),
+            Self::Storage(error) => crate::domain::retry::scope(error),
             Self::MissingDocument { .. }
             | Self::Content { .. }
             | Self::MissingDialect { .. }

@@ -167,7 +167,13 @@ impl OperationDispatch for OutboxDispatch {
             warn!(%operation_id, "admission committed after the outbox stopped");
             return;
         };
-        outbox.flush();
+        if let Err(error) = outbox.flush_partition(QUEUE, partition(operation_id)) {
+            // The queue is registered in `start()` and the partition comes from
+            // `partition()`, so this is unreachable short of a wiring bug — and
+            // an unsignalled partition waits for the cold reconciler, which is
+            // exactly the latency the call above exists to avoid.
+            warn!(%operation_id, %error, "admission could not signal its outbox partition");
+        }
     }
 }
 
@@ -260,9 +266,7 @@ impl AdmissionHandler {
 
         match self.registry.admit(operation_id, now).await {
             Ok(()) => MessageResult::Ok,
-            Err(ServiceError::Worker(e))
-                if self.registry.retryable(&e) && self.may_retry(attempts) =>
-            {
+            Err(ServiceError::Worker(e)) if e.transient() && self.may_retry(attempts) => {
                 self.retry(operation_id, attempts, e.code())
             }
             Err(error) => {
@@ -533,6 +537,22 @@ pub async fn start(
     Ok(handle)
 }
 
+/// Tell the pipeline to look at the partitions a recovered page just filled.
+///
+/// One push per operation rather than per distinct partition: the prioritizer
+/// coalesces repeats, and deduplicating here would only move that work.
+fn signal_recovered_partitions(outbox: &Outbox, page: &[RecoveryCursor]) {
+    for cursor in page {
+        if let Err(error) = outbox.flush_partition(QUEUE, partition(cursor.id)) {
+            // Unreachable short of a wiring bug: the queue was registered by the
+            // `start()` above and the partition comes from `partition()`. An
+            // unsignalled partition waits for the cold reconciler, which is the
+            // latency this call exists to avoid.
+            warn!(operation_id = %cursor.id, %error, "recovery could not signal its outbox partition");
+        }
+    }
+}
+
 /// Re-enqueue non-terminal operations at boot, including interrupted inline submissions.
 /// Duplicate messages are safe because admission is idempotent.
 ///
@@ -576,7 +596,8 @@ async fn recover_nonterminal_operations(
         .await
         .map_err(StartError::RecoveryEnqueue)?;
 
-        outbox.flush();
+        // Only now that the rows are committed and visible.
+        signal_recovered_partitions(outbox, &page);
 
         if short {
             break;

@@ -208,11 +208,6 @@ impl RegistryService {
         self.config.worker.operation_timeout
     }
 
-    /// Classify admission failures against the database engine that produced them.
-    pub(crate) fn retryable(&self, error: &WorkerError) -> bool {
-        error.transient(self.db.backend())
-    }
-
     /// Delivery attempts the outbox handler may spend on one operation.
     pub(crate) fn max_delivery_attempts(&self) -> u32 {
         self.config.worker.max_delivery_attempts
