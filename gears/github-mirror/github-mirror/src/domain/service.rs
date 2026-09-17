@@ -3407,6 +3407,7 @@ impl Service {
             scope: job.scope,
             force: job.force,
             since: job.since,
+            cancel: cancel.clone(),
         };
         let sync =
             self.sync_repository(&job.ctx, &job.owner, &job.name, &options, progress, cancel);
@@ -3644,6 +3645,7 @@ impl Service {
             name,
             FetchOptions {
                 access_scope: scope,
+                cancel: cancel.clone(),
                 ..options.clone()
             },
         ));

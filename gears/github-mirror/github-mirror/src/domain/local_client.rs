@@ -57,6 +57,7 @@ impl GithubMirrorClientV1 for LocalClient {
                     scope: ScopeConfig::default(),
                     force: false,
                     since: None,
+                    cancel: tokio_util::sync::CancellationToken::new(),
                 },
                 &SyncProgress::new(),
                 &tokio_util::sync::CancellationToken::new(),

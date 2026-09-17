@@ -195,6 +195,7 @@ async fn every_child_listing_of_a_shared_repository_stays_with_its_tenant() {
                     scope: collect_everything(),
                     force: false,
                     since: None,
+                    cancel: tokio_util::sync::CancellationToken::new(),
                 },
                 &SyncProgress::new(),
                 &tokio_util::sync::CancellationToken::new(),

@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use crate::domain::error::DomainError;
 use crate::domain::ports::github::{
@@ -97,6 +98,10 @@ const GITHUB_API_VERSION: &str = "2022-11-28";
 const RATE_LIMIT_RETRIES: u32 = 30;
 const UPSTREAM_RETRIES: u32 = 3;
 const UPSTREAM_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn cancelled_mid_request() -> DomainError {
+    DomainError::internal("the sync was cancelled while GitHub was being called")
+}
 
 fn upstream_backoff(attempt: u32) -> std::time::Duration {
     UPSTREAM_BACKOFF.saturating_mul(1u32 << attempt.min(8))
@@ -224,8 +229,11 @@ impl GithubClient {
 
     /// A permit for one outbound request, held until the response body has
     /// been read.
-    async fn request_permit(&self) -> Result<SemaphorePermit<'_>, DomainError> {
-        self.wait_out_cooldown().await;
+    async fn request_permit(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<SemaphorePermit<'_>, DomainError> {
+        self.wait_out_cooldown(cancel).await?;
         self.permits
             .acquire()
             .await
@@ -233,17 +241,36 @@ impl GithubClient {
     }
 
     /// Sleep until the shared cooldown has passed, re-checking in case another
-    /// request pushed it further while this one slept.
-    async fn wait_out_cooldown(&self) {
+    /// request pushed it further while this one slept. A cancelled run gives
+    /// up the wait instead of holding the shutdown for the whole cooldown.
+    async fn wait_out_cooldown(&self, cancel: &CancellationToken) -> Result<(), DomainError> {
         loop {
             let deadline = *self
                 .cooldown_until
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             match deadline {
-                Some(until) if until > Instant::now() => tokio::time::sleep_until(until).await,
-                _ => return,
+                Some(until) if until > Instant::now() => {
+                    tokio::select! {
+                        () = tokio::time::sleep_until(until) => {}
+                        () = cancel.cancelled() => return Err(cancelled_mid_request()),
+                    }
+                }
+                _ => return Ok(()),
             }
+        }
+    }
+
+    /// Send `request`, giving up as soon as the run is cancelled. The inner
+    /// result is the transport's own, so a caller can still retry a network
+    /// failure.
+    async fn send_cancellable(
+        request: reqwest::RequestBuilder,
+        cancel: &CancellationToken,
+    ) -> Result<reqwest::Result<reqwest::Response>, DomainError> {
+        tokio::select! {
+            outcome = request.send() => Ok(outcome),
+            () = cancel.cancelled() => Err(cancelled_mid_request()),
         }
     }
 
@@ -327,13 +354,18 @@ impl GithubClient {
         // against the ceiling until its body has been read. A retry gives its
         // permit up first: a request asleep on a backoff is not in flight.
         let (response, rate_limited, _permit) = loop {
-            let permit = self.request_permit().await?;
-            let response = match self.conditional_request(url, cached.as_ref()).send().await {
+            let permit = self.request_permit(&options.cancel).await?;
+            let response = match Self::send_cancellable(
+                self.conditional_request(url, cached.as_ref()),
+                &options.cancel,
+            )
+            .await?
+            {
                 Ok(response) => response,
                 Err(e) if upstream_attempt < UPSTREAM_RETRIES => {
                     drop(permit);
-                    self.back_off_upstream(url, &e.to_string(), upstream_attempt)
-                        .await;
+                    self.back_off_upstream(url, &e.to_string(), upstream_attempt, &options.cancel)
+                        .await?;
                     upstream_attempt += 1;
                     continue;
                 }
@@ -345,8 +377,8 @@ impl GithubClient {
             let status = response.status();
             if status.is_server_error() && upstream_attempt < UPSTREAM_RETRIES {
                 drop(permit);
-                self.back_off_upstream(url, &status.to_string(), upstream_attempt)
-                    .await;
+                self.back_off_upstream(url, &status.to_string(), upstream_attempt, &options.cancel)
+                    .await?;
                 upstream_attempt += 1;
                 continue;
             }
@@ -461,7 +493,13 @@ impl GithubClient {
         format!("{}{path}", self.api_base_url.trim_end_matches('/'))
     }
 
-    async fn back_off_upstream(&self, url: &str, reason: &str, attempt: u32) {
+    async fn back_off_upstream(
+        &self,
+        url: &str,
+        reason: &str,
+        attempt: u32,
+        cancel: &CancellationToken,
+    ) -> Result<(), DomainError> {
         let delay = upstream_backoff(attempt);
         tracing::warn!(
             url = %redacted_word(url),
@@ -470,7 +508,10 @@ impl GithubClient {
             delay_secs = delay.as_secs(),
             "GitHub did not answer properly; retrying"
         );
-        tokio::time::sleep(delay).await;
+        tokio::select! {
+            () = tokio::time::sleep(delay) => Ok(()),
+            () = cancel.cancelled() => Err(cancelled_mid_request()),
+        }
     }
 
     fn check_origin(&self, url: &str) -> Result<(), DomainError> {
@@ -562,6 +603,7 @@ impl GithubClient {
         &self,
         query: &str,
         variables: serde_json::Value,
+        cancel: &CancellationToken,
     ) -> Result<serde_json::Value, DomainError> {
         let url = format!("{}/graphql", self.api_base_url.trim_end_matches('/'));
 
@@ -569,7 +611,7 @@ impl GithubClient {
         let mut upstream_attempt: u32 = 0;
         // GraphQL shares the REST ceiling: both spend the same token's budget.
         let (response, _permit) = loop {
-            let permit = self.request_permit().await?;
+            let permit = self.request_permit(cancel).await?;
             let mut request = self
                 .http
                 .post(&url)
@@ -577,12 +619,12 @@ impl GithubClient {
             if let Some(token) = &self.token {
                 request = request.bearer_auth(token);
             }
-            let response = match request.send().await {
+            let response = match Self::send_cancellable(request, cancel).await? {
                 Ok(response) => response,
                 Err(e) if upstream_attempt < UPSTREAM_RETRIES => {
                     drop(permit);
-                    self.back_off_upstream(&url, &e.to_string(), upstream_attempt)
-                        .await;
+                    self.back_off_upstream(&url, &e.to_string(), upstream_attempt, cancel)
+                        .await?;
                     upstream_attempt += 1;
                     continue;
                 }
@@ -596,8 +638,8 @@ impl GithubClient {
             let status = response.status();
             if status.is_server_error() && upstream_attempt < UPSTREAM_RETRIES {
                 drop(permit);
-                self.back_off_upstream(&url, &status.to_string(), upstream_attempt)
-                    .await;
+                self.back_off_upstream(&url, &status.to_string(), upstream_attempt, cancel)
+                    .await?;
                 upstream_attempt += 1;
                 continue;
             }
@@ -2196,6 +2238,7 @@ impl GithubPort for GithubClient {
             .post_graphql(
                 REVIEW_THREADS_QUERY,
                 review_threads_variables(owner, name, number),
+                &options.cancel,
             )
             .await?;
         let review_threads = threads["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]

@@ -4,6 +4,7 @@ use strum::IntoEnumIterator;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use tokio_util::sync::CancellationToken;
 use toolkit_macros::domain_model;
 use toolkit_security::AccessScope;
 
@@ -20,7 +21,7 @@ use crate::domain::scope::ScopeConfig;
 
 /// Everything one fetch needs beyond the repository's name.
 #[domain_model]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct FetchOptions {
     /// Whose cache partition the conditional-request store reads and writes.
     pub tenant_id: uuid::Uuid,
@@ -33,6 +34,10 @@ pub struct FetchOptions {
     /// Oldest closed issue or pull request worth collecting (PRD &sect;5.4
     /// `--since`); open ones are always collected.
     pub since: Option<DateTime<Utc>>,
+    /// The run's cancellation token: a request in flight and a back-off sleep
+    /// both end as soon as it fires, so a shutdown does not wait out a
+    /// rate-limit cooldown.
+    pub cancel: CancellationToken,
 }
 
 /// A top-level listing the sync can reconcile deletions for.
