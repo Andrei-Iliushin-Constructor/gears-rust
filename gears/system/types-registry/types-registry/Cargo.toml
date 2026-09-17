@@ -87,8 +87,8 @@ tokio = { workspace = true, features = [
     "net",
     "test-util",
 ] }
-# In-memory SQLite for the schema-level migration tests.
-toolkit-db = { workspace = true, features = ["sqlite"] }
+# SQLite plus transaction-boundary observation for dispatch regression tests.
+toolkit-db = { workspace = true, features = ["sqlite", "test-support"] }
 # PostgreSQL / MySQL bring-up for the `integration` suite. Not optional --
 # `[dev-dependencies]` cannot be -- but every reference is behind
 # `#![cfg(feature = "integration")]`, so a default `cargo test` needs no Docker.

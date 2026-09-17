@@ -159,6 +159,16 @@ impl OperationDispatch for OutboxDispatch {
         outbox.enqueue(tx, record).await?;
         Ok(())
     }
+
+    fn committed(&self, operation_id: Uuid) {
+        let Some(outbox) = self.outbox.get().and_then(Weak::upgrade) else {
+            // Shutdown can drop the handle after acceptance committed. The
+            // durable record remains available to the next process's recovery.
+            warn!(%operation_id, "admission committed after the outbox stopped");
+            return;
+        };
+        outbox.flush();
+    }
 }
 
 /// Leased handler that parses the operation UUID and maps the admission result.
@@ -565,6 +575,8 @@ async fn recover_nonterminal_operations(
         })
         .await
         .map_err(StartError::RecoveryEnqueue)?;
+
+        outbox.flush();
 
         if short {
             break;

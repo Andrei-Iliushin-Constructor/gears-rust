@@ -119,8 +119,8 @@ standalone `routing_config` table is never created in any phase.
 - `TR/tests/migration_backends_test.rs` — NEW, 2 container-backed tests behind `integration`
 - `TR/src/gear.rs` — capabilities `[system, db, rest]`, `DatabaseCapability`
 - `TR/src/infra/storage/mod.rs`, `TR/src/infra/mod.rs`, `TR/src/lib.rs` — re-export `Migrator`
-- `TR/Cargo.toml` — `sea-orm`, `sea-orm-migration`, `toolkit-db`, `toolkit` feature
-  `preview-outbox`, `integration` feature, `testcontainers` dev-deps
+- `TR/Cargo.toml` — `sea-orm`, `sea-orm-migration`, `toolkit`, `toolkit-db` feature
+  `sqlite`, `integration` feature, `testcontainers` dev-deps
 **Scope:** M — one long DDL file; deliberately not split, because splitting it orders FKs across tasks
 
 ---
@@ -1847,6 +1847,13 @@ With `PATH="$HOME/.cargo/bin:$PATH"`, whole-workspace `make clippy`
 **Acceptance criteria:**
 - [x] Production submissions use `AdmissionMode::Outbox`; acceptance and enqueue share a
       transaction, while seeding stays inline and never enqueues (P3)
+- [x] After acceptance/recovery commits, call `Outbox::flush()` to request an
+      immediate scan for committed incoming rows. Enqueue's pre-commit hint can be
+      consumed before its rows become visible; flush restores that work.
+      Acceptance tests assert post-transaction notification and no notification on
+      rollback/refusal/replay; toolkit-db tests reproduce the early drain with a real
+      transaction and sequencer, including the auto-flush transaction helper.
+      The registration e2e scenarios below exposed this gap.
 - [x] Handler contains no admission logic — it resolves the operation UUID and calls the worker
 - [x] Delivery is at-least-once and commits are idempotent; duplicate delivery is a no-op
 - [x] Transient database failure returns `Retry`. `Reject` covers a permanently invalid
@@ -1878,8 +1885,8 @@ With `PATH="$HOME/.cargo/bin:$PATH"`, whole-workspace `make clippy`
 
 **Testing exception (SPEC §§13–14):** Only real delivery uses `common::await_delivery`:
 immediate read, 10–100 ms capped backoff, one 2 s deadline; retry only `pending`/`running`,
-fail on expiry/unexpected responses. Drivers are private and `Outbox::flush()` only wakes
-them. Worker/domain tests call directly; the passing suite retains its 5 s budget.
+fail on expiry/unexpected responses. Drivers are private and `Outbox::flush()` requests
+a scan without waiting for delivery. Worker/domain tests call directly; the passing suite retains its 5 s budget.
 
 **Implementation notes:**
 - `AdmissionHandler::admit_payload` tests mapping/idempotency directly; pipeline tests
@@ -2271,6 +2278,13 @@ documents; automatic per-gear inventory registration remains in P1 (P18).
 
 ### - [ ] T28: Update e2e suites for the `202` contract
 
+Four initial async-registration scenarios are described in
+[`registration.md`](../../../../../testing/e2e/suites/types_registry/scenarios/registration.md),
+with shared JSON fixtures and pytest scenario IDs. They exercise the interim v2
+surface alongside the existing v1 tests; this does **not** complete the cutover
+and migration work below. The local launcher uses SQLite, so these runs make no
+PostgreSQL/MySQL-specific claim.
+
 **Description:** The `POST /entities` break (D10) invalidates every e2e call site that
 registers and reads the result synchronously. Those sites move to submit-then-poll: `202`,
 then `GET /operations/{id}` until terminal, then assert on the per-candidate outcome.
@@ -2401,7 +2415,7 @@ only the projection / visibility / Context-Tenant key dimensions.
 
 ### Checkpoint 7 — ready for review
 - [ ] The cutover holds: all linked inventory + `cfg.entities` seed into the database within configured limits; existing explicit callers reconcile their documents; repeat startup is idempotent and the platform stays healthy. C3 remains documented until P1
- ] All 16 success criteria of SPEC §16 met
+- [ ] All 16 success criteria of SPEC §16 met
 - [ ] `make ci`, gear tests on three backends, `make e2e-local`, `make e2e-docker`, `make dylint`, `make lychee` green
 - [ ] Every ceiling in SPEC §9 has a comment at the point it binds
 - [ ] `TypesRegistryClient` is deleted and no crate references it (D6, T26)

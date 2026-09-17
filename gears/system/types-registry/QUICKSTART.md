@@ -39,7 +39,7 @@ Examples use `cf`, the only platform vendor allowed by default; others need an `
 ### Register a Type Schema, then poll the outcome
 
 ```bash
-curl -s -X POST "$BASE/types-registry/v2/entities" \
+RECEIPT=$(curl -s -X POST "$BASE/types-registry/v2/entities" \
   -H "Idempotency-Key: register-example-event-1" \
   -H "Content-Type: application/json" \
   -d '{
@@ -52,11 +52,18 @@ curl -s -X POST "$BASE/types-registry/v2/entities" \
             "properties": { "email": { "type": "string" } }
           }
         }]
-      }'
+      }')
 ```
 
 Response: **202 Accepted**, `Location: …/types-registry/v2/operations/{operation_id}`
-and an advisory `Retry-After: 1`. Follow the `Location`:
+and an advisory `Retry-After: 1`. The receipt body carries the same id:
+
+```bash
+OPERATION_ID=$(printf '%s' "$RECEIPT" |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["operation_id"])')
+```
+
+Follow the `Location`:
 
 ```bash
 curl -s "$BASE/types-registry/v2/operations/$OPERATION_ID" | python3 -m json.tool

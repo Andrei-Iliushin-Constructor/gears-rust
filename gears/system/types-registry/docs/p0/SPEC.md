@@ -1412,7 +1412,9 @@ gears:
         max_revalidation_attempts: 8   # the revalidation loop's bound, §8.1 step 4.3
         max_delivery_attempts: 8       # T21: failed deliveries before dead-lettering
                                        # and terminalizing as `admission_abandoned`.
-                                       # >0 and <= 32767 (the outbox's i16 counter)
+                                       # >0 and <= 32766: the outbox's i16 counter
+                                       # less the increment the handler's own
+                                       # delivery has already spent
       local_client:
         cache:
           freshness_window: 30s        # DESIGN §3.3; `0s` disables the window
@@ -1685,7 +1687,8 @@ Follow `12_unit_testing.md`, with one exception for real outbox-delivery tests:
 - **No timers, polling or retries in worker, domain or compatibility tests.** Invoke the
   admission worker directly with `(operation_id, runner)`.
 - **Real outbox delivery may wait.** `toolkit-db` exposes no single-pass driver;
-  `Outbox::flush()` only sends a wakeup. This exception has four bounds:
+  `Outbox::flush()` requests a scan without waiting for delivery. This exception has
+  four bounds:
   1. Use only `tests/common/mod.rs::await_delivery`; no ad-hoc waits.
   2. Read immediately, then use capped exponential backoff under one deadline covering
      reads and waits. Expiry fails the test.
@@ -1836,8 +1839,7 @@ references.
 
 - Any change to `database.sql` — it is the normative P1 target, and a P0 deviation from
   it costs a migration later.
-- Adding a dependency, or enabling a `preview-` feature beyond the approved
-  `toolkit-db/preview-outbox` (D9).
+- Adding a dependency, or enabling any `preview-` feature.
 - Deviating from the migration order for `TypesRegistryClient`: the new trait must exist and
   be tested before the first consumer moves (D6).
 - Widening scope into anything listed Out in §2.

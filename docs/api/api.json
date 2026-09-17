@@ -9265,7 +9265,7 @@
         "description": "One candidate's durable outcome.",
         "properties": {
           "error": {
-            "description": "The refusal as `{reason, message}`, when this candidate failed.\n`reason` is a stable machine-readable code; `message` is an explanation for humans.\nCompatibility messages include causes and schema locations where available.\nClients must not parse `message` or depend on its wording."
+            "description": "The refusal as `{reason, message}`, when this candidate failed.\n`reason` is a stable machine-readable code; `message` is an explanation for humans.\nMissing dependencies also carry `dependency_id` and `dependency_kind`\n(`base`, `conforming_type`, `ref`). System abandonment carries a safe\n`error_code` and `operation_id` for correlation with operator logs.\nCompatibility messages include causes and schema locations where available.\nClients must not parse `message` or depend on its wording."
           },
           "gts_id": {
             "type": "string"

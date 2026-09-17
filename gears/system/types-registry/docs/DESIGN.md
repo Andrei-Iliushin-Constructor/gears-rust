@@ -1923,7 +1923,7 @@ Registry Source Plugins are registered as well-known GTS Instances and resolved 
 
 #### Platform database
 
-The single authoritative store of §3.7, served by many pods, on SQLite, PostgreSQL, or MySQL. Durable dispatch uses the `toolkit-db` outbox with the `types_registry__outbox` table prefix, currently gated by the experimental `toolkit-db/preview-outbox` feature. `cpt-cf-types-registry-constraint-multi-backend` governs how portability is preserved across the three backends.
+The single authoritative store of §3.7, served by many pods, on SQLite, PostgreSQL, or MySQL. Durable dispatch uses the `toolkit-db` outbox with the `types_registry__outbox` table prefix, unconditionally supported and behind no feature gate (SPEC §4). `cpt-cf-types-registry-constraint-multi-backend` governs how portability is preserved across the three backends.
 
 #### External Registry Sources
 
@@ -2233,7 +2233,7 @@ Only P2 construction questions belong here. Known P1 blockers are stated separat
 
 ### Implementation prerequisites
 
-Six prerequisites block implementation: the benchmark profile above, two external confirmations, and three protocol/contract/schema alignments below.
+Five prerequisites block implementation: the benchmark profile above, one external confirmation, and three protocol/contract/schema alignments below.
 
 No ADR-0015 quarantine preflight is needed because the release introducing the check is also the first to persist Managed Entities. The rule must not be enabled over data admitted by a build that had storage but lacked the check.
 
@@ -2254,7 +2254,7 @@ No ADR-0015 quarantine preflight is needed because the release introducing the c
 7. **Registration-policy matching properties**: trailing wildcard includes its root; a prefixed wildcard requires a suffix; trailing wildcard ignores the type marker; major-only pattern includes its minors. These are pinned in `gts-id` `GtsIdPattern::matches_views` tests `test_trailing_chain_wildcard_matches_empty_suffix`, `test_prefixed_chain_wildcard_requires_a_suffix`, and `test_trailing_wildcard_ignores_type_marker`.
 8. **Pattern containment** for Source Claim overlap. Rooted grammar provides anchoring, and ADR-0011 prevents claims slicing into a chain.
 
-**Approve reliance on `toolkit-db/preview-outbox`.** P1 will reuse its leased outbox rather than implement another. `ledger`, `file-storage`, and `chat-engine` already use it; Types Registry needs the same sign-off.
+**`toolkit-db` outbox reliance — no longer a prerequisite.** P1 reuses `toolkit-db`'s leased outbox rather than implementing another, as `ledger`, `file-storage`, and `chat-engine` do. This needed a sign-off while the outbox was an experimental feature; `toolkit-db` 0.12.0 made it unconditional, so no approval is outstanding (SPEC §4).
 
 ## 5. Traceability
 
