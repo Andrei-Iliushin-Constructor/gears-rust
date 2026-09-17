@@ -5,6 +5,7 @@ use strum::IntoEnumIterator;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use toolkit_macros::domain_model;
+use toolkit_security::AccessScope;
 
 use crate::domain::error::DomainError;
 use crate::domain::repo::{
@@ -19,10 +20,11 @@ use crate::domain::scope::ScopeConfig;
 
 /// Everything one fetch needs beyond the repository's name.
 #[domain_model]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FetchOptions {
     /// Whose cache partition the conditional-request store reads and writes.
     pub tenant_id: uuid::Uuid,
+    pub access_scope: AccessScope,
     /// Which object types and sub-resources to collect.
     pub scope: ScopeConfig,
     /// Ignore any cached validator and re-fetch everything (PRD §5.2 force
@@ -414,7 +416,7 @@ pub trait GithubPort: Send + Sync {
     /// Storage failures.
     async fn clear_cache(
         &self,
-        tenant_id: uuid::Uuid,
+        scope: &AccessScope,
         owner: &str,
         name: Option<&str>,
         repo_ids: &[i64],

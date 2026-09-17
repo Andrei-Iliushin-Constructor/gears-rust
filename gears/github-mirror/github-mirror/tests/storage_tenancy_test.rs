@@ -7,6 +7,7 @@ use github_mirror::domain::repo::{ListingFilter, PageWindow, RepoRecord};
 use github_mirror::domain::scope::{CollectionMode, ScopeConfig};
 use github_mirror::domain::service::SyncProgress;
 use toolkit_odata::ODataQuery;
+use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 const OWNER: &str = "rust-lang";
@@ -190,6 +191,7 @@ async fn every_child_listing_of_a_shared_repository_stays_with_its_tenant() {
                 NAME,
                 &FetchOptions {
                     tenant_id: tenant.subject_tenant_id(),
+                    access_scope: AccessScope::default(),
                     scope: collect_everything(),
                     force: false,
                     since: None,

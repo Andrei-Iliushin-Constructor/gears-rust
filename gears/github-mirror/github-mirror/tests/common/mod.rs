@@ -41,7 +41,7 @@ use toolkit::api::canonical_prelude::CanonicalError;
 use toolkit::{ClientHub, ConfigProvider, GearCtx};
 use toolkit_db::migration_runner::run_migrations_for_testing;
 use toolkit_db::{ConnectOpts, DBProvider, Db, connect_db};
-use toolkit_security::{PlatformSecurityContext, SecurityContext, pep_properties};
+use toolkit_security::{AccessScope, PlatformSecurityContext, SecurityContext, pep_properties};
 use uuid::Uuid;
 
 pub type ConcreteService = Service;
@@ -427,7 +427,7 @@ impl GithubPort for FakeGithub {
 
     async fn clear_cache(
         &self,
-        _tenant_id: Uuid,
+        _scope: &AccessScope,
         _owner: &str,
         _name: Option<&str>,
         _repo_ids: &[i64],

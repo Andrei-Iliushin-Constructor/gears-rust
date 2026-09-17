@@ -2955,7 +2955,8 @@ impl Service {
         // Clearing a tenant's own cache is a sync-scoped action: it changes
         // nothing anyone can read, only what the next sync will re-fetch.
         let tenant_id = ctx.subject_tenant_id();
-        self.policy_enforcer
+        let scope = self
+            .policy_enforcer
             .access_scope_with(
                 ctx,
                 &SYNC_RESOURCE,
@@ -2995,7 +2996,7 @@ impl Service {
 
         let removed = self
             .github
-            .clear_cache(tenant_id, owner, name, &repo_ids)
+            .clear_cache(&scope, owner, name, &repo_ids)
             .await?;
         tracing::info!(
             owner,
@@ -3402,6 +3403,7 @@ impl Service {
         let percent = progress.handle();
         let options = FetchOptions {
             tenant_id: job.ctx.subject_tenant_id(),
+            access_scope: AccessScope::default(),
             scope: job.scope,
             force: job.force,
             since: job.since,
@@ -3636,11 +3638,14 @@ impl Service {
 
         let run = Arc::new(RunState::new(
             Uuid::new_v4(),
-            scope,
+            scope.clone(),
             tenant_id,
             owner,
             name,
-            *options,
+            FetchOptions {
+                access_scope: scope,
+                ..options.clone()
+            },
         ));
         let outcome = self.run_phases(&run, progress, cancel).await;
 

@@ -14,6 +14,7 @@
 
 use async_trait::async_trait;
 use aws_lc_rs::digest::{self, SHA256};
+use toolkit_security::AccessScope;
 
 use crate::domain::error::DomainError;
 
@@ -78,22 +79,24 @@ impl CachedResponse {
 /// drive it in memory.
 #[async_trait]
 pub trait HttpCache: Send + Sync {
-    /// The entry for `key` within `tenant`, if one exists.
+    /// The entry for `key` within `scope`, if one exists.
     ///
     /// # Errors
     /// Storage failures. A cache miss is `Ok(None)`, not an error.
     async fn get(
         &self,
-        tenant_id: uuid::Uuid,
+        scope: &AccessScope,
         key: &CacheKey,
     ) -> Result<Option<CachedResponse>, DomainError>;
 
-    /// Store or replace the entry for `key` within `tenant`.
+    /// Store or replace the entry for `key` as a row of `tenant_id`, which
+    /// `scope` must cover.
     ///
     /// # Errors
     /// Storage failures.
     async fn put(
         &self,
+        scope: &AccessScope,
         tenant_id: uuid::Uuid,
         key: &CacheKey,
         url: &str,
@@ -109,7 +112,7 @@ pub trait HttpCache: Send + Sync {
     ///
     /// # Errors
     /// Storage failures.
-    async fn clear(&self, tenant_id: uuid::Uuid, url_prefix: &str) -> Result<u64, DomainError>;
+    async fn clear(&self, scope: &AccessScope, url_prefix: &str) -> Result<u64, DomainError>;
 }
 
 /// A cache that stores nothing, for callers that do not want one.
@@ -122,7 +125,7 @@ pub struct NoCache;
 impl HttpCache for NoCache {
     async fn get(
         &self,
-        _tenant_id: uuid::Uuid,
+        _scope: &AccessScope,
         _key: &CacheKey,
     ) -> Result<Option<CachedResponse>, DomainError> {
         Ok(None)
@@ -130,6 +133,7 @@ impl HttpCache for NoCache {
 
     async fn put(
         &self,
+        _scope: &AccessScope,
         _tenant_id: uuid::Uuid,
         _key: &CacheKey,
         _url: &str,
@@ -138,7 +142,7 @@ impl HttpCache for NoCache {
         Ok(())
     }
 
-    async fn clear(&self, _tenant_id: uuid::Uuid, _url_prefix: &str) -> Result<u64, DomainError> {
+    async fn clear(&self, _scope: &AccessScope, _url_prefix: &str) -> Result<u64, DomainError> {
         Ok(0)
     }
 }

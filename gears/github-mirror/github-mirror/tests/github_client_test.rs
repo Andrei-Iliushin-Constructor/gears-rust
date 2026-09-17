@@ -11,6 +11,7 @@ use github_mirror::infra::github::cache::{CacheKey, CachedResponse, HttpCache};
 use github_mirror::infra::github::client::GithubClient;
 use httpmock::MockServer;
 use serde_json::json;
+use toolkit_security::AccessScope;
 
 /// An RFC3339 literal as the instant the mirror stores.
 fn instant(raw: &str) -> chrono::DateTime<chrono::Utc> {
@@ -449,8 +450,10 @@ fn gh_commit_statuses_json() -> serde_json::Value {
 
 /// Fetch options for a test: a fresh tenant, no force, the given scope.
 fn opts(scope: ScopeConfig) -> FetchOptions {
+    let tenant_id = uuid::Uuid::new_v4();
     FetchOptions {
-        tenant_id: uuid::Uuid::new_v4(),
+        tenant_id,
+        access_scope: AccessScope::for_tenant(tenant_id),
         scope,
         force: false,
         since: None,
@@ -1306,7 +1309,7 @@ struct MemCache {
 impl HttpCache for MemCache {
     async fn get(
         &self,
-        _tenant_id: uuid::Uuid,
+        _scope: &AccessScope,
         key: &CacheKey,
     ) -> Result<Option<CachedResponse>, DomainError> {
         Ok(self.entries.lock().unwrap().get(key.as_str()).cloned())
@@ -1314,6 +1317,7 @@ impl HttpCache for MemCache {
 
     async fn put(
         &self,
+        _scope: &AccessScope,
         _tenant_id: uuid::Uuid,
         key: &CacheKey,
         _url: &str,
@@ -1326,7 +1330,7 @@ impl HttpCache for MemCache {
         Ok(())
     }
 
-    async fn clear(&self, _tenant_id: uuid::Uuid, _url_prefix: &str) -> Result<u64, DomainError> {
+    async fn clear(&self, _scope: &AccessScope, _url_prefix: &str) -> Result<u64, DomainError> {
         let mut entries = self.entries.lock().unwrap();
         let removed = entries.len() as u64;
         entries.clear();
@@ -1376,6 +1380,7 @@ async fn a_stored_etag_turns_the_next_sync_into_a_free_304() {
     let tenant = uuid::Uuid::new_v4();
     let options = FetchOptions {
         tenant_id: tenant,
+        access_scope: AccessScope::for_tenant(tenant),
         scope,
         force: false,
         since: None,
@@ -1400,7 +1405,7 @@ async fn a_stored_etag_turns_the_next_sync_into_a_free_304() {
 
     let forced = FetchOptions {
         force: true,
-        ..options
+        ..options.clone()
     };
     fetch_repository(&client, "rust-lang", "rust", &forced)
         .await
@@ -1806,6 +1811,7 @@ async fn a_rate_limit_seen_by_one_request_pauses_every_other_request() {
 
     let first = {
         let client = std::sync::Arc::clone(&client);
+        let options = options.clone();
         tokio::spawn(async move {
             client
                 .fetch_repository_metadata("acme", "limited", &options)

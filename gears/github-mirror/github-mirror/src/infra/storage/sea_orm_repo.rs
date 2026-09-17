@@ -4799,15 +4799,14 @@ impl SeaOrmHttpCache {
 impl HttpCache for SeaOrmHttpCache {
     async fn get(
         &self,
-        tenant_id: Uuid,
+        scope: &AccessScope,
         key: &CacheKey,
     ) -> Result<Option<CachedResponse>, DomainError> {
-        let scope = AccessScope::for_tenant(tenant_id);
         let conn = self.db.conn()?;
 
         let row = HttpCacheEntity::find()
             .secure()
-            .scope_with(&scope)
+            .scope_with(scope)
             .filter(sea_orm::Condition::all().add(http_cache::Column::CacheKey.eq(key.as_str())))
             .one(&conn)
             .await
@@ -4829,12 +4828,12 @@ impl HttpCache for SeaOrmHttpCache {
 
     async fn put(
         &self,
+        scope: &AccessScope,
         tenant_id: Uuid,
         key: &CacheKey,
         url: &str,
         entry: CachedResponse,
     ) -> Result<(), DomainError> {
-        let scope = AccessScope::for_tenant(tenant_id);
         let conn = self.db.conn()?;
 
         let plain = entry.body.as_bytes();
@@ -4874,7 +4873,7 @@ impl HttpCache for SeaOrmHttpCache {
 
         HttpCacheEntity::insert(model())
             .secure()
-            .scope_with_model(&scope, &model())
+            .scope_with_model(scope, &model())
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(&conn)
@@ -4884,8 +4883,7 @@ impl HttpCache for SeaOrmHttpCache {
         Ok(())
     }
 
-    async fn clear(&self, tenant_id: Uuid, url_prefix: &str) -> Result<u64, DomainError> {
-        let scope = AccessScope::for_tenant(tenant_id);
+    async fn clear(&self, scope: &AccessScope, url_prefix: &str) -> Result<u64, DomainError> {
         let conn = self.db.conn()?;
         let escaped = url_prefix
             .replace('!', "!!")
@@ -4897,7 +4895,7 @@ impl HttpCache for SeaOrmHttpCache {
 
         let result = HttpCacheEntity::delete_many()
             .secure()
-            .scope_with(&scope)
+            .scope_with(scope)
             .filter(
                 sea_orm::Condition::any()
                     .add(http_cache::Column::Url.eq(url_prefix))

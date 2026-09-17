@@ -1,6 +1,8 @@
 use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use toolkit_security::AccessScope;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -268,7 +270,7 @@ impl GithubClient {
         if options.force {
             return None;
         }
-        match self.cache.get(options.tenant_id, key).await {
+        match self.cache.get(&options.access_scope, key).await {
             Ok(entry) => entry,
             Err(e) => {
                 tracing::warn!(%url, error = %e, "cache read failed; fetching fresh");
@@ -547,7 +549,11 @@ impl GithubClient {
         if !entry.is_revalidatable() {
             return;
         }
-        if let Err(e) = self.cache.put(options.tenant_id, key, url, entry).await {
+        if let Err(e) = self
+            .cache
+            .put(&options.access_scope, options.tenant_id, key, url, entry)
+            .await
+        {
             tracing::warn!(%url, error = %e, "cache write failed; the next sync will re-fetch");
         }
     }
@@ -2490,7 +2496,7 @@ impl GithubPort for GithubClient {
 
     async fn clear_cache(
         &self,
-        tenant_id: uuid::Uuid,
+        scope: &AccessScope,
         owner: &str,
         name: Option<&str>,
         repo_ids: &[i64],
@@ -2500,11 +2506,11 @@ impl GithubPort for GithubClient {
             Some(name) => format!("{base}/repos/{owner}/{name}"),
             None => format!("{base}/repos/{owner}"),
         };
-        let mut removed = self.cache.clear(tenant_id, &prefix).await?;
+        let mut removed = self.cache.clear(scope, &prefix).await?;
         for id in repo_ids {
             removed += self
                 .cache
-                .clear(tenant_id, &format!("{base}/repositories/{id}"))
+                .clear(scope, &format!("{base}/repositories/{id}"))
                 .await?;
         }
         Ok(removed)

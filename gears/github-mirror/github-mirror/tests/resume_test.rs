@@ -18,7 +18,7 @@ use github_mirror::domain::repo::{
 use github_mirror_sdk::SyncSummary;
 use tokio_util::sync::CancellationToken;
 use toolkit_odata::ODataQuery;
-use toolkit_security::SecurityContext;
+use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
 
 /// The fixture fake, but the first listing call trips `cancel` so the run is
@@ -182,14 +182,12 @@ impl GithubPort for StopsAfterDiscovery {
 
     async fn clear_cache(
         &self,
-        tenant_id: Uuid,
+        scope: &AccessScope,
         owner: &str,
         name: Option<&str>,
         repo_ids: &[i64],
     ) -> Result<u64, DomainError> {
-        self.inner
-            .clear_cache(tenant_id, owner, name, repo_ids)
-            .await
+        self.inner.clear_cache(scope, owner, name, repo_ids).await
     }
 }
 
@@ -557,14 +555,12 @@ impl GithubPort for ListingWithEtag {
 
     async fn clear_cache(
         &self,
-        tenant_id: Uuid,
+        scope: &AccessScope,
         owner: &str,
         name: Option<&str>,
         repo_ids: &[i64],
     ) -> Result<u64, DomainError> {
-        self.inner
-            .clear_cache(tenant_id, owner, name, repo_ids)
-            .await
+        self.inner.clear_cache(scope, owner, name, repo_ids).await
     }
 }
 

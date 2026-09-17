@@ -5,7 +5,7 @@ use github_mirror_sdk::{GithubMirrorClientV1, MirrorStatus, Repo, SyncSummary};
 use toolkit_canonical_errors::CanonicalError;
 use toolkit_macros::domain_model;
 use toolkit_odata::{ODataQuery, Page};
-use toolkit_security::SecurityContext;
+use toolkit_security::{AccessScope, SecurityContext};
 
 use crate::domain::ports::github::FetchOptions;
 use crate::domain::scope::ScopeConfig;
@@ -53,6 +53,7 @@ impl GithubMirrorClientV1 for LocalClient {
                 name,
                 &FetchOptions {
                     tenant_id: ctx.subject_tenant_id(),
+                    access_scope: AccessScope::default(),
                     scope: ScopeConfig::default(),
                     force: false,
                     since: None,
