@@ -42,6 +42,14 @@ fn within_since(state: &str, updated_at: &str, since: Option<DateTime<Utc>>) -> 
     DateTime::parse_from_rfc3339(updated_at).is_ok_and(|at| at.with_timezone(&Utc) >= since)
 }
 
+/// Whether `updated_at` is older than a bound this sweep was given. No
+/// bound means nothing is too old.
+fn older_than(updated_at: &str, bound: Option<DateTime<Utc>>) -> bool {
+    bound.is_some_and(|bound| {
+        DateTime::parse_from_rfc3339(updated_at).is_ok_and(|at| at.with_timezone(&Utc) < bound)
+    })
+}
+
 fn updated_after_param(updated_after: Option<DateTime<Utc>>) -> String {
     updated_after.map_or_else(String::new, |at| {
         format!(
@@ -2094,11 +2102,13 @@ impl GithubPort for GithubClient {
         Ok(detail)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn list_pull_requests(
         &self,
         owner: &str,
         name: &str,
         repo_id: i64,
+        updated_after: Option<DateTime<Utc>>,
         page1_etag: Option<&str>,
         continue_from: Option<&str>,
         options: &FetchOptions,
@@ -2116,13 +2126,14 @@ impl GithubPort for GithubClient {
             Stage {
                 tail: "/pulls/comments",
                 first: self.absolute(&format!(
-                    "/repos/{owner}/{name}/pulls/comments?per_page={FIRST_PAGE_SIZE}"
+                    "/repos/{owner}/{name}/pulls/comments?sort=updated&direction=desc&per_page={FIRST_PAGE_SIZE}{}",
+                    updated_after_param(updated_after)
                 )),
             },
         ];
         let url = continue_from.map_or_else(|| stages[0].first.clone(), str::to_owned);
         let stage = stage_of(&stages, &url)?;
-        let bounded = options.since.is_some();
+        let bounded = updated_after.is_some() || options.since.is_some();
 
         let mut listing = PullListing::default();
         if stage == 0 {
@@ -2136,16 +2147,28 @@ impl GithubPort for GithubClient {
                 }
             }
             listing.contributors = derive_pull_people(repo_id, &page.parsed, &[]).into_records();
-            listing.pull_requests = page
+            let records: Vec<PullRequestRecord> = page
                 .parsed
                 .into_iter()
                 .map(|p| pull_request_record(repo_id, p))
+                .collect();
+            // Pulls come newest-updated first and GitHub's endpoint takes no
+            // `since`, so the bound is applied here: once a whole page sits
+            // below the watermark, every later page does too and the walk
+            // moves on to the next stage.
+            let past_the_bound = !records.is_empty()
+                && records
+                    .iter()
+                    .all(|p| older_than(&p.updated_at, updated_after));
+            listing.pull_requests = records
+                .into_iter()
                 .filter(|p| within_since(&p.state, &p.updated_at, options.since))
                 .collect();
+            let next_page = if past_the_bound { None } else { page.next };
             listing
                 .complete
-                .set(Listing::PullRequests, page.next.is_none() && !bounded);
-            listing.next = continue_after(&stages, stage, page.next);
+                .set(Listing::PullRequests, next_page.is_none() && !bounded);
+            listing.next = continue_after(&stages, stage, next_page);
         } else {
             let page: FetchedPage<Vec<GhReviewComment>> = self.get_page(&url, options).await?;
             listing.contributors = derive_pull_people(repo_id, &[], &page.parsed).into_records();

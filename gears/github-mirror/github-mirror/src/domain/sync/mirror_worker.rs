@@ -487,6 +487,7 @@ impl MirrorWorker {
                     &run.owner,
                     &run.name,
                     repo_id,
+                    updated_after,
                     start.page1_etag.as_deref(),
                     continue_from.as_deref(),
                     &run.options,

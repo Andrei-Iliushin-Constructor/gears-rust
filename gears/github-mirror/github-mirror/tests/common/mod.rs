@@ -218,11 +218,13 @@ impl GithubPort for FakeGithub {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn list_pull_requests(
         &self,
         _owner: &str,
         _name: &str,
         _repo_id: i64,
+        _updated_after: Option<chrono::DateTime<chrono::Utc>>,
         _page1_etag: Option<&str>,
         _continue_from: Option<&str>,
         _options: &FetchOptions,

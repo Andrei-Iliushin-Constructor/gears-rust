@@ -514,11 +514,13 @@ async fn walk_issues(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn walk_pulls(
     client: &GithubClient,
     owner: &str,
     name: &str,
     repo_id: i64,
+    updated_after: Option<chrono::DateTime<chrono::Utc>>,
     page1_etag: Option<&str>,
     options: &FetchOptions,
 ) -> Result<PullListing, DomainError> {
@@ -530,6 +532,7 @@ async fn walk_pulls(
                 owner,
                 name,
                 repo_id,
+                updated_after,
                 page1_etag,
                 continue_from.as_deref(),
                 options,
@@ -603,7 +606,7 @@ async fn fetch_repository(
     let collection = options.scope.collection;
 
     let issues = walk_issues(client, owner, name, repo_id, None, None, options).await?;
-    let pulls = walk_pulls(client, owner, name, repo_id, None, options).await?;
+    let pulls = walk_pulls(client, owner, name, repo_id, None, None, options).await?;
     let commits = walk_commits(client, owner, name, repo_id, None, None, options).await?;
     let meta = client.list_metadata(owner, name, repo_id, options).await?;
     let actions = client.list_actions(owner, name, repo_id, options).await?;
@@ -1732,7 +1735,7 @@ async fn an_unchanged_first_page_stops_the_pull_and_commit_sweeps_too() {
     let client = GithubClient::new(server.base_url(), None).expect("client must build");
     let options = opts(ScopeConfig::default());
 
-    let pulls = walk_pulls(&client, "rust-lang", "rust", 42, None, &options)
+    let pulls = walk_pulls(&client, "rust-lang", "rust", 42, None, None, &options)
         .await
         .expect("the first pull sweep must walk");
     assert_eq!(pulls.page1_etag.as_deref(), Some("W/\"pulls-page-one\""));
@@ -1751,6 +1754,7 @@ async fn an_unchanged_first_page_stops_the_pull_and_commit_sweeps_too() {
             "rust-lang",
             "rust",
             42,
+            None,
             Some("W/\"pulls-page-one\""),
             None,
             &options,

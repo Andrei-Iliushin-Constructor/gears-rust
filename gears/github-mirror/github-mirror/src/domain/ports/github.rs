@@ -344,11 +344,13 @@ pub trait GithubPort: Send + Sync {
         options: &FetchOptions,
     ) -> Result<IssueDetail, DomainError>;
 
+    #[allow(clippy::too_many_arguments)]
     async fn list_pull_requests(
         &self,
         owner: &str,
         name: &str,
         repo_id: i64,
+        updated_after: Option<DateTime<Utc>>,
         page1_etag: Option<&str>,
         continue_from: Option<&str>,
         options: &FetchOptions,
