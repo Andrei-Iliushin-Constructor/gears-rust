@@ -2965,7 +2965,38 @@ impl Service {
             )
             .await?;
 
-        let removed = self.github.clear_cache(tenant_id, owner, name).await?;
+        let repo_scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &REPO_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new().resource_property(pep_properties::OWNER_TENANT_ID, tenant_id),
+            )
+            .await?;
+        let repo_ids: Vec<i64> = match name {
+            Some(name) => self
+                .repo
+                .find_by_full_name(&repo_scope, &format!("{owner}/{name}"))
+                .await?
+                .map(|repo| repo.id)
+                .into_iter()
+                .collect(),
+            None => self
+                .repo
+                .list_window(&repo_scope, PageWindow::first(PageWindow::MAX_LIMIT))
+                .await?
+                .into_iter()
+                .filter(|repo| repo.owner == owner)
+                .map(|repo| repo.id)
+                .collect(),
+        };
+
+        let removed = self
+            .github
+            .clear_cache(tenant_id, owner, name, &repo_ids)
+            .await?;
         tracing::info!(
             owner,
             repository = name,

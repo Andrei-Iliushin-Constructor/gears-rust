@@ -430,6 +430,7 @@ impl GithubPort for FakeGithub {
         _tenant_id: Uuid,
         _owner: &str,
         _name: Option<&str>,
+        _repo_ids: &[i64],
     ) -> Result<u64, DomainError> {
         Ok(0)
     }

@@ -2493,12 +2493,20 @@ impl GithubPort for GithubClient {
         tenant_id: uuid::Uuid,
         owner: &str,
         name: Option<&str>,
+        repo_ids: &[i64],
     ) -> Result<u64, DomainError> {
         let base = self.api_base_url.trim_end_matches('/');
         let prefix = match name {
             Some(name) => format!("{base}/repos/{owner}/{name}"),
             None => format!("{base}/repos/{owner}"),
         };
-        self.cache.clear(tenant_id, &prefix).await
+        let mut removed = self.cache.clear(tenant_id, &prefix).await?;
+        for id in repo_ids {
+            removed += self
+                .cache
+                .clear(tenant_id, &format!("{base}/repositories/{id}"))
+                .await?;
+        }
+        Ok(removed)
     }
 }

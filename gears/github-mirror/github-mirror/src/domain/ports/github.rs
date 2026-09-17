@@ -405,7 +405,10 @@ pub trait GithubPort: Send + Sync {
     ) -> Result<Vec<WorkflowJobRecord>, DomainError>;
 
     /// Drop cached responses for one owner, or one `owner/name` repository,
-    /// and report how many entries went (DESIGN §4 `clear_cache`).
+    /// and report how many entries went (DESIGN §4 `clear_cache`). `repo_ids`
+    /// are the GitHub ids of the repositories concerned: the pages GitHub
+    /// links as `/repositories/{id}/...` are cached under that form and would
+    /// otherwise survive the clear.
     ///
     /// # Errors
     /// Storage failures.
@@ -414,5 +417,6 @@ pub trait GithubPort: Send + Sync {
         tenant_id: uuid::Uuid,
         owner: &str,
         name: Option<&str>,
+        repo_ids: &[i64],
     ) -> Result<u64, DomainError>;
 }

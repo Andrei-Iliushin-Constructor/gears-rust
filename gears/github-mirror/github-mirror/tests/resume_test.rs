@@ -185,8 +185,11 @@ impl GithubPort for StopsAfterDiscovery {
         tenant_id: Uuid,
         owner: &str,
         name: Option<&str>,
+        repo_ids: &[i64],
     ) -> Result<u64, DomainError> {
-        self.inner.clear_cache(tenant_id, owner, name).await
+        self.inner
+            .clear_cache(tenant_id, owner, name, repo_ids)
+            .await
     }
 }
 
@@ -557,8 +560,11 @@ impl GithubPort for ListingWithEtag {
         tenant_id: Uuid,
         owner: &str,
         name: Option<&str>,
+        repo_ids: &[i64],
     ) -> Result<u64, DomainError> {
-        self.inner.clear_cache(tenant_id, owner, name).await
+        self.inner
+            .clear_cache(tenant_id, owner, name, repo_ids)
+            .await
     }
 }
 
