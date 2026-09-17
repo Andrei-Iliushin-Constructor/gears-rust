@@ -1,4 +1,4 @@
-"""Shared JSON scenario data and HTTP fixtures for async registration."""
+"""Shared JSON scenario data and HTTP fixtures for the async admission API."""
 
 import json
 import os
@@ -27,44 +27,71 @@ async def registry_http(base_url, auth_headers):
         yield client
 
 
-@pytest.fixture
-def registration_fixture():
-    """Load the files linked from registration.md with one namespace per test."""
+def _topic_loader(topic):
+    """Load `fixtures/<topic>/` with one namespace per test.
+
+    Every fixture in a topic spells its IDs with the `cf.e2e.<topic>.` prefix;
+    rewriting that prefix keeps chained IDs and `$ref` targets consistent while
+    making the whole set unique to this test.
+
+    One namespace per loader, so a test that asks for two topics gets two
+    namespaces — fixtures of different topics cannot reference each other.
+    """
     namespace = f"r{uuid.uuid4().hex}"
-    directory = Path(__file__).parent / "fixtures" / "registration"
+    directory = Path(__file__).parent / "fixtures" / topic
+    prefix = f"cf.e2e.{topic}."
 
     def load(name):
         document = (directory / f"{name}.json").read_text(encoding="utf-8")
-        return json.loads(
-            document.replace("cf.e2e.registration.", f"cf.e2e.{namespace}.")
+        # Nothing else isolates these tests: one server, one database, no reset
+        # between them. A fixture that does not spell the prefix would keep a
+        # literal, shared ID and collide with every other test by whichever
+        # ran first, so refuse it here instead of failing as `already_exists`.
+        assert prefix in document, (
+            f"fixtures/{topic}/{name}.json must spell its identifiers with "
+            f"'{prefix}' so the per-test namespace can isolate them"
         )
+        return json.loads(document.replace(prefix, f"cf.e2e.{namespace}."))
 
     return load
 
 
+@pytest.fixture
+def registration_fixture():
+    """Load the files linked from scenarios/registration.md."""
+    return _topic_loader("registration")
+
+
+@pytest.fixture
+def deletion_fixture():
+    """Load the files linked from scenarios/deletion.md."""
+    return _topic_loader("deletion")
+
+
 def pytest_configure(config):
     config.addinivalue_line(
-        "markers", "scenario(id): stable scenario ID from scenarios/registration.md"
+        "markers", "scenario(id): stable scenario ID from a scenarios/*.md document"
     )
 
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
     """Capture associations before -k/-m deselection; permit planned scenarios."""
-    document = Path(__file__).parent / "scenarios" / "registration.md"
-    ids = re.findall(
-        r"^### (TR-REG-\d{3}) —", document.read_text(encoding="utf-8"), re.M
-    )
-    if len(ids) != len(set(ids)):
-        raise pytest.UsageError(f"Duplicate scenario IDs in {document}")
-    associations = {scenario_id: [] for scenario_id in ids}
+    associations = {}
+    for document in sorted((Path(__file__).parent / "scenarios").glob("*.md")):
+        for scenario_id in re.findall(
+            r"^### (TR-[A-Z]+-\d{3}) —", document.read_text(encoding="utf-8"), re.M
+        ):
+            if scenario_id in associations:
+                raise pytest.UsageError(f"Duplicate scenario ID {scenario_id} in {document}")
+            associations[scenario_id] = []
     for item in items:
         if Path(__file__).parent not in item.path.parents:
             continue
         for marker in item.iter_markers("scenario"):
             if len(marker.args) != 1 or marker.args[0] not in associations:
                 raise pytest.UsageError(
-                    f"Unknown registration scenario on {item.nodeid}: {marker.args}"
+                    f"Unknown scenario on {item.nodeid}: {marker.args}"
                 )
             scenario_id = marker.args[0]
             associations[scenario_id].append(item.nodeid)
@@ -77,7 +104,7 @@ def pytest_terminal_summary(terminalreporter):
     associations = terminalreporter.config.stash.get(SCENARIO_TESTS, {})
     if not associations:
         return
-    terminalreporter.section("Types Registry registration scenarios")
+    terminalreporter.section("Types Registry scenarios")
     reports = [
         report
         for group in terminalreporter.stats.values()

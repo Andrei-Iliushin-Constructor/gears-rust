@@ -1,4 +1,4 @@
-"""HTTP workflow and explicit normalization for complete registration responses."""
+"""HTTP workflow and explicit normalization for complete admission responses."""
 import asyncio
 from copy import deepcopy
 from datetime import datetime
@@ -40,7 +40,14 @@ def replace_text(document, field):
     document[field] = f"<{field}>"
 
 
-def assert_operation(operation, expected):
+def assert_operation(operation, expected, *, ordered=False):
+    """Compare a terminal operation in full.
+
+    `ordered=True` compares `items` as they arrived. Deletion outcomes are
+    reported in request order so that a caller who deleted by Registry
+    Reference can match identifier-keyed outcomes positionally (DESIGN §3.3);
+    for registration, response order carries no contract and is sorted away.
+    """
     actual = deepcopy(operation)
     assert_uuid(actual["operation_id"])
     assert timestamp(actual["created_at"]) <= timestamp(actual["started_at"]) <= timestamp(
@@ -51,9 +58,10 @@ def assert_operation(operation, expected):
     for item in actual["items"]:
         if item["error"] is not None:
             replace_text(item["error"], "message")
-    actual["items"].sort(key=lambda item: item["gts_id"])
     expected = deepcopy(expected)
-    expected["items"].sort(key=lambda item: item["gts_id"])
+    if not ordered:
+        actual["items"].sort(key=lambda item: item["gts_id"])
+        expected["items"].sort(key=lambda item: item["gts_id"])
     assert_json(actual, expected)
 
 
@@ -88,13 +96,8 @@ def assert_not_found(response, expected):
     assert_json(actual, expected)
 
 
-async def submit_and_poll(client, api_path, candidates, expected_receipt):
-    """Return terminal outcomes; completed never implies all items succeeded."""
-    response = await client.post(
-        f"{api_path}/entities",
-        headers={"Idempotency-Key": str(uuid.uuid4())},
-        json={"items": candidates},
-    )
+def _accept(response, expected_receipt):
+    """Validate a 202 receipt and return it with the operation's absolute URL."""
     assert response.status_code == 202, response.text
     assert response.headers["content-type"].startswith("application/json")
     receipt = response.json()
@@ -104,9 +107,13 @@ async def submit_and_poll(client, api_path, candidates, expected_receipt):
     assert_json(normalized, expected_receipt)
     assert "location" in response.headers, response.headers
     # Follow the actual Location, including any gateway prefix.
-    location = urljoin(str(response.url), response.headers["location"])
+    return receipt, urljoin(str(response.url), response.headers["location"])
+
+
+async def _poll(client, receipt, location, kind):
+    """Return terminal outcomes; completed never implies all items succeeded."""
     last_operation = None
-    # A latency requirement, not a tuning knob: an accepted registration must
+    # A latency requirement, not a tuning knob: an accepted submission must
     # reach a terminal status promptly. Exhausting this deadline means the work
     # waited for some periodic sweep instead of being picked up on acceptance.
     try:
@@ -117,7 +124,7 @@ async def submit_and_poll(client, api_path, candidates, expected_receipt):
                 assert polled.headers["content-type"].startswith("application/json")
                 last_operation = polled.json()
                 assert last_operation["operation_id"] == receipt["operation_id"]
-                assert last_operation["kind"] == "registration", last_operation
+                assert last_operation["kind"] == kind, last_operation
                 assert last_operation["dry_run"] is False, last_operation
                 status = last_operation["status"]
                 assert status in {"pending", "running", "completed"}, last_operation
@@ -129,3 +136,74 @@ async def submit_and_poll(client, api_path, candidates, expected_receipt):
             f"Operation {receipt['operation_id']} did not complete at {location}; "
             f"last operation (including item errors): {last_operation}"
         ) from None
+
+
+def _idempotency_key():
+    return {"Idempotency-Key": str(uuid.uuid4())}
+
+
+async def submit_and_poll(client, api_path, candidates, expected_receipt):
+    """Register a batch through `POST {api}/entities`."""
+    response = await client.post(
+        f"{api_path}/entities", headers=_idempotency_key(), json={"items": candidates}
+    )
+    receipt, location = _accept(response, expected_receipt)
+    return await _poll(client, receipt, location, "registration")
+
+
+async def delete_batch_and_poll(client, api_path, targets, expected_receipt):
+    """Delete a batch through `POST {api}/entities:batchDelete`.
+
+    Each target is `{"key": ..., "expected_resource_version": ...}`; the key is
+    a canonical GTS identifier or a Registry Reference UUID.
+    """
+    response = await client.post(
+        f"{api_path}/entities:batchDelete",
+        headers=_idempotency_key(),
+        json={"items": targets},
+    )
+    receipt, location = _accept(response, expected_receipt)
+    return await _poll(client, receipt, location, "deletion")
+
+
+async def delete_one_and_poll(client, api_path, key, expected_resource_version, expected_receipt):
+    """Delete one entity through `DELETE {api}/entities/{key}`."""
+    response = await client.delete(
+        f"{api_path}/entities/{key}",
+        headers=_idempotency_key(),
+        params={"expected_resource_version": expected_resource_version},
+    )
+    receipt, location = _accept(response, expected_receipt)
+    return await _poll(client, receipt, location, "deletion")
+
+
+async def read_entity(client, api_path, gts_id):
+    """Read one entity, tombstone or not, and return its complete body."""
+    response = await client.get(f"{api_path}/entities/{gts_id}")
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("application/json")
+    return response.json()
+
+
+async def read_tombstone(client, api_path, before, operation):
+    """A tombstone stays exact-readable until purge (ADR-0013).
+
+    Compared against the body observed before the deletion rather than against
+    a hand-written dictionary: the claim is that *nothing* changed except the
+    lifecycle, the version and the update timestamp.
+    """
+    actual = await read_entity(client, api_path, before["gts_id"])
+    updated = timestamp(actual["updated_at"])
+    assert timestamp(operation["started_at"]) <= updated <= timestamp(
+        operation["completed_at"]
+    ), actual
+    assert_json(
+        actual,
+        {
+            **before,
+            "lifecycle_status": "deleted",
+            "resource_version": before["resource_version"] + 1,
+            "updated_at": actual["updated_at"],
+        },
+    )
+    return actual
