@@ -50,6 +50,10 @@ pub struct RunState {
     summary: Mutex<SyncSummary>,
     drift: Mutex<Vec<CountDrift>>,
     contributors: Mutex<HashMap<i64, ContributorRecord>>,
+    /// The size of the last count gap seen per pull request and entity type,
+    /// so a repair pass can tell a shrinking gap from one GitHub will not
+    /// close.
+    gap_sizes: Mutex<HashMap<(i64, String), u64>>,
 }
 
 impl RunState {
@@ -78,6 +82,7 @@ impl RunState {
             }),
             drift: Mutex::new(Vec::new()),
             contributors: Mutex::new(HashMap::new()),
+            gap_sizes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -175,6 +180,15 @@ impl RunState {
                 Entry::Occupied(mut slot) => slot.get_mut().absorb(record),
             }
         }
+    }
+
+    /// Record how wide `entity_type`'s gap on this pull request is now, and
+    /// answer with how wide it was on the pass before.
+    fn note_gap(&self, pull_number: i64, entity_type: &str, size: u64) -> Option<u64> {
+        self.gap_sizes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert((pull_number, entity_type.to_owned()), size)
     }
 
     #[must_use]
@@ -587,8 +601,10 @@ impl MirrorWorker {
     }
 
     fn report_gap(&self, ctx: &WorkerContext, number: i64, gap: &CountGap, attempt: u32) {
+        let previous_gap = self.run.note_gap(number, &gap.entity_type, gap.size());
         let gap = CountGap {
             repair_attempts: attempt,
+            previous_gap,
             ..gap.clone()
         };
         match gap.outcome() {

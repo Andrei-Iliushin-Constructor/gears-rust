@@ -35,17 +35,6 @@ impl CountGap {
         }
         GapOutcome::Repair
     }
-
-    #[must_use]
-    pub fn advance(&self, stored: u64) -> Self {
-        Self {
-            entity_type: self.entity_type.clone(),
-            expected: self.expected,
-            stored,
-            repair_attempts: self.repair_attempts + 1,
-            previous_gap: Some(self.size()),
-        }
-    }
 }
 
 #[must_use]

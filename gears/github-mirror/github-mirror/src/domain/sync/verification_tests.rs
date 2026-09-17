@@ -109,14 +109,6 @@ fn the_repair_budget_is_bounded() {
 }
 
 #[test]
-fn advancing_records_the_gap_it_started_from() {
-    let advanced = gap(12, 9, 0, None).advance(11);
-    assert_eq!(advanced.stored, 11);
-    assert_eq!(advanced.repair_attempts, 1);
-    assert_eq!(advanced.previous_gap, Some(3));
-}
-
-#[test]
 fn a_stored_count_above_the_declared_one_is_not_a_gap() {
     assert_eq!(gap(9, 12, 0, None).size(), 0);
     assert_eq!(gap(9, 12, 0, None).outcome(), GapOutcome::Complete);
