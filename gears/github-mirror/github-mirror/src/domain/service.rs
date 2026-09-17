@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use authz_resolver_sdk::PolicyEnforcer;
 use authz_resolver_sdk::pep::{AccessRequest, ResourceType};
@@ -362,6 +362,10 @@ pub struct Service {
     sync_tx: mpsc::Sender<SyncJob>,
     sync_rx: Arc<Mutex<Option<mpsc::Receiver<SyncJob>>>>,
     in_flight: Arc<Mutex<HashMap<InFlightKey, Uuid>>>,
+    /// The gear's shutdown token, bound when the sync pool starts. Syncs that
+    /// do not come from the pool — the in-process client's — carry it too, so
+    /// a shutdown reaches them as well.
+    shutdown: Arc<OnceLock<CancellationToken>>,
 }
 
 /// One repository of one tenant: what a queued or running sync occupies.
@@ -415,6 +419,7 @@ impl Clone for Service {
             sync_tx: self.sync_tx.clone(),
             sync_rx: Arc::clone(&self.sync_rx),
             in_flight: Arc::clone(&self.in_flight),
+            shutdown: Arc::clone(&self.shutdown),
         }
     }
 }
@@ -498,6 +503,7 @@ impl Service {
             sync_tx,
             sync_rx: Arc::new(Mutex::new(Some(sync_rx))),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
+            shutdown: Arc::new(OnceLock::new()),
         }
     }
 
@@ -3005,6 +3011,20 @@ impl Service {
             "cleared cached responses"
         );
         Ok(removed)
+    }
+
+    /// Hand the service the token the gear cancels on shutdown. Called once,
+    /// when the sync pool starts; a later call is ignored.
+    pub fn bind_shutdown(&self, token: CancellationToken) {
+        if self.shutdown.set(token).is_err() {
+            tracing::warn!("the shutdown token is already bound; keeping the first one");
+        }
+    }
+
+    /// The shutdown token, or a detached one before the pool has started.
+    #[must_use]
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.get().cloned().unwrap_or_default()
     }
 
     /// What a sync collects when the request does not narrow it.

@@ -385,6 +385,7 @@ impl RunnableCapability for GithubMirrorGear {
         };
 
         let new_cancel_token = cancel.child_token();
+        service.bind_shutdown(new_cancel_token.clone());
         let max_concurrent = service.max_concurrent_syncs();
         let runner = SyncPoolRunner {
             service,
