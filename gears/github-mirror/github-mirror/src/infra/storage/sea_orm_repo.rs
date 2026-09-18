@@ -22,11 +22,12 @@ use github_mirror_sdk::{
     ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
 use sea_orm::prelude::DateTimeUtc;
-use sea_orm::sea_query::LikeExpr;
+use sea_orm::sea_query::{Expr, LikeExpr};
 use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, Order};
 use toolkit_db::odata::sea_orm_filter::{LimitCfg, paginate_odata};
 use toolkit_db::secure::{
     DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureOnConflict,
+    SecureUpdateExt,
 };
 use toolkit_db::{DBProvider, DbError};
 use toolkit_odata::{ODataQuery, Page, SortDir};
@@ -5158,6 +5159,7 @@ fn sync_session_active_model(tenant_id: Uuid, r: &SyncSessionRecord) -> sync_ses
         created_at: ActiveValue::Set(r.created_at.clone()),
         started_at: ActiveValue::Set(r.started_at.clone()),
         ended_at: ActiveValue::Set(r.ended_at.clone()),
+        updated_at: ActiveValue::Set(r.updated_at.clone()),
     }
 }
 
@@ -5176,6 +5178,7 @@ impl TryFrom<sync_sessions::Model> for SyncSessionRecord {
             created_at: m.created_at,
             started_at: m.started_at,
             ended_at: m.ended_at,
+            updated_at: m.updated_at,
         })
     }
 }
@@ -5233,6 +5236,29 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
             .map_err(map_scope_error)?;
 
         row.map(TryInto::try_into).transpose()
+    }
+
+    async fn record_heartbeat(
+        &self,
+        scope: &AccessScope,
+        id: Uuid,
+        progress_percent: i32,
+        updated_at: &str,
+    ) -> Result<(), DomainError> {
+        let conn = self.db.conn()?;
+        SyncSessionEntity::update_many()
+            .secure()
+            .scope_with(scope)
+            .filter(sea_orm::Condition::all().add(sync_sessions::Column::Id.eq(id)))
+            .col_expr(
+                sync_sessions::Column::ProgressPercent,
+                Expr::value(progress_percent),
+            )
+            .col_expr(sync_sessions::Column::UpdatedAt, Expr::value(updated_at))
+            .exec(&conn)
+            .await
+            .map_err(map_scope_error)?;
+        Ok(())
     }
 
     async fn list_recent(

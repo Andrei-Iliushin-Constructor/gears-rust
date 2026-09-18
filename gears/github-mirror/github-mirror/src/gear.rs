@@ -361,7 +361,10 @@ impl RunnableCapability for GithubMirrorGear {
     /// Before it starts, sessions left `queued` or `running` by a previous
     /// process are closed out as `interrupted` — the queue lives in memory, so
     /// nothing will ever pick them up again. The sweep happens here rather
-    /// than in [`Self::stop`] because a killed process never reaches `stop`.
+    /// than in [`Self::stop`] because a killed process never reaches `stop`,
+    /// and only after this call has claimed the job receiver: that proves no
+    /// pool is running, so a duplicate `start` fails without touching live
+    /// sessions or their locks.
     async fn start(&self, cancel: CancellationToken) -> anyhow::Result<()> {
         let service = self
             .service
@@ -374,6 +377,10 @@ impl RunnableCapability for GithubMirrorGear {
             })?
             .clone();
 
+        let Some(jobs) = service.take_sync_receiver().await else {
+            anyhow::bail!("{} sync worker already started", Self::MODULE_NAME);
+        };
+
         match service
             .sweep_interrupted_sessions(&toolkit_security::AccessScope::allow_all())
             .await
@@ -382,10 +389,6 @@ impl RunnableCapability for GithubMirrorGear {
             Ok(swept) => info!(sessions = swept, "closed out interrupted sync sessions"),
             Err(e) => warn!(error = %e, "could not sweep interrupted sync sessions"),
         }
-
-        let Some(jobs) = service.take_sync_receiver().await else {
-            anyhow::bail!("{} sync worker already started", Self::MODULE_NAME);
-        };
 
         let new_cancel_token = cancel.child_token();
         service.bind_shutdown(new_cancel_token.clone());
@@ -506,6 +509,6 @@ mod tests {
     fn gear_provides_all_migrations() {
         use toolkit::contracts::DatabaseCapability;
         let gear = GithubMirrorGear::default();
-        assert_eq!(gear.migrations().len(), 45);
+        assert_eq!(gear.migrations().len(), 46);
     }
 }

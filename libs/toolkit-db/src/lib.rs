@@ -581,10 +581,13 @@ impl DbHandle {
     /// key can be acquired again. Only meaningful for the file backend behind
     /// `SQLite`; a no-op elsewhere. Returns whether a marker was removed.
     ///
+    /// Start-up only: nothing checks whether the holder is still alive, so a
+    /// call from a request path would break a lock a live process holds.
+    ///
     /// # Errors
     /// Returns an error if a marker exists but cannot be removed.
-    pub async fn break_stale_lock(&self, gear: &str, key: &str) -> Result<bool> {
-        Ok(self.locks.break_stale(gear, key).await?)
+    pub async fn remove_lock_marker_at_startup(&self, gear: &str, key: &str) -> Result<bool> {
+        Ok(self.locks.remove_marker_at_startup(gear, key).await?)
     }
 
     /// Try to acquire an advisory lock with configurable retry/backoff policy.

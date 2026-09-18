@@ -1482,9 +1482,13 @@ pub struct SyncSessionDto {
     pub summary: Option<SyncSummaryDto>,
     pub created_at: String,
     pub started_at: Option<String>,
-    /// Re-stamped by every heartbeat, so it is readable mid-run.
+    /// Set once, when the run ends.
     pub ended_at: Option<String>,
-    /// `ended_at - started_at` in milliseconds, once both are known.
+    /// Re-stamped by every write, the progress heartbeat included, so a
+    /// poller can tell a live run from a stuck one.
+    pub updated_at: Option<String>,
+    /// Milliseconds from `started_at` to `ended_at`, or to `updated_at` while
+    /// the run is still going.
     pub duration_ms: Option<i64>,
 }
 
@@ -1507,7 +1511,10 @@ impl From<SyncSessionRecord> for SyncSessionDto {
             .as_deref()
             .and_then(|raw| serde_json::from_str::<SyncSummary>(raw).ok())
             .map(SyncSummaryDto::from);
-        let duration_ms = elapsed_ms(s.started_at.as_deref(), s.ended_at.as_deref());
+        let duration_ms = elapsed_ms(
+            s.started_at.as_deref(),
+            s.ended_at.as_deref().or(s.updated_at.as_deref()),
+        );
 
         Self {
             id: s.id.to_string(),
@@ -1519,6 +1526,7 @@ impl From<SyncSessionRecord> for SyncSessionDto {
             created_at: s.created_at,
             started_at: s.started_at,
             ended_at: s.ended_at,
+            updated_at: s.updated_at,
             duration_ms,
         }
     }

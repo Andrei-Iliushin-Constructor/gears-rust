@@ -17728,7 +17728,7 @@
             "type": "string"
           },
           "duration_ms": {
-            "description": "`ended_at - started_at` in milliseconds, once both are known.",
+            "description": "Milliseconds from `started_at` to `ended_at`, or to `updated_at` while\nthe run is still going.",
             "format": "int64",
             "type": [
               "integer",
@@ -17736,7 +17736,7 @@
             ]
           },
           "ended_at": {
-            "description": "Re-stamped by every heartbeat, so it is readable mid-run.",
+            "description": "Set once, when the run ends.",
             "type": [
               "string",
               "null"
@@ -17780,6 +17780,13 @@
                 "$ref": "#/components/schemas/SyncSummaryDto",
                 "description": "The run's counters, replayed from the stored JSON; absent until the\nsession completes."
               }
+            ]
+          },
+          "updated_at": {
+            "description": "Re-stamped by every write, the progress heartbeat included, so a\npoller can tell a live run from a stuck one.",
+            "type": [
+              "string",
+              "null"
             ]
           }
         },

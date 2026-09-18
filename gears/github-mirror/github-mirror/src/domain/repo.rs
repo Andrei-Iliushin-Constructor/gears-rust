@@ -1523,6 +1523,7 @@ pub struct SyncSessionRecord {
     pub created_at: String,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
+    pub updated_at: Option<String>,
 }
 
 #[async_trait]
@@ -1539,6 +1540,16 @@ pub trait SyncSessionRepository: Send + Sync {
         scope: &AccessScope,
         id: Uuid,
     ) -> Result<Option<SyncSessionRecord>, DomainError>;
+
+    /// The heartbeat's write: `progress_percent` and `updated_at` only, so a
+    /// tick never overwrites the rest of the row with a stale copy.
+    async fn record_heartbeat(
+        &self,
+        scope: &AccessScope,
+        id: Uuid,
+        progress_percent: i32,
+        updated_at: &str,
+    ) -> Result<(), DomainError>;
 
     /// Sessions newest first, `created_at` then `id` descending, starting
     /// after the `(created_at, id)` pair in `after` when a page continues.

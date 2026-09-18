@@ -895,8 +895,10 @@ pub mod sync_sessions {
         /// RFC3339 timestamps kept as text (engine-agnostic), as elsewhere.
         pub created_at: String,
         pub started_at: Option<String>,
-        /// Stamped by every heartbeat, so duration is readable mid-run.
+        /// Set once, when the run ends.
         pub ended_at: Option<String>,
+        /// Re-stamped by every write, the progress heartbeat included.
+        pub updated_at: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

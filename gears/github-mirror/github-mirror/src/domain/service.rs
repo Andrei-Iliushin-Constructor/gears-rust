@@ -3348,6 +3348,7 @@ impl Service {
             in_flight.insert(key.clone(), id);
         }
 
+        let now = now_rfc3339();
         let mut session = SyncSessionRecord {
             id,
             repo_full_name: format!("{owner}/{name}"),
@@ -3356,9 +3357,10 @@ impl Service {
             progress_percent: 0,
             error: None,
             summary_json: None,
-            created_at: now_rfc3339(),
+            created_at: now.clone(),
             started_at: None,
             ended_at: None,
+            updated_at: Some(now),
         };
         let recorded = async {
             self.sync_sessions
@@ -3393,6 +3395,7 @@ impl Service {
             let reason = format!("sync could not be queued: {e}");
             session.status = SessionStatus::Failed;
             session.ended_at = Some(now_rfc3339());
+            session.updated_at.clone_from(&session.ended_at);
             session.error = Some(reason.clone());
             self.sync_sessions
                 .upsert(&scope, tenant_id, session)
@@ -3454,14 +3457,13 @@ impl Service {
             .ok_or(DomainError::NotFound)?;
         session.status = SessionStatus::InProgress;
         session.started_at = Some(now_rfc3339());
+        session.updated_at.clone_from(&session.started_at);
         self.sync_sessions
             .upsert(&scope, tenant_id, session.clone())
             .await?;
 
         let progress = SyncProgress::new();
-        let outcome = self
-            .sync_with_heartbeat(job, &progress, &session, cancel)
-            .await;
+        let outcome = self.sync_with_heartbeat(job, &progress, cancel).await;
 
         let completed = outcome.is_ok();
         match outcome {
@@ -3487,6 +3489,7 @@ impl Service {
         }
         session.progress_percent = i32::from(progress.percent());
         session.ended_at = Some(now_rfc3339());
+        session.updated_at.clone_from(&session.ended_at);
         let repo_full_name = session.repo_full_name.clone();
         self.sync_sessions
             .upsert(&scope, tenant_id, session)
@@ -3512,14 +3515,15 @@ impl Service {
     ///
     /// DESIGN §4 has progress "published via a shared atomic" and persisted
     /// "incrementally ... via a heartbeat (also stamping `ended_at`)", so a
-    /// caller polling the session sees the run advance and can compute its
-    /// duration before it ends. A heartbeat that fails to write is logged and
-    /// skipped — losing a progress sample must not fail the sync.
+    /// caller polling the session sees the run advance. Here the beat stamps
+    /// `updated_at` instead, so `ended_at` means what it says, and it writes
+    /// only the two columns it owns rather than a copy of the whole row. A
+    /// heartbeat that fails to write is logged and skipped — losing a progress
+    /// sample must not fail the sync.
     async fn sync_with_heartbeat(
         &self,
         job: &SyncJob,
         progress: &SyncProgress,
-        session: &SyncSessionRecord,
         cancel: &CancellationToken,
     ) -> Result<SyncSummary, DomainError> {
         let percent = progress.handle();
@@ -3539,10 +3543,11 @@ impl Service {
             tokio::select! {
                 outcome = &mut sync => return outcome,
                 () = tokio::time::sleep(std::time::Duration::from_secs(HEARTBEAT_SECS)) => {
-                    let mut beat = session.clone();
-                    beat.progress_percent = i32::from(percent.load(Ordering::Relaxed));
-                    beat.ended_at = Some(now_rfc3339());
-                    if let Err(e) = self.save_session_progress(&job.ctx, beat).await {
+                    let progress_percent = i32::from(percent.load(Ordering::Relaxed));
+                    if let Err(e) = self
+                        .save_session_progress(&job.ctx, job.session_id, progress_percent)
+                        .await
+                    {
                         tracing::warn!(
                             session_id = %job.session_id,
                             error = %e,
@@ -3554,17 +3559,17 @@ impl Service {
         }
     }
 
-    /// One heartbeat write, on its own scope.
+    /// One heartbeat write, on its own scope: progress and `updated_at` only.
     async fn save_session_progress(
         &self,
         ctx: &SecurityContext,
-        session: SyncSessionRecord,
+        session_id: Uuid,
+        progress_percent: i32,
     ) -> Result<(), DomainError> {
         let scope = self.session_scope(ctx, actions::UPSERT).await?;
         self.sync_sessions
-            .upsert(&scope, ctx.subject_tenant_id(), session)
-            .await?;
-        Ok(())
+            .record_heartbeat(&scope, session_id, progress_percent, &now_rfc3339())
+            .await
     }
 
     /// Close out sessions left mid-flight by a previous process.
@@ -3602,6 +3607,7 @@ impl Service {
             count += 1;
             session.status = SessionStatus::Interrupted;
             session.ended_at = Some(now_rfc3339());
+            session.updated_at.clone_from(&session.ended_at);
             session.error = Some("the server restarted while this sync was in flight".to_owned());
             self.sync_sessions.upsert(scope, tenant_id, session).await?;
         }
@@ -3617,7 +3623,12 @@ impl Service {
             return;
         };
         let lock_key = format!("sync/{tenant_id}/{owner}/{name}");
-        match self.db.db().break_stale_lock(GEAR_NAME, &lock_key).await {
+        match self
+            .db
+            .db()
+            .remove_lock_marker_at_startup(GEAR_NAME, &lock_key)
+            .await
+        {
             Ok(true) => tracing::info!(
                 repository = repo,
                 "released the sync lock a dead process left behind"

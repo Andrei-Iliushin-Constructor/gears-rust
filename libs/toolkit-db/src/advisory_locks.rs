@@ -1640,11 +1640,17 @@ impl LockManager {
     ///
     /// No liveness check is made, deliberately: this is for a service's own
     /// start-up path, where the caller knows no holder of `key` is running
-    /// (module docs, "Recovering a stale marker").
+    /// (module docs, "Recovering a stale marker"). The name carries that
+    /// contract: called from a request path, this would delete the marker of
+    /// a holder that is still running.
     ///
     /// # Errors
     /// `DbLockError::Io` when a marker exists but cannot be removed.
-    pub async fn break_stale(&self, gear: &str, key: &str) -> Result<bool, DbLockError> {
+    pub async fn remove_marker_at_startup(
+        &self,
+        gear: &str,
+        key: &str,
+    ) -> Result<bool, DbLockError> {
         if !matches!(self.backend, LockBackend::File) {
             return Ok(false);
         }

@@ -50,6 +50,7 @@ fn session_record(id: Uuid, status: SessionStatus, created_at: &str) -> SyncSess
         created_at: created_at.to_owned(),
         started_at: None,
         ended_at: None,
+        updated_at: None,
     }
 }
 
