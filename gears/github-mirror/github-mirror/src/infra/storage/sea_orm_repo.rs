@@ -5108,12 +5108,16 @@ impl RepoSyncStatusRepository for SeaOrmRepoSyncStatusRepository {
         &self,
         scope: &AccessScope,
         status: Option<RepoRunStatus>,
+        after: Option<&str>,
         limit: u64,
     ) -> Result<Vec<RepoSyncStatusRecord>, DomainError> {
         let conn = self.db.conn()?;
         let mut condition = sea_orm::Condition::all();
         if let Some(status) = status {
             condition = condition.add(repo_sync_status::Column::Status.eq(status.as_str()));
+        }
+        if let Some(after) = after {
+            condition = condition.add(repo_sync_status::Column::RepoFullName.gt(after));
         }
 
         let rows = RepoSyncStatusEntity::find()
@@ -5234,13 +5238,28 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
     async fn list_recent(
         &self,
         scope: &AccessScope,
+        after: Option<(&str, Uuid)>,
         limit: u64,
     ) -> Result<Vec<SyncSessionRecord>, DomainError> {
         let conn = self.db.conn()?;
+        let mut condition = sea_orm::Condition::all();
+        if let Some((created_at, id)) = after {
+            condition = condition.add(
+                sea_orm::Condition::any()
+                    .add(sync_sessions::Column::CreatedAt.lt(created_at))
+                    .add(
+                        sea_orm::Condition::all()
+                            .add(sync_sessions::Column::CreatedAt.eq(created_at))
+                            .add(sync_sessions::Column::Id.lt(id)),
+                    ),
+            );
+        }
         let rows = SyncSessionEntity::find()
             .secure()
             .scope_with(scope)
+            .filter(condition)
             .order_by(sync_sessions::Column::CreatedAt, Order::Desc)
+            .order_by(sync_sessions::Column::Id, Order::Desc)
             .limit(limit)
             .all(&conn)
             .await

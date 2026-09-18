@@ -139,6 +139,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .require_license_features::<License>([])
         .query_param("status", false, "Only `in_progress` or only `complete`")
         .query_param("limit", false, "Maximum number of repositories to return")
+        .query_param("cursor", false, "`next_cursor` of the previous page")
         .handler(handlers::list_repo_sync_status)
         .json_response_with_schema::<toolkit_odata::Page<dto::RepoSyncStatusDto>>(
             openapi,
@@ -166,6 +167,7 @@ fn register_session_routes(mut router: Router, openapi: &dyn OpenApiRegistry) ->
         .authenticated()
         .require_license_features::<License>([])
         .query_param("limit", false, "Maximum number of sessions to return")
+        .query_param("cursor", false, "`next_cursor` of the previous page")
         .handler(handlers::list_sync_sessions)
         .json_response_with_schema::<toolkit_odata::Page<dto::SyncSessionDto>>(
             openapi,

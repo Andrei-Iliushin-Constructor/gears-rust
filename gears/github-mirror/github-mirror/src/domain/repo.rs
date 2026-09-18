@@ -1472,12 +1472,13 @@ pub trait RepoSyncStatusRepository: Send + Sync {
         repo_full_name: &str,
     ) -> Result<Option<RepoSyncStatusRecord>, DomainError>;
 
-    /// Every repository the scope can see, newest slug order, optionally
-    /// narrowed to one status.
+    /// Every repository the scope can see in slug order, optionally narrowed
+    /// to one status, starting after the slug `after` when a page continues.
     async fn list(
         &self,
         scope: &AccessScope,
         status: Option<RepoRunStatus>,
+        after: Option<&str>,
         limit: u64,
     ) -> Result<Vec<RepoSyncStatusRecord>, DomainError>;
 }
@@ -1539,9 +1540,12 @@ pub trait SyncSessionRepository: Send + Sync {
         id: Uuid,
     ) -> Result<Option<SyncSessionRecord>, DomainError>;
 
+    /// Sessions newest first, `created_at` then `id` descending, starting
+    /// after the `(created_at, id)` pair in `after` when a page continues.
     async fn list_recent(
         &self,
         scope: &AccessScope,
+        after: Option<(&str, Uuid)>,
         limit: u64,
     ) -> Result<Vec<SyncSessionRecord>, DomainError>;
 

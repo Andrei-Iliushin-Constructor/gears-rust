@@ -102,7 +102,7 @@ async fn a_session_is_created_updated_and_listed_newest_first() {
     assert_eq!(loaded.ended_at.as_deref(), Some("2026-08-25T10:00:30Z"));
 
     let recent = repo
-        .list_recent(&scope, 10)
+        .list_recent(&scope, None, 10)
         .await
         .expect("list must succeed");
     assert_eq!(recent.len(), 2);
@@ -138,7 +138,7 @@ async fn sessions_are_tenant_scoped() {
         "another tenant must not see the session at all"
     );
     assert!(
-        repo.list_recent(&stranger_scope, 10)
+        repo.list_recent(&stranger_scope, None, 10)
             .await
             .expect("list must succeed")
             .is_empty()

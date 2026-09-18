@@ -14,7 +14,7 @@ use github_mirror_sdk::{
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use toolkit_macros::domain_model;
-use toolkit_odata::{ODataQuery, Page, PageInfo};
+use toolkit_odata::{CursorV1, ODataQuery, Page, PageInfo, SortDir};
 use toolkit_security::{AccessScope, SecurityContext, pep_properties};
 use uuid::Uuid;
 
@@ -49,12 +49,73 @@ use super::validate::{repo_full_name, validate_commit_sha, validate_owner, valid
 pub const GEAR_NAME: &str = crate::gear::GithubMirrorGear::MODULE_NAME;
 
 const DEFAULT_LIST_LIMIT: u64 = 50;
+const SESSIONS_ORDER: &str = "-created_at,-id";
+const REPO_STATUS_ORDER: &str = "+repository";
 
 /// The current instant as RFC3339 text.
 ///
 /// Session and run-status rows still store their timestamps as text (their
 /// tables predate the typed columns), so they format here; `extracted_at` and
 /// the contributor window are real timestamps and never pass through this.
+fn cursor_keys<'a>(
+    query: &'a ODataQuery,
+    order: &str,
+    key_count: usize,
+) -> Result<Option<&'a [String]>, DomainError> {
+    let Some(cursor) = query.cursor.as_ref() else {
+        return Ok(None);
+    };
+    if cursor.s != order || cursor.k.len() != key_count || cursor.d != "fwd" {
+        return Err(invalid_cursor());
+    }
+    Ok(Some(cursor.k.as_slice()))
+}
+
+fn invalid_cursor() -> DomainError {
+    DomainError::Validation {
+        field: "cursor".to_owned(),
+        message: "the cursor does not belong to this listing".to_owned(),
+    }
+}
+
+fn encode_cursor(
+    order: &str,
+    direction: SortDir,
+    keys: Vec<String>,
+) -> Result<String, DomainError> {
+    CursorV1 {
+        k: keys,
+        o: direction,
+        s: order.to_owned(),
+        f: None,
+        d: "fwd".to_owned(),
+    }
+    .encode()
+    .map_err(|e| DomainError::Internal(format!("encoding a page cursor failed: {e}")))
+}
+
+fn keyset_page<T>(
+    mut rows: Vec<T>,
+    limit: u64,
+    cursor_after: impl Fn(&T) -> Result<String, DomainError>,
+) -> Result<Page<T>, DomainError> {
+    let page_len = usize::try_from(limit).unwrap_or(usize::MAX);
+    let next_cursor = if rows.len() > page_len {
+        rows.truncate(page_len);
+        rows.last().map(cursor_after).transpose()?
+    } else {
+        None
+    };
+    Ok(Page::new(
+        rows,
+        PageInfo {
+            next_cursor,
+            prev_cursor: None,
+            limit,
+        },
+    ))
+}
+
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
@@ -3145,16 +3206,24 @@ impl Service {
         let scope = self.repo_status_scope(ctx, actions::LIST).await?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
-        let items = self.repo_sync_status.list(&scope, status, limit).await?;
+        let after = cursor_keys(query, REPO_STATUS_ORDER, 1)?;
+        let rows = self
+            .repo_sync_status
+            .list(
+                &scope,
+                status,
+                after.map(|keys| keys[0].as_str()),
+                limit.saturating_add(1),
+            )
+            .await?;
 
-        Ok(Page::new(
-            items,
-            PageInfo {
-                next_cursor: None,
-                prev_cursor: None,
-                limit,
-            },
-        ))
+        keyset_page(rows, limit, |last| {
+            encode_cursor(
+                REPO_STATUS_ORDER,
+                SortDir::Asc,
+                vec![last.repo_full_name.clone()],
+            )
+        })
     }
 
     /// The repositories a resume should re-run: one named slug, or every
@@ -3169,7 +3238,7 @@ impl Service {
         let Some(slug) = only else {
             return self
                 .repo_sync_status
-                .list(&scope, Some(RepoRunStatus::InProgress), RESUME_LIMIT)
+                .list(&scope, Some(RepoRunStatus::InProgress), None, RESUME_LIMIT)
                 .await;
         };
 
@@ -3611,16 +3680,24 @@ impl Service {
             .await?;
 
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
-        let items = self.sync_sessions.list_recent(&scope, limit).await?;
+        let after = cursor_keys(query, SESSIONS_ORDER, 2)?
+            .map(|keys| {
+                let id = keys[1].parse::<Uuid>().map_err(|_| invalid_cursor())?;
+                Ok::<_, DomainError>((keys[0].as_str(), id))
+            })
+            .transpose()?;
+        let rows = self
+            .sync_sessions
+            .list_recent(&scope, after, limit.saturating_add(1))
+            .await?;
 
-        Ok(Page::new(
-            items,
-            PageInfo {
-                next_cursor: None,
-                prev_cursor: None,
-                limit,
-            },
-        ))
+        keyset_page(rows, limit, |last| {
+            encode_cursor(
+                SESSIONS_ORDER,
+                SortDir::Desc,
+                vec![last.created_at.clone(), last.id.to_string()],
+            )
+        })
     }
 
     /// Cheap DB reachability probe for the platform's readiness aggregation

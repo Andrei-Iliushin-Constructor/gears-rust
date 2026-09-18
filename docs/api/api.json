@@ -44806,6 +44806,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "`next_cursor` of the previous page",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -44985,6 +44994,15 @@
             "description": "Maximum number of repositories to return",
             "in": "query",
             "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`next_cursor` of the previous page",
+            "in": "query",
+            "name": "cursor",
             "required": false,
             "schema": {
               "type": "string"
