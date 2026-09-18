@@ -188,6 +188,14 @@ impl From<WorkerError> for CanonicalError {
                 &format!("operation item {item_id} was terminalized by another pass"),
                 "admission",
             ),
+            // The operation exists — it was just read — so this is a `500`, not the
+            // `404` the `OperationNotFound` arm above produces. That is what this
+            // path used to report, which named a live operation as missing and
+            // dropped the item id that says what actually vanished.
+            WorkerError::ItemOutcomeVanished { item_id } => opaque_internal(
+                &format!("operation item {item_id} lost the outcome a concurrent pass recorded"),
+                "admission",
+            ),
             WorkerError::StoreBuild(inner) => opaque_internal(&inner, "transient store build"),
             WorkerError::EvaluationTask(inner) => {
                 opaque_internal(&inner, "blocking evaluation task")

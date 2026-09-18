@@ -25,7 +25,7 @@ use toolkit_macros::domain_model;
 use tracing::Span;
 use uuid::Uuid;
 
-use super::bounds::{check_closure, materialize_bounded};
+use super::bounds::{check_resolution_inputs, materialize_bounded};
 use super::errors::{ItemFailure, WorkerError};
 use super::fingerprint::canonical_text;
 use super::refresh::refresh_dependents;
@@ -647,7 +647,7 @@ fn evaluate_loaded(
     vector: RevisionVector,
     limits: &Limits,
 ) -> Result<EvaluatedUnit, ItemFailure> {
-    check_closure(store.store_mut(), id.id(), limits.resolution_closure)?;
+    check_resolution_inputs(store.store_mut(), id.id(), limits.resolution_closure)?;
     let outcome = if id.is_type() {
         let resolved = store
             .store_mut()

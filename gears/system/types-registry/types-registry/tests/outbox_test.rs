@@ -604,6 +604,71 @@ async fn abandoning_after_a_slow_admission_stays_inside_the_delivery_deadline() 
     );
 }
 
+/// An admission that overruns is cut off with lease left to abandon it, so the
+/// operation reaches a terminal status instead of being dead-lettered while it
+/// stays `pending`.
+///
+/// This is the other half of the test above. There the write is what cannot fit;
+/// here admission itself would have spent the whole work budget, and the reserve
+/// is what stops it. Without that reserve the message was rejected — so nothing
+/// was queued for it any more — while the operation stayed non-terminal, and
+/// only the next process start would have picked it up from the recovery scan.
+///
+/// Sized so the two versions disagree about the outcome, not the duration:
+/// admission wants more than its share, and the abandonment write then takes
+/// longer than the sliver an unreserved budget would have left but well inside
+/// the reserve. A virtual clock is not available here for the same reason the
+/// test above states — this path does real database work.
+#[tokio::test]
+async fn an_overrunning_admission_is_cut_off_with_lease_left_to_abandon_it() {
+    // work deadline 1800ms, reserve min(5s, 25% of 2s) = 500ms, so admission
+    // must stop at 1300ms.
+    const LEASE: std::time::Duration = std::time::Duration::from_secs(2);
+    const SPENT_ADMITTING: std::time::Duration = std::time::Duration::from_millis(1600);
+    const ABANDON_STALL: std::time::Duration = std::time::Duration::from_millis(300);
+
+    let db = test_db_with_outbox().await;
+    let registry = service_with_operation_timeout(
+        &db,
+        common::TestStores::slow_admission_then_stalled_abandon(SPENT_ADMITTING, ABANDON_STALL),
+        LEASE,
+    );
+    let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
+
+    let accepted = registry
+        .submit(&registration("key", TARGET), NOW)
+        .await
+        .expect("accept");
+
+    // The last attempt the budget allows: a pass cut off with retries left is
+    // redelivered instead, which is the arm the next assertion must not hit.
+    let result = handler
+        .admit_payload(accepted.operation_id.to_string().as_bytes(), LAST_ATTEMPT)
+        .await;
+    let MessageResult::Reject(reason) = result else {
+        panic!("an overrun on the last attempt must be dead-lettered: {result:?}");
+    };
+    let diagnostic: Value =
+        serde_json::from_str(&reason).expect("structured dead-letter diagnostic");
+    assert_eq!(
+        diagnostic["error_code"], "admission_deadline_exceeded",
+        "an overrun is its own diagnostic, not a failure code borrowed from admission",
+    );
+
+    let unhooked = service_without_dispatch(&db, stores());
+    let operation = unhooked
+        .operation(accepted.operation_id)
+        .await
+        .expect("read")
+        .expect("the operation exists");
+    assert_eq!(
+        operation.status,
+        OperationStatus::Completed,
+        "the reserve exists so this write lands: a dead-lettered message whose \
+         operation stays non-terminal has no queued work left to resume it",
+    );
+}
+
 /// `mark_completed` only moves a `running` row, so abandonment goes through
 /// `mark_abandoned`, which terminalizes from either non-terminal status. Without
 /// it the operation stays `pending` with terminal items and returns through every
@@ -654,9 +719,18 @@ async fn abandoning_an_operation_that_never_ran_still_terminalizes_it() {
 }
 
 /// Infrastructure errors can name connection details, SQL and row content, so
-/// abandonment must sanitize the log, dead-letter reason and client payload.
+/// abandonment keeps them out of the dead-letter reason and the stored item
+/// payload — both of which a client reads back over REST.
+///
+/// The operator log is the one surface that does carry the cause, and it has to:
+/// without it an abandoned operation leaves `error_code` alone to explain four
+/// different failures, and nothing else on this path records why. That is the
+/// same split `api::rest::error::opaque_internal` already makes for the REST
+/// path — it logs `error = %cause` for these very `ServiceError` variants and
+/// answers the caller with an opaque message — so this test previously held the
+/// delivery path to a stricter rule than the gear applies one layer over.
 #[tokio::test]
-async fn abandonment_does_not_expose_the_infrastructure_cause() {
+async fn abandonment_logs_the_cause_and_keeps_it_out_of_every_client_surface() {
     let log_dir = common::TestDir::new("abandonment-log");
     let log_path = log_dir.path().join("admission.log");
     let log_file = std::fs::File::create(&log_path).expect("create log capture");
@@ -682,8 +756,10 @@ async fn abandonment_does_not_expose_the_infrastructure_cause() {
         "the abandonment event must be captured: {log}",
     );
     assert!(
-        !log.contains("failure injection"),
-        "the infrastructure cause must not reach the log: {log}",
+        log.contains("failure injection"),
+        "the operator log is where the cause belongs: it is the only record of why \
+         this operation was abandoned, and the payload assertions below are what \
+         keep it off the client's surfaces: {log}",
     );
     let MessageResult::Reject(reason) = result else {
         panic!("exhausted system failure must be rejected: {result:?}");

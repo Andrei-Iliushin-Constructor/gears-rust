@@ -208,7 +208,7 @@ impl StoreBuildError {
     #[must_use]
     pub fn is_transient(&self) -> bool {
         match self {
-            Self::Storage(error) => crate::domain::retry::scope(error),
+            Self::Storage(error) => crate::domain::retry::scoped_failure_may_clear(error),
             Self::MissingDocument { .. }
             | Self::Content { .. }
             | Self::MissingDialect { .. }

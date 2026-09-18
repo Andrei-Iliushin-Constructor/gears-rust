@@ -1687,7 +1687,8 @@ Follow `12_unit_testing.md`, with one exception for real outbox-delivery tests:
 - **No timers, polling or retries in worker, domain or compatibility tests.** Invoke the
   admission worker directly with `(operation_id, runner)`.
 - **Real outbox delivery may wait.** `toolkit-db` exposes no single-pass driver;
-  `Outbox::flush()` requests a scan without waiting for delivery. This exception has
+  `Outbox::push_dirty()` marks a partition and wakes a sequencer, and `Outbox::flush()`
+  wakes one without naming a partition — neither waits for delivery. This exception has
   four bounds:
   1. Use only `tests/common/mod.rs::await_delivery`; no ad-hoc waits.
   2. Read immediately, then use capped exponential backoff under one deadline covering

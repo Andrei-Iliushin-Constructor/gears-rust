@@ -302,13 +302,8 @@ impl OperationRepo {
         Ok(result.rows_affected == 1)
     }
 
-    /// Move an operation to `completed`. `completed` means every item is terminal;
-    /// outcomes stay on the items and are not aggregated here (`database.sql`).
-    ///
-    /// # Errors
-    /// Propagates the update's failure.
-    /// Terminalize an operation delivery abandoned, from **either** non-terminal
-    /// status.
+    /// Terminalize an operation that delivery abandoned, from **either**
+    /// non-terminal status.
     ///
     /// Separate from [`Self::mark_completed`], which only moves a `running` row:
     /// an operation can be abandoned before its pass ever reached `mark_running`,
@@ -357,6 +352,15 @@ impl OperationRepo {
         Ok(result.rows_affected > 0)
     }
 
+    /// Move an operation to `completed`. `completed` means every item is terminal;
+    /// outcomes stay on the items and are not aggregated here (`database.sql`).
+    ///
+    /// Only moves a `running` row — see [`Self::mark_abandoned`] for the
+    /// abandonment that also moves a `pending` one, and for why widening this
+    /// method instead would be wrong.
+    ///
+    /// # Errors
+    /// Propagates the update's failure.
     pub async fn mark_completed(
         runner: &impl DBRunner,
         scope: &AccessScope,
@@ -490,6 +494,66 @@ impl OperationRepo {
             .await?;
         Ok(result.rows_affected == 1)
     }
+
+    /// Terminalize every still-undecided item of one operation as `failed`,
+    /// carrying one structured reason for all of them.
+    ///
+    /// One statement rather than a read plus an UPDATE per item. Abandonment
+    /// runs inside whatever is left of the delivery's lease, and a batch at
+    /// `limits.batch_candidates` would otherwise issue that many sequential
+    /// round trips on the one path whose entire purpose is to finish before that
+    /// lease expires — which is how the abandonment write came to time out
+    /// without ever being issued.
+    ///
+    /// Carries the same non-terminal guard as [`Self::mark_item_failed`], so
+    /// items an earlier pass already decided keep their own outcomes, and the
+    /// columns it writes are identical. Returns how many items this call moved;
+    /// zero is an ordinary outcome when another pass terminalized them all.
+    ///
+    /// # Errors
+    /// Propagates the update's failure.
+    pub async fn fail_nonterminal_items(
+        runner: &impl DBRunner,
+        scope: &AccessScope,
+        operation_id: Uuid,
+        error_payload: String,
+        now: OffsetDateTime,
+    ) -> Result<u64, ScopeError> {
+        let result = operation_item::Entity::update_many()
+            .secure()
+            .col_expr(
+                operation_item::Column::Status,
+                Expr::value(OperationItemStatus::Failed),
+            )
+            .col_expr(
+                operation_item::Column::RequestPayload,
+                Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                operation_item::Column::ErrorPayload,
+                Expr::value(Some(error_payload)),
+            )
+            .col_expr(operation_item::Column::StartedAt, Expr::value(now))
+            .col_expr(operation_item::Column::CompletedAt, Expr::value(now))
+            .filter(non_terminal_items_of(operation_id))
+            .scope_with(scope)
+            .exec(runner)
+            .await?;
+        Ok(result.rows_affected)
+    }
+}
+
+/// The set [`OperationRepo::fail_nonterminal_items`] moves: one operation's items
+/// that no pass has decided yet. The status half is [`non_terminal`]'s, for the
+/// same write-once reason.
+fn non_terminal_items_of(operation_id: Uuid) -> Condition {
+    Condition::all()
+        .add(operation_item::Column::OperationId.eq(operation_id))
+        .add(
+            Condition::any()
+                .add(operation_item::Column::Status.eq(OperationItemStatus::Pending))
+                .add(operation_item::Column::Status.eq(OperationItemStatus::Running)),
+        )
 }
 
 /// Guard non-terminal status so outcomes remain write-once (`database.sql`).

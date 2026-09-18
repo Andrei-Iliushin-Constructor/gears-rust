@@ -402,6 +402,17 @@ impl OperationStore for Repos {
     ) -> Result<bool, ScopeError> {
         OperationRepo::mark_item_failed(tx, scope, item_id, error_payload, now).await
     }
+
+    async fn fail_nonterminal_items(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        operation_id: Uuid,
+        error_payload: String,
+        now: OffsetDateTime,
+    ) -> Result<u64, ScopeError> {
+        OperationRepo::fail_nonterminal_items(tx, scope, operation_id, error_payload, now).await
+    }
 }
 
 #[async_trait]

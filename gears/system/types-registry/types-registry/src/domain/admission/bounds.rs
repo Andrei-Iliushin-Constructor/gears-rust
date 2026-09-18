@@ -1,4 +1,6 @@
-//! Per-document resolution budgets, shared by admission and dependent refresh.
+//! What a candidate's resolution inputs must satisfy before it is resolved:
+//! the per-document budgets, shared by admission and dependent refresh, and the
+//! presence of everything it consumes.
 
 use std::collections::HashSet;
 
@@ -11,12 +13,26 @@ use crate::domain::artifacts::{MaterializedArtifacts, materialize};
 use crate::domain::dependency::extract_edges;
 use crate::domain::enums::DependencyKind;
 
-/// Count the candidate and the distinct documents it consumes before resolving.
+/// Check a candidate's resolution inputs: that there are not too many of them,
+/// and that every one it names is present.
+///
+/// **Two refusals, not one**, because a single walk discovers both and walking
+/// twice would read the same documents to answer half the question each time:
+/// [`AdmissionFailureReason::ResolutionClosureExceeded`] when the distinct
+/// documents exceed `bound`, and [`ItemFailure::missing_dependency`]
+/// (`dependency_not_found`) when an edge names a target the store does not hold.
+/// The second is why this is not called `check_closure` any more — a
+/// missing-dependency refusal coming out of a function named after a document
+/// budget is easy to miss at the call sites.
 ///
 /// Walk the authored documents in the overlaid store: committed outgoing edges
 /// of a revised candidate may have been removed by this revision. Unrelated
 /// documents in a shared refresh store do not consume this candidate's budget.
-pub fn check_closure(store: &mut GtsStore, root: &str, bound: usize) -> Result<(), ItemFailure> {
+pub fn check_resolution_inputs(
+    store: &mut GtsStore,
+    root: &str,
+    bound: usize,
+) -> Result<(), ItemFailure> {
     let mut seen = HashSet::new();
     let mut pending = vec![root.to_owned()];
     while let Some(id) = pending.pop() {

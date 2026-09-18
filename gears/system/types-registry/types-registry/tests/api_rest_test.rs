@@ -30,6 +30,10 @@ mod common;
 use common::{stores, test_db};
 
 const CF_TYPE: &str = gts_id!("cf.core.example.type.v1~");
+/// Two more targets, so a deletion batch can mix key spellings and hold more
+/// than one Registry Reference.
+const CF_OTHER: &str = gts_id!("cf.core.example.other.v1~");
+const CF_THIRD: &str = gts_id!("cf.core.example.third.v1~");
 /// An Instance of [`CF_TYPE`]: a full five-token last segment with no trailing `~`.
 const CF_INSTANCE: &str = gts_id!("cf.core.example.type.v1~cf.core.example.first.v1");
 const INVALID_ARGUMENT_TYPE: &str =
@@ -53,9 +57,30 @@ const V2_MUTATION_OPERATIONS: [&str; 3] = [
     "types_registry.delete_entity",
 ];
 
-/// `OpenAPI` parameter shape with typed location and scalar type. Catches swapped
-/// description/type arguments in `query_param_typed`, which compile but emit `string`.
-type DeclaredParam = (String, ParamLocation, bool, String);
+/// `OpenAPI` parameter shape as the generated document will carry it: typed
+/// location, scalar type, and the two constraints `query_param_typed` cannot
+/// express.
+///
+/// The scalar type catches swapped description/type arguments in
+/// `query_param_typed`, which compile but emit `string`. `format` and `minimum`
+/// are here because `register_delete_entity` spells out a full `ParamSpec` to
+/// declare them: without recording them, that spec could go back to
+/// `query_param_typed` and the generated client stop rejecting `0`, with every
+/// assertion below still passing.
+type DeclaredParam = (
+    String,
+    ParamLocation,
+    bool,
+    String,
+    Option<String>,
+    Option<f64>,
+);
+
+/// A parameter's `format` as the generated document renders it — the token
+/// `ParamSpec` carries, which `OpenApiRegistryImpl` emits verbatim.
+fn declared_format(param: &toolkit::api::ParamSpec) -> Option<String> {
+    param.format.clone()
+}
 /// One response as the generated document will carry it: status and content type.
 type DeclaredResponse = (u16, String);
 /// One response header: status, name, and JSON Schema scalar type.
@@ -94,6 +119,8 @@ impl OpenApiRegistry for TestOpenApi {
                         p.location.clone(),
                         p.required,
                         p.param_type.clone(),
+                        declared_format(p),
+                        p.minimum,
                     )
                 })
                 .collect(),
@@ -1244,6 +1271,8 @@ fn the_idempotency_key_header_is_declared_as_a_required_parameter() {
                 ParamLocation::Header,
                 true,
                 "string".to_owned(),
+                None,
+                None,
             )),
             "{operation_id} must declare a required Idempotency-Key header, got: {declared:?}",
         );
@@ -1275,18 +1304,26 @@ fn the_single_deletion_query_parameters_are_declared() {
             ParamLocation::Path,
             true,
             "string".to_owned(),
+            None,
+            None,
         ),
+        // The precondition, with both constraints: a generated client has to
+        // reject `0` on its own, which a bare `integer` does not make it do.
         (
             "expected_resource_version".to_owned(),
             ParamLocation::Query,
             true,
             "integer".to_owned(),
+            Some("int64".to_owned()),
+            Some(1.0),
         ),
         (
             "dry_run".to_owned(),
             ParamLocation::Query,
             false,
             "boolean".to_owned(),
+            None,
+            None,
         ),
     ] {
         assert!(
@@ -1608,6 +1645,72 @@ async fn deleting_by_registry_reference_reports_the_identifier() {
     assert_eq!(operation["items"][0]["status"], json!("succeeded"));
 }
 
+/// A batch mixing both key spellings, and two references at once.
+///
+/// This is the case the `resolved` lookup exists to serve: with only one
+/// identifier or only one reference per batch, a mis-paired target still
+/// produces a plausible-looking outcome, so nothing would notice if the map
+/// handed a UUID the wrong identifier. Asserting each item by `gts_id` in
+/// request order is what pins the pairing.
+#[tokio::test]
+async fn a_batch_mixing_identifiers_and_references_pairs_every_outcome() {
+    let router = router_with_db().await;
+
+    register_entity(&router, "seed-a", CF_TYPE).await;
+    register_entity(&router, "seed-b", CF_OTHER).await;
+    register_entity(&router, "seed-c", CF_THIRD).await;
+
+    // Two of the three go in as references, so the batch exercises a map with
+    // more than one entry as well as the mixed spelling.
+    let mut references = Vec::new();
+    for id in [CF_OTHER, CF_THIRD] {
+        let entity = call(&router, get(&format!("{V2}/entities/{id}"))).await;
+        references.push(
+            entity.body["gts_uuid"]
+                .as_str()
+                .expect("the read carries the Registry Reference")
+                .to_owned(),
+        );
+    }
+
+    let accepted = call(
+        &router,
+        batch_delete(
+            Some("mixed-batch"),
+            &json!({
+                "items": [
+                    { "key": CF_TYPE, "expected_resource_version": 1 },
+                    { "key": references[0], "expected_resource_version": 1 },
+                    { "key": references[1], "expected_resource_version": 1 },
+                ]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(accepted.status, StatusCode::ACCEPTED, "{:?}", accepted.body);
+
+    let operation = poll(&router, &accepted).await;
+    let items = operation["items"]
+        .as_array()
+        .expect("the operation carries its items");
+    assert_eq!(items.len(), 3, "{items:?}");
+
+    // Request order, identifiers throughout — a reference submission is reported
+    // by the identifier it resolved to, never by the UUID the client sent.
+    for (position, expected) in [CF_TYPE, CF_OTHER, CF_THIRD].iter().enumerate() {
+        assert_eq!(
+            items[position]["gts_id"],
+            json!(expected),
+            "item {position} is paired with the wrong target: {items:?}",
+        );
+        assert_eq!(
+            items[position]["status"],
+            json!("succeeded"),
+            "item {position}: {items:?}",
+        );
+    }
+}
+
 /// An unknown UUID returns `404`: it cannot be reversed into an outcome identifier.
 /// An absent GTS identifier instead produces an asynchronous item failure.
 #[tokio::test]
@@ -1680,6 +1783,73 @@ async fn batch_deletion_requires_a_positive_expected_resource_version() {
             CF_TYPE,
             "expected_resource_version",
             "VALIDATION_FAILED",
+        );
+    }
+}
+
+/// A field the server does not recognize is a `400`, not a silent default.
+///
+/// `api_dto` renames to `snake_case` and nothing else, so before
+/// `deny_unknown_fields` a client sending the camelCase spelling of `dry_run`
+/// had it dropped: the flag deserialized to `None`, defaulted to `false`, and a
+/// batch of entities was really deleted by a request that asked for a
+/// prediction. The entity is registered first so the assertion cannot pass
+/// because the target was missing anyway.
+#[tokio::test]
+async fn a_misspelled_dry_run_is_refused_rather_than_committed() {
+    let router = router_with_db().await;
+    register_entity(&router, "seed-unknown-field", CF_TYPE).await;
+
+    let refused = call(
+        &router,
+        batch_delete(
+            Some("camel-case-dry-run"),
+            &json!({
+                "items": [{ "key": CF_TYPE, "expected_resource_version": 1 }],
+                "dryRun": true,
+            }),
+        ),
+    )
+    .await;
+    // `422`, not the `400` the query route answers below: a body field the
+    // server does not recognize is caught by the JSON extractor, while an
+    // unrecognized query parameter is caught by the `Query` extractor. Both
+    // refuse, and neither commits — the differing status is toolkit's existing
+    // contract for the two extractors, not a choice this route makes.
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "an unrecognized body field on a destructive route must not commit: {:?}",
+        refused.body,
+    );
+    assert!(
+        format!("{:?}", refused.body).contains("dryRun"),
+        "the refusal must name the field the client got wrong: {:?}",
+        refused.body,
+    );
+
+    // The control: the entity is still there, so the refusal really did stop the
+    // deletion rather than merely answering after it.
+    let read = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
+    assert_eq!(read.status, StatusCode::OK, "{:?}", read.body);
+}
+
+/// The same rule on the query string, where `serde_urlencoded` is just as happy
+/// to ignore a parameter it was not asked about.
+#[tokio::test]
+async fn an_unrecognized_deletion_query_parameter_is_refused() {
+    let router = router_with_db().await;
+
+    for case in [
+        "?expected_resource_version=1&dryrun=true",
+        "?expected_resource_version=1&dry-run=true",
+    ] {
+        let refused = call(&router, delete_one(Some(case), CF_TYPE, case)).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::BAD_REQUEST,
+            "{case} must be refused, not defaulted to a committing deletion: {:?}",
+            refused.body,
         );
     }
 }

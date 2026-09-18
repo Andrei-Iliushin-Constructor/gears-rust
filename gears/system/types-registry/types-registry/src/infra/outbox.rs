@@ -34,7 +34,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::config::LEASE_HEADROOM;
-use crate::domain::admission::OperationDispatch;
+use crate::domain::admission::{AdmissionFailureReason, DeliveryFailure, OperationDispatch};
 use crate::domain::enums::OperationStatus;
 use crate::domain::ports::RecoveryCursor;
 use crate::domain::ports::metrics::{AdmissionMetrics, DeliveryOutcome};
@@ -65,6 +65,18 @@ const PAYLOAD_TYPE: &str = "types_registry.admission_operation";
 /// Operations per recovery page. Recovery runs in `init()` before readiness;
 /// paging avoids reading the entire `operation` backlog at once during boot.
 const RECOVERY_PAGE: u64 = 256;
+
+/// Lease held back from admission so the abandonment a failure needs to write
+/// still has a budget of its own.
+///
+/// Absolute rather than a share of the lease: terminalization is two guarded
+/// UPDATEs, and its cost does not grow with `operation_timeout`. The cap keeps
+/// it sane when the lease is short — a test lease can be milliseconds, and a
+/// reserve larger than the budget would leave admission no time at all.
+const TERMINALIZE_RESERVE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Share of a short lease the reserve may take before the cap applies.
+const TERMINALIZE_RESERVE_MAX_SHARE: f32 = 0.25;
 
 /// Canonical operation UUID, readable in dead-letter rows.
 /// Candidate content stays in operation items (SPEC T21).
@@ -212,10 +224,16 @@ impl AdmissionHandler {
         msg: &OutboxMessage,
         lease: std::time::Duration,
     ) -> MessageResult {
+        let envelope = Envelope::of(msg);
         if msg.payload_type != PAYLOAD_TYPE {
-            return reject_unusable(self.registry.metrics(), "unexpected_payload_type", None);
+            return reject_unusable(
+                self.registry.metrics(),
+                DeliveryFailure::UnexpectedPayloadType,
+                None,
+                Some(envelope),
+            );
         }
-        self.admit_payload_within(&msg.payload, msg.attempts, lease)
+        self.admit_payload_within(&msg.payload, msg.attempts, lease, Some(envelope))
             .await
     }
 
@@ -224,7 +242,7 @@ impl AdmissionHandler {
     /// message's `attempts` (retries so far, `0` on first delivery) and passes the
     /// lease actually left.
     pub async fn admit_payload(&self, payload: &[u8], attempts: i16) -> MessageResult {
-        self.admit_payload_within(payload, attempts, self.registry.operation_timeout())
+        self.admit_payload_within(payload, attempts, self.registry.operation_timeout(), None)
             .await
     }
 
@@ -240,10 +258,16 @@ impl AdmissionHandler {
         payload: &[u8],
         attempts: i16,
         lease: std::time::Duration,
+        envelope: Option<Envelope<'_>>,
     ) -> MessageResult {
         // Permanent by construction: no redelivery changes the bytes.
         let Ok(operation_id) = parse_payload(payload) else {
-            return reject_unusable(self.registry.metrics(), "invalid_operation_payload", None);
+            return reject_unusable(
+                self.registry.metrics(),
+                DeliveryFailure::InvalidOperationPayload,
+                None,
+                envelope,
+            );
         };
 
         let now = time::OffsetDateTime::now_utc();
@@ -258,24 +282,66 @@ impl AdmissionHandler {
         // without the handler reaching a decision, which is what a lease timeout
         // leaves behind. Skip `registry.admit()` — it timed out before and would
         // hold the lease again — and decide from the stored status instead.
-        if u64::try_from(attempts).unwrap_or(u64::MAX) >= u64::from(self.max_attempts) {
+        if retries_taken(attempts) >= self.max_attempts {
             return self
-                .decide_from_stored_status(operation_id, attempts, now, deadline)
+                .decide_from_stored_status(operation_id, attempts, now, deadline, envelope)
                 .await;
         }
 
-        match self.registry.admit(operation_id, now).await {
-            Ok(()) => MessageResult::Ok,
-            Err(ServiceError::Worker(e)) if e.transient() && self.may_retry(attempts) => {
-                self.retry(operation_id, attempts, e.code())
+        // Admission gets the work budget minus a reserve, so a failure that only
+        // surfaces late still has lease left to write its abandonment. Without
+        // the reserve `admit` could spend the whole budget, `terminalize_abandoned`
+        // would time out without issuing its write, and the message would be
+        // dead-lettered while the operation stayed `pending`/`running` — with no
+        // queued message, so nothing but the next process start would pick it up.
+        let admit_deadline = admit_deadline(deadline, lease);
+
+        match tokio::time::timeout_at(admit_deadline, self.registry.admit(operation_id, now)).await
+        {
+            Ok(Ok(())) => MessageResult::Ok,
+            Ok(Err(ServiceError::Worker(e))) if e.transient() && self.may_retry(attempts) => {
+                self.retry(operation_id, attempts, DeliveryFailure::Admission(e.code()))
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 let code = match &error {
-                    ServiceError::Worker(error) => error.code(),
-                    _ => "admission_service_failure",
+                    ServiceError::Worker(error) => DeliveryFailure::Admission(error.code()),
+                    _ => DeliveryFailure::ServiceFailure,
                 };
-                self.abandon(operation_id, attempts, now, deadline, code)
-                    .await
+                // The cause goes to the operator log and never into the
+                // dead-letter payload: a driver error can carry SQL, credentials
+                // or document content, and the payload is read back over REST.
+                // Without this the arms above collapse into one `error_code` and
+                // an abandoned operation leaves no record of why.
+                self.abandon(
+                    operation_id,
+                    attempts,
+                    now,
+                    deadline,
+                    code,
+                    Some(error.to_string()),
+                )
+                .await
+            }
+            // The pass ran out of its share rather than failing. An interrupted
+            // admission is resumable — committed items stay terminal, the rest
+            // stay `pending` — so redelivery is the honest answer while the budget
+            // allows one. When it does not, abandon inside the reserve this
+            // deadline exists to protect.
+            Err(_) if self.may_retry(attempts) => self.retry(
+                operation_id,
+                attempts,
+                DeliveryFailure::AdmissionDeadlineExceeded,
+            ),
+            Err(_) => {
+                self.abandon(
+                    operation_id,
+                    attempts,
+                    now,
+                    deadline,
+                    DeliveryFailure::AdmissionDeadlineExceeded,
+                    None,
+                )
+                .await
             }
         }
     }
@@ -301,6 +367,7 @@ impl AdmissionHandler {
         attempts: i16,
         now: time::OffsetDateTime,
         deadline: tokio::time::Instant,
+        envelope: Option<Envelope<'_>>,
     ) -> MessageResult {
         let status = tokio::time::timeout_at(deadline, self.registry.operation(operation_id)).await;
         match status {
@@ -315,8 +382,9 @@ impl AdmissionHandler {
             }
             Ok(Ok(None)) => reject_unusable(
                 self.registry.metrics(),
-                "operation_not_found",
+                DeliveryFailure::OperationNotFound,
                 Some(operation_id),
+                envelope,
             ),
             // Unfinished or no status to go on: abandon.
             // Safe either way: `abandon` fails only undecided items and
@@ -330,7 +398,8 @@ impl AdmissionHandler {
                     attempts,
                     now,
                     deadline,
-                    "delivery_budget_exhausted",
+                    DeliveryFailure::DeliveryBudgetExhausted,
+                    None,
                 )
                 .await
             }
@@ -340,11 +409,12 @@ impl AdmissionHandler {
     /// Whether a further delivery is allowed. `attempts` counts retries already
     /// taken, so the delivery in hand is number `attempts + 1`.
     fn may_retry(&self, attempts: i16) -> bool {
-        u64::try_from(attempts).unwrap_or(u64::MAX) + 1 < u64::from(self.max_attempts)
+        retries_taken(attempts).saturating_add(1) < self.max_attempts
     }
 
     /// Retry an infrastructure failure that still has attempts left.
-    fn retry(&self, operation_id: Uuid, attempts: i16, error_code: &'static str) -> MessageResult {
+    fn retry(&self, operation_id: Uuid, attempts: i16, failure: DeliveryFailure) -> MessageResult {
+        let error_code = failure.as_str();
         warn!(
             %operation_id,
             attempts,
@@ -366,21 +436,29 @@ impl AdmissionHandler {
         attempts: i16,
         now: time::OffsetDateTime,
         deadline: tokio::time::Instant,
-        error_code: &'static str,
+        failure: DeliveryFailure,
+        cause: Option<String>,
     ) -> MessageResult {
+        let error_code = failure.as_str();
         // Infrastructure errors can contain connection details or row content.
         // Use the same stable reason for the operator log and dead letter.
         let reason = serde_json::json!({
-            "reason": "admission_abandoned",
+            "reason": AdmissionFailureReason::AdmissionAbandoned.as_str(),
             "error_code": error_code,
             "operation_id": operation_id,
         })
         .to_string();
+        // `cause` is the one field that does not go into `reason`: it carries the
+        // driver's own text, which the dead-letter payload must stay free of
+        // because REST reads that payload back. Empty when the caller has no
+        // error to attribute — a spent budget is not a failure with a cause.
+        let cause = cause.unwrap_or_default();
         error!(
             %operation_id,
             attempts,
             max_attempts = self.max_attempts,
             error_code,
+            cause = %cause,
             "types_registry abandoned an admission; the message is dead-lettered"
         );
         self.registry
@@ -433,19 +511,74 @@ fn work_deadline(lease: std::time::Duration) -> tokio::time::Instant {
     tokio::time::Instant::now() + lease.mul_f32(0.9)
 }
 
+/// When admission must stop, given the work budget it runs inside.
+///
+/// Derived from `deadline` rather than from a second `Instant::now()`, so both
+/// deadlines are one instant apart by construction and the reserve is really
+/// reserved. See [`TERMINALIZE_RESERVE`] for why it is absolute.
+fn admit_deadline(
+    deadline: tokio::time::Instant,
+    lease: std::time::Duration,
+) -> tokio::time::Instant {
+    deadline - TERMINALIZE_RESERVE.min(lease.mul_f32(TERMINALIZE_RESERVE_MAX_SHARE))
+}
+
+/// Retries already taken, as one number both budget checks read the same way.
+///
+/// The outbox stores the count in an `i16` and it should never be negative. The
+/// clamp states what happens if it ever is: a nonsense value counts as the whole
+/// budget spent, so the delivery in hand is the one that ends the message.
+///
+/// Both checks used to inline a `u64::MAX` fallback and then disagree about it —
+/// the budget-exhausted branch read it as "spent", while `may_retry` added one,
+/// wrapped to zero in release (and panicked in debug), and read it as "retries
+/// left", which kept a corrupt row cycling on its partition forever.
+fn retries_taken(attempts: i16) -> u32 {
+    u32::try_from(attempts).unwrap_or(u32::MAX)
+}
+
+/// Where a message sat in the queue. The only handle an operator has on a
+/// rejection whose payload named no operation: `operation_id` is `None` for
+/// exactly those, so without these three coordinates a dead-letter row cannot be
+/// tied back to the rejection that produced it.
+#[derive(Clone, Copy)]
+struct Envelope<'a> {
+    payload_type: &'a str,
+    partition_id: i64,
+    seq: i64,
+}
+
+impl<'a> Envelope<'a> {
+    fn of(msg: &'a OutboxMessage) -> Self {
+        Self {
+            payload_type: &msg.payload_type,
+            partition_id: msg.partition_id,
+            seq: msg.seq,
+        }
+    }
+}
+
 /// An unusable payload cannot be retried or identify an operation to terminalize.
 ///
 /// Takes `metrics` because the counter must fire here too: an unusable message is a
 /// dead letter like any other, and leaving it uncounted puts a blind spot in the
 /// series an operator alerts on.
+///
+/// `envelope` is absent only when a test called the admission entry point without
+/// one; every delivery carries it.
 fn reject_unusable(
     metrics: &dyn AdmissionMetrics,
-    error_code: &'static str,
+    failure: DeliveryFailure,
     operation_id: Option<Uuid>,
+    envelope: Option<Envelope<'_>>,
 ) -> MessageResult {
+    let error_code = failure.as_str();
     error!(
         error_code,
         ?operation_id,
+        payload_type = envelope.map(|e| e.payload_type).unwrap_or_default(),
+        partition_id = envelope.map(|e| e.partition_id),
+        seq = envelope.map(|e| e.seq),
         "types_registry received an unusable admission message"
     );
     metrics.admission_delivery(DeliveryOutcome::DeadLettered);
@@ -625,5 +758,39 @@ mod tests {
         // The lease is the timeout plus two seconds of headroom.
         assert_eq!(config.duration, std::time::Duration::from_secs(302));
         assert_eq!(config.duration.saturating_sub(config.headroom), TIMEOUT);
+    }
+
+    /// Admission cannot spend the budget the abandonment write needs.
+    ///
+    /// Asserted as arithmetic on one `work_deadline`, so it needs no clock: what
+    /// matters is the distance between the two deadlines, not where either lands.
+    /// Before this reserve existed, `admit` ran unbounded inside the work budget,
+    /// so a failure surfacing late left `terminalize_abandoned` a deadline already
+    /// in the past — the message was dead-lettered while the operation stayed
+    /// non-terminal with no queued message to resume it.
+    #[tokio::test]
+    async fn admission_stops_early_enough_to_leave_the_abandonment_a_budget() {
+        // `operation_timeout` plus `LEASE_HEADROOM`, as `lease_config` builds it.
+        const PRODUCTION: std::time::Duration = std::time::Duration::from_secs(302);
+        // A short lease — what a test or a tight deployment sets. The cap keeps
+        // the reserve a share of it, because a fixed five seconds would leave
+        // admission a deadline in the past and nothing would ever be admitted.
+        const SHORT: std::time::Duration = std::time::Duration::from_millis(400);
+
+        let work = work_deadline(PRODUCTION);
+        assert_eq!(
+            work - admit_deadline(work, PRODUCTION),
+            TERMINALIZE_RESERVE,
+            "at production lease the reserve is the absolute one: two guarded \
+             UPDATEs do not get slower because `operation_timeout` grew",
+        );
+
+        let work = work_deadline(SHORT);
+        let admit = admit_deadline(work, SHORT);
+        assert_eq!(work - admit, SHORT.mul_f32(TERMINALIZE_RESERVE_MAX_SHARE));
+        assert!(
+            admit < work,
+            "the reserve must never swallow the whole work budget",
+        );
     }
 }

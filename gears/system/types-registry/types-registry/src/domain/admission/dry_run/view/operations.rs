@@ -160,4 +160,19 @@ impl OperationStore for AdmissionView {
             "an admission view records no refusal; the pass publishes it outside the snapshot",
         ))
     }
+
+    /// Reject abandonment: only the outbox delivery path terminalizes an
+    /// operation, and it never runs against a view.
+    async fn fail_nonterminal_items(
+        &self,
+        _tx: &DbTx<'_>,
+        _scope: &AccessScope,
+        _operation_id: Uuid,
+        _error_payload: String,
+        _now: OffsetDateTime,
+    ) -> Result<u64, ScopeError> {
+        Err(unsupported(
+            "an admission view does not abandon an operation; delivery does that outside the snapshot",
+        ))
+    }
 }

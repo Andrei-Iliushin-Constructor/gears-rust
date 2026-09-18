@@ -48,7 +48,7 @@ use toolkit_db::secure::ScopeError;
 /// rendered, and a redelivery compiles the same scope from the same
 /// configuration.
 ///
-/// Unlike [`database`] this cannot be exhaustive — `ScopeError` is
+/// Unlike [`database_failure_may_clear`] this cannot be exhaustive — `ScopeError` is
 /// `#[non_exhaustive]`, so a new variant cannot be made a compile error here
 /// and naming the others alongside a wildcard is a `match_same_arms` lint. The
 /// wildcard therefore answers `false`, which is the opposite of this module's
@@ -58,7 +58,7 @@ use toolkit_db::secure::ScopeError;
 /// likely is one too. A new one that is *not* belongs on the other side, and
 /// that is a decision for whoever adds it.
 #[must_use]
-pub fn scope(error: &ScopeError) -> bool {
+pub fn scoped_failure_may_clear(error: &ScopeError) -> bool {
     matches!(error, ScopeError::Db(_))
 }
 
@@ -70,7 +70,7 @@ pub fn scope(error: &ScopeError) -> bool {
 /// beside it carry — came to be treated as permanent under an earlier
 /// catch-all.
 #[must_use]
-pub fn database(error: &DbError) -> bool {
+pub fn database_failure_may_clear(error: &DbError) -> bool {
     match error {
         // Reached the engine or the wire. The next delivery may find a healthy
         // connection, a drained pool or a released lock.
@@ -95,7 +95,9 @@ pub fn database(error: &DbError) -> bool {
         // denial must not spend the delivery budget. Anything else under
         // `Other` is opaque, which is exactly the case the retry side is the
         // default for.
-        DbError::Other(error) => error.downcast_ref::<ScopeError>().is_none_or(scope),
+        DbError::Other(error) => error
+            .downcast_ref::<ScopeError>()
+            .is_none_or(scoped_failure_may_clear),
     }
 }
 

@@ -1790,3 +1790,134 @@ async fn a_blocked_deletion_puts_the_dependant_count_on_its_span_and_no_identiti
         "the span still carries the operation kind: {refusal}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The two instruments the delivery path owns
+// ---------------------------------------------------------------------------
+
+/// The pre-resolution batch bound, and the refusal it counts.
+///
+/// `RegistryService::delete` enforces `limits.batch_candidates` **before**
+/// `resolve_targets` reads anything, because `DeleteEntitiesRequest` declares no
+/// `max_items` of its own — so this guard is the only thing between an oversized
+/// batch and an unbounded read. Acceptance has its own check, but it runs after
+/// resolution and its test cannot reach this one; the metric is counted here
+/// too, so the series does not depend on which check fired.
+#[tokio::test]
+async fn an_oversized_deletion_batch_is_refused_before_it_reads_and_counted_as_a_deletion() {
+    use types_registry::config::TypesRegistryConfig;
+    use types_registry::domain::admission::NullDispatch;
+    use types_registry::domain::policy::RegistrationPolicy;
+    use types_registry::domain::registry_service::{
+        AdmissionMode, DeleteRequest, DeleteTarget, EntityKey, RegistryService, ServiceError,
+    };
+
+    const LIMIT: usize = 2;
+
+    let db = common::test_db().await;
+    let mut config = TypesRegistryConfig::default();
+    config.limits.batch_candidates = LIMIT;
+    let registry = RegistryService::new(
+        db.db(),
+        common::stores(),
+        RegistrationPolicy::default(),
+        config,
+        std::sync::Arc::new(NullDispatch),
+        AdmissionMode::Outbox,
+        std::sync::Arc::clone(metrics()),
+    );
+
+    flush();
+    let before = counter_sum_where(
+        "types_registry_refusals_total",
+        &[("reason", "batch_too_large"), ("kind", "deletion")],
+    );
+
+    // Registry References, not identifiers: an identifier-only batch needs no
+    // lookup, so it could not tell the guard from acceptance's own check. These
+    // UUIDs resolve to nothing, so without the guard `resolve_targets` reads
+    // first and fails with `UnresolvedReference` — which is what makes the
+    // assertion below discriminate rather than merely pass.
+    let targets: Vec<DeleteTarget> = (0..=LIMIT)
+        .map(|_| DeleteTarget {
+            key: EntityKey::Uuid(uuid::Uuid::new_v4()),
+            expected_resource_version: Some(1),
+        })
+        .collect();
+    let refused = registry
+        .delete(
+            &DeleteRequest {
+                idempotency_key: "over-the-limit".to_owned(),
+                dry_run: false,
+                targets,
+            },
+            NOW,
+        )
+        .await;
+
+    match refused {
+        Err(ServiceError::Acceptance(error)) => {
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains(&(LIMIT + 1).to_string())
+                    && rendered.contains(&LIMIT.to_string()),
+                "the refusal names both numbers so an operator can size the batch: {rendered}",
+            );
+        }
+        Err(ServiceError::UnresolvedReference { .. }) => panic!(
+            "the bound must be checked before `resolve_targets`: reaching the lookup means an \
+             oversized batch became an unbounded read",
+        ),
+        other => panic!("an over-limit deletion batch must be refused synchronously: {other:?}"),
+    }
+
+    flush();
+    assert_eq!(
+        counter_sum_where(
+            "types_registry_refusals_total",
+            &[("reason", "batch_too_large"), ("kind", "deletion")],
+        ),
+        before + 1,
+        "the series must not depend on which of the two checks fired, so this one \
+         counts the refusal it raises itself",
+    );
+}
+
+/// The delivery counter's label vocabulary, pinned the way T16 pins every other
+/// instrument: against a real exporter rather than against `Debug`.
+///
+/// This series is what a stall alert reads — rising `retried` with flat
+/// `dead_lettered` means redelivery without progress — and it was the one
+/// instrument this gear added without a contract test, so a typo in either label
+/// would have passed the whole suite.
+#[tokio::test]
+async fn the_delivery_outcome_labels_are_exactly_retried_and_dead_lettered() {
+    use types_registry::domain::ports::metrics::DeliveryOutcome;
+
+    const NAME: &str = "types_registry_admission_deliveries_total";
+
+    flush();
+    let before_retried = counter_sum_where(NAME, &[("outcome", "retried")]);
+    let before_dead = counter_sum_where(NAME, &[("outcome", "dead_lettered")]);
+
+    metrics().admission_delivery(DeliveryOutcome::Retried);
+    metrics().admission_delivery(DeliveryOutcome::DeadLettered);
+
+    flush();
+    assert_eq!(
+        counter_sum_where(NAME, &[("outcome", "retried")]),
+        before_retried + 1,
+    );
+    assert_eq!(
+        counter_sum_where(NAME, &[("outcome", "dead_lettered")]),
+        before_dead + 1,
+    );
+
+    let mut vocabulary = label_values_of(NAME, "outcome");
+    vocabulary.dedup();
+    assert_eq!(
+        vocabulary,
+        vec!["dead_lettered".to_owned(), "retried".to_owned()],
+        "the alert's series must be bounded to these two values",
+    );
+}

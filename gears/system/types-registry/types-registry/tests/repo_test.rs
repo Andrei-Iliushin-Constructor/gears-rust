@@ -21,11 +21,18 @@ use toolkit_gts::gts_id;
 use uuid::Uuid;
 
 use common::{TestDir, allow_all, test_db, test_db_file};
-use types_registry::domain::enums::{DependencyKind, EntityKind, LifecycleStatus, OwnershipScope};
-use types_registry::domain::ports::NewEntity;
+use types_registry::domain::admission::Precondition;
+use types_registry::domain::admission::fingerprint::{RequestFingerprint, ScopeHash};
+use types_registry::domain::enums::{
+    DependencyKind, EntityKind, LifecycleStatus, OperationItemStatus, OperationKind,
+    OwnershipScope, Plane,
+};
+use types_registry::domain::ports::{
+    ItemSuccess, NewEntity, NewOperation, NewOperationItem, RecoveryCursor,
+};
 use types_registry::infra::storage::entity::dependency;
 use types_registry::infra::storage::repo::{
-    DependencyRepo, EntityRepo, PageRequest, VersionFamilyRepo,
+    DependencyRepo, EntityRepo, OperationRepo, PageRequest, VersionFamilyRepo,
 };
 
 const NOW: OffsetDateTime = datetime!(2026-08-18 09:15:30 UTC);
@@ -913,4 +920,220 @@ async fn the_same_repository_methods_run_inside_a_transaction() {
         .expect("read")
         .expect("committed row");
     assert_eq!(row.id, committed);
+}
+
+/// Abandonment fails a whole operation's undecided items in one statement, and
+/// the write-once guard still holds.
+///
+/// The loop this replaced issued a read plus an UPDATE per item, up to
+/// `limits.batch_candidates` of them, inside the transaction the outbox handler
+/// bounds with what is left of the delivery's lease — which is how the
+/// abandonment write came to time out without ever being issued. Asserting the
+/// count is what shows one statement covered the set; asserting the untouched
+/// item is what shows the guard did not widen along with it.
+#[tokio::test]
+async fn abandonment_fails_every_undecided_item_of_one_operation_and_no_other() {
+    const ABANDONED: &str = r#"{"reason":"admission_abandoned"}"#;
+
+    let db = test_db().await;
+    let conn = db.conn().expect("conn");
+    let scope = allow_all();
+
+    let operation = OperationRepo::insert(
+        &conn,
+        &scope,
+        NewOperation {
+            id: Uuid::new_v4(),
+            kind: OperationKind::Registration,
+            dry_run: false,
+            plane: Plane::Platform,
+            tenant_id: None,
+            principal_id: Uuid::nil(),
+            idempotency_key: "abandon-batch".to_owned(),
+            idempotency_scope_hash: ScopeHash::from_stored(vec![0x01; 32]).expect("32 bytes"),
+            request_fingerprint: RequestFingerprint::from_stored(vec![0x02; 32]).expect("32 bytes"),
+            now: NOW,
+        },
+    )
+    .await
+    .expect("insert operation");
+
+    let items: Vec<NewOperationItem> = [CUSTOMER_V1, CUSTOMER_V1_DERIVED_A, CUSTOMER_V1_DERIVED_B]
+        .iter()
+        .enumerate()
+        .map(|(index, gts_id)| NewOperationItem {
+            item_no: i32::try_from(index).expect("three items"),
+            gts_id: (*gts_id).to_owned(),
+            precondition: Precondition::MustNotExist,
+            compat_forced: false,
+            request_payload: "{}".to_owned(),
+        })
+        .collect();
+    OperationRepo::insert_items(&conn, &scope, &operation, &items)
+        .await
+        .expect("insert items");
+
+    // One item is already decided, as it would be after a pass that committed it
+    // before the delivery was abandoned. Its outcome must survive.
+    let seeded = OperationRepo::find_items(&conn, &scope, operation.id)
+        .await
+        .expect("read items");
+    let decided = seeded
+        .iter()
+        .find(|item| item.gts_id == CUSTOMER_V1)
+        .expect("the first candidate");
+    assert!(
+        OperationRepo::mark_item_succeeded(
+            &conn,
+            &scope,
+            decided.id,
+            ItemSuccess::Registered {
+                revision_no: 1,
+                resource_version: 1,
+            },
+            NOW,
+        )
+        .await
+        .expect("terminalize one item")
+    );
+
+    let failed = OperationRepo::fail_nonterminal_items(
+        &conn,
+        &scope,
+        operation.id,
+        ABANDONED.to_owned(),
+        NOW,
+    )
+    .await
+    .expect("fail the undecided items");
+    assert_eq!(
+        failed, 2,
+        "one statement must cover every undecided item, and only those",
+    );
+
+    let after = OperationRepo::find_items(&conn, &scope, operation.id)
+        .await
+        .expect("reread items");
+    for item in &after {
+        if item.gts_id == CUSTOMER_V1 {
+            assert_eq!(
+                item.status,
+                OperationItemStatus::Succeeded,
+                "an item an earlier pass decided keeps its outcome",
+            );
+            assert_eq!(item.result_revision_no, Some(1));
+        } else {
+            assert_eq!(item.status, OperationItemStatus::Failed, "{}", item.gts_id);
+            assert_eq!(
+                item.error_payload.as_deref(),
+                Some(ABANDONED),
+                "{}: every failed item carries the one abandonment reason",
+                item.gts_id,
+            );
+        }
+    }
+
+    // Idempotent: a redelivery that abandons again finds nothing left to move.
+    let again = OperationRepo::fail_nonterminal_items(
+        &conn,
+        &scope,
+        operation.id,
+        ABANDONED.to_owned(),
+        NOW,
+    )
+    .await
+    .expect("second abandonment");
+    assert_eq!(again, 0, "the guard makes a repeated abandonment a no-op");
+}
+
+/// Boot recovery pages by keyset, and the tie-break is load-bearing.
+///
+/// The only production caller asks for 256 rows at a time and every recovery
+/// test seeds one or two operations, so `after` was always `None` and this
+/// branch never ran. A wrong comparison here either skips operations at boot or
+/// re-reads the same page forever, and both are invisible without a second page.
+///
+/// Every operation shares one `created_at`, so ordering rests entirely on the
+/// `id` tie-break — which is the half a `created_at`-only cursor would drop.
+#[tokio::test]
+async fn nonterminal_paging_walks_every_operation_once_across_pages() {
+    const OPERATIONS: usize = 5;
+    const PAGE: u64 = 2;
+
+    let db = test_db().await;
+    let conn = db.conn().expect("conn");
+    let scope = allow_all();
+
+    let mut expected: Vec<Uuid> = Vec::with_capacity(OPERATIONS);
+    for n in 0..OPERATIONS {
+        let operation = OperationRepo::insert(
+            &conn,
+            &scope,
+            NewOperation {
+                id: Uuid::new_v4(),
+                kind: OperationKind::Registration,
+                dry_run: false,
+                plane: Plane::Platform,
+                tenant_id: None,
+                principal_id: Uuid::nil(),
+                idempotency_key: format!("recover-{n}"),
+                idempotency_scope_hash: ScopeHash::from_stored(vec![0x01; 32]).expect("32 bytes"),
+                request_fingerprint: RequestFingerprint::from_stored(vec![0x02; 32])
+                    .expect("32 bytes"),
+                // One instant for all of them: the `id` tie-break is the test.
+                now: NOW,
+            },
+        )
+        .await
+        .expect("insert operation");
+        expected.push(operation.id);
+    }
+
+    // The order the cursor promises: `created_at` then `id`, and they all share
+    // the first, so this is `id` order.
+    expected.sort_unstable();
+
+    let mut walked: Vec<Uuid> = Vec::new();
+    let mut after = None;
+    loop {
+        let page = OperationRepo::find_nonterminal_ids(&conn, &scope, after, PAGE)
+            .await
+            .expect("read a recovery page");
+        if page.is_empty() {
+            break;
+        }
+        assert!(
+            u64::try_from(page.len()).expect("small page") <= PAGE,
+            "a page must not exceed the limit it was asked for: {page:?}",
+        );
+        walked.extend(page.iter().map(|cursor| cursor.id));
+        let short = u64::try_from(page.len()).expect("small page") < PAGE;
+        after = page.last().copied();
+        if short {
+            break;
+        }
+    }
+
+    assert_eq!(
+        walked, expected,
+        "the scan must visit every non-terminal operation exactly once, in cursor order",
+    );
+
+    // Passing the last cursor back must end the scan rather than return the row
+    // it already handed over — the `>` in the tie-break, not `>=`.
+    let past_the_end = OperationRepo::find_nonterminal_ids(
+        &conn,
+        &scope,
+        walked.last().copied().map(|id| RecoveryCursor {
+            created_at: NOW,
+            id,
+        }),
+        PAGE,
+    )
+    .await
+    .expect("read past the end");
+    assert!(
+        past_the_end.is_empty(),
+        "the cursor must exclude the row it names, or boot re-reads it forever: {past_the_end:?}",
+    );
 }

@@ -34,6 +34,16 @@ pub enum WorkerError {
     /// catches this and reports the other pass's outcome; callers never see it.
     #[error("operation item {item_id} was terminalized by another pass")]
     ItemAlreadyTerminal { item_id: i64 },
+    /// A concurrent pass won this item's CAS, but the reread that should hand
+    /// back its stored outcome does not contain the row.
+    ///
+    /// Distinct from [`Self::OperationNotFound`], which this path used to report:
+    /// the operation plainly does exist — it was just read — and the REST mapping
+    /// turns that variant into `404 No operation with id: {id}`, which is a lie
+    /// about a live operation and loses the one identifier that says what
+    /// actually went missing.
+    #[error("operation item {item_id} lost the outcome a concurrent pass recorded")]
+    ItemOutcomeVanished { item_id: i64 },
     #[error("building the transient store failed: {0}")]
     StoreBuild(#[source] StoreBuildError),
     #[error("the blocking evaluation task failed: {0}")]
@@ -94,8 +104,8 @@ impl WorkerError {
     #[must_use]
     pub fn transient(&self) -> bool {
         match self {
-            Self::Storage(error) => crate::domain::retry::scope(error),
-            Self::Db(error) => crate::domain::retry::database(error),
+            Self::Storage(error) => crate::domain::retry::scoped_failure_may_clear(error),
+            Self::Db(error) => crate::domain::retry::database_failure_may_clear(error),
             Self::StoreBuild(error) => error.is_transient(),
             Self::RevalidationRequired(_) => true,
             // A cancelled task can be recovered on redelivery; a panic cannot.
@@ -105,6 +115,7 @@ impl WorkerError {
             | Self::MissingItemWrite { .. }
             | Self::MissingPrediction { .. }
             | Self::ItemAlreadyTerminal { .. }
+            | Self::ItemOutcomeVanished { .. }
             | Self::CurrentStateMissing { .. }
             | Self::EntityVanished { .. }
             | Self::StoredIdentifierUnparsable { .. }
@@ -125,6 +136,7 @@ impl WorkerError {
             Self::MissingItemWrite { .. } => "missing_item_write",
             Self::MissingPrediction { .. } => "missing_prediction",
             Self::ItemAlreadyTerminal { .. } => "unexpected_terminal_item",
+            Self::ItemOutcomeVanished { .. } => "item_outcome_vanished",
             Self::StoreBuild(_) => "store_build_failed",
             Self::EvaluationTask(_) => "evaluation_task_failed",
             Self::CurrentStateMissing { .. } => "current_state_missing",

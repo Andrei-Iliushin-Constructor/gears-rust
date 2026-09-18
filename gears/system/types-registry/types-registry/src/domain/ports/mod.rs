@@ -945,6 +945,19 @@ pub trait OperationStore: Send + Sync {
         error_payload: String,
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError>;
+
+    /// Fail every still-undecided item of one operation in a single statement,
+    /// for the abandonment path — which runs on the delivery's remaining lease
+    /// and cannot afford one round trip per item. Items an earlier pass decided
+    /// keep their outcomes; the count is how many this call moved.
+    async fn fail_nonterminal_items(
+        &self,
+        tx: &DbTx<'_>,
+        scope: &AccessScope,
+        operation_id: Uuid,
+        error_payload: String,
+        now: OffsetDateTime,
+    ) -> Result<u64, ScopeError>;
 }
 
 /// Dependency edges.

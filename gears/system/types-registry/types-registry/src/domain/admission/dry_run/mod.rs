@@ -108,7 +108,7 @@ pub(super) async fn run_batch(
         if !won {
             let row = terminalized
                 .get(&item.id)
-                .ok_or(WorkerError::OperationNotFound { operation_id })?;
+                .ok_or(WorkerError::ItemOutcomeVanished { item_id: item.id })?;
             outcomes.push(stored_outcome(row)?);
             continue;
         }

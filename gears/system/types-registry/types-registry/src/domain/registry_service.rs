@@ -266,16 +266,15 @@ impl RegistryService {
         provider
             .transaction(move |tx| {
                 Box::pin(async move {
-                    let items = stores.find_items(tx, &scope, operation_id).await?;
-                    for item in items {
-                        if item.status == OperationItemStatus::Pending
-                            || item.status == OperationItemStatus::Running
-                        {
-                            stores
-                                .mark_item_failed(tx, &scope, item.id, payload.clone(), now)
-                                .await?;
-                        }
-                    }
+                    // One statement over the operation's undecided items, not a
+                    // read plus an UPDATE each: this transaction runs on whatever
+                    // is left of the delivery's lease, and a batch at
+                    // `limits.batch_candidates` spent that budget on round trips
+                    // instead of on the write it exists to make. The port carries
+                    // the non-terminal guard, so decided items keep their outcomes.
+                    stores
+                        .fail_nonterminal_items(tx, &scope, operation_id, payload, now)
+                        .await?;
                     // One statement from either non-terminal status: an
                     // operation abandoned before its pass reached `mark_running`
                     // is still `pending`, and `mark_completed` would not move it —
@@ -342,6 +341,14 @@ impl RegistryService {
 
     /// Admit an accepted operation with shared inline/outbox tuning.
     /// Completed operations and terminal items are skipped, making redelivery safe.
+    ///
+    /// **NOT cancel-safe**, and this is the future the outbox drops: the leased
+    /// handler runs it under `timeout_at`, so a pass that outlives its share of
+    /// the lease is dropped mid-flight. What that leaves behind is recoverable
+    /// rather than partial — the operation stays `running`, items a per-candidate
+    /// transaction already committed stay terminal with their real outcomes, and
+    /// the rest stay `pending`, so a redelivery skips the decided ones and resumes
+    /// the others. A caller that cannot tolerate a dropped pass must not drop it.
     ///
     /// # Errors
     /// [`ServiceError::Worker`] for infrastructure failures. Candidate refusals are

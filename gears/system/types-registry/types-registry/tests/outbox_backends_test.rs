@@ -3,7 +3,7 @@
 //! Exercise dialect-specific claim, acknowledgement and cursor SQL, including
 //! `MySQL` ID allocation hidden by `SQLite`'s single-writer model.
 //!
-//! `assert_single_admission_under_two_pipelines` runs two pipelines over one
+//! [`assert_single_admission_under_two_pipelines`] runs two pipelines over one
 //! database and asserts the candidate is admitted once. It pins the outcome, not
 //! the mechanism: it neither forces the two attempts to overlap nor counts handler
 //! entries, so it does not show whether the lease or the item CAS refused the
@@ -11,7 +11,6 @@
 //! pass and observes whether the second is admitted at all.
 
 #![cfg(feature = "integration")]
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::doc_markdown)]
 
 mod common;
 

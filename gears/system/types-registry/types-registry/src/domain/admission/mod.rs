@@ -32,7 +32,7 @@ pub mod unit;
 pub mod vector;
 pub mod worker;
 
-pub use reasons::AdmissionFailureReason;
+pub use reasons::{AdmissionFailureReason, DeliveryFailure};
 
 use serde_json::Value;
 use toolkit_db::DbTx;

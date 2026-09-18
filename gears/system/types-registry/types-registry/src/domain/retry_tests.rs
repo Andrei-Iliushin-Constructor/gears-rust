@@ -4,7 +4,7 @@
 //! the module deliberately has no table to assert against, and the property
 //! worth guarding is which side an unrecognized failure lands on.
 
-use super::{database, scope};
+use super::{database_failure_may_clear, scoped_failure_may_clear};
 use toolkit_db::DbError;
 use toolkit_db::secure::ScopeError;
 
@@ -13,13 +13,12 @@ use toolkit_db::secure::ScopeError;
 /// rather than to dead-letter work a reread would have admitted.
 #[test]
 fn engine_and_transport_failures_are_retried() {
-    assert!(database(&DbError::Sea(sea_orm::DbErr::ConnectionAcquire(
-        sea_orm::ConnAcquireErr::Timeout
-    ))));
-    assert!(database(&DbError::Io(std::io::Error::new(
-        std::io::ErrorKind::ConnectionReset,
-        "reset",
-    ))));
+    assert!(database_failure_may_clear(&DbError::Sea(
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::Timeout)
+    )));
+    assert!(database_failure_may_clear(&DbError::Io(
+        std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset",)
+    )));
 }
 
 /// Regression guard. `DbError::Lock` wraps the same `sqlx::Error` and
@@ -33,7 +32,7 @@ fn an_advisory_lock_failure_is_retried_like_the_errors_it_wraps() {
     ));
 
     assert!(
-        database(&DbError::Lock(io)),
+        database_failure_may_clear(&DbError::Lock(io)),
         "a lock failure carrying a transport error must not be permanent",
     );
 }
@@ -42,30 +41,36 @@ fn an_advisory_lock_failure_is_retried_like_the_errors_it_wraps() {
 /// failure and spending the budget on them buys nothing.
 #[test]
 fn configuration_and_programming_failures_are_permanent() {
-    assert!(!database(&DbError::InvalidConfig(
+    assert!(!database_failure_may_clear(&DbError::InvalidConfig(
         "invalid configuration".into()
     )));
-    assert!(!database(&DbError::UnknownDsn("no-such-dsn".into())));
-    assert!(!database(&DbError::FeatureDisabled("pg")));
-    assert!(!database(&DbError::ConnRequestedInsideTx));
+    assert!(!database_failure_may_clear(&DbError::UnknownDsn(
+        "no-such-dsn".into()
+    )));
+    assert!(!database_failure_may_clear(&DbError::FeatureDisabled("pg")));
+    assert!(!database_failure_may_clear(&DbError::ConnRequestedInsideTx));
 }
 
 /// Scope compilation is deterministic: the same scope refuses the same way on
 /// every delivery. `Denied` in particular must never spend the budget.
 #[test]
 fn scope_decisions_are_permanent_but_a_scoped_database_failure_is_not() {
-    assert!(!scope(&ScopeError::Denied("not allowed")));
-    assert!(!scope(&ScopeError::Invalid("invalid scope")));
-    assert!(!scope(&ScopeError::GraphSyntax(
+    assert!(!scoped_failure_may_clear(&ScopeError::Denied(
+        "not allowed"
+    )));
+    assert!(!scoped_failure_may_clear(&ScopeError::Invalid(
+        "invalid scope"
+    )));
+    assert!(!scoped_failure_may_clear(&ScopeError::GraphSyntax(
         "no projected columns".into()
     )));
-    assert!(!scope(&ScopeError::TenantNotInScope {
+    assert!(!scoped_failure_may_clear(&ScopeError::TenantNotInScope {
         tenant_id: uuid::Uuid::nil(),
     }));
 
-    assert!(scope(&ScopeError::Db(sea_orm::DbErr::ConnectionAcquire(
-        sea_orm::ConnAcquireErr::Timeout
-    ))));
+    assert!(scoped_failure_may_clear(&ScopeError::Db(
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::Timeout)
+    )));
 }
 
 /// `DBProvider` preserves a scoped failure inside `Other`, so the wrapper must
@@ -74,7 +79,7 @@ fn scope_decisions_are_permanent_but_a_scoped_database_failure_is_not() {
 fn a_scope_denial_wrapped_by_the_provider_stays_permanent() {
     let wrapped = DbError::Other(anyhow::Error::new(ScopeError::Denied("not allowed")));
 
-    assert!(!database(&wrapped));
+    assert!(!database_failure_may_clear(&wrapped));
 }
 
 /// An opaque `Other` is the case the default exists for: nothing here can tell
@@ -82,9 +87,9 @@ fn a_scope_denial_wrapped_by_the_provider_stays_permanent() {
 /// might.
 #[test]
 fn an_opaque_wrapped_failure_takes_the_retry_side() {
-    assert!(database(&DbError::Other(anyhow::anyhow!(
-        "connection reset"
-    ))));
+    assert!(database_failure_may_clear(&DbError::Other(
+        anyhow::anyhow!("connection reset")
+    )));
 }
 
 /// The behaviour this classifier deliberately changed. Invalid SQL against a
@@ -99,7 +104,7 @@ fn a_query_failure_is_retried_and_left_to_the_delivery_budget() {
     )));
 
     assert!(
-        scope(&missing_table),
+        scoped_failure_may_clear(&missing_table),
         "a query failure is bounded by worker.max_delivery_attempts, not by this classifier",
     );
 }

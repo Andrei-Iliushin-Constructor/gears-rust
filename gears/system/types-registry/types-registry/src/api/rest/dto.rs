@@ -466,6 +466,7 @@ mod tests {
 /// form, whose name reaches callers as an `OpenAPI` component.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(request)]
+#[serde(deny_unknown_fields)]
 pub struct SubmitEntityDto {
     /// The canonical GTS identifier. A non-canonical spelling is refused rather
     /// than normalized.
@@ -500,6 +501,7 @@ pub struct SubmitEntityDto {
 /// shape.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(request)]
+#[serde(deny_unknown_fields)]
 pub struct SubmitEntitiesRequest {
     #[schema(min_items = 1)]
     pub items: Vec<SubmitEntityDto>,
@@ -514,6 +516,7 @@ pub struct SubmitEntitiesRequest {
 /// A batch deletion target, resolved like `GET /entities/{entity_key}`.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(request)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteEntityDto {
     /// A canonical GTS identifier or a Registry Reference UUID.
     pub key: String,
@@ -532,8 +535,17 @@ pub struct DeleteEntityDto {
 }
 
 /// A deletion batch.
+///
+/// `deny_unknown_fields`, like every request body and query on this surface:
+/// `api_dto` renames to `snake_case` and nothing else, so a client posting
+/// `"dryRun": true` otherwise deserializes to `dry_run: None`, defaults to
+/// `false`, and has a batch of entities really deleted. On a destructive route
+/// the safe answer to a field the server does not recognize is `400`, not a
+/// commit. v1's `RegisterEntitiesRequest` / `ListEntitiesQuery` are deliberately
+/// left tolerant — P12 keeps that contract and its e2e suite unchanged.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(request)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteEntitiesRequest {
     /// No `max_items`: the ceiling is `limits.batch_candidates`, which a deployment
     /// configures. A literal here would be a second, fixed number that disagrees
@@ -549,6 +561,7 @@ pub struct DeleteEntitiesRequest {
 /// Single-deletion parameters; the entity key is in the path.
 #[derive(Debug, Clone, Default)]
 #[toolkit_macros::api_dto(request)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteEntityQuery {
     /// Required positive version, validated by acceptance as on the batch route.
     /// Missing or non-numeric values return `400`.

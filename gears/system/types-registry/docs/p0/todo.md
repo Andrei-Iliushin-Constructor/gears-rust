@@ -1847,9 +1847,16 @@ With `PATH="$HOME/.cargo/bin:$PATH"`, whole-workspace `make clippy`
 **Acceptance criteria:**
 - [x] Production submissions use `AdmissionMode::Outbox`; acceptance and enqueue share a
       transaction, while seeding stays inline and never enqueues (P3)
-- [x] After acceptance/recovery commits, call `Outbox::flush()` to request an
-      immediate scan for committed incoming rows. Enqueue's pre-commit hint can be
-      consumed before its rows become visible; flush restores that work.
+- [x] After acceptance/recovery commits, call `Outbox::push_dirty(partition_id)` for the
+      partitions just committed. `enqueue` pushes the same signal, but from inside the
+      caller's transaction, so it can be consumed before the rows are visible; the
+      post-commit push is what restores that work. Naming the partition is the point —
+      `Outbox::flush()` wakes a sequencer without saying which partition is dirty, so it
+      leaves the sequencer to discover the work, and discovery is a `SELECT DISTINCT
+      partition_id` over the whole incoming table. That scan now runs only on the cold
+      paths that own it: once at startup, and in the reconciler worker on its own idle
+      interval. It is no longer on any per-commit path, and there is no call site left in
+      `Sequencer::execute` to regress into.
       Acceptance tests assert post-transaction notification and no notification on
       rollback/refusal/replay; toolkit-db tests reproduce the early drain with a real
       transaction and sequencer, including the auto-flush transaction helper.
@@ -1913,10 +1920,22 @@ a scan without waiting for delivery. Worker/domain tests call directly; the pass
   `N + 1` skips admission and reads the stored status, acknowledging a completed operation or
   rejecting an unfinished one. Terminal-path reads/writes stop before the remaining lease
   deadline so cancellation does not turn the terminal decision back into another retry.
+  **Admission itself is bounded too**, at the work deadline minus a terminalization reserve
+  (absolute, capped at a quarter of a short lease). Unreserved, a failure surfacing late left
+  the abandonment write a deadline already past: the message was dead-lettered while the
+  operation stayed non-terminal with nothing queued, so only the next process start recovered
+  it. A pass cut off at that bound is `admission_deadline_exceeded` — redelivered while the
+  budget allows, abandoned inside the reserve when it does not.
   `RegistryService::abandon` records `admission_abandoned` only on non-terminal items and
-  completes the operation from either `pending` or `running`. Client errors and dead-letter
+  completes the operation from either `pending` or `running`, in **one** guarded UPDATE over
+  the operation's undecided items rather than a read plus an UPDATE each: this transaction
+  runs on what the delivery has left, and a batch at `limits.batch_candidates` spent that
+  budget on round trips. Client errors and dead-letter
   reasons carry safe `error_code` and `operation_id` fields that correlate with logs, without
-  raw infrastructure error text. These are system failures, not ordinary candidate refusals.
+  raw infrastructure error text; the cause itself goes to the operator log and nowhere else,
+  which is the split `api::rest::error::opaque_internal` already makes for the REST path and
+  the only record of *why* an operation was abandoned.
+  These are system failures, not ordinary candidate refusals.
   `types_registry_admission_deliveries_total{outcome}` counts retries/dead letters for alerts,
   including the unusable-payload rejection.
 - The lease lasts `operation_timeout + 2s` and handlers ignore cancellation, so shutdown
