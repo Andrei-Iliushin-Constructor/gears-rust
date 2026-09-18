@@ -795,8 +795,11 @@ async fn seed_partition_operation(
     use types_registry::domain::enums::Plane;
     use types_registry::domain::ports::{NewOperation, NewOperationItem};
 
-    db.db()
+    let enqueue_dispatch = Arc::clone(&dispatch);
+    let wake = db
+        .db()
         .transaction_ref(|tx| {
+            let dispatch = enqueue_dispatch;
             Box::pin(async move {
                 let ports = stores();
                 let scope = common::allow_all();
@@ -833,12 +836,18 @@ async fn seed_partition_operation(
                         }],
                     )
                     .await?;
-                dispatch.enqueue(tx, id).await.map_err(DbError::Other)?;
-                Ok(())
+                let wake = dispatch
+                    .enqueue(tx, id)
+                    .await
+                    .map_err(|e| DbError::Other(e.into()))?;
+                Ok(wake)
             })
         })
         .await
         .expect("seed operation and dispatch atomically");
+    // Enqueue defers the sequencer wake to the post-commit signal; fire it now
+    // that the seed transaction has committed.
+    wake.fire();
 }
 
 #[tokio::test]
@@ -986,7 +995,7 @@ async fn a_second_pipeline_refuses_to_bind_rather_than_starting_unreachable() {
     assert!(
         matches!(
             refused,
-            types_registry::infra::outbox::StartError::AlreadyBound
+            types_registry::domain::admission::OutboxError::AlreadyBound
         ),
         "a second bind is its own failure, not a generic outbox error: {refused}",
     );
@@ -1064,7 +1073,9 @@ async fn a_rejected_message_lands_in_a_dead_letter_row_that_names_the_reason() {
 
     let provider: DBProvider<DbError> = DBProvider::new(db.db());
     let outbox = Arc::clone(handle.outbox());
-    provider
+    // Enqueue does not wake the sequencer; thread the flush handle out of the
+    // transaction and flush it once the foreign record is durable.
+    let wake = provider
         .transaction(move |tx| {
             let outbox = Arc::clone(&outbox);
             Box::pin(async move {
@@ -1075,16 +1086,13 @@ async fn a_rejected_message_lands_in_a_dead_letter_row_that_names_the_reason() {
                     )
                     .build()
                     .expect("build the foreign record");
-                outbox.enqueue(tx, foreign).await.expect("enqueue");
-                Ok::<_, DbError>(())
+                let wake = outbox.enqueue(tx, foreign).await.expect("enqueue");
+                Ok::<_, DbError>(wake)
             })
         })
         .await
         .expect("commit the foreign message");
-    handle
-        .outbox()
-        .flush_partition(types_registry::infra::outbox::QUEUE, 0)
-        .expect("signal the partition the foreign message landed in");
+    wake.fire();
 
     let dead_letters = await_delivery("the foreign message is dead-lettered", || async {
         let conn = db.conn().expect("conn");

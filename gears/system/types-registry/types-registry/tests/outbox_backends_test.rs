@@ -218,17 +218,14 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
         "{backend}: the gate holds the first arrival, so exactly one pass is inside",
     );
 
-    let partition = types_registry::infra::outbox::partition_of(accepted.operation_id);
-    let queue = types_registry::infra::outbox::QUEUE;
-    second_handle
-        .outbox()
-        .flush_partition(queue, partition)
-        .unwrap_or_else(|e| panic!("{backend}: signal the partition on the second pipeline: {e}"));
-    first_handle
-        .outbox()
-        .flush_partition(queue, partition)
-        .unwrap_or_else(|e| panic!("{backend}: signal the partition on the first pipeline: {e}"));
-
+    // Acceptance already committed on the first pipeline, and its dispatch's
+    // post-commit flush has woken that pipeline's sequencer, so the message
+    // reaches the shared `outgoing` table. Both pipelines run the low-latency
+    // profile against the same database, so within CONTENTION_WINDOW each pod's
+    // processor polls `outgoing` and races for the lease — the exclusion this
+    // test asserts. No manual partition signal is used: waking a partition a pod
+    // did not itself enqueue is deliberately not part of the outbox API, and the
+    // durable lease is what serializes the two workers.
     tokio::time::sleep(CONTENTION_WINDOW).await;
     assert_eq!(
         gate.reached(),

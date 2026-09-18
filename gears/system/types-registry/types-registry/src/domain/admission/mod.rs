@@ -36,6 +36,7 @@ pub use reasons::{AdmissionFailureReason, DeliveryFailure};
 
 use serde_json::Value;
 use toolkit_db::DbTx;
+use toolkit_db::outbox::Wake;
 use toolkit_macros::domain_model;
 use uuid::Uuid;
 
@@ -147,6 +148,26 @@ impl Accepted {
     }
 }
 
+/// Errors from the admission outbox port: starting the pipeline, binding a
+/// started pipeline to the dispatch, or enqueuing within a transaction.
+///
+/// The port lives in the domain, so its error type does too; the outbox
+/// transport ([`OperationDispatch`]'s implementation) maps the underlying
+/// `toolkit_db` failure into [`Backend`](Self::Backend).
+#[derive(Debug, thiserror::Error)]
+pub enum OutboxError {
+    /// The underlying outbox operation failed — starting it, building the record,
+    /// or the transactional enqueue.
+    #[error("the admission outbox operation failed: {0}")]
+    Backend(#[from] toolkit_db::outbox::OutboxError),
+    /// A pipeline is already attached to the dispatch.
+    #[error("the admission dispatch is already bound to a running pipeline")]
+    AlreadyBound,
+    /// `enqueue` was called before the pipeline was bound, or after it stopped.
+    #[error("the admission outbox is not running")]
+    NotRunning,
+}
+
 /// How an accepted operation reaches the admission worker.
 ///
 /// A port rather than a direct `Outbox` call, because an `Outbox` only exists
@@ -161,18 +182,17 @@ impl Accepted {
 /// so there is no second executor to be generic over.
 #[async_trait::async_trait]
 pub trait OperationDispatch: Send + Sync {
-    /// Enqueue one operation UUID.
+    /// Enqueue one operation UUID, returning the [`Wake`] for its rows.
     ///
     /// The payload carries the UUID and nothing else — candidate content must
     /// never enter an outbox or dead-letter payload (SPEC T21).
     ///
+    /// The wake must be fired only *after* the acceptance transaction commits;
+    /// acceptance holds it across the commit and fires it, or drops it unfired on
+    /// rollback. The dispatch parks nothing across the commit boundary.
+    ///
     /// # Errors
-    /// Whatever the transport fails with; acceptance turns it into a refusal and
-    /// the transaction rolls back, so nothing is half-accepted.
-    async fn enqueue(&self, tx: &DbTx<'_>, operation_id: Uuid) -> anyhow::Result<()>;
-
-    /// Wake the consumer after acceptance commits. This is only a latency hint:
-    /// durable delivery comes from the enqueued record and its lease. Must not
-    /// perform blocking work.
-    fn committed(&self, _operation_id: Uuid) {}
+    /// [`OutboxError`] if the transport cannot enqueue; acceptance turns it into a
+    /// refusal and the transaction rolls back, so nothing is half-accepted.
+    async fn enqueue(&self, tx: &DbTx<'_>, operation_id: Uuid) -> Result<Wake, OutboxError>;
 }
