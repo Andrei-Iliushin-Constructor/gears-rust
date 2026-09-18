@@ -2132,7 +2132,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-cluster"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2283,7 +2283,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-event-broker"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2433,7 +2433,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-file-storage"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "async-trait",
