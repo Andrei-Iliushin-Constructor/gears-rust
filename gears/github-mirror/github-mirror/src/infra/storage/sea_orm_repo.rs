@@ -4523,13 +4523,20 @@ impl SyncWriter for SeaOrmSyncWriter {
         repo_id: i64,
         contributors: Vec<ContributorRecord>,
     ) -> Result<u64, DomainError> {
-        let scope = scope.clone();
         let written = u64::try_from(contributors.len()).unwrap_or(u64::MAX);
+        // The merge read runs on its own connection, before the transaction:
+        // a transaction that reads first and writes later has to upgrade its
+        // lock, and on `SQLite` that upgrade fails at once if another writer
+        // (the session heartbeat) committed in between.
+        let conn = self.db.conn()?;
+        let merged = merge_known_contributors(&conn, scope, repo_id, contributors).await?;
+        let scope = scope.clone();
         self.db
             .db()
             .transaction_ref_mapped(move |tx| {
                 Box::pin(async move {
-                    write_contributors_in(tx, &scope, tenant_id, repo_id, contributors).await
+                    sync_table!(tx, &scope, tenant_id, contributor_upsert_in, merged);
+                    Ok::<(), DomainError>(())
                 })
             })
             .await?;

@@ -3402,6 +3402,12 @@ impl Service {
                 session.summary_json = serde_json::to_string(&summary).ok();
             }
             Err(e) => {
+                tracing::error!(
+                    session_id = %job.session_id,
+                    repository = %format!("{}/{}", job.owner, job.name),
+                    error = %crate::redact::redacted(&e.to_string()),
+                    "sync run failed"
+                );
                 session.status = if cancel.is_cancelled() {
                     SessionStatus::Interrupted
                 } else {
