@@ -9,6 +9,12 @@ release-plz updates this file in the Release PR.
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/constructorfabric/gears-rust/compare/cf-gears-file-storage-v0.2.3...cf-gears-file-storage-v0.2.4) - 2026-09-17
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [0.2.5](https://github.com/constructorfabric/gears-rust/compare/cf-gears-event-broker-v0.2.4...cf-gears-event-broker-v0.2.5) - 2026-09-17
 
 ### Other
