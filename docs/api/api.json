@@ -10191,11 +10191,47 @@
         ],
         "type": "object"
       },
+      "Page_RepoSyncStatusDto": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RepoSyncStatusDto"
+            },
+            "type": "array"
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/PageInfo"
+          }
+        },
+        "required": [
+          "items",
+          "page_info"
+        ],
+        "type": "object"
+      },
       "Page_ReviewThreadDto": {
         "properties": {
           "items": {
             "items": {
               "$ref": "#/components/schemas/ReviewThreadDto"
+            },
+            "type": "array"
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/PageInfo"
+          }
+        },
+        "required": [
+          "items",
+          "page_info"
+        ],
+        "type": "object"
+      },
+      "Page_SyncSessionDto": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SyncSessionDto"
             },
             "type": "array"
           },
@@ -44777,7 +44813,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SyncSessionDto"
+                  "$ref": "#/components/schemas/Page_SyncSessionDto"
                 }
               }
             },
@@ -44960,7 +44996,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RepoSyncStatusDto"
+                  "$ref": "#/components/schemas/Page_RepoSyncStatusDto"
                 }
               }
             },
