@@ -9,11 +9,7 @@ mod test_stores;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub use test_stores::{
-    CasMissHooks, ClaimHooks, DeletionMissHooks, OperationReadFailureHooks, PauseHooks, PausePoint,
-    SlowAdmissionThenStalledAbandonHooks, StaleFirstFindItemsHooks, StallHooks, StoreHooks,
-    TestStores,
-};
+pub use test_stores::{FailingCall, Hooks, PausePoint, SharedPause, TestStores, TestStoresBuilder};
 
 use gts::GtsConfig;
 use types_registry::{
