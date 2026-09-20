@@ -10,6 +10,7 @@ use toolkit::contracts::{DatabaseCapability, SystemCapability};
 use toolkit::lifecycle::ReadySignal;
 use toolkit::{Gear, GearCtx, RestApiCapability};
 use toolkit_db::outbox::OutboxHandle;
+use toolkit_db::{DBProvider, DbError};
 use toolkit_gts::{all_inventory_instances, all_inventory_type_schemas};
 use tracing::{debug, info, warn};
 use types_registry_sdk::{RegisterResult, RegisterSummary, TypesRegistryClient};
@@ -17,6 +18,7 @@ use types_registry_sdk::{RegisterResult, RegisterSummary, TypesRegistryClient};
 use crate::config::TypesRegistryConfig;
 use crate::domain::admission::OperationDispatch;
 use crate::domain::local_client::TypesRegistryLocalClient;
+use crate::domain::policy::RegistrationPolicy;
 use crate::domain::ports::Stores;
 use crate::domain::ports::metrics::AdmissionMetrics;
 use crate::domain::registry_service::RegistryService;
@@ -98,6 +100,54 @@ impl Default for TypesRegistryGear {
 }
 
 impl TypesRegistryGear {
+    /// Wire the database-backed admission path: the registry service, the
+    /// dispatch it hands accepted operations to, and the outbox pipeline that
+    /// delivers them.
+    ///
+    /// Its own step because it is the one part of `init` that leaves something
+    /// running — the handle it stores in `self.outbox` is what [`serve`] drains
+    /// at shutdown — and the one part a deployment can do without: `no-db.yaml`
+    /// and `--mock` skip it, and T7-T9's routes answer `503` instead.
+    ///
+    /// [`serve`]: Self::serve
+    async fn wire_admission(
+        &self,
+        db: &DBProvider<DbError>,
+        registration_policy: RegistrationPolicy,
+        cfg: TypesRegistryConfig,
+        metrics: Arc<dyn AdmissionMetrics>,
+    ) -> anyhow::Result<()> {
+        // Bind after pipeline creation; the weak link breaks the ownership cycle.
+        let dispatch = Arc::new(OutboxDispatch::new());
+        // The domain names its persistence ports and never the repositories;
+        // this is the one place the database-backed adapter is chosen.
+        let stores: Arc<dyn Stores> = Arc::new(Repos);
+        let registry = Arc::new(RegistryService::new(
+            db.db(),
+            stores,
+            registration_policy,
+            cfg,
+            Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
+            // Dispatch production admissions; seeding uses a separate inline service (SPEC §8.1).
+            crate::domain::registry_service::AdmissionMode::Outbox,
+            metrics,
+        ));
+
+        // Start after inline seeding to avoid concurrent seed admission (plan P3).
+        let handle = crate::infra::outbox::start(db.db(), &registry, &dispatch).await?;
+        *self.outbox.lock() = Some(handle);
+
+        self.registry
+            .set(registry)
+            .map_err(|_| anyhow::anyhow!("{} gear already initialized", Self::MODULE_NAME))?;
+        info!(
+            queue = crate::infra::outbox::QUEUE,
+            table_prefix = OUTBOX_TABLE_PREFIX,
+            "types_registry database-backed admission path wired; outbox worker running"
+        );
+        Ok(())
+    }
+
     /// Await runtime cancellation, then stop and join the pipeline started in `init()`.
     pub(crate) async fn serve(
         self: Arc<Self>,
@@ -223,34 +273,8 @@ impl Gear for TypesRegistryGear {
         // T7–T9's database path is optional for `no-db.yaml` / `--mock` deployments.
         // Without a DB, routes return canonical `503 Service Unavailable`; warn why.
         if let Some(db) = ctx.db() {
-            // Bind after pipeline creation; the weak link breaks the ownership cycle.
-            let dispatch = Arc::new(OutboxDispatch::new());
-            // The domain names its persistence ports and never the repositories;
-            // this is the one place the database-backed adapter is chosen.
-            let stores: Arc<dyn Stores> = Arc::new(Repos);
-            let registry = Arc::new(RegistryService::new(
-                db.db(),
-                stores,
-                registration_policy,
-                cfg_for_registry,
-                Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
-                // Dispatch production admissions; seeding uses a separate inline service (SPEC §8.1).
-                crate::domain::registry_service::AdmissionMode::Outbox,
-                Arc::clone(&metrics),
-            ));
-
-            // Start after inline seeding to avoid concurrent seed admission (plan P3).
-            let handle = crate::infra::outbox::start(db.db(), &registry, &dispatch).await?;
-            *self.outbox.lock() = Some(handle);
-
-            self.registry
-                .set(registry)
-                .map_err(|_| anyhow::anyhow!("{} gear already initialized", Self::MODULE_NAME))?;
-            info!(
-                queue = crate::infra::outbox::QUEUE,
-                table_prefix = OUTBOX_TABLE_PREFIX,
-                "types_registry database-backed admission path wired; outbox worker running"
-            );
+            self.wire_admission(&db, registration_policy, cfg_for_registry, metrics)
+                .await?;
         } else {
             tracing::warn!(
                 "types_registry has no database bound: POST /entities, GET /operations/{{id}} and \
