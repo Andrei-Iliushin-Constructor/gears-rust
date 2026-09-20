@@ -72,7 +72,8 @@ pub struct DeleteTarget {
 #[domain_model]
 #[derive(Clone, Debug)]
 pub struct DeleteRequest {
-    pub idempotency_key: String,
+    /// Mandatory, and `Option` for [`SubmitRequest::idempotency_key`]'s reason.
+    pub idempotency_key: Option<String>,
     pub dry_run: bool,
     pub targets: Vec<DeleteTarget>,
 }
@@ -230,11 +231,9 @@ impl RegistryService {
         let scope = Self::scope();
         provider
             .transaction_with_config(snapshot_read(&self.db), move |tx| {
-                Box::pin(async move {
-                    Ok(stores
-                        .find_nonterminal_ids(tx, &scope, after, limit)
-                        .await?)
-                })
+                Box::pin(
+                    async move { Ok(stores.nonterminal_page(tx, &scope, after, limit).await?) },
+                )
             })
             .await
     }

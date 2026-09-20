@@ -3,6 +3,7 @@
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 use toolkit::api::OpenApiRegistry;
 use toolkit::contracts::{DatabaseCapability, SystemCapability};
@@ -76,7 +77,13 @@ pub struct TypesRegistryGear {
     registry: OnceLock<Arc<RegistryService>>,
     local_client: OnceLock<Arc<TypesRegistryLocalClient>>,
     /// Pipeline retained from `init()` for shutdown; absent without a DB or after draining.
-    outbox: tokio::sync::Mutex<Option<OutboxHandle>>,
+    ///
+    /// A synchronous mutex on purpose. The two holders — `init` storing the
+    /// handle and `serve` taking it — each do one non-async move under the
+    /// lock, and nothing waits on it. An async mutex would make it *possible*
+    /// to hold the lock across the drain `serve` performs next, which is the
+    /// one thing this field must not do.
+    outbox: Mutex<Option<OutboxHandle>>,
 }
 
 impl Default for TypesRegistryGear {
@@ -85,7 +92,7 @@ impl Default for TypesRegistryGear {
             service: OnceLock::new(),
             registry: OnceLock::new(),
             local_client: OnceLock::new(),
-            outbox: tokio::sync::Mutex::new(None),
+            outbox: Mutex::new(None),
         }
     }
 }
@@ -100,8 +107,11 @@ impl TypesRegistryGear {
         ready.notify();
         cancel.cancelled().await;
 
-        // Taking the handle makes repeated shutdown a no-op.
-        if let Some(handle) = self.outbox.lock().await.take() {
+        // Taking the handle makes repeated shutdown a no-op. Taken in its own
+        // statement so the guard is released before the drain below rather
+        // than held across it.
+        let handle = self.outbox.lock().take();
+        if let Some(handle) = handle {
             info!("types_registry draining the admission outbox");
             handle.stop().await;
             info!("types_registry admission outbox stopped");
@@ -231,7 +241,7 @@ impl Gear for TypesRegistryGear {
 
             // Start after inline seeding to avoid concurrent seed admission (plan P3).
             let handle = crate::infra::outbox::start(db.db(), &registry, &dispatch).await?;
-            *self.outbox.lock().await = Some(handle);
+            *self.outbox.lock() = Some(handle);
 
             self.registry
                 .set(registry)

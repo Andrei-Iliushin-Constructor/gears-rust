@@ -853,7 +853,11 @@ pub trait OperationStore: Send + Sync {
     /// Page non-terminal operations after interruption or outbox rollout without
     /// reading the entire boot backlog. Keyset paging advances while prior rows
     /// await admission. Start with `None`, then use the last cursor; a short page ends the scan.
-    async fn find_nonterminal_ids(
+    ///
+    /// One page of [`RecoveryCursor`]s — `(created_at, id)` pairs, not bare ids:
+    /// the caller hands the last one back as `after`, and `created_at` is what
+    /// makes that resumable. Reach for `.id` when only the operation is wanted.
+    async fn nonterminal_page(
         &self,
         tx: &DbTx<'_>,
         scope: &AccessScope,

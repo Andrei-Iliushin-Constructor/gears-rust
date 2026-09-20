@@ -197,7 +197,13 @@ pub fn validate(
     request: &SubmitRequest,
 ) -> Result<Validated, AcceptanceError> {
     // --- step 1: envelope and batch size ---------------------------------
-    let key = request.idempotency_key.trim();
+    // An absent header and a blank one are one refusal: both leave acceptance
+    // without the key a replay would have to match.
+    let key = request
+        .idempotency_key
+        .as_deref()
+        .unwrap_or_default()
+        .trim();
     if key.is_empty() {
         return Err(AcceptanceError::MissingIdempotencyKey);
     }
@@ -417,6 +423,7 @@ pub fn validate(
     Ok(Validated {
         kind: request.kind,
         dry_run: request.dry_run,
+        // Past the check above, so a plain `String`: this key exists.
         idempotency_key: key.to_owned(),
         // ponytail: ceiling C2 — the three inputs are constants in P0, so the key
         // namespace is global. See `fingerprint::P0_PRINCIPAL_ID`.

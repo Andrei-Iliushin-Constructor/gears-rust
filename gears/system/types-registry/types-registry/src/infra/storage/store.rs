@@ -302,14 +302,14 @@ impl OperationStore for Repos {
         OperationRepo::find_by_id(tx, scope, id).await
     }
 
-    async fn find_nonterminal_ids(
+    async fn nonterminal_page(
         &self,
         tx: &DbTx<'_>,
         scope: &AccessScope,
         after: Option<RecoveryCursor>,
         limit: u64,
     ) -> Result<Vec<RecoveryCursor>, ScopeError> {
-        OperationRepo::find_nonterminal_ids(tx, scope, after, limit).await
+        OperationRepo::nonterminal_page(tx, scope, after, limit).await
     }
 
     async fn insert_operation(

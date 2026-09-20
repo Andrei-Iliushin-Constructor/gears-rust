@@ -100,7 +100,7 @@ fn schema(gts_id: &str) -> Value {
 
 fn request(key: &str, content: Value) -> SubmitRequest {
     SubmitRequest {
-        idempotency_key: key.to_owned(),
+        idempotency_key: Some(key.to_owned()),
         kind: domain_enums::OperationKind::Registration,
         dry_run: false,
         candidates: vec![Candidate {
@@ -125,7 +125,7 @@ fn batch_request(key: &str, count: usize) -> SubmitRequest {
         })
         .collect();
     SubmitRequest {
-        idempotency_key: key.to_owned(),
+        idempotency_key: Some(key.to_owned()),
         kind: domain_enums::OperationKind::Registration,
         dry_run: false,
         candidates,

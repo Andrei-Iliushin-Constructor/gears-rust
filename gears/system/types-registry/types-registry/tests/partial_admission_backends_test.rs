@@ -101,7 +101,7 @@ async fn admit_batch(
         },
         &(Arc::new(NoDispatch) as Arc<dyn OperationDispatch>),
         &SubmitRequest {
-            idempotency_key: key.to_owned(),
+            idempotency_key: Some(key.to_owned()),
             kind: OperationKind::Registration,
             dry_run: false,
             candidates,

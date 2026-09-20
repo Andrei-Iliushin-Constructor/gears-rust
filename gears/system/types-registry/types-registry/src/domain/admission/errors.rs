@@ -154,6 +154,41 @@ impl WorkerError {
     }
 }
 
+/// The dependency an [`ItemFailure`] names, as the stored payload carries it.
+///
+/// `kind` is the payload token (`base`, `conforming_type`, `ref`) rather than
+/// [`DependencyKind`], for the reason [`AdmissionFailureReason::Unknown`]
+/// exists: a payload written by a later version can name a kind this binary
+/// does not know, and refusing to parse it would drop `target` too — the one
+/// field a reader needs in order to say *what* is missing. `DependencyKind`
+/// stays closed because its storage counterpart and the DDL's CHECK are
+/// exhaustive against it; this type is the diagnostic side, where an unknown
+/// token is data rather than corruption.
+#[domain_model]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailureDependency {
+    pub kind: String,
+    pub target: String,
+}
+
+impl From<DependencyEdge> for FailureDependency {
+    fn from(edge: DependencyEdge) -> Self {
+        Self {
+            kind: wire_kind(edge.kind).to_owned(),
+            target: edge.target,
+        }
+    }
+}
+
+/// The payload token for a known dependency kind.
+const fn wire_kind(kind: DependencyKind) -> &'static str {
+    match kind {
+        DependencyKind::Derivation => "base",
+        DependencyKind::InstanceOf => "conforming_type",
+        DependencyKind::SchemaRef => "ref",
+    }
+}
+
 /// A candidate-level failure: final, recorded, and never retried.
 #[domain_model]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,7 +197,7 @@ pub struct ItemFailure {
     pub reason: AdmissionFailureReason,
     pub message: String,
     /// Identifies a missing dependency without asking clients to parse the message.
-    pub dependency: Option<DependencyEdge>,
+    pub dependency: Option<FailureDependency>,
 }
 
 impl std::fmt::Display for ItemFailure {
@@ -193,7 +228,7 @@ impl ItemFailure {
         Self {
             reason: AdmissionFailureReason::DependencyNotFound,
             message: format!("{role} '{}' is not registered", dependency.target),
-            dependency: Some(dependency),
+            dependency: Some(dependency.into()),
         }
     }
 
@@ -204,11 +239,7 @@ impl ItemFailure {
         let mut payload = json!({ "reason": self.reason.as_str(), "message": self.message });
         if let Some(dependency) = &self.dependency {
             payload["dependency_id"] = json!(dependency.target);
-            payload["dependency_kind"] = json!(match dependency.kind {
-                DependencyKind::Derivation => "base",
-                DependencyKind::InstanceOf => "conforming_type",
-                DependencyKind::SchemaRef => "ref",
-            });
+            payload["dependency_kind"] = json!(dependency.kind);
         }
         payload.to_string()
     }
@@ -227,6 +258,9 @@ impl ItemFailure {
                     (Some(reason), Some(message)) => Self {
                         reason: AdmissionFailureReason::from_wire(reason),
                         message: message.to_owned(),
+                        // An unrecognized `dependency_kind` is kept rather than
+                        // dropped: the pair is what a later version wrote, and
+                        // discarding it would take `dependency_id` with it.
                         dependency: value
                             .get("dependency_id")
                             .and_then(serde_json::Value::as_str)
@@ -235,16 +269,9 @@ impl ItemFailure {
                                     .get("dependency_kind")
                                     .and_then(serde_json::Value::as_str),
                             )
-                            .and_then(|(target, kind)| {
-                                Some(DependencyEdge {
-                                    kind: match kind {
-                                        "base" => DependencyKind::Derivation,
-                                        "conforming_type" => DependencyKind::InstanceOf,
-                                        "ref" => DependencyKind::SchemaRef,
-                                        _ => return None,
-                                    },
-                                    target: target.to_owned(),
-                                })
+                            .map(|(target, kind)| FailureDependency {
+                                kind: kind.to_owned(),
+                                target: target.to_owned(),
                             }),
                     },
                     _ => Self::new(

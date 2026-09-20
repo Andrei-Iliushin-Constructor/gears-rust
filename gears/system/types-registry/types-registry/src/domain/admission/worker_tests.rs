@@ -22,6 +22,34 @@ fn missing_dependency_details_survive_outcome_redelivery() {
     }
 }
 
+/// A `dependency_kind` this binary does not know keeps the whole edge, target
+/// included — the same choice `AdmissionFailureReason::Unknown` makes for the
+/// reason. Dropping the pair would leave a reader with no way to name what is
+/// missing except by parsing `message`.
+#[test]
+fn an_unknown_dependency_kind_survives_with_its_target() {
+    let stored = r#"{"reason":"dependency_not_found","message":"'cf.core.absent.type.v1~' is not registered","dependency_id":"cf.core.absent.type.v1~","dependency_kind":"successor_of"}"#;
+
+    let failure = ItemFailure::from_payload(stored);
+
+    let dependency = failure
+        .dependency
+        .as_ref()
+        .expect("an unrecognized kind must not discard the dependency");
+    assert_eq!(dependency.kind, "successor_of");
+    assert_eq!(dependency.target, "cf.core.absent.type.v1~");
+    assert_eq!(
+        failure.reason,
+        AdmissionFailureReason::DependencyNotFound,
+        "an unknown kind says nothing about the reason",
+    );
+    assert_eq!(
+        ItemFailure::from_payload(&failure.to_payload()),
+        failure,
+        "and re-recording it writes the token back unchanged",
+    );
+}
+
 #[tokio::test]
 async fn evaluation_panics_are_permanent_but_cancelled_tasks_can_be_recovered() {
     use super::WorkerError;

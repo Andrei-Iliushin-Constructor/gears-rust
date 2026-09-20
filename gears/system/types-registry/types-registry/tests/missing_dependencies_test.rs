@@ -76,7 +76,7 @@ async fn first_delivery_with_mode(
     let receipt = registry
         .submit(
             &SubmitRequest {
-                idempotency_key: "missing-dependency".to_owned(),
+                idempotency_key: Some("missing-dependency".to_owned()),
                 kind: OperationKind::Registration,
                 dry_run,
                 candidates,

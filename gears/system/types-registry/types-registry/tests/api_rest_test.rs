@@ -267,6 +267,7 @@ struct Response {
     location: Option<String>,
     retry_after: Option<String>,
     idempotency_replayed: Option<String>,
+    cache_control: Option<String>,
     body: Value,
 }
 
@@ -293,6 +294,11 @@ async fn call(router: &Router, req: Request<Body>) -> Response {
         .get("idempotency-replayed")
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+    let cache_control = resp
+        .headers()
+        .get(axum::http::header::CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .expect("read body");
@@ -308,6 +314,7 @@ async fn call(router: &Router, req: Request<Body>) -> Response {
         location,
         retry_after,
         idempotency_replayed,
+        cache_control,
         body,
     }
 }
@@ -2348,4 +2355,61 @@ async fn every_mutation_reaches_a_terminal_outcome_through_the_outbox() {
 
         handle.stop().await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Receipt caching
+// ---------------------------------------------------------------------------
+
+/// Every receipt refuses to be stored, on all three mutation routes and on the
+/// replay that answers `200` rather than `202`.
+///
+/// A receipt names one caller's operation and carries its replay state; both
+/// move underneath any copy. The router mounts no response-header layer — that
+/// is the platform edge's job for HSTS/CSP and the rest — so this one header
+/// has to come from the handler, and nothing else pins it.
+#[tokio::test]
+async fn every_mutation_receipt_refuses_to_be_cached() {
+    let router = router_with_db().await;
+
+    let submitted = call(&router, submit(Some("cache-1"), &one_candidate(CF_TYPE))).await;
+    assert_eq!(
+        submitted.status,
+        StatusCode::ACCEPTED,
+        "{:?}",
+        submitted.body
+    );
+    assert_eq!(submitted.cache_control.as_deref(), Some("no-store"));
+
+    // The replay answers 200 with the recorded outcome, and is the response a
+    // cache would most plausibly keep.
+    let replayed = call(&router, submit(Some("cache-1"), &one_candidate(CF_TYPE))).await;
+    assert_eq!(
+        replayed.body["replayed"],
+        json!(true),
+        "{:?}",
+        replayed.body
+    );
+    assert_eq!(
+        replayed.cache_control.as_deref(),
+        Some("no-store"),
+        "a replay is still a receipt",
+    );
+
+    let batch = call(
+        &router,
+        batch_delete(Some("cache-2"), &one_target(CF_TYPE, 1)),
+    )
+    .await;
+    assert_eq!(batch.status, StatusCode::ACCEPTED, "{:?}", batch.body);
+    assert_eq!(batch.cache_control.as_deref(), Some("no-store"));
+
+    register_entity(&router, "cache-3", CF_OTHER).await;
+    let single = call(
+        &router,
+        delete_one(Some("cache-4"), CF_OTHER, "?expected_resource_version=1"),
+    )
+    .await;
+    assert_eq!(single.status, StatusCode::ACCEPTED, "{:?}", single.body);
+    assert_eq!(single.cache_control.as_deref(), Some("no-store"));
 }

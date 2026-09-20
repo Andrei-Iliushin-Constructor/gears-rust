@@ -105,7 +105,7 @@ async fn submit(
         },
         &dispatch,
         &SubmitRequest {
-            idempotency_key: key.to_owned(),
+            idempotency_key: Some(key.to_owned()),
             kind,
             dry_run: false,
             candidates,
@@ -463,7 +463,7 @@ async fn the_same_key_for_a_dry_run_and_a_commit_is_a_conflict_not_a_replay() {
     let config = TypesRegistryConfig::default();
     let dispatch: Arc<dyn OperationDispatch> = Arc::new(NoDispatch);
     let request = |dry_run: bool| SubmitRequest {
-        idempotency_key: "one-key".to_owned(),
+        idempotency_key: Some("one-key".to_owned()),
         kind: domain_enums::OperationKind::Deletion,
         dry_run,
         candidates: vec![Candidate {

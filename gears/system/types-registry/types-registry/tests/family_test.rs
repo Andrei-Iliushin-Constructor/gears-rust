@@ -87,7 +87,7 @@ async fn submit(db: &Arc<DBProvider<DbError>>, key: &str, gts_id: &str) -> Uuid 
         },
         &dispatch,
         &SubmitRequest {
-            idempotency_key: key.to_owned(),
+            idempotency_key: Some(key.to_owned()),
             kind: domain_enums::OperationKind::Registration,
             dry_run: false,
             candidates: vec![Candidate {

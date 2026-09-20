@@ -44,7 +44,11 @@ use crate::domain::registry_service::{RegistryService, ServiceError};
 pub const TABLE_PREFIX: &str = "types_registry__outbox";
 
 /// Queue for admission operations.
-pub(crate) const QUEUE: &str = "admission";
+///
+/// Public for the same reason [`TABLE_PREFIX`] is: a test that puts a message
+/// on this queue by hand — the only way to reach the reject branch of
+/// [`LeasedHandler::handle`] through a real `Batch` — has to name it.
+pub const QUEUE: &str = "admission";
 
 /// Independent operations can evaluate concurrently across pods. Only entity
 /// commits are serialized by `entity_write_order` (D4); separate operations have
@@ -116,6 +120,12 @@ pub enum StartError {
     Recovery(#[source] ServiceError),
     #[error("re-enqueueing non-terminal operations failed: {0}")]
     RecoveryEnqueue(#[source] DbError),
+    /// A second [`start`] bound its pipeline to a dispatch that already had one.
+    /// Every acceptance would keep enqueueing into the first, so the second
+    /// pipeline would run against a queue nothing writes to — a silently idle
+    /// worker rather than a second one.
+    #[error("the admission dispatch is already bound to a running pipeline")]
+    AlreadyBound,
 }
 
 fn lease_config(operation_timeout: std::time::Duration) -> LeaseConfig {
@@ -150,10 +160,17 @@ impl OutboxDispatch {
     }
 
     /// Attach the started pipeline. Called once, by whoever started it.
-    pub fn bind(&self, outbox: &Arc<Outbox>) {
-        if self.outbox.set(Arc::downgrade(outbox)).is_err() {
-            warn!("types_registry admission dispatch was bound twice; keeping the first pipeline");
-        }
+    ///
+    /// # Errors
+    /// [`StartError::AlreadyBound`] if a pipeline is already attached. The
+    /// binding is not replaced: acceptance would go on enqueueing into the
+    /// first pipeline, leaving the second one running against a queue nothing
+    /// writes to. Refusing at `start` is the difference between a failed
+    /// startup and a worker that looks alive and delivers nothing.
+    pub fn bind(&self, outbox: &Arc<Outbox>) -> Result<(), StartError> {
+        self.outbox
+            .set(Arc::downgrade(outbox))
+            .map_err(|_| StartError::AlreadyBound)
     }
 }
 
@@ -639,7 +656,9 @@ impl LeasedHandler for AdmissionHandler {
 /// `low_latency` avoids pacing bursts while consumers await admission in `init()`.
 ///
 /// # Errors
-/// [`StartError`] for outbox startup or for a failed recovery scan.
+/// [`StartError`] for outbox startup, for a dispatch that is already bound to a
+/// running pipeline, or for a failed recovery scan. On any of them the handle
+/// this function built is dropped, which stops the pipeline it had started.
 pub async fn start(
     db: Db,
     registry: &Arc<RegistryService>,
@@ -665,7 +684,7 @@ pub async fn start(
         .lease(lease_config(registry.operation_timeout()))
         .start()
         .await?;
-    dispatch.bind(handle.outbox());
+    dispatch.bind(handle.outbox())?;
     recover_nonterminal_operations(&db, registry, handle.outbox()).await?;
     Ok(handle)
 }

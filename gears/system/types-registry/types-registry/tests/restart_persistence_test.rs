@@ -164,7 +164,7 @@ async fn read_durable_state(db: &Arc<DBProvider<DbError>>) -> DurableState {
 
 fn submission(key: &str, gts_id: &str, content: Value) -> SubmitRequest {
     SubmitRequest {
-        idempotency_key: key.to_owned(),
+        idempotency_key: Some(key.to_owned()),
         kind: OperationKind::Registration,
         dry_run: false,
         candidates: vec![Candidate {

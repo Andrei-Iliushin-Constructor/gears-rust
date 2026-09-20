@@ -108,7 +108,13 @@ impl Precondition {
 pub struct SubmitRequest {
     /// Mandatory. Absence is a synchronous refusal, not a generated key: a
     /// generated one would make every retry a fresh operation.
-    pub idempotency_key: String,
+    ///
+    /// `Option` rather than an empty-string sentinel: a transport that has no
+    /// key to report says `None` in the type, and the one place that decides
+    /// what absence means is [`acceptance::validate`]. After it,
+    /// [`Validated::idempotency_key`] is a plain `String`, because by then the
+    /// key exists and is non-empty.
+    pub idempotency_key: Option<String>,
     pub kind: OperationKind,
     pub dry_run: bool,
     pub candidates: Vec<Candidate>,

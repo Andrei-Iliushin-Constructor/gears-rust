@@ -37,16 +37,14 @@ impl OperationStore for AdmissionView {
         self.base.find_by_id(tx, scope, id).await
     }
 
-    async fn find_nonterminal_ids(
+    async fn nonterminal_page(
         &self,
         tx: &DbTx<'_>,
         scope: &AccessScope,
         after: Option<RecoveryCursor>,
         limit: u64,
     ) -> Result<Vec<RecoveryCursor>, ScopeError> {
-        self.base
-            .find_nonterminal_ids(tx, scope, after, limit)
-            .await
+        self.base.nonterminal_page(tx, scope, after, limit).await
     }
 
     async fn insert_operation(

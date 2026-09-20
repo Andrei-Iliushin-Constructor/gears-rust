@@ -226,14 +226,19 @@ pub async fn delete_entity(
 }
 
 /// Decode `Idempotency-Key`; acceptance handles absence, this layer rejects invalid bytes.
-fn idempotency_key(headers: &HeaderMap) -> Result<String, CanonicalError> {
-    match headers.get("idempotency-key") {
-        None => Ok(String::new()),
-        Some(value) => Ok(value
-            .to_str()
-            .map_err(|_| super::error::idempotency_key_not_utf8())?
-            .to_owned()),
-    }
+///
+/// Absence is `None`, not an empty `String`: acceptance refuses both the same
+/// way, but only one of them is something a caller could have sent.
+fn idempotency_key(headers: &HeaderMap) -> Result<Option<String>, CanonicalError> {
+    headers
+        .get("idempotency-key")
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::to_owned)
+                .map_err(|_| super::error::idempotency_key_not_utf8())
+        })
+        .transpose()
 }
 
 /// Build the shared mutation response from the receipt's admission status.
@@ -258,6 +263,14 @@ fn receipt(
         CanonicalError::internal("the registry could not construct an operation receipt").create()
     })?;
     out.insert(header::LOCATION, location_value);
+    // A receipt names one caller's operation and its idempotent replay state,
+    // and both move underneath any copy of it. Nothing between here and the
+    // caller may keep one: a shared cache would hand a second caller the first
+    // caller's operation id, and a private one would answer a poll with a
+    // status that has already advanced. This is the one response-header
+    // concern that belongs to the gear rather than to the platform edge, which
+    // owns HSTS/CSP and the rest of the transport policy.
+    out.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     if status == StatusCode::ACCEPTED {
         out.insert(
             header::RETRY_AFTER,

@@ -124,8 +124,9 @@ impl OperationRepo {
             .transpose()
     }
 
-    /// Find pending and running operations for startup recovery.
-    pub async fn find_nonterminal_ids(
+    /// One keyset page of pending and running operations for startup recovery,
+    /// as `(created_at, id)` cursors — the last of which resumes the scan.
+    pub async fn nonterminal_page(
         runner: &impl DBRunner,
         scope: &AccessScope,
         after: Option<RecoveryCursor>,

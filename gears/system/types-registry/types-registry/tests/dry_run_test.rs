@@ -89,7 +89,7 @@ async fn submit(
         },
         &dispatch,
         &SubmitRequest {
-            idempotency_key: key.to_owned(),
+            idempotency_key: Some(key.to_owned()),
             kind,
             dry_run,
             candidates,
@@ -503,7 +503,7 @@ async fn forced_dry_run(db: &Provider, key: &str, gts_id: &str, content: Value) 
         },
         &dispatch,
         &SubmitRequest {
-            idempotency_key: key.to_owned(),
+            idempotency_key: Some(key.to_owned()),
             kind: OperationKind::Registration,
             dry_run: true,
             candidates: vec![Candidate {

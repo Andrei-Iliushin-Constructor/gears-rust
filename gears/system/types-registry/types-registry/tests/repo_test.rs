@@ -1096,7 +1096,7 @@ async fn nonterminal_paging_walks_every_operation_once_across_pages() {
     let mut walked: Vec<Uuid> = Vec::new();
     let mut after = None;
     loop {
-        let page = OperationRepo::find_nonterminal_ids(&conn, &scope, after, PAGE)
+        let page = OperationRepo::nonterminal_page(&conn, &scope, after, PAGE)
             .await
             .expect("read a recovery page");
         if page.is_empty() {
@@ -1121,7 +1121,7 @@ async fn nonterminal_paging_walks_every_operation_once_across_pages() {
 
     // Passing the last cursor back must end the scan rather than return the row
     // it already handed over — the `>` in the tie-break, not `>=`.
-    let past_the_end = OperationRepo::find_nonterminal_ids(
+    let past_the_end = OperationRepo::nonterminal_page(
         &conn,
         &scope,
         walked.last().copied().map(|id| RecoveryCursor {

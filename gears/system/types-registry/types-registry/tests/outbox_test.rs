@@ -44,7 +44,7 @@ fn schema(gts_id: &str) -> Value {
 
 fn registration(idempotency_key: &str, gts_id: &str) -> SubmitRequest {
     SubmitRequest {
-        idempotency_key: idempotency_key.to_owned(),
+        idempotency_key: Some(idempotency_key.to_owned()),
         kind: OperationKind::Registration,
         dry_run: false,
         candidates: vec![Candidate {
@@ -1149,4 +1149,187 @@ async fn stopping_the_pipeline_leaves_no_silent_enqueue() {
             .is_none(),
         "and the refused acceptance must have rolled back",
     );
+}
+
+/// Binding a second pipeline to a dispatch that already has one is refused at
+/// `start`, not warned about.
+///
+/// The binding is a `OnceLock`: acceptance would go on enqueueing into the
+/// first pipeline whatever the second one did, so a second worker would poll a
+/// queue nothing writes to — alive, leased, and delivering nothing. A start
+/// that cannot be reached is a failed start.
+#[tokio::test]
+async fn a_second_pipeline_refuses_to_bind_rather_than_starting_unreachable() {
+    let db = test_db_with_outbox().await;
+    let (registry, dispatch) = service(&db, stores());
+
+    let first = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
+        .await
+        .expect("the first pipeline binds");
+
+    // `let else` rather than `expect_err`: `OutboxHandle` is not `Debug`.
+    let Err(refused) = types_registry::infra::outbox::start(db.db(), &registry, &dispatch).await
+    else {
+        panic!("the second pipeline must not bind");
+    };
+    assert!(
+        matches!(
+            refused,
+            types_registry::infra::outbox::StartError::AlreadyBound
+        ),
+        "a second bind is its own failure, not a generic outbox error: {refused}",
+    );
+
+    // The first pipeline is untouched by the refusal and still delivers.
+    let accepted = registry
+        .submit(&registration("after-refused-bind", TARGET), NOW)
+        .await
+        .expect("accept");
+    let operation = await_delivery("the first pipeline still delivers", || async {
+        let record = registry
+            .operation(accepted.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        (record.status == OperationStatus::Completed).then_some(record)
+    })
+    .await;
+    assert_eq!(operation.status, OperationStatus::Completed);
+
+    first.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// The two branches of `LeasedHandler::handle` that only a real `Batch` reaches
+// ---------------------------------------------------------------------------
+
+/// A temporary failure returns `HandlerResult::Retry`, and the pipeline
+/// redelivers until the failure stops.
+///
+/// Every other retry test calls `admit_payload` directly, which returns a
+/// `MessageResult` to the test rather than to the loop: what the loop does with
+/// it — abandoning the batch and leaving the message for redelivery instead of
+/// acking it — is only exercised here.
+#[tokio::test]
+async fn a_temporary_failure_is_redelivered_by_the_pipeline_until_it_clears() {
+    const FAILURES: usize = 1;
+
+    let db = test_db_with_outbox().await;
+    let ports = common::TestStores::failing_running_transiently(FAILURES);
+    let (registry, dispatch) = service(&db, Arc::clone(&ports) as Arc<dyn Stores>);
+    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
+        .await
+        .expect("start the admission outbox");
+
+    let accepted = registry
+        .submit(&registration("retried-key", TARGET), NOW)
+        .await
+        .expect("accept");
+
+    let operation = await_delivery("a redelivered admission completes", || async {
+        let record = registry.operation(accepted.operation_id).await.unwrap()?;
+        (record.status == OperationStatus::Completed).then_some(record)
+    })
+    .await;
+
+    assert_eq!(
+        ports.transient_failures_issued(),
+        FAILURES,
+        "the first delivery must have failed temporarily, or this test proves nothing",
+    );
+    assert_eq!(
+        operation.items[0].status,
+        OperationItemStatus::Succeeded,
+        "the redelivery admits the candidate the failed delivery did not: {:?}",
+        operation.items,
+    );
+    assert_eq!(
+        operation.items.len(),
+        1,
+        "a redelivery resumes the operation rather than adding to it: {:?}",
+        operation.items,
+    );
+
+    handle.stop().await;
+}
+
+/// A rejected message becomes a dead-letter row whose recorded reason names why.
+///
+/// The reject branch and the row it writes are the other half the direct
+/// `admit_payload` tests cannot reach: they observe the `MessageResult` and stop
+/// there, so nothing until now read what the outbox stored for an operator.
+#[tokio::test]
+async fn a_rejected_message_lands_in_a_dead_letter_row_that_names_the_reason() {
+    use toolkit_db::outbox::{DeadLetterFilter, DeadLetterScope, Record};
+
+    let db = test_db_with_outbox().await;
+    let (registry, dispatch) = service(&db, stores());
+    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
+        .await
+        .expect("start the admission outbox");
+
+    // A foreign envelope: right queue, wrong payload type. No redelivery can
+    // change either, so the handler must reject rather than retry.
+    let provider: DBProvider<DbError> = DBProvider::new(db.db());
+    let outbox = Arc::clone(handle.outbox());
+    provider
+        .transaction(move |tx| {
+            let outbox = Arc::clone(&outbox);
+            Box::pin(async move {
+                let foreign = Record::to(types_registry::infra::outbox::QUEUE, 0)
+                    .payload(
+                        b"not-an-admission-message".to_vec(),
+                        "some.other.gear.event",
+                    )
+                    .build()
+                    .expect("build the foreign record");
+                outbox.enqueue(tx, foreign).await.expect("enqueue");
+                Ok::<_, DbError>(())
+            })
+        })
+        .await
+        .expect("commit the foreign message");
+    handle
+        .outbox()
+        .flush_partition(types_registry::infra::outbox::QUEUE, 0)
+        .expect("signal the partition the foreign message landed in");
+
+    let dead_letters = await_delivery("the foreign message is dead-lettered", || async {
+        let conn = db.conn().expect("conn");
+        let rows = handle
+            .outbox()
+            .dead_letter_list(
+                &conn,
+                &DeadLetterFilter::from_scope(DeadLetterScope::default()),
+            )
+            .await
+            .expect("read the dead letters");
+        (!rows.is_empty()).then_some(rows)
+    })
+    .await;
+
+    assert_eq!(dead_letters.len(), 1, "one message, one row");
+    let row = &dead_letters[0];
+    assert_eq!(
+        row.payload, b"not-an-admission-message",
+        "the row keeps the bytes an operator has to look at",
+    );
+    assert_eq!(row.payload_type, "some.other.gear.event");
+    let reason: Value = serde_json::from_str(
+        row.last_error
+            .as_deref()
+            .expect("a rejected message records why"),
+    )
+    .expect("the reason is the handler's structured diagnostic");
+    assert_eq!(
+        reason["error_code"], "unexpected_payload_type",
+        "the stored reason names the refusal, not a generic failure: {reason}",
+    );
+    assert_eq!(
+        reason["operation_id"],
+        Value::Null,
+        "a foreign envelope names no operation",
+    );
+
+    handle.stop().await;
 }

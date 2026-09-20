@@ -326,7 +326,7 @@ async fn submit_via(
         },
         &dispatch,
         &SubmitRequest {
-            idempotency_key: key.to_owned(),
+            idempotency_key: Some(key.to_owned()),
             kind: domain_enums::OperationKind::Registration,
             dry_run: false,
             candidates,
@@ -362,7 +362,7 @@ async fn submit_forced(
         },
         &dispatch,
         &SubmitRequest {
-            idempotency_key: key.to_owned(),
+            idempotency_key: Some(key.to_owned()),
             kind: domain_enums::OperationKind::Registration,
             dry_run: false,
             candidates: vec![Candidate {
@@ -1451,7 +1451,7 @@ async fn one_pass(
         },
         &dispatch,
         &SubmitRequest {
-            idempotency_key: key.to_owned(),
+            idempotency_key: Some(key.to_owned()),
             kind,
             dry_run,
             candidates: vec![candidate],
@@ -1847,7 +1847,7 @@ async fn an_oversized_deletion_batch_is_refused_before_it_reads_and_counted_as_a
     let refused = registry
         .delete(
             &DeleteRequest {
-                idempotency_key: "over-the-limit".to_owned(),
+                idempotency_key: Some("over-the-limit".to_owned()),
                 dry_run: false,
                 targets,
             },
