@@ -39,6 +39,7 @@
 //! engine that produced it is not an input.
 
 use toolkit_db::DbError;
+use toolkit_db::advisory_locks::DbLockError;
 use toolkit_db::secure::ScopeError;
 
 /// Whether a scoped storage failure can read differently on redelivery.
@@ -73,8 +74,11 @@ pub fn scoped_failure_may_clear(error: &ScopeError) -> bool {
 pub fn database_failure_may_clear(error: &DbError) -> bool {
     match error {
         // Reached the engine or the wire. The next delivery may find a healthy
-        // connection, a drained pool or a released lock.
-        DbError::Sqlx(_) | DbError::Sea(_) | DbError::Io(_) | DbError::Lock(_) => true,
+        // connection or a drained pool.
+        DbError::Sqlx(_) | DbError::Sea(_) | DbError::Io(_) => true,
+
+        // Not every lock failure is contention; see [`lock_failure_may_clear`].
+        DbError::Lock(error) => lock_failure_may_clear(error),
 
         // Resolved from configuration, or a programming mistake in this
         // process. A redelivery reads the same configuration and makes the same
@@ -99,6 +103,38 @@ pub fn database_failure_may_clear(error: &DbError) -> bool {
             .downcast_ref::<ScopeError>()
             .is_none_or(scoped_failure_may_clear),
     }
+}
+
+/// Whether an advisory-lock failure can read differently on redelivery.
+///
+/// Stated as a *negative* match, so the two named variants are the whole
+/// permanent set and everything else — including a variant added later — keeps
+/// this module's retry default:
+///
+/// - `AlreadyHeld` is contention. Another session holds the key and will
+///   release it; that is what an advisory lock is for, and the commit path's
+///   own `transaction_with_retry` budget having run out says nothing about the
+///   next delivery.
+/// - `Io` and `UnexpectedDatabaseResult` are the transport and the engine
+///   answering oddly, which is the same case the arms beside `Lock` cover.
+/// - `Database` is a `sqlx::Error` wherever `toolkit-db` was built with a
+///   server-side lock backend, and is unnameable here when it was not — which
+///   is why this is a negative match rather than an exhaustive one. Whether a
+///   dependency's `pg`/`mysql` features are on is not something this gear can
+///   express in a `cfg`.
+///
+/// The two permanent ones both describe *this* process rather than the
+/// database. `InvalidConfig` is the lock configuration a redelivery compiles
+/// again from the same settings; `NotHeld` is a release of a lock this process
+/// never took, which is a bug here and which redelivering reproduces rather
+/// than clears. Retrying either spends `worker.max_delivery_attempts`
+/// deliveries, dead-letters the operation anyway, and hides the
+/// misconfiguration behind the repeats.
+fn lock_failure_may_clear(error: &DbLockError) -> bool {
+    !matches!(
+        error,
+        DbLockError::InvalidConfig { .. } | DbLockError::NotHeld
+    )
 }
 
 #[cfg(test)]

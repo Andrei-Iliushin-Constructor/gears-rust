@@ -23,6 +23,7 @@ use types_registry::domain::enums::{
 };
 use types_registry::domain::policy::RegistrationPolicy;
 use types_registry::domain::ports::Stores;
+use types_registry::domain::ports::metrics::{AdmissionMetrics, DeliveryOutcome};
 use types_registry::domain::registry_service::{AdmissionMode, EntityKey, RegistryService};
 use types_registry::infra::outbox::{AdmissionHandler, OutboxDispatch};
 
@@ -98,6 +99,18 @@ const MAX_ATTEMPTS: u32 = LAST_ATTEMPT as u32 + 1;
 /// delivery the handler decides either acks or rejects, so it never comes back.
 const PAST_BUDGET: i16 = LAST_ATTEMPT + 1;
 
+/// What a driver error can actually carry, injected verbatim so the disclosure
+/// assertions are about values that must never be written rather than about a
+/// string that says "test".
+const SENSITIVE_CAUSE: &str = "could not execute UPDATE on \
+     postgres://registry:hunter2@db.internal:5432/app (authorization: Bearer \
+     eyJhbGciOiJIUzI1NiJ9.super-secret): row was {\"ssn\": \"123-45-6789\"}";
+
+/// One distinctive fragment of [`SENSITIVE_CAUSE`], asserted separately: a
+/// formatter that escapes or wraps the whole string would defeat a
+/// whole-string `contains` while still having disclosed the secret.
+const SENSITIVE_FRAGMENT: &str = "hunter2";
+
 /// Like [`service_without_dispatch`] but with a chosen `operation_timeout`, which
 /// is the budget the handler divides for its own awaits.
 fn service_with_operation_timeout(
@@ -116,6 +129,28 @@ fn service_with_operation_timeout(
         AdmissionMode::Outbox,
         metrics(),
     ))
+}
+
+/// Like [`service_without_dispatch`], and hands back instruments the test can
+/// read. The delivery counter is the only one that matters here: two of the
+/// handler's branches differ in which outcome they count, and a branch that
+/// returned the right `MessageResult` while counting the other one would still
+/// mislead the stall alert that reads the series.
+fn service_recording_deliveries(
+    db: &Arc<DBProvider<DbError>>,
+    ports: Arc<dyn Stores>,
+) -> (Arc<RegistryService>, Arc<common::RecordingDeliveryMetrics>) {
+    let recorded = Arc::new(common::RecordingDeliveryMetrics::default());
+    let registry = Arc::new(RegistryService::new(
+        db.db(),
+        ports,
+        RegistrationPolicy::default(),
+        TypesRegistryConfig::default(),
+        Arc::new(NullDispatch),
+        AdmissionMode::Outbox,
+        Arc::clone(&recorded) as Arc<dyn AdmissionMetrics>,
+    ));
+    (registry, recorded)
 }
 
 /// Use `NullDispatch` so tests can invoke the handler without a pipeline race.
@@ -718,19 +753,24 @@ async fn abandoning_an_operation_that_never_ran_still_terminalizes_it() {
     );
 }
 
-/// Infrastructure errors can name connection details, SQL and row content, so
-/// abandonment keeps them out of the dead-letter reason and the stored item
-/// payload — both of which a client reads back over REST.
+/// Infrastructure errors can name connection strings, SQL, credentials and row
+/// content. Abandonment keeps every one of those out of all three surfaces: the
+/// operator log, the dead-letter reason, and the stored item payload a client
+/// reads back over REST.
 ///
-/// The operator log is the one surface that does carry the cause, and it has to:
-/// without it an abandoned operation leaves `error_code` alone to explain four
-/// different failures, and nothing else on this path records why. That is the
-/// same split `api::rest::error::opaque_internal` already makes for the REST
-/// path — it logs `error = %cause` for these very `ServiceError` variants and
-/// answers the caller with an opaque message — so this test previously held the
-/// delivery path to a stricter rule than the gear applies one layer over.
+/// The log was the exception until now — it carried `ServiceError`'s rendered
+/// text so that `error_code` would not be left to explain four different
+/// failures on its own. A log is an information-disclosure surface like a
+/// response body (PLID-53.02), and "the REST layer does it too" names a second
+/// site to harden rather than a licence for this one. The diagnostic survives as
+/// `cause_kind`: one word from a fixed allowlist, which separates the four
+/// failures without quoting anything the database said.
+///
+/// The injected text is chosen to be what must never appear anywhere — a DSN
+/// with a password, a bearer token, and document content — rather than a
+/// recognizable test string a log could omit by accident.
 #[tokio::test]
-async fn abandonment_logs_the_cause_and_keeps_it_out_of_every_client_surface() {
+async fn abandonment_records_the_cause_kind_and_never_the_drivers_own_text() {
     let log_dir = common::TestDir::new("abandonment-log");
     let log_path = log_dir.path().join("admission.log");
     let log_file = std::fs::File::create(&log_path).expect("create log capture");
@@ -739,7 +779,10 @@ async fn abandonment_logs_the_cause_and_keeps_it_out_of_every_client_surface() {
         .with_writer(move || log_file.try_clone().expect("clone log capture"))
         .finish();
     let db = test_db_with_outbox().await;
-    let registry = service_without_dispatch(&db, common::TestStores::failing_item_success());
+    let registry = service_without_dispatch(
+        &db,
+        common::TestStores::failing_item_success_saying(SENSITIVE_CAUSE),
+    );
     let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
 
     let accepted = registry
@@ -752,14 +795,19 @@ async fn abandonment_logs_the_cause_and_keeps_it_out_of_every_client_surface() {
         .await;
     let log = std::fs::read_to_string(&log_path).expect("read captured log");
     assert!(
-        log.contains("types_registry abandoned an admission"),
-        "the abandonment event must be captured: {log}",
+        !log.contains(SENSITIVE_CAUSE) && !log.contains(SENSITIVE_FRAGMENT),
+        "no part of the driver's own text may reach the operator log: {log}",
     );
     assert!(
-        log.contains("failure injection"),
-        "the operator log is where the cause belongs: it is the only record of why \
-         this operation was abandoned, and the payload assertions below are what \
-         keep it off the client's surfaces: {log}",
+        log.contains("cause_kind=\"worker\""),
+        "the diagnostic the cause is replaced by must still be there, or the four \
+         failures behind one error_code stay indistinguishable: {log}",
+    );
+    assert!(
+        log.contains("abandonment=\"written\""),
+        "and the log must say whether the operation was actually terminalized, \
+         which is what separates a complete dead letter from a message that left \
+         a `pending` operation behind: {log}",
     );
     let MessageResult::Reject(reason) = result else {
         panic!("exhausted system failure must be rejected: {result:?}");
@@ -783,8 +831,12 @@ async fn abandonment_logs_the_cause_and_keeps_it_out_of_every_client_surface() {
         .as_deref()
         .expect("an abandoned item carries a stored error payload");
     assert!(
-        !stored.contains("failure injection"),
+        !stored.contains(SENSITIVE_CAUSE) && !stored.contains(SENSITIVE_FRAGMENT),
         "the injected cause must not reach the client-visible payload: {stored}",
+    );
+    assert!(
+        !reason.contains(SENSITIVE_CAUSE) && !reason.contains(SENSITIVE_FRAGMENT),
+        "nor the dead-letter reason, which an operator reads over the same API: {reason}",
     );
     let error: Value = serde_json::from_str(stored).expect("the stored payload is JSON");
     assert_eq!(error["reason"], json!("admission_abandoned"));
@@ -1332,4 +1384,280 @@ async fn a_rejected_message_lands_in_a_dead_letter_row_that_names_the_reason() {
     );
 
     handle.stop().await;
+}
+
+/// A failed startup must not consume the dispatch binding.
+///
+/// `start` builds the pipeline, runs the boot recovery scan, and binds the
+/// dispatch to the outbox. Binding is a `OnceLock`, so whichever of those two
+/// steps runs first decides what a *failed* start leaves behind: bind-then-recover
+/// leaves the binding set to a `Weak` whose pipeline the dropped handle has
+/// already stopped, and every later start in the same process answers
+/// `AlreadyBound` — reporting a running pipeline that does not exist, and making
+/// one failed recovery scan unrecoverable without a restart.
+///
+/// Recovering first is safe because recovery does not go through the dispatch:
+/// it enqueues into `handle.outbox()` directly, precisely because the registry
+/// is not published yet.
+///
+/// The injected failure is the recovery page read alone; every other call serves
+/// real storage, so the second start runs against the same usable database and
+/// the assertion is about the binding rather than about the store.
+#[tokio::test]
+async fn a_failed_recovery_scan_leaves_the_dispatch_bindable_by_the_next_start() {
+    let db = test_db_with_outbox().await;
+    let dispatch = Arc::new(OutboxDispatch::new());
+    let broken = service_with(
+        &db,
+        common::TestStores::failing_recovery_scan(),
+        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
+    );
+
+    let Err(refused) = types_registry::infra::outbox::start(db.db(), &broken, &dispatch).await
+    else {
+        panic!("a failing recovery scan must fail the start");
+    };
+    assert!(
+        matches!(
+            refused,
+            types_registry::infra::outbox::StartError::Recovery(_)
+        ),
+        "the start must fail on recovery, not on the binding: {refused}",
+    );
+
+    // Same dispatch, working store: the retry must be able to bind and deliver.
+    let healthy = service_with(
+        &db,
+        stores(),
+        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
+    );
+    let handle = match types_registry::infra::outbox::start(db.db(), &healthy, &dispatch).await {
+        Ok(handle) => handle,
+        Err(error) => panic!(
+            "the second start must bind: a recovery failure left the binding spent, so nothing \
+             but a process restart could recover: {error}"
+        ),
+    };
+
+    let accepted = healthy
+        .submit(&registration("after-failed-recovery", TARGET), NOW)
+        .await
+        .expect("accept");
+    let operation = await_delivery("the bound pipeline delivers", || async {
+        let record = healthy.operation(accepted.operation_id).await.unwrap()?;
+        (record.status == OperationStatus::Completed).then_some(record)
+    })
+    .await;
+    assert_eq!(
+        operation.items[0].status,
+        OperationItemStatus::Succeeded,
+        "the recovered start is a real pipeline, not just a successful bind: {:?}",
+        operation.items,
+    );
+
+    handle.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Abandonment is coupled to the message's fate (the three terminalization cases)
+// ---------------------------------------------------------------------------
+
+/// The baseline the two failing cases below are read against: the abandonment
+/// write lands, so the dead letter tells the whole story and the message ends.
+///
+/// Stated as its own test rather than inferred from the others, because
+/// "rejected" is what the old unconditional code did in every case; the claim
+/// worth pinning is that rejecting is what *success* looks like.
+#[tokio::test]
+async fn an_abandonment_whose_write_lands_is_dead_lettered() {
+    let db = test_db_with_outbox().await;
+    let (registry, counted) =
+        service_recording_deliveries(&db, common::TestStores::failing_running());
+    let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
+
+    let accepted = registry
+        .submit(&registration("terminalized", TARGET), NOW)
+        .await
+        .expect("accept");
+    // A first delivery, with the budget still open: the reject below is the
+    // write landing, not the budget running out.
+    let result = handler
+        .admit_payload(accepted.operation_id.to_string().as_bytes(), 0)
+        .await;
+
+    assert!(
+        matches!(result, MessageResult::Reject(_)),
+        "a permanent failure whose operation was terminalized ends the message: {result:?}",
+    );
+    assert_eq!(
+        counted.outcomes(),
+        vec![DeliveryOutcome::DeadLettered],
+        "and counts exactly one dead letter",
+    );
+
+    let operation = registry
+        .operation(accepted.operation_id)
+        .await
+        .expect("read")
+        .expect("the operation exists");
+    assert_eq!(operation.status, OperationStatus::Completed);
+    assert_eq!(operation.items[0].status, OperationItemStatus::Failed);
+}
+
+/// A terminalization that fails while deliveries remain must keep the message,
+/// not dead-letter it.
+///
+/// This is the invariant the reserve alone did not restore. Rejecting here
+/// produces the one state nothing resolves: the message is in the dead-letter
+/// table, so no queued work is left, while the operation is still `pending`, so
+/// a caller polling it never learns anything — and only the next process start,
+/// through the boot recovery scan, would pick it up. `Retry` keeps a live
+/// delivery path over the same durable row, and the operation row being
+/// unchanged is exactly what makes a redelivery re-attempt the same abandonment.
+#[tokio::test]
+async fn a_retryable_terminalization_failure_keeps_the_message_instead_of_dead_lettering_it() {
+    let db = test_db_with_outbox().await;
+    let (registry, counted) =
+        service_recording_deliveries(&db, common::TestStores::failing_running_and_abandonment());
+    let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
+
+    let accepted = registry
+        .submit(&registration("unterminalized", TARGET), NOW)
+        .await
+        .expect("accept");
+    let result = handler
+        .admit_payload(accepted.operation_id.to_string().as_bytes(), 0)
+        .await;
+
+    assert!(
+        matches!(result, MessageResult::Retry),
+        "the operation is still non-terminal, so the message must stay deliverable: {result:?}",
+    );
+    assert_eq!(
+        counted.outcomes(),
+        vec![DeliveryOutcome::Retried],
+        "the series an operator alerts on must say redelivered, not dead-lettered: a \
+         `dead_lettered` increment here would report work as given up on while it is \
+         still queued",
+    );
+
+    let operation = registry
+        .operation(accepted.operation_id)
+        .await
+        .expect("read")
+        .expect("the operation exists");
+    assert_eq!(
+        operation.status,
+        OperationStatus::Pending,
+        "the refused terminalization must have rolled back whole: {:?}",
+        operation.items,
+    );
+    assert_eq!(operation.items[0].status, OperationItemStatus::Pending);
+
+    // Still recoverable at the next boot, which is the second half of why
+    // rejecting would have been wrong: with the message gone, that scan was the
+    // only remaining path.
+    let recovered = registry
+        .nonterminal_operation_page(None, 128)
+        .await
+        .expect("read the recovery page");
+    assert!(
+        recovered
+            .iter()
+            .any(|cursor| cursor.id == accepted.operation_id),
+        "a non-terminal operation must stay in the recovery set: {recovered:?}",
+    );
+}
+
+/// The bound on the retry above: once the delivery budget is spent, the dead
+/// letter stands even though the operation is still non-terminal.
+///
+/// Without this arm a terminalization that never succeeds would hold its
+/// partition forever and drive `attempts` past the `i16` the outbox stores it
+/// in — retrying a write that cannot land is not more correct than stopping, it
+/// is only unbounded. The state this leaves is strictly worse than
+/// terminalizing and strictly better than that loop, and the boot recovery scan
+/// remains its resolution.
+#[tokio::test]
+async fn an_unterminalizable_abandonment_is_dead_lettered_once_the_budget_is_spent() {
+    let db = test_db_with_outbox().await;
+    let (registry, counted) =
+        service_recording_deliveries(&db, common::TestStores::failing_running_and_abandonment());
+    let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
+
+    let accepted = registry
+        .submit(&registration("unterminalizable", TARGET), NOW)
+        .await
+        .expect("accept");
+    // The last delivery the budget allows: `may_retry` is false, so the arm
+    // above cannot apply however the write goes.
+    let result = handler
+        .admit_payload(accepted.operation_id.to_string().as_bytes(), LAST_ATTEMPT)
+        .await;
+
+    let MessageResult::Reject(reason) = result else {
+        panic!("a message must leave the queue once its deliveries are spent: {result:?}");
+    };
+    let diagnostic: Value = serde_json::from_str(&reason).expect("a safe structured reason");
+    assert_eq!(diagnostic["reason"], "admission_abandoned");
+    assert_eq!(
+        counted.outcomes(),
+        vec![DeliveryOutcome::DeadLettered],
+        "and it is counted as the dead letter it is",
+    );
+
+    let operation = registry
+        .operation(accepted.operation_id)
+        .await
+        .expect("read")
+        .expect("the operation exists");
+    assert_eq!(
+        operation.status,
+        OperationStatus::Pending,
+        "the honest cost of the bound: this operation is dead-lettered while \
+         non-terminal, and the next boot's recovery scan is what resolves it",
+    );
+}
+
+/// The log has to say which of the two happened, because the `MessageResult`
+/// does not reach an operator and the two outcomes need different responses: a
+/// redelivery resolves itself, a dead letter with a `pending` operation waits
+/// for a restart.
+#[tokio::test]
+async fn a_retried_terminalization_failure_says_so_in_the_log() {
+    let log_dir = common::TestDir::new("terminalization-log");
+    let log_path = log_dir.path().join("admission.log");
+    let log_file = std::fs::File::create(&log_path).expect("create log capture");
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || log_file.try_clone().expect("clone log capture"))
+        .finish();
+    let db = test_db_with_outbox().await;
+    let registry =
+        service_without_dispatch(&db, common::TestStores::failing_running_and_abandonment());
+    let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
+
+    let accepted = registry
+        .submit(&registration("logged", TARGET), NOW)
+        .await
+        .expect("accept");
+    let result = handler
+        .admit_payload(accepted.operation_id.to_string().as_bytes(), 0)
+        .with_subscriber(subscriber)
+        .await;
+    assert!(matches!(result, MessageResult::Retry), "got: {result:?}");
+
+    let log = std::fs::read_to_string(&log_path).expect("read captured log");
+    assert!(
+        log.contains("the message will be redelivered rather than dead-lettered"),
+        "the event must name the decision it made: {log}",
+    );
+    assert!(
+        !log.contains("the message is dead-lettered"),
+        "and must not also claim the opposite: {log}",
+    );
+    assert!(
+        log.contains("abandonment=\"abandonment_write_failed\""),
+        "with the reason the terminalization did not land: {log}",
+    );
 }

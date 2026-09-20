@@ -6,10 +6,12 @@
 //! [`assert_single_admission_under_two_pipelines`] runs two pipelines over one
 //! database and asserts the candidate is admitted once. It pins the mechanism as
 //! well as the outcome: both services' ports sit behind one gate at
-//! [`PausePoint::OperationRead`], which holds the first pass to arrive and counts
-//! every arrival, so the test states — while that pass is provably inside
-//! admission — that no second one entered. That is the lease excluding the second
-//! worker before the store, distinguished from an item CAS refusing it after.
+//! [`PausePoint::OperationRead`] that attributes arrivals to a single operation,
+//! holds the first of them, and counts the rest — so the test states, while that
+//! pass is provably inside admission and both pipelines have been told to look
+//! at its partition, that no second pass entered. That is the lease excluding the
+//! other worker before the store, distinguished from an item CAS refusing it
+//! after.
 
 #![cfg(feature = "integration")]
 
@@ -39,12 +41,20 @@ const DRAFT_07: &str = "http://json-schema.org/draft-07/schema#";
 
 const TARGET: &str = gts_id!("cf.core.obxback.target.v1~");
 
-/// How long the second worker is given to enter admission while the first
-/// holds the message. It only has to exceed the poll interval of a worker that
-/// is already running and idle; the assertion it serves is a negative one, and
-/// a second worker that arrives later still shows up in the outcome assertions
-/// below as a second revision.
+/// How long the other worker is given to enter admission after being told, by
+/// an explicit `flush_partition`, to look at the held message's partition.
+///
+/// A dirty push wakes that pipeline's sequencer immediately rather than leaving
+/// it to a poll interval, so this window covers one sequencer pass plus the
+/// processor claim it schedules — not a cold reconciliation. The assertion it
+/// serves is a negative one, and a worker that got in later would still show up
+/// in the outcome assertions below as a second revision.
 const CONTENTION_WINDOW: Duration = Duration::from_millis(300);
+
+/// A warm-up candidate, registered through the second pipeline before any
+/// contention, so the silence at the gate afterwards cannot be explained by a
+/// pipeline that never delivers anything.
+const WARMUP: &str = gts_id!("cf.core.obxback.warmup.v1~");
 
 fn schema(gts_id: &str) -> Value {
     json!({
@@ -121,23 +131,47 @@ async fn assert_delivery(db: &Arc<DBProvider<DbError>>, backend: &str) {
     handle.stop().await;
 }
 
-/// Two pipelines, one database/message: admit once, with no second revision or
-/// resource-version bump, whether the lease or item CAS excludes the second worker.
+/// Two pipelines, one database, one message: admit once, with no second revision
+/// or resource-version bump, whether the lease or the item CAS excludes the
+/// other worker.
 ///
-/// The two passes are made to overlap rather than left to chance. Both services
-/// run over ports behind one gate at [`PausePoint::OperationRead`], the first
-/// pass to arrive is held there, and the gate counts arrivals — so the test can
-/// ask, while the first pass is demonstrably inside admission, whether a second
-/// one entered at all. A barrier would not do: when exclusion works by keeping
-/// the second worker out of the store entirely, waiting for it deadlocks, and
+/// The two passes are made to overlap rather than left to chance, and every step
+/// that used to be probabilistic is now driven:
+///
+/// - **Both services' ports sit behind one gate** at [`PausePoint::OperationRead`]
+///   which attributes arrivals to a *single* operation. A shared counter over all
+///   traffic could not say which operation or which delivery path reached the
+///   store, so a count of `1` meant little; this one is asserted against the
+///   contended operation's own id.
+/// - **The second pipeline is proved alive first.** It is started on its own and
+///   a warm-up registration is enqueued through its dispatch and admitted to
+///   completion — with no other pipeline running, so nothing else could have
+///   delivered it. Without that, `reached() == 1` below is equally well explained
+///   by a second pipeline that never ran, never bound, or was never instrumented.
+///   The warm-up passes the gate untouched because the gate is still disarmed.
+/// - **The other pipeline is made to attempt the same queued partition.** Once a
+///   pass is held, both outboxes get an explicit `flush_partition` for the contended
+///   operation's partition. Enqueueing through one dispatch wakes only that
+///   pipeline, and the other's sequencer is idle for a minute at a time — so
+///   without this push the window below observed a pipeline that had never been
+///   asked to look, and the test proved nothing about contention.
+///
+/// Both pipelines are pushed rather than only the second: which of them wins the
+/// claim on a message neither was told about first is not controllable, and the
+/// invariant does not care. The holder is identified by the gate, and the push
+/// guarantees the *other* one has been asked for the same partition — which is
+/// the contention the assertion is about.
+///
+/// A barrier would not do in place of the count: when exclusion works by keeping
+/// the other worker out of the store entirely, waiting for it deadlocks, and
 /// "it never arrived" is the answer rather than a hang.
 async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError>>, backend: &str) {
     let gts_id = gts_id!("cf.core.obxback.contended.v1~");
 
     // Two independent services over the same `Db`, so two leased workers compete
-    // for the same partition. Only the first gets to enqueue.
+    // for the same partition, both reading through one gate.
     let (first_ports, gate, reached, resume) =
-        TestStores::pausing_shared(PausePoint::OperationRead);
+        TestStores::pausing_shared_for_one_operation(PausePoint::OperationRead);
     let second_ports = TestStores::sharing_pause(&gate);
     let dispatch = Arc::new(OutboxDispatch::new());
     let submitter = Arc::new(RegistryService::new(
@@ -159,12 +193,67 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
         AdmissionMode::Outbox,
         metrics(),
     ));
-    let first_handle = types_registry::infra::outbox::start(db.db(), &submitter, &dispatch)
-        .await
-        .unwrap_or_else(|e| panic!("{backend}: start the first pipeline: {e}"));
+
+    // The second pipeline alone, so the warm-up below has exactly one possible
+    // deliverer. The gate is disarmed, so none of that traffic is held or counted.
     let second_handle = types_registry::infra::outbox::start(db.db(), &second, &second_dispatch)
         .await
         .unwrap_or_else(|e| panic!("{backend}: start the second pipeline: {e}"));
+
+    let warmup = second
+        .submit(
+            &SubmitRequest {
+                idempotency_key: Some("warmup-key".to_owned()),
+                kind: OperationKind::Registration,
+                dry_run: false,
+                candidates: vec![Candidate {
+                    gts_id: WARMUP.to_owned(),
+                    content: Some(schema(WARMUP)),
+                    expected_resource_version: None,
+                    force: false,
+                }],
+            },
+            NOW,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{backend}: accept the warm-up submission: {e}"));
+    let warmed = await_delivery(
+        &format!("{backend}: the second pipeline delivers"),
+        || async {
+            let record = second
+                .operation(warmup.operation_id)
+                .await
+                .unwrap_or_else(|e| panic!("{backend}: read the warm-up operation: {e}"))
+                .unwrap_or_else(|| panic!("{backend}: the warm-up operation exists"));
+            match record.status {
+                OperationStatus::Completed => Some(record),
+                OperationStatus::Pending | OperationStatus::Running => None,
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        warmed.items[0].status,
+        OperationItemStatus::Succeeded,
+        "{backend}: the second pipeline admits through its own dispatch, so the \
+         silence at the gate below is about exclusion and not about a dead \
+         pipeline: {:?}",
+        warmed.items,
+    );
+    assert_eq!(
+        gate.reached(),
+        0,
+        "{backend}: a disarmed gate attributes nothing, or the warm-up would be \
+         counted as contention",
+    );
+
+    let first_handle = types_registry::infra::outbox::start(db.db(), &submitter, &dispatch)
+        .await
+        .unwrap_or_else(|e| panic!("{backend}: start the first pipeline: {e}"));
+
+    // From here the next operation read through either service's ports is the
+    // one the gate attributes, holds and counts.
+    gate.arm();
 
     let accepted = submitter
         .submit(
@@ -189,49 +278,40 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
         .await
         .unwrap_or_else(|e| panic!("{backend}: a pass must reach the admission read: {e}"));
     assert_eq!(
+        gate.held_operation(),
+        Some(accepted.operation_id),
+        "{backend}: the gate must be holding the contended operation; a count of \
+         arrivals says nothing unless the arrival is the operation under test",
+    );
+    assert_eq!(
         gate.reached(),
         1,
         "{backend}: the gate holds the first arrival, so exactly one pass is inside",
     );
 
-    // Give the other worker a window to enter admission while the first holds
-    // the message. Nothing may: a second arrival here means both workers read
-    // the same operation, and only the item CAS would be left to separate them.
+    // Tell both pipelines to look at that partition. The holder already has the
+    // lease; the other one now genuinely attempts the same queued message
+    // instead of waiting out a sequencer interval it was never woken from.
+    let partition = types_registry::infra::outbox::partition_of(accepted.operation_id);
+    let queue = types_registry::infra::outbox::QUEUE;
+    second_handle
+        .outbox()
+        .flush_partition(queue, partition)
+        .unwrap_or_else(|e| panic!("{backend}: signal the partition on the second pipeline: {e}"));
+    first_handle
+        .outbox()
+        .flush_partition(queue, partition)
+        .unwrap_or_else(|e| panic!("{backend}: signal the partition on the first pipeline: {e}"));
+
+    // Nothing may arrive: a second arrival here means both workers read the same
+    // operation, and only the item CAS would be left to separate them.
     tokio::time::sleep(CONTENTION_WINDOW).await;
     assert_eq!(
         gate.reached(),
         1,
-        "{backend}: the second worker must be excluded before the store, by the \
+        "{backend}: the other worker must be excluded before the store, by the \
          lease on the message — not later, by a CAS on the item",
     );
-
-    // The control for that silence: a *different* candidate, submitted through
-    // the second service while the first pass is still held, does reach the
-    // gate. Without this, `reached() == 1` above would also be what a dead
-    // second pipeline, an uninstrumented one, or a broken counter produced.
-    let uncontended = gts_id!("cf.core.obxback.uncontended.v1~");
-    let other = second
-        .submit(
-            &SubmitRequest {
-                idempotency_key: Some("uncontended-key".to_owned()),
-                kind: OperationKind::Registration,
-                dry_run: false,
-                candidates: vec![Candidate {
-                    gts_id: uncontended.to_owned(),
-                    content: Some(schema(uncontended)),
-                    expected_resource_version: None,
-                    force: false,
-                }],
-            },
-            NOW,
-        )
-        .await
-        .unwrap_or_else(|e| panic!("{backend}: accept the uncontended submission: {e}"));
-    await_delivery(
-        &format!("{backend}: a second pass reaches the gate"),
-        || async { (gate.reached() >= 2).then_some(()) },
-    )
-    .await;
 
     resume
         .send(())
@@ -267,26 +347,6 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
         .await
         .unwrap_or_else(|e| panic!("{backend}: read the entity: {e}"))
         .unwrap_or_else(|| panic!("{backend}: the admitted entity is readable"));
-    let uncontended_operation =
-        await_delivery(&format!("{backend}: uncontended registration"), || async {
-            let record = second
-                .operation(other.operation_id)
-                .await
-                .unwrap_or_else(|e| panic!("{backend}: read the uncontended operation: {e}"))
-                .unwrap_or_else(|| panic!("{backend}: the uncontended operation exists"));
-            match record.status {
-                OperationStatus::Completed => Some(record),
-                OperationStatus::Pending | OperationStatus::Running => None,
-            }
-        })
-        .await;
-    assert_eq!(
-        uncontended_operation.items[0].status,
-        OperationItemStatus::Succeeded,
-        "{backend}: the control candidate is admitted like any other: {:?}",
-        uncontended_operation.items,
-    );
-
     assert_eq!(
         entity.resource_version, 1,
         "{backend}: a second admission would have bumped the version",

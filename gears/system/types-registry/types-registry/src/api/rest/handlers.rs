@@ -252,7 +252,12 @@ fn receipt(
         StatusCode::ACCEPTED
     };
 
-    let mut out = HeaderMap::new();
+    // A receipt names one caller's operation and its idempotent replay state,
+    // and both move underneath any copy of it. Nothing between here and the
+    // caller may keep one: a shared cache would hand a second caller the first
+    // caller's operation id, and a private one would answer a poll with a
+    // status that has already advanced.
+    let mut out = no_store();
     let location = operation_location(request_path, accepted.operation_id);
     let location_value = HeaderValue::from_str(&location).map_err(|e| {
         tracing::error!(
@@ -263,14 +268,6 @@ fn receipt(
         CanonicalError::internal("the registry could not construct an operation receipt").create()
     })?;
     out.insert(header::LOCATION, location_value);
-    // A receipt names one caller's operation and its idempotent replay state,
-    // and both move underneath any copy of it. Nothing between here and the
-    // caller may keep one: a shared cache would hand a second caller the first
-    // caller's operation id, and a private one would answer a poll with a
-    // status that has already advanced. This is the one response-header
-    // concern that belongs to the gear rather than to the platform edge, which
-    // owns HSTS/CSP and the rest of the transport policy.
-    out.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     if status == StatusCode::ACCEPTED {
         out.insert(
             header::RETRY_AFTER,
@@ -318,17 +315,39 @@ fn operation_location(request_path: &str, operation_id: Uuid) -> String {
 }
 
 /// `GET /types-registry/v2/operations/{operation_id}`
+///
+/// Answers with `Cache-Control: no-store`, for the reason a receipt does and one
+/// more. The URL is stable while the document under it is not: a client polls it
+/// while `status` moves `pending` → `running` → `completed` and the item
+/// outcomes appear, so a kept copy answers a later poll with progress that has
+/// already advanced — a poller that never terminates, or one that reports a
+/// candidate undecided after it failed. The document also names one caller's
+/// operation and its per-candidate errors, which a shared cache would hand to
+/// the next reader of the same path.
 pub async fn get_operation(
     Extension(service): Extension<Option<Arc<RegistryService>>>,
     extract::Path(operation_id): extract::Path<Uuid>,
-) -> ApiResult<Json<OperationDto>> {
+) -> ApiResult<(HeaderMap, Json<OperationDto>)> {
     let service = require_registry(service)?;
     let record = service
         .operation(operation_id)
         .await
         .map_err(CanonicalError::from)?
         .ok_or_else(|| CanonicalError::from(DomainError::not_found_by_uuid(operation_id)))?;
-    Ok(Json(record.into()))
+    Ok((no_store(), Json(record.into())))
+}
+
+/// The one response header this gear owns, on the responses that carry moving
+/// per-caller state: the mutation receipts and the operation poll.
+///
+/// The router mounts no response-header layer, and should not — HSTS, CSP,
+/// `X-Frame-Options` and the rest of the transport policy belong to the platform
+/// edge, which applies them to every gear at once. Cacheability is different:
+/// only the handler knows that this particular body moves under its own URL.
+fn no_store() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers
 }
 
 /// `GET /types-registry/v2/entities/{entity_key}`

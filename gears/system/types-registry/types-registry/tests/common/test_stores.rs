@@ -89,6 +89,15 @@ pub struct Hooks {
     /// Makes `mark_running` sleep, so a pass spends part of its budget before
     /// failing — which is what reveals a deadline recomputed after admission.
     pub stall_mark_running: Option<std::time::Duration>,
+    /// Text the injected failures carry instead of their own.
+    ///
+    /// Exists so a disclosure test can choose what the driver "says": the
+    /// default strings are recognizable as test injection, and a log that
+    /// happened to omit them would look clean for the wrong reason. A scenario
+    /// puts credential- and document-shaped values here instead, which is what
+    /// the log, the dead-letter reason and the stored payload then have to be
+    /// free of.
+    injected_cause: Option<&'static str>,
 }
 
 /// One held call: [`PausePoint`], which occurrence, and the two ends the test
@@ -98,8 +107,54 @@ struct Pause {
     /// Matching call to pause, starting at 1.
     nth: usize,
     seen: std::sync::atomic::AtomicUsize,
+    /// Which operation this gate attributes arrivals to, when it attributes them
+    /// to one at all. `None` is the unfiltered gate every single-service
+    /// scenario uses: every call at [`Self::at`] matches.
+    target: Option<parking_lot::Mutex<GateTarget>>,
     reached: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     resume: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+/// What a filtered gate is currently attributing arrivals to.
+///
+/// Latching the operation on the first arrival rather than being told it up
+/// front is what makes the contention test free of a race. The alternative is
+/// to submit, read the operation id back, and only then narrow the gate — by
+/// which time the pipeline the submission woke may already have passed the
+/// point, so the arrival the test exists to observe goes uncounted on a timing
+/// that varies per machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GateTarget {
+    /// Attributing nothing. Warm-up traffic — the operations a test runs to
+    /// establish that a pipeline is alive at all — passes through uncounted.
+    Disarmed,
+    /// Waiting for the next arrival, which becomes the attributed operation.
+    Armed,
+    /// Attributing arrivals to this operation, and to no other.
+    Holding(Uuid),
+}
+
+impl Pause {
+    /// Whether this call is one the gate counts, latching the attributed
+    /// operation if it is the first arrival after arming.
+    fn attributes(&self, operation_id: Option<Uuid>) -> bool {
+        let Some(target) = &self.target else {
+            return true;
+        };
+        // A filtered gate can only attribute a call that names an operation.
+        let Some(operation_id) = operation_id else {
+            return false;
+        };
+        let mut target = target.lock();
+        match *target {
+            GateTarget::Disarmed => false,
+            GateTarget::Armed => {
+                *target = GateTarget::Holding(operation_id);
+                true
+            }
+            GateTarget::Holding(held) => held == operation_id,
+        }
+    }
 }
 
 /// One-shot notifications for claim entry and successful return.
@@ -125,6 +180,15 @@ pub enum FailingCall {
     MarkRunning,
     /// The operation read by id.
     FindById,
+    /// The startup recovery page read, so `start` fails after the pipeline is
+    /// built but before it can be reached — the window that must not leave a
+    /// dispatch permanently bound to a pipeline nobody kept.
+    NonterminalPage,
+    /// The abandonment write itself, so the operation stays non-terminal after
+    /// a delivery has already decided to give up on it. The one injection that
+    /// separates "the dead letter tells the whole story" from "the message is
+    /// gone and the operation is still `pending`".
+    MarkAbandoned,
 }
 
 /// A budget of temporary failures, and a count of the ones actually issued.
@@ -146,8 +210,20 @@ struct EntityWrites {
 }
 
 impl Hooks {
-    /// Runs at each reached [`PausePoint`]; may hold the transaction open.
+    /// Runs at each reached [`PausePoint`] that names no operation.
     async fn at(&self, point: PausePoint) {
+        self.hold(point, None).await;
+    }
+
+    /// Runs at a [`PausePoint`] inside a call that names one operation, so a
+    /// filtered gate can attribute the arrival to it. Identical to [`Self::at`]
+    /// for an unfiltered gate.
+    async fn at_operation(&self, point: PausePoint, operation_id: Uuid) {
+        self.hold(point, Some(operation_id)).await;
+    }
+
+    /// Signal, count and possibly hold one arrival; may hold the transaction open.
+    async fn hold(&self, point: PausePoint, operation_id: Option<Uuid>) {
         if let Some(claim) = &self.claim {
             let slot = match point {
                 PausePoint::BeforeEntityWriteOrderClaim => Some(&claim.entered),
@@ -164,6 +240,7 @@ impl Hooks {
 
         if let Some(pause) = &self.pause
             && pause.at == point
+            && pause.attributes(operation_id)
             && pause.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == pause.nth
         {
             let reached = pause.reached.lock().await.take();
@@ -213,6 +290,11 @@ impl Hooks {
         self.fail.contains(&call)
     }
 
+    /// The text an injected failure carries: the scenario's, or the call's own.
+    fn cause(&self, own: &'static str) -> &'static str {
+        self.injected_cause.unwrap_or(own)
+    }
+
     /// Whether this `mark_running` call is one of the temporary failures, and
     /// records it if so.
     fn takes_transient_mark_running_failure(&self) -> bool {
@@ -249,10 +331,45 @@ impl Hooks {
 pub struct SharedPause(Arc<Pause>);
 
 impl SharedPause {
-    /// Passes that have reached the point so far.
+    /// Arrivals the gate has attributed to its operation so far, including the
+    /// one it is holding.
     #[must_use]
     pub fn reached(&self) -> usize {
         self.0.seen.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Start attributing arrivals: the next one names the operation, is counted,
+    /// and is held.
+    ///
+    /// # Panics
+    /// If this gate is unfiltered, or if it is already armed or holding — both
+    /// are a test asking for an attribution the counter cannot give.
+    pub fn arm(&self) {
+        let target = self
+            .0
+            .target
+            .as_ref()
+            .expect("only a filtered gate attributes arrivals to one operation");
+        let mut target = target.lock();
+        assert_eq!(
+            *target,
+            GateTarget::Disarmed,
+            "a gate attributes one operation, and this one already has its own",
+        );
+        *target = GateTarget::Armed;
+    }
+
+    /// The operation the gate latched, once an arrival has named one.
+    ///
+    /// The assertion that makes a count of arrivals mean something: `1` proves a
+    /// second pass stayed out only if the one that arrived is the operation
+    /// under test.
+    #[must_use]
+    pub fn held_operation(&self) -> Option<Uuid> {
+        match *self.0.target.as_ref()?.lock() {
+            GateTarget::Holding(operation_id) => Some(operation_id),
+            GateTarget::Armed | GateTarget::Disarmed => None,
+        }
     }
 }
 
@@ -322,6 +439,7 @@ impl TestStoresBuilder {
             at,
             nth,
             seen: std::sync::atomic::AtomicUsize::new(0),
+            target: None,
             reached: tokio::sync::Mutex::new(Some(reached)),
             resume: tokio::sync::Mutex::new(Some(resume)),
         })))
@@ -408,6 +526,12 @@ impl TestStoresBuilder {
         self
     }
 
+    /// Make every injected failure carry `text` rather than its own message.
+    pub fn with_injected_cause(mut self, text: &'static str) -> Self {
+        self.hooks.injected_cause = Some(text);
+        self
+    }
+
     /// Decorate real persistence with everything named so far.
     pub fn build(self) -> Arc<TestStores> {
         Arc::new(TestStores {
@@ -451,10 +575,19 @@ impl TestStores {
         (decorated, reached_rx, resume_tx)
     }
 
-    /// Like [`Self::pausing`], but also hands back the gate so a second
-    /// service's ports can be put behind it with [`Self::sharing_pause`].
+    /// Like [`Self::pausing`], but the gate is *shared* and attributes arrivals
+    /// to one operation — and it is handed back so a second service's ports can
+    /// be put behind it with [`Self::sharing_pause`].
+    ///
+    /// It starts disarmed, which is the difference from every other constructor
+    /// here and the whole point of it. A contention test has to run traffic
+    /// through both services before the contention — otherwise a count of zero
+    /// arrivals is equally well explained by a pipeline that never ran — and
+    /// that warm-up traffic must pass through the gate untouched. The test then
+    /// calls [`SharedPause::arm`], and the next arrival names the operation the
+    /// gate holds and counts.
     #[must_use]
-    pub fn pausing_shared(
+    pub fn pausing_shared_for_one_operation(
         at: PausePoint,
     ) -> (
         Arc<Self>,
@@ -468,6 +601,7 @@ impl TestStores {
             at,
             nth: 1,
             seen: std::sync::atomic::AtomicUsize::new(0),
+            target: Some(parking_lot::Mutex::new(GateTarget::Disarmed)),
             reached: tokio::sync::Mutex::new(Some(reached_tx)),
             resume: tokio::sync::Mutex::new(Some(resume_rx)),
         }));
@@ -549,6 +683,16 @@ impl TestStores {
         Self::builder().failing(FailingCall::FindById).build()
     }
 
+    /// Ports whose startup recovery page read always fails, so `start` fails
+    /// after building its pipeline. Every other call serves real storage, so the
+    /// same database is usable by the start that follows.
+    #[must_use]
+    pub fn failing_recovery_scan() -> Arc<Self> {
+        Self::builder()
+            .failing(FailingCall::NonterminalPage)
+            .build()
+    }
+
     /// Ports whose operation read *and* abandonment write each sleep for `delay`.
     /// Pass a delay far longer than the caller's own budget: the caller must be
     /// what ends the call, not the store. Stalling both is what separates a caller
@@ -574,6 +718,28 @@ impl TestStores {
             .stalling_mark_running(admit)
             .failing(FailingCall::MarkRunning)
             .stalling_mark_abandoned(abandon)
+            .build()
+    }
+
+    /// Ports whose `mark_running` fails permanently *and* whose abandonment
+    /// write fails, so a delivery that decides to give up cannot terminalize the
+    /// operation it is giving up on.
+    #[must_use]
+    pub fn failing_running_and_abandonment() -> Arc<Self> {
+        Self::builder()
+            .failing(FailingCall::MarkRunning)
+            .failing(FailingCall::MarkAbandoned)
+            .build()
+    }
+
+    /// [`Self::failing_item_success`] with the driver text a disclosure test
+    /// chooses, so the assertions are about values that must never be written
+    /// anywhere rather than about a recognizable test string.
+    #[must_use]
+    pub fn failing_item_success_saying(text: &'static str) -> Arc<Self> {
+        Self::builder()
+            .failing(FailingCall::MarkItemSucceeded)
+            .with_injected_cause(text)
             .build()
     }
 
@@ -882,7 +1048,7 @@ impl OperationStore for TestStores {
                 "this operation's status read is under failure injection",
             ));
         }
-        self.hooks.at(PausePoint::OperationRead).await;
+        self.hooks.at_operation(PausePoint::OperationRead, id).await;
         if let Some(delay) = self.hooks.stall_find_by_id {
             tokio::time::sleep(delay).await;
         }
@@ -896,6 +1062,11 @@ impl OperationStore for TestStores {
         after: Option<RecoveryCursor>,
         limit: u64,
     ) -> Result<Vec<RecoveryCursor>, ScopeError> {
+        if self.hooks.fails(FailingCall::NonterminalPage) {
+            return Err(ScopeError::Invalid(
+                "this recovery page read is under failure injection",
+            ));
+        }
         self.inner.nonterminal_page(tx, scope, after, limit).await
     }
 
@@ -983,6 +1154,15 @@ impl OperationStore for TestStores {
         if let Some(delay) = self.hooks.stall_mark_abandoned {
             tokio::time::sleep(delay).await;
         }
+        if self.hooks.fails(FailingCall::MarkAbandoned) {
+            return Err(ScopeError::Db(sea_orm::DbErr::Query(
+                sea_orm::RuntimeErr::Internal(
+                    self.hooks
+                        .cause("(code: 5) database is locked: abandonment failure injection")
+                        .to_owned(),
+                ),
+            )));
+        }
         self.inner.mark_abandoned(tx, scope, id, now).await
     }
 
@@ -997,7 +1177,9 @@ impl OperationStore for TestStores {
         if self.hooks.fails(FailingCall::MarkItemSucceeded) {
             return Err(ScopeError::Db(sea_orm::DbErr::Query(
                 sea_orm::RuntimeErr::Internal(
-                    "(code: 5) database is locked: item success failure injection".to_owned(),
+                    self.hooks
+                        .cause("(code: 5) database is locked: item success failure injection")
+                        .to_owned(),
                 ),
             )));
         }

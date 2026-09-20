@@ -1805,6 +1805,13 @@ async fn a_blocked_deletion_puts_the_dependant_count_on_its_span_and_no_identiti
 /// too, so the series does not depend on which check fired.
 #[tokio::test]
 async fn an_oversized_deletion_batch_is_refused_before_it_reads_and_counted_as_a_deletion() {
+    // The exporter is process-wide and the neighbouring tests call
+    // `reset_metrics()`, which zeroes the baseline this one reads before the
+    // refusal and compares against after it. Without the lock a concurrent
+    // reset lands between the two reads and the delta is off by whatever the
+    // reset dropped.
+    let _serial = SERIAL.lock().await;
+
     use types_registry::config::TypesRegistryConfig;
     use types_registry::domain::admission::NullDispatch;
     use types_registry::domain::policy::RegistrationPolicy;
@@ -1892,6 +1899,11 @@ async fn an_oversized_deletion_batch_is_refused_before_it_reads_and_counted_as_a
 /// would have passed the whole suite.
 #[tokio::test]
 async fn the_delivery_outcome_labels_are_exactly_retried_and_dead_lettered() {
+    // Same shared exporter, same reason: the label vocabulary below is read off
+    // the export, and a neighbour's `reset_metrics()` between the increments
+    // and the read would empty it.
+    let _serial = SERIAL.lock().await;
+
     use types_registry::domain::ports::metrics::DeliveryOutcome;
 
     const NAME: &str = "types_registry_admission_deliveries_total";

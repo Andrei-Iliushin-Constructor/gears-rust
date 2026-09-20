@@ -108,3 +108,36 @@ fn a_query_failure_is_retried_and_left_to_the_delivery_budget() {
         "a query failure is bounded by worker.max_delivery_attempts, not by this classifier",
     );
 }
+
+/// The narrowing this classifier makes inside `DbError::Lock`. A lock failure
+/// that reached the engine, the wire, or another holder is a redelivery
+/// candidate; one that reports this process's own configuration, or the release
+/// of a lock it never took, is not.
+#[test]
+fn a_contended_lock_is_retried_but_a_misconfigured_one_is_not() {
+    use toolkit_db::advisory_locks::DbLockError;
+
+    assert!(
+        database_failure_may_clear(&DbError::Lock(DbLockError::AlreadyHeld {
+            lock_name: "types_registry__entity_write_order".to_owned(),
+        })),
+        "another holder releases; that is the whole premise of an advisory lock",
+    );
+    assert!(
+        database_failure_may_clear(&DbError::Lock(DbLockError::UnexpectedDatabaseResult {
+            message: "expected one row".to_owned(),
+        })),
+        "an unexpected result is the engine answering oddly, not a decided refusal",
+    );
+
+    assert!(
+        !database_failure_may_clear(&DbError::Lock(DbLockError::InvalidConfig {
+            message: "keepalive must be positive".to_owned(),
+        })),
+        "a redelivery reads the same lock configuration and is refused the same way",
+    );
+    assert!(
+        !database_failure_may_clear(&DbError::Lock(DbLockError::NotHeld)),
+        "releasing a lock this process never took is a bug here, not a transient state",
+    );
+}

@@ -2413,3 +2413,48 @@ async fn every_mutation_receipt_refuses_to_be_cached() {
     assert_eq!(single.status, StatusCode::ACCEPTED, "{:?}", single.body);
     assert_eq!(single.cache_control.as_deref(), Some("no-store"));
 }
+
+/// The polling response refuses to be cached too, which is the other half of
+/// the receipt rule.
+///
+/// `GET /v2/operations/{id}` is mutable state under a stable URL: a client polls
+/// the same path while `status` moves `pending` → `running` → `completed` and the
+/// item outcomes appear underneath it. A cache that keeps one answer hands back
+/// progress that has already advanced — a poller that never terminates, or one
+/// that reports a candidate as undecided after it failed. The document also
+/// names one caller's operation and its per-candidate errors, so a shared cache
+/// would disclose it to the next reader of the same URL.
+///
+/// `router_with_db` admits inline, so the poll below is the terminal document
+/// rather than a `pending`/`running` one. That is the harder case for the header
+/// anyway — a completed operation is the answer a cache would most plausibly
+/// consider stable — and the status is asserted so the claim stays honest if
+/// that wiring ever changes.
+#[tokio::test]
+async fn the_operation_polling_response_refuses_to_be_cached() {
+    let router = router_with_db().await;
+
+    let accepted = call(&router, submit(Some("poll-cache"), &one_candidate(CF_TYPE))).await;
+    assert_eq!(accepted.status, StatusCode::ACCEPTED, "{:?}", accepted.body);
+    let operation_id = accepted.body["operation_id"]
+        .as_str()
+        .expect("a receipt carries an operation_id")
+        .to_owned();
+
+    let polled = call(&router, get(&format!("{V2}/operations/{operation_id}"))).await;
+    assert_eq!(polled.status, StatusCode::OK, "{:?}", polled.body);
+    assert_eq!(
+        polled.body["status"],
+        json!("completed"),
+        "{:?}",
+        polled.body,
+    );
+    assert_eq!(
+        polled.cache_control.as_deref(),
+        Some("no-store"),
+        "a terminal operation is still one caller's document — it names that \
+         caller's operation and its per-candidate errors — so no cache, shared \
+         or private, may retain it for reuse: {:?}",
+        polled.body,
+    );
+}

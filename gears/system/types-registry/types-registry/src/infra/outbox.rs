@@ -6,9 +6,12 @@
 //!
 //! Candidate refusals (including missing dependencies) are stored on items and acked.
 //! Retries block only their partition's cursor (see [`PARTITIONS`]). Permanent
-//! system failures are dead-lettered immediately; transient failures exhaust
-//! `worker.max_delivery_attempts` first. Terminalizing as `admission_abandoned`
-//! gives callers a readable outcome and prevents recovery on every boot.
+//! system failures are dead-lettered as soon as the operation has been
+//! terminalized; transient failures exhaust `worker.max_delivery_attempts`
+//! first. Terminalizing as `admission_abandoned` gives callers a readable
+//! outcome and prevents recovery on every boot — and the dead letter waits for
+//! it, because a rejected message whose operation is still `pending` leaves no
+//! queued work and nothing but the next boot's scan to resume it.
 //!
 //! Deliveries cut short by the lease timeout increment `attempts` without recording
 //! an outcome, so the handler cannot count them itself. Once `attempts` reaches
@@ -61,6 +64,20 @@ const PARTITIONS: u16 = 8;
 fn partition(operation_id: Uuid) -> u32 {
     let bytes = operation_id.as_bytes();
     u32::from(u16::from_be_bytes([bytes[14], bytes[15]]) % PARTITIONS)
+}
+
+/// The partition an operation's message is routed to.
+///
+/// Public for the reason [`QUEUE`] is: proving that two pipelines cannot admit
+/// one operation twice requires making the *second* pipeline attempt the exact
+/// message the first is holding, and the only way to ask a pipeline to look at
+/// a partition is `Outbox::flush_partition`, which takes the partition rather
+/// than the operation. Leaving a test to recompute the routing would put a second
+/// copy of [`partition`] and [`PARTITIONS`] beside this one, which is the copy
+/// that silently stops matching.
+#[must_use]
+pub fn partition_of(operation_id: Uuid) -> u32 {
+    partition(operation_id)
 }
 
 /// The message's declared type. Printable ASCII, as the outbox requires.
@@ -324,18 +341,20 @@ impl AdmissionHandler {
                     ServiceError::Worker(error) => DeliveryFailure::Admission(error.code()),
                     _ => DeliveryFailure::ServiceFailure,
                 };
-                // The cause goes to the operator log and never into the
-                // dead-letter payload: a driver error can carry SQL, credentials
-                // or document content, and the payload is read back over REST.
-                // Without this the arms above collapse into one `error_code` and
-                // an abandoned operation leaves no record of why.
+                // The failure's *kind* goes to the operator log; its rendered
+                // text goes nowhere. A driver error can carry SQL, credentials
+                // or document content, and both the dead-letter payload (read
+                // back over REST) and the log are surfaces that must stay free
+                // of it. Without the kind the arms above collapse into one
+                // `error_code` and an abandoned operation leaves no record of
+                // which subsystem failed.
                 self.abandon(
                     operation_id,
                     attempts,
                     now,
                     deadline,
                     code,
-                    Some(error.to_string()),
+                    Some(error.cause_kind()),
                 )
                 .await
             }
@@ -370,6 +389,11 @@ impl AdmissionHandler {
     /// `MessageResult::Retry` here would put the next delivery back into this same
     /// branch, so a status read that keeps failing would hold its partition
     /// forever and drive `attempts` past the `i16` the outbox stores it in.
+    ///
+    /// [`Self::abandon`] can answer `Retry` when its write fails, and cannot do so
+    /// from here: this branch is entered only once `retries_taken(attempts)` has
+    /// reached `max_attempts`, which is exactly when `may_retry` is `false`. The
+    /// guarantee is arithmetic rather than a second check.
     ///
     /// Terminal also has to mean *returning*. `LeasedStrategy` runs the handler
     /// under `timeout_at` and converts a dropped future into `Retry`, so an await
@@ -445,8 +469,35 @@ impl AdmissionHandler {
         MessageResult::Retry
     }
 
-    /// Dead-letter and terminalize so `GET /operations/{id}` shows abandonment
-    /// and boot recovery does not re-enqueue the operation.
+    /// Terminalize so `GET /operations/{id}` shows abandonment and boot recovery
+    /// does not re-enqueue the operation — then end the message, or ask for one
+    /// more delivery if that write did not land.
+    ///
+    /// The order is the point. Terminalizing and rejecting are two writes to two
+    /// stores, and rejecting first — or rejecting regardless — produces the one
+    /// state nothing can resolve: the message dead-lettered, so no queued work
+    /// is left, while the operation is still `pending`/`running`, so no caller
+    /// polling it learns anything and no partition is waiting on it. Only the
+    /// next process start would find it, through the boot recovery scan.
+    ///
+    /// So `Reject` is conditional on the write. When it fails and the delivery
+    /// budget still allows one, the honest answer is `Retry`: the durable
+    /// operation row is unchanged and a redelivery re-attempts the same
+    /// abandonment, which is a live path rather than a scan at the next boot.
+    ///
+    /// It has to stay bounded, and that is what `may_retry` is doing here. A
+    /// terminalization that never succeeds would otherwise hold its partition
+    /// forever and drive `attempts` past the `i16` the outbox stores it in. Once
+    /// the budget is spent the dead letter stands with the operation non-terminal
+    /// — strictly worse than terminalizing, strictly better than an unbounded
+    /// loop, and recoverable at the next start.
+    ///
+    /// `cause_kind` is one word from [`ServiceError::cause_kind`]'s allowlist,
+    /// never a rendered error: a driver's `Display` can carry SQL, credentials or
+    /// document content, and a log is an information-disclosure surface like a
+    /// response body (PLID-53.02). It is still emitted because `error_code` alone
+    /// cannot separate the four failures behind `admission_service_failure`, and
+    /// an abandoned operation leaves no other record of which one it was.
     async fn abandon(
         &self,
         operation_id: Uuid,
@@ -454,70 +505,128 @@ impl AdmissionHandler {
         now: time::OffsetDateTime,
         deadline: tokio::time::Instant,
         failure: DeliveryFailure,
-        cause: Option<String>,
+        cause_kind: Option<&'static str>,
     ) -> MessageResult {
         let error_code = failure.as_str();
-        // Infrastructure errors can contain connection details or row content.
-        // Use the same stable reason for the operator log and dead letter.
+        // Absent when the caller has no error to attribute — a spent budget is
+        // not a failure with a cause.
+        let cause_kind = cause_kind.unwrap_or(NO_CAUSE);
+        let terminalized = self
+            .terminalize_abandoned(operation_id, now, deadline, error_code)
+            .await;
+
+        if let Terminalization::Failed(write) = terminalized
+            && self.may_retry(attempts)
+        {
+            warn!(
+                %operation_id,
+                attempts,
+                max_attempts = self.max_attempts,
+                error_code,
+                cause_kind,
+                abandonment = write,
+                "types_registry could not terminalize an abandoned admission; the message \
+                 will be redelivered rather than dead-lettered while the operation is \
+                 non-terminal"
+            );
+            self.registry
+                .metrics()
+                .admission_delivery(DeliveryOutcome::Retried);
+            return MessageResult::Retry;
+        }
+
+        // Infrastructure errors can contain connection details or row content,
+        // and REST reads this payload back on `GET /operations/{id}`. The
+        // dead-letter reason therefore carries the same stable codes the log
+        // does and nothing else — no `cause_kind` either, which is a log field
+        // about this process rather than an answer to a caller.
         let reason = serde_json::json!({
             "reason": AdmissionFailureReason::AdmissionAbandoned.as_str(),
             "error_code": error_code,
             "operation_id": operation_id,
         })
         .to_string();
-        // `cause` is the one field that does not go into `reason`: it carries the
-        // driver's own text, which the dead-letter payload must stay free of
-        // because REST reads that payload back. Empty when the caller has no
-        // error to attribute — a spent budget is not a failure with a cause.
-        let cause = cause.unwrap_or_default();
         error!(
             %operation_id,
             attempts,
             max_attempts = self.max_attempts,
             error_code,
-            cause = %cause,
+            cause_kind,
+            abandonment = terminalized.as_str(),
             "types_registry abandoned an admission; the message is dead-lettered"
         );
         self.registry
             .metrics()
             .admission_delivery(DeliveryOutcome::DeadLettered);
-        self.terminalize_abandoned(operation_id, now, deadline, error_code)
-            .await;
         MessageResult::Reject(reason)
     }
 
-    /// Terminalize an abandoned operation, best effort, stopping at `deadline`.
+    /// Terminalize an abandoned operation, stopping at `deadline`, and report
+    /// whether the write landed.
     ///
-    /// The dead-letter stands either way — a failure here only means the operation
-    /// stays non-terminal until boot recovery re-enqueues it. Bounded for the same
-    /// reason the status read is: a write that outlives the lease is dropped by
-    /// `timeout_at` and returns as `Retry`, undoing the dead-letter its caller
-    /// exists to produce.
+    /// Reporting rather than only logging is what lets [`Self::abandon`] make the
+    /// message's fate follow the operation's: this used to return `()` and its
+    /// caller rejected regardless, which dead-lettered the message while the
+    /// operation stayed non-terminal.
+    ///
+    /// Bounded for the same reason the status read is: a write that outlives the
+    /// lease is dropped by `timeout_at` and converted back into a retry by the
+    /// strategy, which is not a decision this handler made.
+    ///
+    /// It logs nothing itself. The caller emits one event that states the whole
+    /// decision — redelivered or dead-lettered — rather than two that have to be
+    /// read together to find out which happened.
     async fn terminalize_abandoned(
         &self,
         operation_id: Uuid,
         now: time::OffsetDateTime,
         deadline: tokio::time::Instant,
         error_code: &'static str,
-    ) {
+    ) -> Terminalization {
         let written = tokio::time::timeout_at(
             deadline,
             self.registry.abandon(operation_id, now, error_code),
         )
         .await;
-        let failure = match &written {
-            Ok(Ok(())) => return,
-            Ok(Err(_)) => "abandonment_write_failed",
-            Err(_) => "abandonment_write_timeout",
-        };
-        error!(
-            %operation_id,
-            error = %failure,
-            "types_registry could not terminalize an abandoned operation; it stays \
-             non-terminal until the next recovery scan"
-        );
+        match written {
+            Ok(Ok(())) => Terminalization::Written,
+            Ok(Err(_)) => Terminalization::Failed("abandonment_write_failed"),
+            Err(_) => Terminalization::Failed("abandonment_write_timeout"),
+        }
     }
 }
+
+/// Whether the abandonment write landed, as one log field.
+///
+/// A type rather than a `bool` because the failing side carries *which* failure
+/// it was, and because "the operation is terminal" and "the operation is still
+/// `pending` with no queued message" are the two states an operator most needs
+/// told apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Terminalization {
+    /// The operation is terminal: a caller polling it sees the abandonment and
+    /// boot recovery leaves it alone.
+    Written,
+    /// The write failed or ran out of lease, naming which. The operation is
+    /// still `pending`/`running`.
+    Failed(&'static str),
+}
+
+impl Terminalization {
+    /// The log value. Safe by construction: every string here is a literal in
+    /// this module, never anything the database or a document said.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Written => "written",
+            Self::Failed(failure) => failure,
+        }
+    }
+}
+
+/// The `cause_kind` of an abandonment with no failure behind it — a spent
+/// delivery budget or an admission cut off at its deadline. Named rather than
+/// empty so the log field is always present and always one of a fixed set.
+const NO_CAUSE: &str = "none";
 
 /// When database work must stop, given the lease left when the delivery began.
 ///
@@ -656,9 +765,11 @@ impl LeasedHandler for AdmissionHandler {
 /// `low_latency` avoids pacing bursts while consumers await admission in `init()`.
 ///
 /// # Errors
-/// [`StartError`] for outbox startup, for a dispatch that is already bound to a
-/// running pipeline, or for a failed recovery scan. On any of them the handle
-/// this function built is dropped, which stops the pipeline it had started.
+/// [`StartError`] for outbox startup, for a failed recovery scan, or for a
+/// dispatch that is already bound to a running pipeline. On any of them the
+/// handle this function built is dropped, which stops the pipeline it had
+/// started — and, because the binding is taken last, only the start that
+/// returns `Ok` has consumed it.
 pub async fn start(
     db: Db,
     registry: &Arc<RegistryService>,
@@ -684,8 +795,16 @@ pub async fn start(
         .lease(lease_config(registry.operation_timeout()))
         .start()
         .await?;
-    dispatch.bind(handle.outbox())?;
+    // Recover before binding, not after. Recovery does not need the binding —
+    // it enqueues into `handle.outbox()` directly, precisely because the
+    // registry is not published yet — and the binding is a `OnceLock`, so
+    // taking it before a step that can still fail spends it on a start that
+    // never completes. The handle is then dropped, its pipeline stopped, and
+    // every later start in this process answers `AlreadyBound`: a claim that a
+    // pipeline is running when none is, and one failed recovery scan that only
+    // a process restart could clear.
     recover_nonterminal_operations(&db, registry, handle.outbox()).await?;
+    dispatch.bind(handle.outbox())?;
     Ok(handle)
 }
 

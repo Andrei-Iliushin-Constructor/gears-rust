@@ -208,6 +208,74 @@ pub fn metrics() -> std::sync::Arc<dyn types_registry::domain::ports::metrics::A
     std::sync::Arc::new(types_registry::domain::ports::metrics::NoopMetrics)
 }
 
+/// Instruments that record the delivery outcomes the outbox handler counts.
+///
+/// The one instrument a delivery test has to read: `retried` and
+/// `dead_lettered` are what a stall alert distinguishes, and two of the
+/// handler's branches differ only in which of them they emit — a `Retry` that
+/// counted `dead_lettered` would still return the right `MessageResult` and
+/// still lie to the alert. Everything else forwards to nothing, because the
+/// per-candidate and duration instruments have their own contract tests over a
+/// real exporter in `observability_test`.
+#[derive(Debug, Default)]
+pub struct RecordingDeliveryMetrics {
+    outcomes: parking_lot::Mutex<Vec<types_registry::domain::ports::metrics::DeliveryOutcome>>,
+}
+
+impl RecordingDeliveryMetrics {
+    /// Every delivery outcome counted so far, in order.
+    #[must_use]
+    pub fn outcomes(&self) -> Vec<types_registry::domain::ports::metrics::DeliveryOutcome> {
+        self.outcomes.lock().clone()
+    }
+}
+
+impl types_registry::domain::ports::metrics::AdmissionMetrics for RecordingDeliveryMetrics {
+    fn unchanged_probe(&self, _hit: bool) {}
+
+    fn candidate_terminalized(
+        &self,
+        _status: types_registry::domain::ports::metrics::TerminalStatus,
+        _labels: types_registry::domain::ports::metrics::PassLabels,
+    ) {
+    }
+
+    fn refused(
+        &self,
+        _stage: types_registry::domain::ports::metrics::RefusalStage,
+        _reason: &'static str,
+        _labels: types_registry::domain::ports::metrics::PassLabels,
+    ) {
+    }
+
+    fn compat_verdict(
+        &self,
+        _verdict: gts::CompatibilityVerdict,
+        _forced: bool,
+        _labels: types_registry::domain::ports::metrics::PassLabels,
+    ) {
+    }
+
+    fn revalidation_retried(
+        &self,
+        _drift: &types_registry::domain::admission::vector::VectorDrift,
+    ) {
+    }
+
+    fn observe_activation_write_set(
+        &self,
+        _refreshed: usize,
+        _labels: types_registry::domain::ports::metrics::PassLabels,
+    ) {
+    }
+
+    fn observe_operation_duration(&self, _elapsed: std::time::Duration) {}
+
+    fn admission_delivery(&self, outcome: types_registry::domain::ports::metrics::DeliveryOutcome) {
+        self.outcomes.lock().push(outcome);
+    }
+}
+
 pub fn limits() -> types_registry::config::Limits {
     types_registry::config::Limits::default()
 }

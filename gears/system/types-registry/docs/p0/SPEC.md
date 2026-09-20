@@ -388,9 +388,19 @@ Only system failures and unusable internal messages enter dead letters. On perma
 failure or exhausted recovery, mark unfinished items `failed` with `admission_abandoned`
 and complete the operation, preserving prior terminal outcomes. Store a safe `error_code`
 and `operation_id` in both the client-visible error and the dead-letter reason; use that
-operation ID in logs. Do not serialize raw infrastructure errors. Failure to write the
-terminal state leaves the operation eligible for startup recovery. No automatic dead-letter
-replay restarts a completed operation.
+operation ID in logs. Do not serialize raw infrastructure errors, and do not log them
+either: logs carry an allowlisted `cause_kind` naming the failing subsystem, never a
+driver's or document's own text. No automatic dead-letter replay restarts a completed
+operation.
+
+Terminalize before dead-lettering, and let the write decide the message's fate. A message
+rejected while its operation is still `pending`/`running` leaves no queued work, so nothing
+but the next startup scan can resume it. If the terminal write fails while delivery
+attempts remain, redeliver instead — the operation row is unchanged, so the next delivery
+re-attempts the same abandonment. Once `max_delivery_attempts` is spent, dead-letter
+regardless: an unbounded retry would hold the partition and overflow the stored attempt
+count. Only on that last path does the operation stay non-terminal, and it remains eligible
+for startup recovery.
 
 The default delivery policy allows eight admission attempts. Processor backoff starts at
 100 ms, doubles to a 10 s cap, and is local/interruption-sensitive, not a persisted retry

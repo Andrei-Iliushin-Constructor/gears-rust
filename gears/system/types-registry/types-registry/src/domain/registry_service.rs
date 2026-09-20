@@ -157,6 +157,37 @@ pub enum ServiceError {
     UnresolvedReference { gts_uuid: Uuid },
 }
 
+impl ServiceError {
+    /// The failure's kind, as one word from a fixed allowlist.
+    ///
+    /// The whole diagnostic a log may carry about *why* an admission was
+    /// abandoned. Never `Display`: [`Self::Storage`] and [`Self::Db`] render the
+    /// driver's own text, which can carry SQL, connection strings, credentials
+    /// or row content, and [`Self::CorruptDocument`] carries a stored document
+    /// verbatim. A log is an information-disclosure surface like a response body
+    /// (PLID-53.02), so nothing derived from the cause's text crosses into one.
+    ///
+    /// It is still worth emitting, because `error_code` alone cannot separate
+    /// the failures that share it: `admission_service_failure` covers four
+    /// variants, and an abandoned operation leaves no other record of which one
+    /// it was. The variant name is fixed vocabulary — bounded, safe to put on a
+    /// log field, and enough to route an operator to the right subsystem.
+    ///
+    /// Exhaustive, so a variant added later is a compile error here rather than
+    /// a silently missing or, worse, a wildcard-rendered cause.
+    #[must_use]
+    pub const fn cause_kind(&self) -> &'static str {
+        match self {
+            Self::Acceptance(_) => "acceptance",
+            Self::Worker(_) => "worker",
+            Self::Storage(_) => "storage",
+            Self::Db(_) => "database",
+            Self::CorruptDocument(_) => "corrupt_document",
+            Self::UnresolvedReference { .. } => "unresolved_reference",
+        }
+    }
+}
+
 /// How accepted operations are driven after their acceptance transaction commits.
 #[domain_model]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
