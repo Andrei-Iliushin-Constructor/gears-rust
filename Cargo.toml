@@ -428,7 +428,7 @@ serde_json = "1.0"
 # instead of inheriting. The lockfile already carries both — 0.8.23 and 1.1.2 —
 # so the duplication is upstream's own resolution and not something this adds.
 toml = "0.8"
-serde-saphyr = "0.0.22"
+serde-saphyr = "1.3.0"
 humantime-serde = "1.1"
 secrecy = { version = "0.10", features = ["serde"] }
 serde_urlencoded = "0.7"
@@ -808,9 +808,9 @@ jsonschema = { version = "0.40", default-features = false }
 walkdir = "2.5"
 
 # GTS library — published on crates.io.
-gts-id = "0.12.0"
-gts = "0.12.0"
-gts-macros = "0.12.0"
+gts-id = "0.12.1"
+gts = "0.12.1"
+gts-macros = "0.12.1"
 
 license-resolver-sdk = { package = "cf-gears-license-resolver-sdk", version = "0.1.3", path = "gears/system/license-resolver/license-resolver-sdk" }
 license-resolver = { package = "cf-gears-license-resolver", version = "0.1.3", path = "gears/system/license-resolver/license-resolver" }
