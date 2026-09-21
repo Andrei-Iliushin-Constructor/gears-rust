@@ -13,7 +13,8 @@ use tokio_util::sync::CancellationToken;
 use crate::domain::error::DomainError;
 use crate::domain::ports::github::{
     ActionsListing, CommitDetail, CommitListing, DeclaredCounts, FetchOptions, GithubPort,
-    IssueDetail, IssueDetailWants, IssueListing, Listing, MetadataListing, PullDetail, PullListing,
+    IssueDetail, IssueDetailWants, IssueListing, ListCursor, Listing, MetadataListing, PullDetail,
+    PullListing, RepoRef,
 };
 use crate::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
@@ -1961,14 +1962,20 @@ impl GithubPort for GithubClient {
     /// so they belong to [`Self::refine_issue`].
     async fn list_issues(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        updated_after: Option<DateTime<Utc>>,
-        page1_etag: Option<&str>,
-        continue_from: Option<&str>,
+        repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         options: &FetchOptions,
     ) -> Result<IssueListing, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
+        let ListCursor {
+            updated_after,
+            page1_etag,
+            continue_from,
+        } = cursor;
         if !options.scope.objects.issues {
             return Ok(IssueListing::default());
         }
@@ -2052,13 +2059,16 @@ impl GithubPort for GithubClient {
 
     async fn refine_issue(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         number: i64,
         wants: IssueDetailWants,
         options: &FetchOptions,
     ) -> Result<IssueDetail, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
         let mut detail = IssueDetail {
             issue_number: number,
             ..IssueDetail::default()
@@ -2097,17 +2107,22 @@ impl GithubPort for GithubClient {
         Ok(detail)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn list_pull_requests(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        updated_after: Option<DateTime<Utc>>,
-        page1_etag: Option<&str>,
-        continue_from: Option<&str>,
+        repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         options: &FetchOptions,
     ) -> Result<PullListing, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
+        let ListCursor {
+            updated_after,
+            page1_etag,
+            continue_from,
+        } = cursor;
         if !options.scope.objects.pull_requests {
             return Ok(PullListing::default());
         }
@@ -2186,12 +2201,15 @@ impl GithubPort for GithubClient {
     /// review threads.
     async fn refine_pull_request(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         number: i64,
         options: &FetchOptions,
     ) -> Result<PullDetail, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
         let pull: GhPullRequest = self
             .get_json(&format!("/repos/{owner}/{name}/pulls/{number}"), options)
             .await?;
@@ -2280,17 +2298,22 @@ impl GithubPort for GithubClient {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn list_commits(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        updated_after: Option<DateTime<Utc>>,
-        page1_etag: Option<&str>,
-        continue_from: Option<&str>,
+        repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         options: &FetchOptions,
     ) -> Result<CommitListing, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
+        let ListCursor {
+            updated_after,
+            page1_etag,
+            continue_from,
+        } = cursor;
         if !options.scope.objects.commits {
             return Ok(CommitListing::default());
         }
@@ -2352,13 +2375,16 @@ impl GithubPort for GithubClient {
     /// when CI is in scope — its statuses and check runs.
     async fn refine_commit(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         sha: &str,
         with_ci: bool,
         options: &FetchOptions,
     ) -> Result<CommitDetail, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
         let detail: GhCommitDetail = self
             .get_json(&format!("/repos/{owner}/{name}/commits/{sha}"), options)
             .await?;
@@ -2414,11 +2440,14 @@ impl GithubPort for GithubClient {
     /// The cheap single-page list endpoints, each behind its own flag.
     async fn list_metadata(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         options: &FetchOptions,
     ) -> Result<MetadataListing, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
         let mut listing = MetadataListing::default();
 
         if options.scope.objects.labels {
@@ -2497,11 +2526,14 @@ impl GithubPort for GithubClient {
     /// [`Self::refine_workflow_run`].
     async fn list_actions(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         options: &FetchOptions,
     ) -> Result<ActionsListing, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
         if !options.scope.objects.github_actions {
             return Ok(ActionsListing::default());
         }
@@ -2534,12 +2566,15 @@ impl GithubPort for GithubClient {
 
     async fn refine_workflow_run(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         run_id: i64,
         options: &FetchOptions,
     ) -> Result<Vec<WorkflowJobRecord>, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
         let jobs = self
             .get_json_all_wrapped(
                 &format!(

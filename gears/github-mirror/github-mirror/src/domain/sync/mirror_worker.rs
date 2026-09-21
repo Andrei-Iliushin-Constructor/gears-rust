@@ -25,7 +25,7 @@ use super::verification::{CountGap, GapOutcome, pull_gaps};
 use super::worker::{Worker, WorkerContext};
 use crate::domain::error::DomainError;
 use crate::domain::ports::github::{
-    FetchOptions, GithubPort, IssueDetailWants, ListingCompleteness,
+    FetchOptions, GithubPort, IssueDetailWants, ListCursor, ListingCompleteness, RepoRef,
 };
 use crate::domain::repo::{
     CommitRecord, ContributorRecord, IssueRecord, PullRequestRecord, SyncWriter, WorkflowRunRecord,
@@ -96,6 +96,16 @@ impl RunState {
             .get()
             .copied()
             .ok_or_else(|| DomainError::internal("repository was not discovered before indexing"))
+    }
+
+    /// # Errors
+    /// As [`Self::repo_id`]: the repository must have been discovered.
+    pub fn repo_ref(&self) -> Result<RepoRef<'_>, DomainError> {
+        Ok(RepoRef {
+            owner: &self.owner,
+            name: &self.name,
+            repo_id: self.repo_id()?,
+        })
     }
 
     /// Which listings this run walked to their end.
@@ -361,12 +371,12 @@ impl MirrorWorker {
             let mut listing = self
                 .github
                 .list_issues(
-                    &run.owner,
-                    &run.name,
-                    repo_id,
-                    updated_after,
-                    start.page1_etag.as_deref(),
-                    continue_from.as_deref(),
+                    run.repo_ref()?,
+                    ListCursor {
+                        updated_after,
+                        page1_etag: start.page1_etag.as_deref(),
+                        continue_from: continue_from.as_deref(),
+                    },
                     &run.options,
                 )
                 .await?;
@@ -454,7 +464,7 @@ impl MirrorWorker {
         };
         let detail = self
             .github
-            .refine_issue(&run.owner, &run.name, repo_id, number, wants, &run.options)
+            .refine_issue(run.repo_ref()?, number, wants, &run.options)
             .await?;
         let (reactions, timeline) = (count(&detail.reactions), count(&detail.timeline));
         self.writer
@@ -484,12 +494,12 @@ impl MirrorWorker {
             let mut listing = self
                 .github
                 .list_pull_requests(
-                    &run.owner,
-                    &run.name,
-                    repo_id,
-                    updated_after,
-                    start.page1_etag.as_deref(),
-                    continue_from.as_deref(),
+                    run.repo_ref()?,
+                    ListCursor {
+                        updated_after,
+                        page1_etag: start.page1_etag.as_deref(),
+                        continue_from: continue_from.as_deref(),
+                    },
                     &run.options,
                 )
                 .await?;
@@ -575,7 +585,7 @@ impl MirrorWorker {
         let number = entity_number(task)?;
         let mut detail = self
             .github
-            .refine_pull_request(&run.owner, &run.name, repo_id, number, &run.options)
+            .refine_pull_request(run.repo_ref()?, number, &run.options)
             .await?;
         let gaps = pull_gaps(&detail);
         run.absorb_contributors(std::mem::take(&mut detail.contributors));
@@ -665,12 +675,12 @@ impl MirrorWorker {
             let mut listing = self
                 .github
                 .list_commits(
-                    &run.owner,
-                    &run.name,
-                    repo_id,
-                    updated_after,
-                    start.page1_etag.as_deref(),
-                    continue_from.as_deref(),
+                    run.repo_ref()?,
+                    ListCursor {
+                        updated_after,
+                        page1_etag: start.page1_etag.as_deref(),
+                        continue_from: continue_from.as_deref(),
+                    },
                     &run.options,
                 )
                 .await?;
@@ -735,7 +745,6 @@ impl MirrorWorker {
 
     async fn refine_commit(&self, task: &ExtractionTask) -> Result<(), DomainError> {
         let run = &self.run;
-        let repo_id = run.repo_id()?;
         let sha = task
             .entity_id
             .as_deref()
@@ -743,7 +752,7 @@ impl MirrorWorker {
         let with_ci = run.options.scope.collection.actions != CollectionMode::None;
         let detail = self
             .github
-            .refine_commit(&run.owner, &run.name, repo_id, sha, with_ci, &run.options)
+            .refine_commit(run.repo_ref()?, sha, with_ci, &run.options)
             .await?;
         let (files, statuses, checks) = (
             count(&detail.files),
@@ -763,10 +772,9 @@ impl MirrorWorker {
 
     async fn index_metadata(&self) -> Result<(), DomainError> {
         let run = &self.run;
-        let repo_id = run.repo_id()?;
         let listing = self
             .github
-            .list_metadata(&run.owner, &run.name, repo_id, &run.options)
+            .list_metadata(run.repo_ref()?, &run.options)
             .await?;
         run.mark_complete(&listing.complete);
         let (labels, milestones, releases, branches, tags) = (
@@ -791,10 +799,9 @@ impl MirrorWorker {
 
     async fn index_actions(&self, ctx: &WorkerContext) -> Result<(), DomainError> {
         let run = &self.run;
-        let repo_id = run.repo_id()?;
         let listing = self
             .github
-            .list_actions(&run.owner, &run.name, repo_id, &run.options)
+            .list_actions(run.repo_ref()?, &run.options)
             .await?;
 
         if run.options.scope.collection.actions != CollectionMode::None {
@@ -832,11 +839,10 @@ impl MirrorWorker {
 
     async fn refine_workflow_run(&self, task: &ExtractionTask) -> Result<(), DomainError> {
         let run = &self.run;
-        let repo_id = run.repo_id()?;
         let run_id = entity_number(task)?;
         let jobs = self
             .github
-            .refine_workflow_run(&run.owner, &run.name, repo_id, run_id, &run.options)
+            .refine_workflow_run(run.repo_ref()?, run_id, &run.options)
             .await?;
         let count = count(&jobs);
         self.writer

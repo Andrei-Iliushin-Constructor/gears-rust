@@ -11,8 +11,8 @@ use authz_resolver_sdk::{
 use github_mirror::domain::error::DomainError;
 use github_mirror::domain::ports::github::{
     ActionsListing, CommitDetail, CommitListing, DeclaredCounts, FetchOptions, FetchedRepository,
-    GithubPort, IssueDetail, IssueDetailWants, IssueListing, Listing, ListingCompleteness,
-    MetadataListing, PullDetail, PullListing,
+    GithubPort, IssueDetail, IssueDetailWants, IssueListing, ListCursor, Listing,
+    ListingCompleteness, MetadataListing, PullDetail, PullListing, RepoRef,
 };
 use github_mirror::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
@@ -146,17 +146,13 @@ impl GithubPort for FakeGithub {
         Ok(self.fixture()?.repository.clone())
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn list_issues(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
-        updated_after: Option<chrono::DateTime<chrono::Utc>>,
-        _page1_etag: Option<&str>,
-        _continue_from: Option<&str>,
+        _repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         _options: &FetchOptions,
     ) -> Result<IssueListing, DomainError> {
+        let ListCursor { updated_after, .. } = cursor;
         let f = self.fixture()?;
         Ok(IssueListing {
             complete: if updated_after.is_some() {
@@ -187,9 +183,7 @@ impl GithubPort for FakeGithub {
 
     async fn refine_issue(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
+        _repo: RepoRef<'_>,
         number: i64,
         wants: IssueDetailWants,
         _options: &FetchOptions,
@@ -218,15 +212,10 @@ impl GithubPort for FakeGithub {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn list_pull_requests(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
-        _updated_after: Option<chrono::DateTime<chrono::Utc>>,
-        _page1_etag: Option<&str>,
-        _continue_from: Option<&str>,
+        _repo: RepoRef<'_>,
+        _cursor: ListCursor<'_>,
         _options: &FetchOptions,
     ) -> Result<PullListing, DomainError> {
         let f = self.fixture()?;
@@ -247,9 +236,7 @@ impl GithubPort for FakeGithub {
 
     async fn refine_pull_request(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
+        _repo: RepoRef<'_>,
         number: i64,
         _options: &FetchOptions,
     ) -> Result<PullDetail, DomainError> {
@@ -291,17 +278,13 @@ impl GithubPort for FakeGithub {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn list_commits(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
-        updated_after: Option<chrono::DateTime<chrono::Utc>>,
-        _page1_etag: Option<&str>,
-        _continue_from: Option<&str>,
+        _repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         _options: &FetchOptions,
     ) -> Result<CommitListing, DomainError> {
+        let ListCursor { updated_after, .. } = cursor;
         let f = self.fixture()?;
         Ok(CommitListing {
             complete: if updated_after.is_some() {
@@ -326,9 +309,7 @@ impl GithubPort for FakeGithub {
 
     async fn refine_commit(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
+        _repo: RepoRef<'_>,
         sha: &str,
         with_ci: bool,
         _options: &FetchOptions,
@@ -371,9 +352,7 @@ impl GithubPort for FakeGithub {
 
     async fn list_metadata(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
+        _repo: RepoRef<'_>,
         _options: &FetchOptions,
     ) -> Result<MetadataListing, DomainError> {
         let f = self.fixture()?;
@@ -398,9 +377,7 @@ impl GithubPort for FakeGithub {
 
     async fn list_actions(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
+        _repo: RepoRef<'_>,
         _options: &FetchOptions,
     ) -> Result<ActionsListing, DomainError> {
         let f = self.fixture()?;
@@ -412,9 +389,7 @@ impl GithubPort for FakeGithub {
 
     async fn refine_workflow_run(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
+        _repo: RepoRef<'_>,
         run_id: i64,
         _options: &FetchOptions,
     ) -> Result<Vec<WorkflowJobRecord>, DomainError> {

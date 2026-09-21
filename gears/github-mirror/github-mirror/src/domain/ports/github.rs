@@ -299,6 +299,25 @@ pub struct FetchedRepository {
     pub issue_timeline: Vec<IssueTimelineEventRecord>,
 }
 
+/// The repository a port call is about: `owner/name` for the request path
+/// and GitHub's id for the rows the answer becomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepoRef<'a> {
+    pub owner: &'a str,
+    pub name: &'a str,
+    pub repo_id: i64,
+}
+
+/// Where a paged listing picks up: the bound below which entities are too
+/// old to fetch, the validator page one carried last time, and the page to
+/// continue from (`None` starts at page one).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListCursor<'a> {
+    pub updated_after: Option<DateTime<Utc>>,
+    pub page1_etag: Option<&'a str>,
+    pub continue_from: Option<&'a str>,
+}
+
 /// Outbound port to GitHub's REST API (implemented in `infra/github`).
 ///
 /// One method per sync task: the listings an Indexing task walks, and the
@@ -322,67 +341,46 @@ pub trait GithubPort: Send + Sync {
         options: &FetchOptions,
     ) -> Result<RepoRecord, DomainError>;
 
-    #[allow(clippy::too_many_arguments)]
     async fn list_issues(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        updated_after: Option<DateTime<Utc>>,
-        page1_etag: Option<&str>,
-        continue_from: Option<&str>,
+        repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         options: &FetchOptions,
     ) -> Result<IssueListing, DomainError>;
 
     async fn refine_issue(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         number: i64,
         wants: IssueDetailWants,
         options: &FetchOptions,
     ) -> Result<IssueDetail, DomainError>;
 
-    #[allow(clippy::too_many_arguments)]
     async fn list_pull_requests(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        updated_after: Option<DateTime<Utc>>,
-        page1_etag: Option<&str>,
-        continue_from: Option<&str>,
+        repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         options: &FetchOptions,
     ) -> Result<PullListing, DomainError>;
 
     async fn refine_pull_request(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         number: i64,
         options: &FetchOptions,
     ) -> Result<PullDetail, DomainError>;
 
-    #[allow(clippy::too_many_arguments)]
     async fn list_commits(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        updated_after: Option<DateTime<Utc>>,
-        page1_etag: Option<&str>,
-        continue_from: Option<&str>,
+        repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         options: &FetchOptions,
     ) -> Result<CommitListing, DomainError>;
 
     /// `with_ci` adds the commit's statuses and check runs.
     async fn refine_commit(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         sha: &str,
         with_ci: bool,
         options: &FetchOptions,
@@ -390,25 +388,19 @@ pub trait GithubPort: Send + Sync {
 
     async fn list_metadata(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         options: &FetchOptions,
     ) -> Result<MetadataListing, DomainError>;
 
     async fn list_actions(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         options: &FetchOptions,
     ) -> Result<ActionsListing, DomainError>;
 
     async fn refine_workflow_run(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         run_id: i64,
         options: &FetchOptions,
     ) -> Result<Vec<WorkflowJobRecord>, DomainError>;

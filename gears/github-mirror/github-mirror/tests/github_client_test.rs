@@ -3,7 +3,7 @@
 use github_mirror::domain::error::DomainError;
 use github_mirror::domain::ports::github::{
     CommitListing, FetchOptions, FetchedRepository, GithubPort, IssueDetailWants, IssueListing,
-    Listing, ListingCompleteness, PullListing,
+    ListCursor, Listing, ListingCompleteness, PullListing, RepoRef,
 };
 use github_mirror::domain::repo::ContributorRecord;
 use github_mirror::domain::scope::{CollectionMode, ScopeConfig};
@@ -488,12 +488,16 @@ async fn walk_issues(
     loop {
         let page = client
             .list_issues(
-                owner,
-                name,
-                repo_id,
-                updated_after,
-                page1_etag,
-                continue_from.as_deref(),
+                RepoRef {
+                    owner,
+                    name,
+                    repo_id,
+                },
+                ListCursor {
+                    updated_after,
+                    page1_etag,
+                    continue_from: continue_from.as_deref(),
+                },
                 options,
             )
             .await?;
@@ -529,12 +533,16 @@ async fn walk_pulls(
     loop {
         let page = client
             .list_pull_requests(
-                owner,
-                name,
-                repo_id,
-                updated_after,
-                page1_etag,
-                continue_from.as_deref(),
+                RepoRef {
+                    owner,
+                    name,
+                    repo_id,
+                },
+                ListCursor {
+                    updated_after,
+                    page1_etag,
+                    continue_from: continue_from.as_deref(),
+                },
                 options,
             )
             .await?;
@@ -568,12 +576,16 @@ async fn walk_commits(
     loop {
         let page = client
             .list_commits(
-                owner,
-                name,
-                repo_id,
-                updated_after,
-                page1_etag,
-                continue_from.as_deref(),
+                RepoRef {
+                    owner,
+                    name,
+                    repo_id,
+                },
+                ListCursor {
+                    updated_after,
+                    page1_etag,
+                    continue_from: continue_from.as_deref(),
+                },
                 options,
             )
             .await?;
@@ -608,8 +620,26 @@ async fn fetch_repository(
     let issues = walk_issues(client, owner, name, repo_id, None, None, options).await?;
     let pulls = walk_pulls(client, owner, name, repo_id, None, None, options).await?;
     let commits = walk_commits(client, owner, name, repo_id, None, None, options).await?;
-    let meta = client.list_metadata(owner, name, repo_id, options).await?;
-    let actions = client.list_actions(owner, name, repo_id, options).await?;
+    let meta = client
+        .list_metadata(
+            RepoRef {
+                owner,
+                name,
+                repo_id,
+            },
+            options,
+        )
+        .await?;
+    let actions = client
+        .list_actions(
+            RepoRef {
+                owner,
+                name,
+                repo_id,
+            },
+            options,
+        )
+        .await?;
 
     let mut complete = ListingCompleteness::none();
     for part in [
@@ -636,7 +666,16 @@ async fn fetch_repository(
             continue;
         }
         let detail = client
-            .refine_issue(owner, name, repo_id, issue.number, wants, options)
+            .refine_issue(
+                RepoRef {
+                    owner,
+                    name,
+                    repo_id,
+                },
+                issue.number,
+                wants,
+                options,
+            )
             .await?;
         issue_reactions.extend(detail.reactions);
         issue_timeline.extend(detail.timeline);
@@ -647,7 +686,15 @@ async fn fetch_repository(
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for pull in &pulls.pull_requests {
         let detail = client
-            .refine_pull_request(owner, name, repo_id, pull.number, options)
+            .refine_pull_request(
+                RepoRef {
+                    owner,
+                    name,
+                    repo_id,
+                },
+                pull.number,
+                options,
+            )
             .await?;
         pull_requests.push(detail.pull_request);
         reviews.extend(detail.reviews);
@@ -663,7 +710,16 @@ async fn fetch_repository(
         (Vec::new(), Vec::new(), Vec::new());
     for commit in &commits.commits {
         let detail = client
-            .refine_commit(owner, name, repo_id, &commit.sha, with_ci, options)
+            .refine_commit(
+                RepoRef {
+                    owner,
+                    name,
+                    repo_id,
+                },
+                &commit.sha,
+                with_ci,
+                options,
+            )
             .await?;
         commit_records.push(detail.commit);
         commit_files.extend(detail.files);
@@ -676,7 +732,15 @@ async fn fetch_repository(
         for run in &actions.workflow_runs {
             workflow_jobs.extend(
                 client
-                    .refine_workflow_run(owner, name, repo_id, run.id, options)
+                    .refine_workflow_run(
+                        RepoRef {
+                            owner,
+                            name,
+                            repo_id,
+                        },
+                        run.id,
+                        options,
+                    )
                     .await?,
             );
         }
@@ -1596,12 +1660,15 @@ async fn an_unchanged_first_page_stops_the_issue_sweep_before_page_two() {
 
     let skipped = client
         .list_issues(
-            "rust-lang",
-            "rust",
-            42,
-            None,
-            Some("W/\"issues-page-one\""),
-            None,
+            RepoRef {
+                owner: "rust-lang",
+                name: "rust",
+                repo_id: 42,
+            },
+            ListCursor {
+                page1_etag: Some("W/\"issues-page-one\""),
+                ..ListCursor::default()
+            },
             &options,
         )
         .await
@@ -1751,12 +1818,15 @@ async fn an_unchanged_first_page_stops_the_pull_and_commit_sweeps_too() {
 
     let pulls_again = client
         .list_pull_requests(
-            "rust-lang",
-            "rust",
-            42,
-            None,
-            Some("W/\"pulls-page-one\""),
-            None,
+            RepoRef {
+                owner: "rust-lang",
+                name: "rust",
+                repo_id: 42,
+            },
+            ListCursor {
+                page1_etag: Some("W/\"pulls-page-one\""),
+                ..ListCursor::default()
+            },
             &options,
         )
         .await
@@ -1771,12 +1841,15 @@ async fn an_unchanged_first_page_stops_the_pull_and_commit_sweeps_too() {
     );
     let commits_again = client
         .list_commits(
-            "rust-lang",
-            "rust",
-            42,
-            None,
-            Some("W/\"commits-page-one\""),
-            None,
+            RepoRef {
+                owner: "rust-lang",
+                name: "rust",
+                repo_id: 42,
+            },
+            ListCursor {
+                page1_etag: Some("W/\"commits-page-one\""),
+                ..ListCursor::default()
+            },
             &options,
         )
         .await
