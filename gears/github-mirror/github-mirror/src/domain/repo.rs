@@ -1632,6 +1632,24 @@ pub trait EntityFingerprintRepository: Send + Sync {
         family: &str,
         entity_id: &str,
     ) -> Result<Option<EntityFingerprintRecord>, DomainError>;
+
+    /// The stored fingerprints of `family` for `entity_ids`, in no particular
+    /// order: one read for a whole listing page.
+    async fn find_many(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        family: &str,
+        entity_ids: &[String],
+    ) -> Result<Vec<EntityFingerprintRecord>, DomainError>;
+
+    /// A whole page of fingerprints in one statement per chunk.
+    async fn upsert_many(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        records: Vec<EntityFingerprintRecord>,
+    ) -> Result<(), DomainError>;
 }
 
 /// The storage side of one sync, one method per task.

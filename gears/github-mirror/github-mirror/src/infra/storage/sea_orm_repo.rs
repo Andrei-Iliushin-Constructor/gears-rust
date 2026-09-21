@@ -26,8 +26,8 @@ use sea_orm::sea_query::{Expr, LikeExpr};
 use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, Order};
 use toolkit_db::odata::sea_orm_filter::{LimitCfg, paginate_odata};
 use toolkit_db::secure::{
-    DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureOnConflict,
-    SecureUpdateExt,
+    DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureInsertManyExt,
+    SecureOnConflict, SecureUpdateExt,
 };
 use toolkit_db::{DBProvider, DbError};
 use toolkit_odata::{ODataQuery, Page, SortDir};
@@ -5456,6 +5456,8 @@ impl From<entity_fingerprints::Model> for EntityFingerprintRecord {
     }
 }
 
+const FINGERPRINT_UPSERT_CHUNK: usize = 500;
+
 #[async_trait]
 impl EntityFingerprintRepository for SeaOrmEntityFingerprintRepository {
     async fn upsert(
@@ -5491,6 +5493,73 @@ impl EntityFingerprintRepository for SeaOrmEntityFingerprintRepository {
             .map_err(map_scope_error)?;
 
         Ok(record)
+    }
+
+    async fn find_many(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        family: &str,
+        entity_ids: &[String],
+    ) -> Result<Vec<EntityFingerprintRecord>, DomainError> {
+        if entity_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.db.conn()?;
+        let rows = EntityFingerprintEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(entity_fingerprints::Column::RepoId.eq(repo_id))
+                    .add(entity_fingerprints::Column::Family.eq(family))
+                    .add(
+                        entity_fingerprints::Column::EntityId
+                            .is_in(entity_ids.iter().map(String::as_str)),
+                    ),
+            )
+            .all(&conn)
+            .await
+            .map_err(map_scope_error)?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn upsert_many(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        records: Vec<EntityFingerprintRecord>,
+    ) -> Result<(), DomainError> {
+        let conn = self.db.conn()?;
+        for chunk in records.chunks(FINGERPRINT_UPSERT_CHUNK) {
+            let on_conflict = SecureOnConflict::<EntityFingerprintEntity>::columns([
+                entity_fingerprints::Column::TenantId,
+                entity_fingerprints::Column::RepoId,
+                entity_fingerprints::Column::Family,
+                entity_fingerprints::Column::EntityId,
+            ])
+            .update_columns([
+                entity_fingerprints::Column::Fingerprint,
+                entity_fingerprints::Column::UpdatedAt,
+                entity_fingerprints::Column::NodeId,
+                entity_fingerprints::Column::ChildCountsHash,
+                entity_fingerprints::Column::LastRefinedAt,
+                entity_fingerprints::Column::RefinementStatus,
+            ])
+            .map_err(map_scope_error)?;
+            let models = chunk
+                .iter()
+                .map(|record| entity_fingerprint_active_model(tenant_id, record));
+            EntityFingerprintEntity::insert_many(models)
+                .secure()
+                .scope_unchecked(scope)
+                .map_err(map_scope_error)?
+                .on_conflict(on_conflict)
+                .exec(&conn)
+                .await
+                .map_err(map_scope_error)?;
+        }
+        Ok(())
     }
 
     async fn find(

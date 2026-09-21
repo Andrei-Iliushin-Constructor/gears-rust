@@ -250,30 +250,50 @@ impl MirrorWorker {
         }
     }
 
-    async fn needs_refinement(
+    async fn seed_refinements(
         &self,
+        ctx: &WorkerContext,
         entity: Entity,
-        entity_id: &str,
-        inputs: &GateInputs,
-    ) -> Result<bool, DomainError> {
+        candidates: Vec<RefinementCandidate>,
+    ) -> Result<(), DomainError> {
+        if candidates.is_empty() {
+            return Ok(());
+        }
         let run = &self.run;
-        let reason = self
+        let items: Vec<(&str, &GateInputs)> = candidates
+            .iter()
+            .map(|candidate| (candidate.entity_id.as_str(), &candidate.inputs))
+            .collect();
+        let reasons = self
             .gate
-            .evaluate(
+            .evaluate_page(
                 &run.scope,
                 run.tenant_id,
                 run.repo_id()?,
                 entity,
-                entity_id,
-                inputs,
+                &items,
                 Utc::now(),
                 run.options.force,
             )
             .await?;
-        if let Some(reason) = reason {
-            tracing::debug!(entity = %entity, entity_id, reason = reason.as_str(), "refining");
+        for (candidate, reason) in candidates.into_iter().zip(reasons) {
+            let Some(reason) = reason else {
+                continue;
+            };
+            tracing::debug!(
+                entity = %entity,
+                entity_id = %candidate.entity_id,
+                reason = reason.as_str(),
+                "refining"
+            );
+            self.seed(
+                ctx,
+                TaskKind::Refine(entity),
+                Some(candidate.entity_id),
+                candidate.priority,
+            );
         }
-        Ok(reason.is_some())
+        Ok(())
     }
 
     async fn mark_refined(&self, entity: Entity, entity_id: &str) -> Result<(), DomainError> {
@@ -404,6 +424,7 @@ impl MirrorWorker {
                 return Ok(());
             }
 
+            let mut candidates = Vec::new();
             for issue in &listing.issues {
                 if !swept.insert(issue.number) || is_stale(Some(&issue.updated_at), updated_after) {
                     continue;
@@ -412,25 +433,18 @@ impl MirrorWorker {
                 if !(collection.reactions.includes(open) || collection.timeline.includes(open)) {
                     continue;
                 }
-                let entity_id = issue.number.to_string();
-                if !self
-                    .needs_refinement(Entity::Issue, &entity_id, &issue_inputs(issue))
-                    .await?
-                {
-                    continue;
-                }
-                let priority = if open {
-                    TaskPriority::OPEN_ISSUE
-                } else {
-                    TaskPriority::CLOSED_ISSUE
-                };
-                self.seed(
-                    ctx,
-                    TaskKind::Refine(Entity::Issue),
-                    Some(entity_id),
-                    priority,
-                );
+                candidates.push(RefinementCandidate {
+                    entity_id: issue.number.to_string(),
+                    inputs: issue_inputs(issue),
+                    priority: if open {
+                        TaskPriority::OPEN_ISSUE
+                    } else {
+                        TaskPriority::CLOSED_ISSUE
+                    },
+                });
             }
+            self.seed_refinements(ctx, Entity::Issue, candidates)
+                .await?;
 
             run.absorb_contributors(std::mem::take(&mut listing.contributors));
             let (issues, comments, events) = (
@@ -527,29 +541,23 @@ impl MirrorWorker {
                 return Ok(());
             }
 
+            let mut candidates = Vec::new();
             for pull in &listing.pull_requests {
                 if !swept.insert(pull.number) || is_stale(Some(&pull.updated_at), updated_after) {
                     continue;
                 }
-                let entity_id = pull.number.to_string();
-                if !self
-                    .needs_refinement(Entity::PullRequest, &entity_id, &pull_inputs(pull))
-                    .await?
-                {
-                    continue;
-                }
-                let priority = if pull.state == "open" {
-                    TaskPriority::OPEN_PR
-                } else {
-                    TaskPriority::CLOSED_PR
-                };
-                self.seed(
-                    ctx,
-                    TaskKind::Refine(Entity::PullRequest),
-                    Some(entity_id),
-                    priority,
-                );
+                candidates.push(RefinementCandidate {
+                    entity_id: pull.number.to_string(),
+                    inputs: pull_inputs(pull),
+                    priority: if pull.state == "open" {
+                        TaskPriority::OPEN_PR
+                    } else {
+                        TaskPriority::CLOSED_PR
+                    },
+                });
             }
+            self.seed_refinements(ctx, Entity::PullRequest, candidates)
+                .await?;
 
             run.absorb_contributors(std::mem::take(&mut listing.contributors));
             let (pulls, comments) = (
@@ -708,25 +716,21 @@ impl MirrorWorker {
                 return Ok(());
             }
 
+            let mut candidates = Vec::new();
             for commit in &listing.commits {
                 if !swept.insert(commit.sha.clone())
                     || is_stale(commit.committed_at.as_deref(), updated_after)
                 {
                     continue;
                 }
-                if !self
-                    .needs_refinement(Entity::Commit, &commit.sha, &commit_inputs(commit, with_ci))
-                    .await?
-                {
-                    continue;
-                }
-                self.seed(
-                    ctx,
-                    TaskKind::Refine(Entity::Commit),
-                    Some(commit.sha.clone()),
-                    TaskPriority::NORMAL,
-                );
+                candidates.push(RefinementCandidate {
+                    entity_id: commit.sha.clone(),
+                    inputs: commit_inputs(commit, with_ci),
+                    priority: TaskPriority::NORMAL,
+                });
             }
+            self.seed_refinements(ctx, Entity::Commit, candidates)
+                .await?;
 
             run.absorb_contributors(std::mem::take(&mut listing.contributors));
             let (commits, comments) = (count(&listing.commits), count(&listing.commit_comments));
@@ -812,25 +816,17 @@ impl MirrorWorker {
             .await?;
 
         if run.options.scope.collection.actions != CollectionMode::None {
-            for workflow_run in &listing.workflow_runs {
-                let entity_id = workflow_run.id.to_string();
-                if !self
-                    .needs_refinement(
-                        Entity::WorkflowRun,
-                        &entity_id,
-                        &workflow_run_inputs(workflow_run),
-                    )
-                    .await?
-                {
-                    continue;
-                }
-                self.seed(
-                    ctx,
-                    TaskKind::Refine(Entity::WorkflowRun),
-                    Some(entity_id),
-                    TaskPriority::NORMAL,
-                );
-            }
+            let candidates = listing
+                .workflow_runs
+                .iter()
+                .map(|workflow_run| RefinementCandidate {
+                    entity_id: workflow_run.id.to_string(),
+                    inputs: workflow_run_inputs(workflow_run),
+                    priority: TaskPriority::NORMAL,
+                })
+                .collect();
+            self.seed_refinements(ctx, Entity::WorkflowRun, candidates)
+                .await?;
         }
 
         let (runs, deployments) = (count(&listing.workflow_runs), count(&listing.deployments));
@@ -883,6 +879,12 @@ impl Worker for MirrorWorker {
             },
         }
     }
+}
+
+struct RefinementCandidate {
+    entity_id: String,
+    inputs: GateInputs,
+    priority: TaskPriority,
 }
 
 fn issue_inputs(issue: &IssueRecord) -> GateInputs {

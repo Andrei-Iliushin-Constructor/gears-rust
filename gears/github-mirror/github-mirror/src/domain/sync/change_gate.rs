@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use aws_lc_rs::digest::{self, SHA256};
@@ -106,57 +107,55 @@ impl ChangeGate {
         Self { fingerprints }
     }
 
+    /// The gate for a whole listing page: one read of the page's stored
+    /// fingerprints and one write back, instead of a round trip per entity.
+    /// The answer keeps the order of `items`.
+    ///
     /// # Errors
-    /// `Database`/`Internal` when the fingerprint row cannot be read or
+    /// `Database`/`Internal` when the fingerprint rows cannot be read or
     /// written.
     #[allow(clippy::too_many_arguments)]
-    pub async fn evaluate(
+    pub async fn evaluate_page(
         &self,
         scope: &AccessScope,
         tenant_id: Uuid,
         repo_id: i64,
         entity: Entity,
-        entity_id: &str,
-        inputs: &GateInputs,
+        items: &[(&str, &GateInputs)],
         now: DateTime<Utc>,
         force: bool,
-    ) -> Result<Option<GateReason>, DomainError> {
-        let stored = self
+    ) -> Result<Vec<Option<GateReason>>, DomainError> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let entity_ids: Vec<String> = items.iter().map(|(id, _)| (*id).to_owned()).collect();
+        let mut stored: HashMap<String, EntityFingerprintRecord> = self
             .fingerprints
-            .find(scope, repo_id, entity.as_str(), entity_id)
-            .await?;
-        let reason = evaluate_refinement_gate(stored.as_ref(), inputs, entity, now, force);
+            .find_many(scope, repo_id, entity.as_str(), &entity_ids)
+            .await?
+            .into_iter()
+            .map(|record| (record.entity_id.clone(), record))
+            .collect();
 
-        let refinement_status = if reason.is_some() {
-            REFINEMENT_PENDING.to_owned()
-        } else {
-            stored.as_ref().map_or_else(
-                || REFINEMENT_PENDING.to_owned(),
-                |s| s.refinement_status.clone(),
-            )
-        };
-        let child_counts_hash = inputs
-            .child_counts_hash
-            .clone()
-            .or_else(|| stored.as_ref().and_then(|s| s.child_counts_hash.clone()));
+        let mut reasons = Vec::with_capacity(items.len());
+        let mut records = Vec::with_capacity(items.len());
+        for (entity_id, inputs) in items {
+            let stored = stored.remove(*entity_id);
+            let reason = evaluate_refinement_gate(stored.as_ref(), inputs, entity, now, force);
+            records.push(gated_record(
+                repo_id,
+                entity,
+                entity_id,
+                inputs,
+                stored,
+                reason.is_some(),
+            ));
+            reasons.push(reason);
+        }
         self.fingerprints
-            .upsert(
-                scope,
-                tenant_id,
-                EntityFingerprintRecord {
-                    repo_id,
-                    family: entity.as_str().to_owned(),
-                    entity_id: entity_id.to_owned(),
-                    fingerprint: inputs.fingerprint.clone(),
-                    updated_at: inputs.updated_at.clone(),
-                    node_id: inputs.node_id.clone(),
-                    child_counts_hash,
-                    last_refined_at: stored.and_then(|s| s.last_refined_at),
-                    refinement_status,
-                },
-            )
+            .upsert_many(scope, tenant_id, records)
             .await?;
-        Ok(reason)
+        Ok(reasons)
     }
 
     /// # Errors
@@ -190,6 +189,39 @@ impl ChangeGate {
             )
             .await?;
         Ok(())
+    }
+}
+
+fn gated_record(
+    repo_id: i64,
+    entity: Entity,
+    entity_id: &str,
+    inputs: &GateInputs,
+    stored: Option<EntityFingerprintRecord>,
+    refine: bool,
+) -> EntityFingerprintRecord {
+    let refinement_status = if refine {
+        REFINEMENT_PENDING.to_owned()
+    } else {
+        stored.as_ref().map_or_else(
+            || REFINEMENT_PENDING.to_owned(),
+            |s| s.refinement_status.clone(),
+        )
+    };
+    let child_counts_hash = inputs
+        .child_counts_hash
+        .clone()
+        .or_else(|| stored.as_ref().and_then(|s| s.child_counts_hash.clone()));
+    EntityFingerprintRecord {
+        repo_id,
+        family: entity.as_str().to_owned(),
+        entity_id: entity_id.to_owned(),
+        fingerprint: inputs.fingerprint.clone(),
+        updated_at: inputs.updated_at.clone(),
+        node_id: inputs.node_id.clone(),
+        child_counts_hash,
+        last_refined_at: stored.and_then(|s| s.last_refined_at),
+        refinement_status,
     }
 }
 

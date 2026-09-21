@@ -117,6 +117,11 @@ fn keyset_page<T>(
     ))
 }
 
+struct EnqueueScopes {
+    session: AccessScope,
+    repo_status: AccessScope,
+}
+
 fn stored_summary_json(session_id: Uuid, summary: &SyncSummary) -> Option<String> {
     match serde_json::to_string(summary) {
         Ok(json) => Some(json),
@@ -3184,10 +3189,23 @@ impl Service {
         status: RepoRunStatus,
         synced_at: Option<String>,
     ) -> Result<(), DomainError> {
-        let tenant_id = ctx.subject_tenant_id();
         let scope = self.repo_status_scope(ctx, actions::UPSERT).await?;
+        self.mark_repo_status_in(&scope, ctx, repo_full_name, session_id, status, synced_at)
+            .await
+    }
 
-        let previous = self.repo_sync_status.find(&scope, repo_full_name).await?;
+    async fn mark_repo_status_in(
+        &self,
+        scope: &AccessScope,
+        ctx: &SecurityContext,
+        repo_full_name: &str,
+        session_id: Uuid,
+        status: RepoRunStatus,
+        synced_at: Option<String>,
+    ) -> Result<(), DomainError> {
+        let tenant_id = ctx.subject_tenant_id();
+
+        let previous = self.repo_sync_status.find(scope, repo_full_name).await?;
         let repo_id = match previous.as_ref().and_then(|p| p.repo_id) {
             Some(id) => Some(id),
             None => self.stored_repo_id(ctx, repo_full_name).await,
@@ -3200,7 +3218,7 @@ impl Service {
             last_synced_at: synced_at.or_else(|| previous.and_then(|p| p.last_synced_at)),
         };
         self.repo_sync_status
-            .upsert(&scope, tenant_id, record)
+            .upsert(scope, tenant_id, record)
             .await?;
         Ok(())
     }
@@ -3291,6 +3309,7 @@ impl Service {
         force: bool,
     ) -> Result<Vec<Uuid>, DomainError> {
         let pending = self.repos_awaiting_resume(ctx, only).await?;
+        let scopes = self.enqueue_scopes(ctx).await?;
 
         let mut resumed = Vec::with_capacity(pending.len());
         for repo in pending {
@@ -3301,7 +3320,10 @@ impl Service {
                 );
                 continue;
             };
-            match self.enqueue_sync(ctx, owner, name, None, force, None).await {
+            match self
+                .enqueue_sync_scoped(ctx, &scopes, owner, name, None, force, None)
+                .await
+            {
                 Ok(session_id) => resumed.push(session_id),
                 Err(e) => tracing::warn!(
                     repository = %repo.repo_full_name,
@@ -3339,10 +3361,36 @@ impl Service {
         force: bool,
         since: Option<DateTime<Utc>>,
     ) -> Result<Uuid, DomainError> {
+        let scopes = self.enqueue_scopes(ctx).await?;
+        self.enqueue_sync_scoped(ctx, &scopes, owner, name, sync_scope, force, since)
+            .await
+    }
+
+    /// The two write scopes one sync request needs, resolved once so a resume
+    /// of hundreds of repositories asks the policy enforcer once, not per
+    /// repository.
+    async fn enqueue_scopes(&self, ctx: &SecurityContext) -> Result<EnqueueScopes, DomainError> {
+        Ok(EnqueueScopes {
+            session: self.session_scope(ctx, actions::UPSERT).await?,
+            repo_status: self.repo_status_scope(ctx, actions::UPSERT).await?,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn enqueue_sync_scoped(
+        &self,
+        ctx: &SecurityContext,
+        scopes: &EnqueueScopes,
+        owner: &str,
+        name: &str,
+        sync_scope: Option<ScopeConfig>,
+        force: bool,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<Uuid, DomainError> {
         let sync_scope = sync_scope.unwrap_or(self.config.scope);
         sync_scope.validate()?;
         let tenant_id = ctx.subject_tenant_id();
-        let scope = self.session_scope(ctx, actions::UPSERT).await?;
+        let scope = &scopes.session;
         let key = (tenant_id, format!("{owner}/{name}"));
         let id = Uuid::new_v4();
         {
@@ -3376,9 +3424,10 @@ impl Service {
         };
         let recorded = async {
             self.sync_sessions
-                .upsert(&scope, tenant_id, session.clone())
+                .upsert(scope, tenant_id, session.clone())
                 .await?;
-            self.mark_repo_status(
+            self.mark_repo_status_in(
+                &scopes.repo_status,
                 ctx,
                 &session.repo_full_name,
                 id,
@@ -3409,9 +3458,7 @@ impl Service {
             session.ended_at = Some(now_rfc3339());
             session.updated_at.clone_from(&session.ended_at);
             session.error = Some(reason.clone());
-            self.sync_sessions
-                .upsert(&scope, tenant_id, session)
-                .await?;
+            self.sync_sessions.upsert(scope, tenant_id, session).await?;
             return Err(DomainError::internal(reason));
         }
 
