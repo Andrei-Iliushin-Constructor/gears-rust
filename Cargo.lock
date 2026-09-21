@@ -2457,7 +2457,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-file-storage"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "async-trait",
