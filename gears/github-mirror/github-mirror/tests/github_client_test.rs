@@ -1866,6 +1866,19 @@ async fn an_unchanged_first_page_stops_the_pull_and_commit_sweeps_too() {
     commits_second.assert_calls_async(1).await;
 }
 
+/// Wait until `mock` has answered a request, so what follows cannot race the
+/// request that is still in flight. Returns as soon as the call is recorded;
+/// a mock that is never called fails the test rather than hanging.
+async fn wait_for_call(mock: &httpmock::Mock<'_>) {
+    for _ in 0..600 {
+        if mock.calls_async().await >= 1 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("the mock was never called, so nothing armed the state under test");
+}
+
 #[tokio::test]
 async fn a_rate_limit_seen_by_one_request_pauses_every_other_request() {
     let server = MockServer::start_async().await;
@@ -1897,7 +1910,7 @@ async fn a_rate_limit_seen_by_one_request_pauses_every_other_request() {
                 .await
         })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    wait_for_call(&limited).await;
     limited.delete_async().await;
     server
         .mock_async(|when, then| {
@@ -1913,12 +1926,101 @@ async fn a_rate_limit_seen_by_one_request_pauses_every_other_request() {
         .expect("the free request must succeed once the cooldown has passed");
     let waited = started.elapsed();
     assert!(
-        waited >= std::time::Duration::from_millis(1500),
-        "a request that had nothing to do with the limit must still wait it out, waited {waited:?}"
+        waited >= std::time::Duration::from_secs(1),
+        "the cooldown was armed before this request started and a sleep never returns early, \
+         so a request that had nothing to do with the limit must still wait out most of the \
+         two seconds GitHub asked for, waited {waited:?}"
     );
 
     first
         .await
         .expect("the limited request task must finish")
         .expect("the limited request must succeed on its retry");
+}
+
+/// A revalidated first page must still lead to page two: GitHub sends no
+/// `Link` header on a `304`, so the walk continues from the `next` the cache
+/// stored when the page was fresh.
+#[tokio::test]
+async fn a_304_on_page_one_still_walks_to_page_two() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/rust-lang/rust");
+            then.status(200).json_body(gh_repo_json());
+        })
+        .await;
+
+    let page_two = format!("{}/repos/rust-lang/rust/labels?page=2", server.base_url());
+    let fresh_page_one = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/labels")
+                .query_param_exists("per_page")
+                .is_true(|req| {
+                    !req.headers()
+                        .iter()
+                        .any(|(k, _)| k.as_str() == "if-none-match")
+                });
+            then.status(200)
+                .header("etag", "W/\"labels-page-one\"")
+                .header("link", format!("<{page_two}>; rel=\"next\""))
+                .json_body(gh_labels_json());
+        })
+        .await;
+    let revalidated_page_one = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/labels")
+                .query_param_exists("per_page")
+                .header("if-none-match", "W/\"labels-page-one\"");
+            then.status(304);
+        })
+        .await;
+    let second = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/labels")
+                .query_param("page", "2");
+            then.status(200).json_body(json!([{
+                "id": 9_001, "name": "from-page-two", "color": "ffffff", "description": null
+            }]));
+        })
+        .await;
+
+    let cache = std::sync::Arc::new(MemCache::default());
+    let client =
+        GithubClient::with_cache(server.base_url(), None, cache).expect("client must build");
+    let mut scope = repo_only_scope();
+    scope.objects.labels = true;
+    let options = opts(scope);
+
+    let first_sync = fetch_repository(&client, "rust-lang", "rust", &options)
+        .await
+        .expect("the first sync must succeed");
+    fresh_page_one.assert_calls_async(1).await;
+    second.assert_calls_async(1).await;
+    assert!(first_sync.labels.iter().any(|l| l.name == "from-page-two"));
+
+    let second_sync = fetch_repository(&client, "rust-lang", "rust", &options)
+        .await
+        .expect("the second sync must succeed");
+
+    revalidated_page_one.assert_calls_async(1).await;
+    fresh_page_one.assert_calls_async(1).await;
+    second.assert_calls_async(2).await;
+    let names: Vec<&str> = second_sync
+        .labels
+        .iter()
+        .map(|label| label.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"from-page-two"),
+        "page one answered 304 and the walk must continue from the stored next page, got {names:?}"
+    );
+    assert_eq!(
+        names.len(),
+        first_sync.labels.len(),
+        "a revalidated listing must not be shorter than the fresh one"
+    );
 }
