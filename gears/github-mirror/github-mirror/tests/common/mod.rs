@@ -520,8 +520,8 @@ pub fn service_with_enforcer(
         ServiceConfig {
             api_base_url: api_base_url.to_owned(),
             scope: github_mirror::domain::scope::ScopeConfig::default(),
-            max_concurrent_syncs: 1,
-            max_concurrent_tasks: 1,
+            max_concurrent_syncs: std::num::NonZeroUsize::MIN,
+            max_concurrent_tasks: std::num::NonZeroUsize::MIN,
         },
     ))
 }

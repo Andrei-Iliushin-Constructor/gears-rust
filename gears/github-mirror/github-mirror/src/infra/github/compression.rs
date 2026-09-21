@@ -21,17 +21,15 @@ use crate::domain::error::DomainError;
 pub enum Compression {
     /// Stored verbatim.
     None,
-    /// Deflate with a gzip wrapper.
+    /// Deflate with a gzip wrapper. The design also names Zstandard; it is
+    /// not built into this gear, so the config refuses it instead of the
+    /// cache failing at its first write.
     #[default]
     Gzip,
-    /// Zstandard. Declared by the design but not built: it needs a workspace
-    /// dependency the repository does not carry yet, so selecting it fails at
-    /// startup rather than silently falling back.
-    Zstd,
 }
 
 impl Compression {
-    /// Parse `none`, `gzip` or `zstd`.
+    /// Parse `none` or `gzip`, the names stored alongside cache entries.
     ///
     /// # Errors
     /// `Validation` for anything else.
@@ -39,10 +37,9 @@ impl Compression {
         match value.trim().to_ascii_lowercase().as_str() {
             "none" | "off" => Ok(Self::None),
             "gzip" | "gz" => Ok(Self::Gzip),
-            "zstd" | "zst" => Ok(Self::Zstd),
             other => Err(DomainError::Validation {
                 field: "compression".to_owned(),
-                message: format!("unknown compression `{other}` (valid: none, gzip, zstd)"),
+                message: format!("unknown compression `{other}` (valid: none, gzip)"),
             }),
         }
     }
@@ -53,14 +50,13 @@ impl Compression {
         match self {
             Self::None => "none",
             Self::Gzip => "gzip",
-            Self::Zstd => "zstd",
         }
     }
 
     /// Compress `body` for storage.
     ///
     /// # Errors
-    /// `Internal` when the encoder fails, or when the mode is not built.
+    /// `Internal` when the encoder fails.
     pub fn compress(self, body: &[u8]) -> Result<Vec<u8>, DomainError> {
         match self {
             Self::None => Ok(body.to_vec()),
@@ -74,7 +70,6 @@ impl Compression {
                     .finish()
                     .map_err(|e| DomainError::internal(format!("gzip finish failed: {e}")))
             }
-            Self::Zstd => Err(Self::zstd_unavailable()),
         }
     }
 
@@ -94,15 +89,7 @@ impl Compression {
                     .map_err(|e| DomainError::internal(format!("gzip read failed: {e}")))?;
                 Ok(body)
             }
-            Self::Zstd => Err(Self::zstd_unavailable()),
         }
-    }
-
-    fn zstd_unavailable() -> DomainError {
-        DomainError::internal(
-            "zstd compression is declared by the design but not built into this gear; \
-             use `none` or `gzip`",
-        )
     }
 }
 
@@ -151,21 +138,11 @@ mod tests {
 
     #[test]
     fn modes_parse_and_round_trip_their_names() {
-        for (text, mode) in [
-            ("none", Compression::None),
-            ("GZIP", Compression::Gzip),
-            ("zstd", Compression::Zstd),
-        ] {
+        for (text, mode) in [("none", Compression::None), ("GZIP", Compression::Gzip)] {
             let parsed = Compression::parse(text).unwrap();
             assert_eq!(parsed, mode);
             assert_eq!(Compression::parse(parsed.as_str()).unwrap(), mode);
         }
         assert!(Compression::parse("lzma").is_err());
-    }
-
-    #[test]
-    fn zstd_fails_loudly_rather_than_falling_back() {
-        assert!(Compression::Zstd.compress(BODY).is_err());
-        assert!(Compression::Zstd.decompress(BODY).is_err());
     }
 }

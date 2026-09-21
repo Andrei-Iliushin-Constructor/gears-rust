@@ -1478,8 +1478,11 @@ pub struct SyncSessionDto {
     /// Failure detail when `status = failed`.
     pub error: Option<String>,
     /// The run's counters, replayed from the stored JSON; absent until the
-    /// session completes.
+    /// session completes, or when `summary_unreadable` is set.
     pub summary: Option<SyncSummaryDto>,
+    /// True when the run completed but its stored summary could not be read,
+    /// so `summary` is empty for a reason other than "not finished yet".
+    pub summary_unreadable: bool,
     pub created_at: String,
     pub started_at: Option<String>,
     /// Set once, when the run ends.
@@ -1506,11 +1509,20 @@ fn elapsed_ms(from: Option<&str>, to: Option<&str>) -> Option<i64> {
 
 impl From<SyncSessionRecord> for SyncSessionDto {
     fn from(s: SyncSessionRecord) -> Self {
-        let summary = s
-            .summary_json
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<SyncSummary>(raw).ok())
-            .map(SyncSummaryDto::from);
+        let (summary, summary_unreadable) = match s.summary_json.as_deref() {
+            None => (None, false),
+            Some(raw) => match serde_json::from_str::<SyncSummary>(raw) {
+                Ok(summary) => (Some(SyncSummaryDto::from(summary)), false),
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %s.id,
+                        error = %e,
+                        "stored sync summary does not parse"
+                    );
+                    (None, true)
+                }
+            },
+        };
         let duration_ms = elapsed_ms(
             s.started_at.as_deref(),
             s.ended_at.as_deref().or(s.updated_at.as_deref()),
@@ -1523,6 +1535,7 @@ impl From<SyncSessionRecord> for SyncSessionDto {
             progress_percent: s.progress_percent,
             error: s.error,
             summary,
+            summary_unreadable,
             created_at: s.created_at,
             started_at: s.started_at,
             ended_at: s.ended_at,

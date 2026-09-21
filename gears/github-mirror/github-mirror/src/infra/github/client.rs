@@ -107,10 +107,6 @@ const RATE_LIMIT_RETRIES: u32 = 30;
 const UPSTREAM_RETRIES: u32 = 3;
 const UPSTREAM_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
 
-fn cancelled_mid_request() -> DomainError {
-    DomainError::internal("the sync was cancelled while GitHub was being called")
-}
-
 fn upstream_backoff(attempt: u32) -> std::time::Duration {
     UPSTREAM_BACKOFF.saturating_mul(1u32 << attempt.min(8))
 }
@@ -227,11 +223,10 @@ impl GithubClient {
         })
     }
 
-    /// Cap the requests this client keeps in flight at `max` (zero reads as
-    /// one, so the client always makes progress).
+    /// Cap the requests this client keeps in flight at `max`.
     #[must_use]
-    pub fn with_max_concurrent_requests(mut self, max: usize) -> Self {
-        self.permits = Semaphore::new(max.max(1));
+    pub fn with_max_concurrent_requests(mut self, max: std::num::NonZeroUsize) -> Self {
+        self.permits = Semaphore::new(max.get());
         self
     }
 
@@ -261,7 +256,7 @@ impl GithubClient {
                 Some(until) if until > Instant::now() => {
                     tokio::select! {
                         () = tokio::time::sleep_until(until) => {}
-                        () = cancel.cancelled() => return Err(cancelled_mid_request()),
+                        () = cancel.cancelled() => return Err(DomainError::Cancelled),
                     }
                 }
                 _ => return Ok(()),
@@ -278,7 +273,7 @@ impl GithubClient {
     ) -> Result<reqwest::Result<reqwest::Response>, DomainError> {
         tokio::select! {
             outcome = request.send() => Ok(outcome),
-            () = cancel.cancelled() => Err(cancelled_mid_request()),
+            () = cancel.cancelled() => Err(DomainError::Cancelled),
         }
     }
 
@@ -518,7 +513,7 @@ impl GithubClient {
         );
         tokio::select! {
             () = tokio::time::sleep(delay) => Ok(()),
-            () = cancel.cancelled() => Err(cancelled_mid_request()),
+            () = cancel.cancelled() => Err(DomainError::Cancelled),
         }
     }
 

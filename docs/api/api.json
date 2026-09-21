@@ -17778,9 +17778,13 @@
               },
               {
                 "$ref": "#/components/schemas/SyncSummaryDto",
-                "description": "The run's counters, replayed from the stored JSON; absent until the\nsession completes."
+                "description": "The run's counters, replayed from the stored JSON; absent until the\nsession completes, or when `summary_unreadable` is set."
               }
             ]
+          },
+          "summary_unreadable": {
+            "description": "True when the run completed but its stored summary could not be read,\nso `summary` is empty for a reason other than \"not finished yet\".",
+            "type": "boolean"
           },
           "updated_at": {
             "description": "Re-stamped by every write, the progress heartbeat included, so a\npoller can tell a live run from a stuck one.",
@@ -17795,6 +17799,7 @@
           "repository",
           "status",
           "progress_percent",
+          "summary_unreadable",
           "created_at"
         ],
         "type": "object"

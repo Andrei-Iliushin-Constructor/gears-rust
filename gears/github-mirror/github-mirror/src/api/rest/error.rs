@@ -63,6 +63,7 @@ impl From<DomainError> for CanonicalError {
             DomainError::Conflict(msg) => RepositoryError::already_exists(msg)
                 .with_resource("repository")
                 .create(),
+            DomainError::Cancelled => CanonicalError::internal(INTERNAL_DETAIL).create(),
             DomainError::Forbidden(msg) => {
                 tracing::warn!(msg = %redacted(&msg), "github-mirror access forbidden");
                 RepositoryError::not_found("Repo not found or not accessible")

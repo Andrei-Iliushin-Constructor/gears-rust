@@ -22,6 +22,11 @@ pub enum DomainError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    /// The run was told to stop (shutdown or an explicit cancel) before it
+    /// finished; its session ends `interrupted`, not `failed`.
+    #[error("the sync was interrupted before it finished")]
+    Cancelled,
+
     #[error("Internal error: {0}")]
     Internal(String),
 
@@ -41,7 +46,9 @@ impl DomainError {
     #[must_use]
     pub fn public_text(&self) -> String {
         match self {
-            Self::NotFound | Self::Validation { .. } | Self::Conflict(_) => self.to_string(),
+            Self::NotFound | Self::Validation { .. } | Self::Conflict(_) | Self::Cancelled => {
+                self.to_string()
+            }
             Self::Forbidden(_) => "access forbidden".to_owned(),
             Self::AccessLost(_) => {
                 "GitHub refused the mirror's credentials for this repository".to_owned()

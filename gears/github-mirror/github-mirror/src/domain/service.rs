@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -114,6 +115,20 @@ fn keyset_page<T>(
             limit,
         },
     ))
+}
+
+fn stored_summary_json(session_id: Uuid, summary: &SyncSummary) -> Option<String> {
+    match serde_json::to_string(summary) {
+        Ok(json) => Some(json),
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "sync summary could not be stored as JSON"
+            );
+            None
+        }
+    }
 }
 
 fn now_rfc3339() -> String {
@@ -341,11 +356,9 @@ pub struct SyncJob {
     /// What this run collects. Resolved at enqueue time from the request, or
     /// from the gear config when the request says nothing.
     pub scope: ScopeConfig,
-    /// Bypass the HTTP cache entirely (PRD §5.2 force mode).
-    ///
-    /// Carried end to end but **not yet honoured**: the gear has no `ETag` or
-    /// `Last-Modified` cache to bypass, so every sync is already a full fetch.
-    /// It starts having an effect when conditional requests land (#4630).
+    /// PRD §5.2 force mode: the GitHub client skips its stored `ETag`s, the
+    /// sweep ignores its watermark and the change gate re-fetches every
+    /// entity, so the whole repository is read again from GitHub.
     pub force: bool,
     /// Oldest closed entity worth collecting, from the request.
     pub since: Option<DateTime<Utc>>,
@@ -378,9 +391,9 @@ pub struct ServiceConfig {
     /// What a sync collects when the request does not say.
     pub scope: ScopeConfig,
     /// How many repositories may sync at the same time.
-    pub max_concurrent_syncs: usize,
+    pub max_concurrent_syncs: NonZeroUsize,
     /// How many tasks one repository's sync runs at the same time.
-    pub max_concurrent_tasks: usize,
+    pub max_concurrent_tasks: NonZeroUsize,
 }
 
 #[domain_model]
@@ -3094,11 +3107,10 @@ impl Service {
         self.config.scope
     }
 
-    /// How many repositories the sync worker pool runs at once. Zero reads as
-    /// one: a pool with no workers would accept syncs and never run them.
+    /// How many repositories the sync worker pool runs at once.
     #[must_use]
     pub fn max_concurrent_syncs(&self) -> usize {
-        self.config.max_concurrent_syncs.max(1)
+        self.config.max_concurrent_syncs.get()
     }
 
     /// Scope for writing this tenant's session rows.
@@ -3470,7 +3482,7 @@ impl Service {
             Ok(summary) => {
                 progress.finished();
                 session.status = SessionStatus::Complete;
-                session.summary_json = serde_json::to_string(&summary).ok();
+                session.summary_json = stored_summary_json(job.session_id, &summary);
             }
             Err(e) => {
                 tracing::error!(
@@ -3479,7 +3491,7 @@ impl Service {
                     error = %crate::redact::redacted(&e.to_string()),
                     "sync run failed"
                 );
-                session.status = if cancel.is_cancelled() {
+                session.status = if matches!(e, DomainError::Cancelled) {
                     SessionStatus::Interrupted
                 } else {
                     SessionStatus::Failed
@@ -3843,6 +3855,14 @@ impl Service {
         {
             return Err(report.failures.swap_remove(discovery).error);
         }
+        if report.cancelled
+            || report
+                .failures
+                .iter()
+                .any(|failure| matches!(failure.error, DomainError::Cancelled))
+        {
+            return Err(DomainError::Cancelled);
+        }
         if !report.failures.is_empty() {
             let detail: Vec<String> = report
                 .failures
@@ -3854,13 +3874,6 @@ impl Service {
                 report.tasks_failed(),
                 report.tasks_done + report.tasks_failed(),
                 detail.join("; ")
-            )));
-        }
-
-        if report.cancelled {
-            return Err(DomainError::internal(format!(
-                "the sync of {}/{} was interrupted before it finished",
-                run.owner, run.name
             )));
         }
 

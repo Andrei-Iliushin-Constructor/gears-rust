@@ -131,7 +131,7 @@ impl RepoPhaseRunner {
         workers: Vec<Arc<dyn Worker>>,
         session_id: Uuid,
         tenant_id: Uuid,
-        max_concurrent_tasks: usize,
+        max_concurrent_tasks: std::num::NonZeroUsize,
         cancel: CancellationToken,
         progress: Arc<AtomicU8>,
     ) -> Self {
@@ -144,7 +144,7 @@ impl RepoPhaseRunner {
             dispatcher: Arc::new(dispatcher),
             session_id,
             tenant_id,
-            max_concurrent_tasks: max_concurrent_tasks.max(1),
+            max_concurrent_tasks: max_concurrent_tasks.get(),
             cancel,
             progress,
         }
