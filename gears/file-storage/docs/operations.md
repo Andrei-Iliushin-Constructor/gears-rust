@@ -41,6 +41,7 @@ there is no standalone TOML/JSON file of its own.
 |---|---|---|
 | `default_url_ttl_secs` | `900` (15 min) | `default_default_url_ttl_secs()` |
 | `max_url_ttl_secs` | `604800` (7 days) | `default_max_url_ttl_secs()` |
+| `finalize_token_grace_secs` | `3600` (1h) | `default_finalize_token_grace_secs()` |
 | `multipart_session_ttl_secs` | `86400` (24h) | `default_multipart_session_ttl_secs()` |
 | `multipart_complete_lease_secs` | `120` (2 min) | `default_multipart_complete_lease_secs()` |
 | `sidecar_base_url` | `"http://localhost:8087"` | `default_sidecar_base_url()` |
@@ -66,7 +67,7 @@ a URL remains valid after the authorization decision was made at signing (no per
 recommendation**: keep short (minutes, not hours) for anything not explicitly meant to be long-lived or
 shareable; raise only for known bulk/batch workflows. **Misconfiguration risk**: too long → a leaked/logged URL stays
 exploitable for the full window; too short → legitimate slow uploads/downloads may need to be re-presigned mid-flight
-(no such retry-on-expiry logic exists in the SDK/handlers, so a very small value can break large transfers).
+(no such retry-on-expiry logic exists in the SDK/handlers, so a very small value can break large transfers — though `finalize_token_grace_secs` below keeps an upload that outran this TTL *mid-stream* from failing at the finalize step).
 `FileStorageConfig::validate()` enforces two ordering invariants on this field at startup: it must not exceed
 `max_url_ttl_secs` (otherwise the very first URL minted with no explicit override already violates the ceiling the
 control plane is supposed to enforce), and it must not exceed `orphan_grace_secs` (see that field below).
@@ -79,6 +80,25 @@ sharing use case (a separate FileShare gear, not yet built, is the intended mech
 here). **Misconfiguration risk**: raising it widens the window during which a leaked URL is exploitable, with no
 revocation mechanism to claw it back. Lowering it below `default_url_ttl_secs` is rejected by
 `FileStorageConfig::validate()` at startup rather than silently clamping every default-TTL mint.
+
+### `finalize_token_grace_secs`
+How far past its `exp` (seconds, default `3600` = 1 hour) the signed upload token is still accepted **on the
+server-to-server finalize and report-part callbacks only** (`Verifier::verify_with_grace`); `0` restores strict
+`exp` enforcement everywhere. It exists because the sidecar verifies the token once, at the start of the `PUT`, and
+deliberately never re-checks it mid-stream — `FS_SIDECAR_BODY_IDLE_TIMEOUT_SECS` bounds the gap between chunks, not
+the transfer's total duration — and then forwards that same token to the control plane once the bytes have landed.
+Without the grace, an upload slower than `default_url_ttl_secs` would have every byte durably published and its
+finalize rejected as expired, leaving a `pending` version the client cannot commit. The grace never applies to the
+check that starts a `PUT`/part-`PUT`/`GET`, and it does not weaken what else is verified: signature, `op` and the
+token's binding to `(file_id, version_id)` are enforced exactly as before. **Production recommendation**: size it to
+the slowest legitimate single transfer you intend to support on the worst link you serve; the default hour covers a
+multi-GiB upload on a slow connection. **Misconfiguration risk**: too small → slow uploads fail at finalize with the
+bytes already written (see F5's neighbours in
+[concurrency-and-failure-model.md](./concurrency-and-failure-model.md) §2.1); too large → a leaked token stays usable
+against the finalize/report-part callbacks for that much longer after its nominal expiry, which is a narrower
+exposure than a leaked *upload* URL (those callbacks only commit or report a version whose bytes are already in the
+backend) but is still real. Set `0` if your deployment fronts uploads with something that guarantees a bounded
+transfer time.
 
 ### `multipart_session_ttl_secs`
 Lifetime (seconds, default `86400` = 24h) of a multipart session row: `expires_at` is stamped at initiate time, and

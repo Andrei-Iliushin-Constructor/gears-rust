@@ -1629,7 +1629,11 @@ enforced anywhere in code** — a documented extension point, not a shipped capa
   (`default_url_ttl_secs`, recommended **minutes** — e.g. 15 min — applied to every URL the control plane mints unless a
   caller justifies more) and a **hard ceiling** `max_url_ttl_secs` (≤ **7 days**) that `Issuer::issue` **silently
   clamps** `exp` down to at signing (never a refusal). The sidecar rejects when `now >= exp` (expiry is
-  exclusive: a token stops working exactly at `exp`, not one second later). "Available to everyone for 5 minutes" =
+  exclusive: a token stops working exactly at `exp`, not one second later). The control plane applies the same rule
+  everywhere except on the sidecar's own **finalize/report-part callbacks**, where the already-verified upload token
+  is accepted up to `finalize_token_grace_secs` (1 h default, `0` = strict) past `exp`: the sidecar checks the token
+  once at the start of the `PUT` and never mid-stream, so a slow-but-live upload can legitimately reach the callback
+  after its TTL with the bytes already written (`operations.md`, concurrency model §2.3). "Available to everyone for 5 minutes" =
   only `exp`, no token-claim predicate (predicates are not implemented, see above). A third, independent knob,
   `multipart_session_ttl_secs` (24h default), bounds a multipart *session's* own lifetime separately from the
   per-part URL TTL above — a large upload needs real wall-clock time to complete even though any one signed URL
