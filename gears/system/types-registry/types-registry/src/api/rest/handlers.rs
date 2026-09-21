@@ -226,9 +226,6 @@ pub async fn delete_entity(
 }
 
 /// Decode `Idempotency-Key`; acceptance handles absence, this layer rejects invalid bytes.
-///
-/// Absence is `None`, not an empty `String`: acceptance refuses both the same
-/// way, but only one of them is something a caller could have sent.
 fn idempotency_key(headers: &HeaderMap) -> Result<Option<String>, CanonicalError> {
     headers
         .get("idempotency-key")
@@ -252,11 +249,7 @@ fn receipt(
         StatusCode::ACCEPTED
     };
 
-    // A receipt names one caller's operation and its idempotent replay state,
-    // and both move underneath any copy of it. Nothing between here and the
-    // caller may keep one: a shared cache would hand a second caller the first
-    // caller's operation id, and a private one would answer a poll with a
-    // status that has already advanced.
+    // Receipts are caller-specific and their operation status can advance.
     let mut out = no_store();
     let location = operation_location(request_path, accepted.operation_id);
     let location_value = HeaderValue::from_str(&location).map_err(|e| {
@@ -303,9 +296,7 @@ fn receipt(
 /// Checkpoint 1 report §8.1). [`OriginalUri`] rather than `Uri` for the same
 /// reason: `nest` strips exactly the prefix that has to survive here.
 ///
-/// Replace the last `/entities` segment and its suffix with `/operations/{id}`.
-/// This handles all mutation paths and preserves mount prefixes containing `entities`.
-/// Fall back to a gear-relative path when the segment is absent.
+/// Build the operation location while preserving the route's mount prefix.
 fn operation_location(request_path: &str, operation_id: Uuid) -> String {
     let trimmed = request_path.trim_end_matches('/');
     match trimmed.rfind("/entities") {
@@ -316,14 +307,7 @@ fn operation_location(request_path: &str, operation_id: Uuid) -> String {
 
 /// `GET /types-registry/v2/operations/{operation_id}`
 ///
-/// Answers with `Cache-Control: no-store`, for the reason a receipt does and one
-/// more. The URL is stable while the document under it is not: a client polls it
-/// while `status` moves `pending` → `running` → `completed` and the item
-/// outcomes appear, so a kept copy answers a later poll with progress that has
-/// already advanced — a poller that never terminates, or one that reports a
-/// candidate undecided after it failed. The document also names one caller's
-/// operation and its per-candidate errors, which a shared cache would hand to
-/// the next reader of the same path.
+/// Poll an operation without caching its caller-specific, changing state.
 pub async fn get_operation(
     Extension(service): Extension<Option<Arc<RegistryService>>>,
     extract::Path(operation_id): extract::Path<Uuid>,
@@ -337,13 +321,7 @@ pub async fn get_operation(
     Ok((no_store(), Json(record.into())))
 }
 
-/// The one response header this gear owns, on the responses that carry moving
-/// per-caller state: the mutation receipts and the operation poll.
-///
-/// The router mounts no response-header layer, and should not — HSTS, CSP,
-/// `X-Frame-Options` and the rest of the transport policy belong to the platform
-/// edge, which applies them to every gear at once. Cacheability is different:
-/// only the handler knows that this particular body moves under its own URL.
+/// Add `Cache-Control: no-store` to caller-specific, changing responses.
 fn no_store() -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));

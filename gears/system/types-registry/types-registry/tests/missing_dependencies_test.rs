@@ -1,6 +1,3 @@
-//! Missing dependencies are durable candidate refusals on the first delivery,
-//! not infrastructure failures that retry or dead-letter the operation.
-
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::sync::Arc;

@@ -478,10 +478,7 @@ pub struct SubmitEntityDto {
     /// revision: the entity must exist at exactly that `resource_version`, and a
     /// mismatch fails the candidate terminally rather than rebasing it.
     ///
-    /// `minimum = 1` documents the refusal of `0` and negatives that acceptance
-    /// already enforces. No `value_type` here, unlike [`DeleteEntityDto`]: this
-    /// property stays nullable, because omitting it is a meaningful request and
-    /// `serde(default)` accepts an explicit `null` as that same omission.
+    /// Optional positive precondition; acceptance rejects zero and negatives.
     #[serde(default)]
     #[schema(minimum = 1)]
     pub expected_resource_version: Option<i64>,
@@ -520,37 +517,18 @@ pub struct SubmitEntitiesRequest {
 pub struct DeleteEntityDto {
     /// A canonical GTS identifier or a Registry Reference UUID.
     pub key: String,
-    /// Required positive version. Optional in Rust so acceptance returns the same
-    /// `400 deletion_requires_version` on both deletion routes rather than letting
-    /// the extractor answer first.
-    ///
-    /// `value_type = i64` alongside `required` is what keeps the generated schema a
-    /// plain `integer`: `required` on its own leaves the property nullable, so the
-    /// document would promise that an explicit `null` is accepted while acceptance
-    /// answers `400` — and it would disagree with the DELETE route, which declares
-    /// the same precondition as a non-nullable `integer` query parameter.
+    /// Required positive version; optional internally for uniform validation errors.
     #[serde(default)]
     #[schema(required, value_type = i64, minimum = 1)]
     pub expected_resource_version: Option<i64>,
 }
 
-/// A deletion batch.
-///
-/// `deny_unknown_fields`, like every request body and query on this surface:
-/// `api_dto` renames to `snake_case` and nothing else, so a client posting
-/// `"dryRun": true` otherwise deserializes to `dry_run: None`, defaults to
-/// `false`, and has a batch of entities really deleted. On a destructive route
-/// the safe answer to a field the server does not recognize is `400`, not a
-/// commit. v1's `RegisterEntitiesRequest` / `ListEntitiesQuery` are deliberately
-/// left tolerant — P12 keeps that contract and its e2e suite unchanged.
+/// A deletion batch. Unknown fields are rejected to prevent ignored safety options.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(request)]
 #[serde(deny_unknown_fields)]
 pub struct DeleteEntitiesRequest {
-    /// No `max_items`: the ceiling is `limits.batch_candidates`, which a deployment
-    /// configures. A literal here would be a second, fixed number that disagrees
-    /// with the server the moment anyone changes that setting. `RegistryService::delete`
-    /// enforces the real one before reading anything.
+    /// Runtime configuration supplies the batch limit.
     #[schema(min_items = 1)]
     pub items: Vec<DeleteEntityDto>,
     /// Predict without changing entities. Defaults to `false`; part of the idempotency fingerprint.
@@ -593,9 +571,7 @@ pub struct OperationItemDto {
     pub resource_version: Option<i64>,
     /// The refusal as `{reason, message}`, when this candidate failed.
     /// `reason` is a stable machine-readable code; `message` is an explanation for humans.
-    /// Missing dependencies also carry `dependency_id` and `dependency_kind`
-    /// (`base`, `conforming_type`, `ref`). System abandonment carries a safe
-    /// `error_code` and `operation_id` for correlation with operator logs.
+    /// Structured candidate or abandonment details.
     /// Compatibility messages include causes and schema locations where available.
     /// Clients must not parse `message` or depend on its wording.
     pub error: Option<serde_json::Value>,

@@ -124,8 +124,7 @@ impl OperationRepo {
             .transpose()
     }
 
-    /// One keyset page of pending and running operations for startup recovery,
-    /// as `(created_at, id)` cursors — the last of which resumes the scan.
+    /// Read one keyset page of non-terminal operations for startup recovery.
     pub async fn nonterminal_page(
         runner: &impl DBRunner,
         scope: &AccessScope,
@@ -137,8 +136,7 @@ impl OperationRepo {
                 .add(operation::Column::Status.eq(OperationStatus::Pending))
                 .add(operation::Column::Status.eq(OperationStatus::Running)),
         );
-        // Keyset rather than offset: the rows this scan returns stay non-terminal
-        // until their admission lands, so an offset would re-read the same page.
+        // Keyset paging advances while earlier rows remain non-terminal.
         if let Some(cursor) = after {
             filter = filter.add(
                 Condition::any()
@@ -152,9 +150,7 @@ impl OperationRepo {
         }
         operation::Entity::find()
             .filter(filter)
-            // Creation order, so recovery re-enqueues in the order the operations
-            // were accepted. `id` only breaks ties: it is a client-allocated UUID
-            // and carries no time component.
+            // Creation time orders recovery; the client UUID only breaks ties.
             .order_by(operation::Column::CreatedAt, Order::Asc)
             .order_by(operation::Column::Id, Order::Asc)
             .limit(limit)
@@ -172,13 +168,9 @@ impl OperationRepo {
             })
     }
 
-    /// Insert acceptance; a duplicate `(idempotency_scope_hash, idempotency_key)`
-    /// unique violation serializes concurrent acceptances, as in
-    /// [`VersionFamilyRepo::create_or_get`].
+    /// Insert acceptance; the idempotency constraint serializes duplicates.
     ///
-    /// ponytail C5: P0 retains terminal operations (small rows, bounded by request
-    /// volume). DESIGN §3.2 adds a sweep using `idx_tr_operation_status`, deleting
-    /// completed operations only when no revision pins any item.
+    /// P0 retains terminal operations; DESIGN §3.2 defines later cleanup.
     ///
     /// # Errors
     /// Propagates the insert's failure, including the unique violation above.
@@ -303,16 +295,8 @@ impl OperationRepo {
         Ok(result.rows_affected == 1)
     }
 
-    /// Terminalize an operation that delivery abandoned, from **either**
-    /// non-terminal status.
-    ///
-    /// Separate from [`Self::mark_completed`], which only moves a `running` row:
-    /// an operation can be abandoned before its pass ever reached `mark_running`,
-    /// and widening `mark_completed` instead would let an ordinary pass complete an
-    /// operation it never started. One statement rather than a promote-then-complete
-    /// pair, so there is no intermediate state and no second failure point.
-    ///
-    /// `false` means the row was already terminal — an ordinary concurrent outcome.
+    /// Terminalize abandonment from either non-terminal state.
+    /// Returns `false` if another writer already terminalized the operation.
     ///
     /// # Errors
     /// Propagates scope validation and database update failures.
@@ -329,10 +313,7 @@ impl OperationRepo {
                 Expr::value(OperationStatus::Completed),
             )
             .col_expr(operation::Column::CompletedAt, Expr::value(now))
-            // `ck_tr_operation_state` requires a completed row to carry both
-            // timestamps, and a `pending` operation has no `started_at`: delivery
-            // gave up before its pass ever moved the row. Coalesce rather than
-            // overwrite, so an operation that did run keeps the instant it started.
+            // Pending rows need a start time; preserve it for rows that ran.
             .col_expr(
                 operation::Column::StartedAt,
                 Expr::expr(Func::coalesce([
@@ -356,9 +337,7 @@ impl OperationRepo {
     /// Move an operation to `completed`. `completed` means every item is terminal;
     /// outcomes stay on the items and are not aggregated here (`database.sql`).
     ///
-    /// Only moves a `running` row — see [`Self::mark_abandoned`] for the
-    /// abandonment that also moves a `pending` one, and for why widening this
-    /// method instead would be wrong.
+    /// Complete only a running operation; abandonment may also move pending rows.
     ///
     /// # Errors
     /// Propagates the update's failure.
@@ -496,20 +475,8 @@ impl OperationRepo {
         Ok(result.rows_affected == 1)
     }
 
-    /// Terminalize every still-undecided item of one operation as `failed`,
-    /// carrying one structured reason for all of them.
-    ///
-    /// One statement rather than a read plus an UPDATE per item. Abandonment
-    /// runs inside whatever is left of the delivery's lease, and a batch at
-    /// `limits.batch_candidates` would otherwise issue that many sequential
-    /// round trips on the one path whose entire purpose is to finish before that
-    /// lease expires — which is how the abandonment write came to time out
-    /// without ever being issued.
-    ///
-    /// Carries the same non-terminal guard as [`Self::mark_item_failed`], so
-    /// items an earlier pass already decided keep their own outcomes, and the
-    /// columns it writes are identical. Returns how many items this call moved;
-    /// zero is an ordinary outcome when another pass terminalized them all.
+    /// Fail all undecided items in one guarded statement.
+    /// Returns the number moved; decided outcomes remain unchanged.
     ///
     /// # Errors
     /// Propagates the update's failure.
@@ -544,9 +511,7 @@ impl OperationRepo {
     }
 }
 
-/// The set [`OperationRepo::fail_nonterminal_items`] moves: one operation's items
-/// that no pass has decided yet. The status half is [`non_terminal`]'s, for the
-/// same write-once reason.
+/// Select undecided items for bulk failure.
 fn non_terminal_items_of(operation_id: Uuid) -> Condition {
     Condition::all()
         .add(operation_item::Column::OperationId.eq(operation_id))
@@ -557,9 +522,7 @@ fn non_terminal_items_of(operation_id: Uuid) -> Condition {
         )
 }
 
-/// Guard non-terminal status so outcomes remain write-once (`database.sql`).
-/// Overlapping T21 deliveries or same-`Idempotency-Key` retries must report `false`
-/// on losing the guard, never overwrite `succeeded` with `failed` by filtering only on `id`.
+/// Guard non-terminal status so outcomes remain write-once.
 fn non_terminal(item_id: i64) -> Condition {
     Condition::all()
         .add(operation_item::Column::Id.eq(item_id))

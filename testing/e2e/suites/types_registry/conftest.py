@@ -43,10 +43,6 @@ def _topic_loader(topic):
 
     def load(name):
         document = (directory / f"{name}.json").read_text(encoding="utf-8")
-        # Nothing else isolates these tests: one server, one database, no reset
-        # between them. A fixture that does not spell the prefix would keep a
-        # literal, shared ID and collide with every other test by whichever
-        # ran first, so refuse it here instead of failing as `already_exists`.
         assert prefix in document, (
             f"fixtures/{topic}/{name}.json must spell its identifiers with "
             f"'{prefix}' so the per-test namespace can isolate them"

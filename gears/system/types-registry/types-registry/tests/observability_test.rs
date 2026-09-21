@@ -1791,18 +1791,6 @@ async fn a_blocked_deletion_puts_the_dependant_count_on_its_span_and_no_identiti
     );
 }
 
-// ---------------------------------------------------------------------------
-// The two instruments the delivery path owns
-// ---------------------------------------------------------------------------
-
-/// The pre-resolution batch bound, and the refusal it counts.
-///
-/// `RegistryService::delete` enforces `limits.batch_candidates` **before**
-/// `resolve_targets` reads anything, because `DeleteEntitiesRequest` declares no
-/// `max_items` of its own — so this guard is the only thing between an oversized
-/// batch and an unbounded read. Acceptance has its own check, but it runs after
-/// resolution and its test cannot reach this one; the metric is counted here
-/// too, so the series does not depend on which check fired.
 #[tokio::test]
 async fn an_oversized_deletion_batch_is_refused_before_it_reads_and_counted_as_a_deletion() {
     use types_registry::config::TypesRegistryConfig;
@@ -1814,11 +1802,6 @@ async fn an_oversized_deletion_batch_is_refused_before_it_reads_and_counted_as_a
 
     const LIMIT: usize = 2;
 
-    // The exporter is process-wide and the neighbouring tests call
-    // `reset_metrics()`, which zeroes the baseline this one reads before the
-    // refusal and compares against after it. Without the lock a concurrent
-    // reset lands between the two reads and the delta is off by whatever the
-    // reset dropped.
     let _serial = SERIAL.lock().await;
 
     let db = common::test_db().await;
@@ -1840,11 +1823,6 @@ async fn an_oversized_deletion_batch_is_refused_before_it_reads_and_counted_as_a
         &[("reason", "batch_too_large"), ("kind", "deletion")],
     );
 
-    // Registry References, not identifiers: an identifier-only batch needs no
-    // lookup, so it could not tell the guard from acceptance's own check. These
-    // UUIDs resolve to nothing, so without the guard `resolve_targets` reads
-    // first and fails with `UnresolvedReference` — which is what makes the
-    // assertion below discriminate rather than merely pass.
     let targets: Vec<DeleteTarget> = (0..=LIMIT)
         .map(|_| DeleteTarget {
             key: EntityKey::Uuid(uuid::Uuid::new_v4()),
@@ -1890,22 +1868,12 @@ async fn an_oversized_deletion_batch_is_refused_before_it_reads_and_counted_as_a
     );
 }
 
-/// The delivery counter's label vocabulary, pinned the way T16 pins every other
-/// instrument: against a real exporter rather than against `Debug`.
-///
-/// This series is what a stall alert reads — rising `retried` with flat
-/// `dead_lettered` means redelivery without progress — and it was the one
-/// instrument this gear added without a contract test, so a typo in either label
-/// would have passed the whole suite.
 #[tokio::test]
 async fn the_delivery_outcome_labels_are_exactly_retried_and_dead_lettered() {
     use types_registry::domain::ports::metrics::DeliveryOutcome;
 
     const NAME: &str = "types_registry_admission_deliveries_total";
 
-    // Same shared exporter, same reason: the label vocabulary below is read off
-    // the export, and a neighbour's `reset_metrics()` between the increments
-    // and the read would empty it.
     let _serial = SERIAL.lock().await;
 
     flush();

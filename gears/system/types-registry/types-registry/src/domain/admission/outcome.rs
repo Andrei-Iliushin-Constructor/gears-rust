@@ -1,11 +1,4 @@
-//! The vocabulary one admission pass reports, and the reads that reconstruct it
-//! from stored rows.
-//!
-//! Separate from [`super::worker`] because both it and [`super::dry_run`] speak
-//! this vocabulary: `worker` performs a pass and delegates the dry-run mode to
-//! `dry_run`, which predicts one and reports the same shapes. Holding the shared
-//! types here keeps that delegation one-directional — `worker` needs `dry_run`,
-//! neither needs the other's module.
+//! Shared admission outcomes used by the worker and dry-run paths.
 
 use std::sync::Arc;
 
@@ -23,8 +16,7 @@ use crate::domain::ports::{OperationItemRow, OperationRow, Stores, snapshot_read
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OperationOutcome {
     pub operation_id: Uuid,
-    /// `true` when this pass found the operation already terminal and did nothing.
-    /// A redelivered outbox message lands here.
+    /// Whether redelivery found the operation already terminal.
     pub already_terminal: bool,
     pub items: Vec<ItemOutcome>,
 }
@@ -70,16 +62,13 @@ pub(super) async fn read_operation(
     found.ok_or(WorkerError::OperationNotFound { operation_id })
 }
 
-/// Reconstruct a terminal outcome, deriving `gts_uuid` via `GtsId::to_uuid`.
-/// ADR-0012 requires the Registry Reference on success, including replay;
-/// refusals carry none.
+/// Reconstruct a terminal outcome, including Registry References on success.
 pub(super) fn stored_outcome(item: &OperationItemRow) -> Result<ItemOutcome, WorkerError> {
     let terminal_success = matches!(
         item.status,
         OperationItemStatus::Succeeded | OperationItemStatus::Unchanged
     );
-    // Report corrupt identifiers: `.ok()` would hide the cause and return
-    // `gts_uuid: None` on success, violating ADR-0012.
+    // Do not hide corrupt identifiers behind a missing success UUID.
     let gts_uuid = if terminal_success {
         Some(
             gts::GtsId::try_new(&item.gts_id)

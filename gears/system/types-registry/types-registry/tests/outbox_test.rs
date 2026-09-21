@@ -1,6 +1,3 @@
-//! Outbox wiring (T21, SPEC §8.1): direct handler tests cover result mapping and
-//! idempotency; pipeline tests use `common::await_delivery` under SPEC §13.
-
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::sync::Arc;
@@ -57,7 +54,6 @@ fn registration(idempotency_key: &str, gts_id: &str) -> SubmitRequest {
     }
 }
 
-/// Service in outbox mode; admission runs through dispatch.
 fn service_with(
     db: &Arc<DBProvider<DbError>>,
     ports: Arc<dyn Stores>,
@@ -74,7 +70,6 @@ fn service_with(
     ))
 }
 
-/// Build dispatch before the service and pipeline.
 fn service(
     db: &Arc<DBProvider<DbError>>,
     ports: Arc<dyn Stores>,
@@ -88,31 +83,18 @@ fn service(
     (registry, dispatch)
 }
 
-/// The last attempt the budget allows, as the outbox would pass it: `attempts`
-/// counts retries already taken, so the third delivery arrives as `2`.
 const LAST_ATTEMPT: i16 = 2;
 
-/// Attempt budget used by the handler tests below; a first delivery is `attempts = 0`.
 const MAX_ATTEMPTS: u32 = LAST_ATTEMPT as u32 + 1;
 
-/// A delivery past the budget, which only the lease timeout can produce: a
-/// delivery the handler decides either acks or rejects, so it never comes back.
 const PAST_BUDGET: i16 = LAST_ATTEMPT + 1;
 
-/// What a driver error can actually carry, injected verbatim so the disclosure
-/// assertions are about values that must never be written rather than about a
-/// string that says "test".
 const SENSITIVE_CAUSE: &str = "could not execute UPDATE on \
      postgres://registry:hunter2@db.internal:5432/app (authorization: Bearer \
      eyJhbGciOiJIUzI1NiJ9.super-secret): row was {\"ssn\": \"123-45-6789\"}";
 
-/// One distinctive fragment of [`SENSITIVE_CAUSE`], asserted separately: a
-/// formatter that escapes or wraps the whole string would defeat a
-/// whole-string `contains` while still having disclosed the secret.
 const SENSITIVE_FRAGMENT: &str = "hunter2";
 
-/// Like [`service_without_dispatch`] but with a chosen `operation_timeout`, which
-/// is the budget the handler divides for its own awaits.
 fn service_with_operation_timeout(
     db: &Arc<DBProvider<DbError>>,
     ports: Arc<dyn Stores>,
@@ -131,11 +113,6 @@ fn service_with_operation_timeout(
     ))
 }
 
-/// Like [`service_without_dispatch`], and hands back instruments the test can
-/// read. The delivery counter is the only one that matters here: two of the
-/// handler's branches differ in which outcome they count, and a branch that
-/// returned the right `MessageResult` while counting the other one would still
-/// mislead the stall alert that reads the series.
 fn service_recording_deliveries(
     db: &Arc<DBProvider<DbError>>,
     ports: Arc<dyn Stores>,
@@ -153,7 +130,6 @@ fn service_recording_deliveries(
     (registry, recorded)
 }
 
-/// Use `NullDispatch` so tests can invoke the handler without a pipeline race.
 fn service_without_dispatch(
     db: &Arc<DBProvider<DbError>>,
     ports: Arc<dyn Stores>,
@@ -161,7 +137,6 @@ fn service_without_dispatch(
     service_with(db, ports, Arc::new(NullDispatch))
 }
 
-/// Use production `infra::outbox::start` settings.
 async fn started(
     db: &Arc<DBProvider<DbError>>,
     ports: Arc<dyn Stores>,
@@ -172,10 +147,6 @@ async fn started(
         .expect("start the admission outbox");
     (registry, handle)
 }
-
-// ---------------------------------------------------------------------------
-// The handler shell
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn the_handler_admits_the_operation_its_payload_names() {
@@ -207,7 +178,6 @@ async fn the_handler_admits_the_operation_its_payload_names() {
     assert_eq!(operation.items[0].status, OperationItemStatus::Succeeded);
 }
 
-/// Duplicate delivery preserves the version, outcome and revision count.
 #[tokio::test]
 async fn a_duplicate_delivery_changes_nothing() {
     let db = test_db_with_outbox().await;
@@ -268,7 +238,6 @@ async fn a_payload_that_is_not_an_operation_uuid_is_rejected() {
     );
 }
 
-/// Missing operations are permanent errors: the message and operation commit together.
 #[tokio::test]
 async fn a_message_naming_no_operation_is_rejected() {
     let db = test_db_with_outbox().await;
@@ -284,7 +253,6 @@ async fn a_message_naming_no_operation_is_rejected() {
     );
 }
 
-/// Infrastructure failures must remain retryable at the handler boundary.
 #[tokio::test]
 async fn a_storage_failure_during_admission_is_retried() {
     let db = test_db_with_outbox().await;
@@ -313,13 +281,9 @@ async fn a_storage_failure_during_admission_is_retried() {
     );
 }
 
-/// The attempt budget is what keeps each partition draining: a transient
-/// failure that never clears must eventually leave the queue.
 #[tokio::test]
 async fn a_transient_failure_on_the_last_attempt_is_dead_lettered() {
     let db = test_db_with_outbox().await;
-    // Any hook whose failure is transient will do; this one fails the item-success
-    // write. Abandonment goes through `mark_abandoned`, which no hook intercepts.
     let registry = service_without_dispatch(&db, common::TestStores::failing_item_success());
     let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
 
@@ -362,15 +326,6 @@ async fn a_transient_failure_on_the_last_attempt_is_dead_lettered() {
     );
 }
 
-/// A lease timeout drops the handler's future before it decides, so it counts no
-/// outcome — but `lease_acquire` has already incremented `attempts`. Nothing inside
-/// a delivery can bound that; only a later delivery can, by reading how far
-/// `attempts` has run. Past the budget the handler must stop calling `admit` and
-/// terminalize instead, or one admission that keeps hanging keeps its
-/// partition from ever advancing.
-///
-/// `stores()` is the unhooked store here on purpose: admission would *succeed* if
-/// it ran, so a `Reject` can only mean the handler declined to call it.
 #[tokio::test]
 async fn an_admission_past_the_delivery_budget_is_terminalized_without_being_admitted() {
     let db = test_db_with_outbox().await;
@@ -411,7 +366,6 @@ async fn an_admission_past_the_delivery_budget_is_terminalized_without_being_adm
     .expect("the stored payload is JSON");
     assert_eq!(error["reason"], json!("admission_abandoned"));
 
-    // The entity was never written, which is what "not admitted" has to mean.
     assert!(
         registry
             .entity(&EntityKey::GtsId(TARGET.to_owned()))
@@ -421,7 +375,6 @@ async fn an_admission_past_the_delivery_budget_is_terminalized_without_being_adm
         "the handler must not have run admission for a message past its budget",
     );
 
-    // Out of the recovery set, so the next boot does not re-enqueue it.
     let recovered = registry
         .nonterminal_operation_page(None, 128)
         .await
@@ -434,10 +387,6 @@ async fn an_admission_past_the_delivery_budget_is_terminalized_without_being_adm
     );
 }
 
-/// The budget counts deliveries, not failures: an earlier delivery may have
-/// admitted the operation and then lost its lease before acking. Abandoning that
-/// one would report failure for work that succeeded, so the status check must ack
-/// it instead — and leave the committed outcomes alone.
 #[tokio::test]
 async fn a_delivery_past_the_budget_acks_an_operation_a_prior_pass_completed() {
     let db = test_db_with_outbox().await;
@@ -474,12 +423,6 @@ async fn a_delivery_past_the_budget_acks_an_operation_a_prior_pass_completed() {
     );
 }
 
-/// The status read past the budget can fail too, and there is nowhere left to put
-/// the message: retrying re-enters the same branch, so a read that keeps failing
-/// would hold its partition forever and drive `attempts` past the `i16` the
-/// outbox stores it in. It must terminalize instead — which is safe in both
-/// directions, since `abandon` touches only undecided items and only a
-/// `pending`/`running` operation row.
 #[tokio::test]
 async fn a_status_read_that_fails_past_the_budget_terminalizes_rather_than_retries() {
     let db = test_db_with_outbox().await;
@@ -500,10 +443,6 @@ async fn a_status_read_that_fails_past_the_budget_terminalizes_rather_than_retri
          the same branch: {result:?}",
     );
 
-    // Only `find_by_id` is injected, so abandonment — which reads items and writes
-    // through other calls — still lands. Rejecting without terminalizing would also
-    // satisfy the assertion above, so the operation's state is what separates the
-    // two. Read it through an unhooked service, since the hooked one cannot.
     let unhooked = service_without_dispatch(&db, stores());
     let operation = unhooked
         .operation(accepted.operation_id)
@@ -530,22 +469,6 @@ async fn a_status_read_that_fails_past_the_budget_terminalizes_rather_than_retri
     );
 }
 
-/// A terminal return value is not enough on its own: `LeasedStrategy` runs the
-/// handler under `timeout_at` and turns a dropped future into `Retry`, so a status
-/// read that never answers would reopen the very loop this branch closes. The
-/// handler has to stop on its own and answer from inside the lease.
-///
-/// Both calls on that path stall, because that is what separates one deadline for
-/// the path from a budget per call: the read stalls, the abandonment that follows
-/// it stalls too, and two individually safe budgets add up to more lease than
-/// there is.
-///
-/// One deadline for the path costs the lease once; a budget per call costs it twice
-/// and overruns. The clock is Tokio's, paused for the measured call: elapsed is then
-/// the timer arithmetic under test and not how busy the machine running it is.
-///
-/// Paused only for that call — the pool's own connect timeout is a timer too, and a
-/// virtual clock that jumps to the next deadline expires it during setup.
 #[tokio::test]
 async fn a_stalled_status_path_is_bounded_by_the_handler_as_a_whole() {
     const STALL: std::time::Duration = std::time::Duration::from_mins(1);
@@ -580,21 +503,6 @@ async fn a_stalled_status_path_is_bounded_by_the_handler_as_a_whole() {
     );
 }
 
-/// The ordinary path spends lease before it abandons anything: admission runs
-/// first, and only its failure leads to the abandonment write. A deadline derived
-/// once admission has returned would hand that write a budget measured from then —
-/// ignoring everything admission spent — and a write that runs past the real
-/// deadline is dropped and returned as a retry, which is what abandoning exists to
-/// avoid. The deadline has to be fixed when the delivery starts.
-///
-/// Sized so the two versions disagree about an outcome rather than about a
-/// duration. Admission spends most of the lease; the abandonment write then takes
-/// longer than the ~200ms actually left but well under the ~900ms a restarted
-/// budget would grant. So the fixed deadline cuts the write off and leaves the
-/// operation for boot recovery, while a restarted one lets it finish and
-/// terminalize. Asserting on which happened needs no clock — real or virtual — and
-/// a virtual one is not available here anyway: this path does enough real database
-/// work that auto-advance jumps to unrelated pool timers.
 #[tokio::test]
 async fn abandoning_after_a_slow_admission_stays_inside_the_delivery_deadline() {
     const LEASE: std::time::Duration = std::time::Duration::from_secs(1);
@@ -614,8 +522,6 @@ async fn abandoning_after_a_slow_admission_stays_inside_the_delivery_deadline() 
         .await
         .expect("accept");
 
-    // The last attempt the budget allows, so the failure is abandoned rather than
-    // retried — and the abandonment is on the ordinary path, not the exhausted one.
     let result = handler
         .admit_payload(accepted.operation_id.to_string().as_bytes(), LAST_ATTEMPT)
         .await;
@@ -639,25 +545,8 @@ async fn abandoning_after_a_slow_admission_stays_inside_the_delivery_deadline() 
     );
 }
 
-/// An admission that overruns is cut off with lease left to abandon it, so the
-/// operation reaches a terminal status instead of being dead-lettered while it
-/// stays `pending`.
-///
-/// This is the other half of the test above. There the write is what cannot fit;
-/// here admission itself would have spent the whole work budget, and the reserve
-/// is what stops it. Without that reserve the message was rejected — so nothing
-/// was queued for it any more — while the operation stayed non-terminal, and
-/// only the next process start would have picked it up from the recovery scan.
-///
-/// Sized so the two versions disagree about the outcome, not the duration:
-/// admission wants more than its share, and the abandonment write then takes
-/// longer than the sliver an unreserved budget would have left but well inside
-/// the reserve. A virtual clock is not available here for the same reason the
-/// test above states — this path does real database work.
 #[tokio::test]
 async fn an_overrunning_admission_is_cut_off_with_lease_left_to_abandon_it() {
-    // work deadline 1800ms, reserve min(5s, 25% of 2s) = 500ms, so admission
-    // must stop at 1300ms.
     const LEASE: std::time::Duration = std::time::Duration::from_secs(2);
     const SPENT_ADMITTING: std::time::Duration = std::time::Duration::from_millis(1600);
     const ABANDON_STALL: std::time::Duration = std::time::Duration::from_millis(300);
@@ -675,8 +564,6 @@ async fn an_overrunning_admission_is_cut_off_with_lease_left_to_abandon_it() {
         .await
         .expect("accept");
 
-    // The last attempt the budget allows: a pass cut off with retries left is
-    // redelivered instead, which is the arm the next assertion must not hit.
     let result = handler
         .admit_payload(accepted.operation_id.to_string().as_bytes(), LAST_ATTEMPT)
         .await;
@@ -704,10 +591,6 @@ async fn an_overrunning_admission_is_cut_off_with_lease_left_to_abandon_it() {
     );
 }
 
-/// `mark_completed` only moves a `running` row, so abandonment goes through
-/// `mark_abandoned`, which terminalizes from either non-terminal status. Without
-/// it the operation stays `pending` with terminal items and returns through every
-/// boot's recovery scan.
 #[tokio::test]
 async fn abandoning_an_operation_that_never_ran_still_terminalizes_it() {
     let db = test_db_with_outbox().await;
@@ -740,7 +623,6 @@ async fn abandoning_an_operation_that_never_ran_still_terminalizes_it() {
     );
     assert_eq!(operation.items[0].status, OperationItemStatus::Failed);
 
-    // Out of the recovery set, which is the point of terminalizing.
     let recovered = registry
         .nonterminal_operation_page(None, 128)
         .await
@@ -753,22 +635,6 @@ async fn abandoning_an_operation_that_never_ran_still_terminalizes_it() {
     );
 }
 
-/// Infrastructure errors can name connection strings, SQL, credentials and row
-/// content. Abandonment keeps every one of those out of all three surfaces: the
-/// operator log, the dead-letter reason, and the stored item payload a client
-/// reads back over REST.
-///
-/// The log was the exception until now — it carried `ServiceError`'s rendered
-/// text so that `error_code` would not be left to explain four different
-/// failures on its own. A log is an information-disclosure surface like a
-/// response body (PLID-53.02), and "the REST layer does it too" names a second
-/// site to harden rather than a licence for this one. The diagnostic survives as
-/// `cause_kind`: one word from a fixed allowlist, which separates the four
-/// failures without quoting anything the database said.
-///
-/// The injected text is chosen to be what must never appear anywhere — a DSN
-/// with a password, a bearer token, and document content — rather than a
-/// recognizable test string a log could omit by accident.
 #[tokio::test]
 async fn abandonment_records_the_cause_kind_and_never_the_drivers_own_text() {
     let log_dir = common::TestDir::new("abandonment-log");
@@ -874,8 +740,6 @@ async fn invalid_scope_is_dead_lettered_on_the_first_delivery_with_a_system_diag
     assert_eq!(operation.items[0].status, OperationItemStatus::Failed);
 }
 
-/// Exercise the envelope guard through the body `LeasedHandler::handle` runs per
-/// message; calling `reject_unusable` directly would not detect a missing guard.
 #[tokio::test]
 async fn a_foreign_payload_type_is_rejected_by_the_handler() {
     let db = test_db_with_outbox().await;
@@ -887,8 +751,6 @@ async fn a_foreign_payload_type_is_rejected_by_the_handler() {
         .await
         .expect("accept");
 
-    // A well-formed operation UUID under someone else's payload type: only the
-    // envelope check can refuse this one.
     let msg = OutboxMessage {
         partition_id: 0,
         seq: 1,
@@ -918,11 +780,6 @@ async fn a_foreign_payload_type_is_rejected_by_the_handler() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The payload
-// ---------------------------------------------------------------------------
-
-/// Payloads contain only the operation UUID, including in dead-letter rows.
 #[test]
 fn the_payload_is_the_operation_uuid_and_nothing_else() {
     let operation_id = Uuid::new_v4();
@@ -941,12 +798,6 @@ fn the_payload_is_the_operation_uuid_and_nothing_else() {
     assert!(types_registry::infra::outbox::parse_payload(b"{}").is_err());
 }
 
-// ---------------------------------------------------------------------------
-// Real delivery
-// ---------------------------------------------------------------------------
-
-/// Fixed UUID tails put these operations in distinct partitions. Use real stored
-/// candidates so completion proves admission, not just consumption of a message.
 async fn seed_partition_operation(
     db: &Arc<DBProvider<DbError>>,
     id: Uuid,
@@ -1004,15 +855,9 @@ async fn seed_partition_operation(
         .expect("seed operation and dispatch atomically");
 }
 
-/// A stalled admission must not hold independent operations in other partitions.
-/// Exercise both normal enqueue and startup recovery with production wiring.
 async fn assert_partitions_progress_independently(recover_second: bool) {
     const SECOND: &str = gts_id!("cf.core.outbox.independent.v1~");
 
-    // The paused snapshot owns one connection without taking any DB lock. Keep
-    // one more for active work: SQLite shared-cache cannot run concurrent writer
-    // transactions from multiple sequencers (SQLITE_LOCKED). This test proves
-    // concurrent admission handlers, not concurrent SQLite writers.
     let dsn = format!(
         "sqlite:file:tr-partitions-{}?mode=memory&cache=shared",
         Uuid::new_v4()
@@ -1037,8 +882,6 @@ async fn assert_partitions_progress_independently(recover_second: bool) {
     })
     .await;
 
-    // Starting a second pipeline also recovers the paused first operation. Its
-    // duplicate must stay on the same leased partition while the second proceeds.
     let second_handle = if recover_second {
         seed_partition_operation(&db, second_id, SECOND, Arc::new(NullDispatch)).await;
         let (_, handle) = started(&db, stores()).await;
@@ -1093,8 +936,6 @@ async fn recovery_preserves_partition_routing_across_pipelines() {
     assert_partitions_progress_independently(true).await;
 }
 
-/// Prove delivery and readable entity state without a direct worker call or
-/// stateful `start` phase, as required for consumers submitting in `init()` (P3).
 #[tokio::test]
 async fn an_accepted_operation_is_admitted_by_the_outbox() {
     let db = test_db_with_outbox().await;
@@ -1130,7 +971,6 @@ async fn an_accepted_operation_is_admitted_by_the_outbox() {
     handle.stop().await;
 }
 
-/// Recover pending inline submissions left by an interrupted process during rollout.
 #[tokio::test]
 async fn startup_requeues_nonterminal_operations_without_a_message() {
     let db = test_db_with_outbox().await;
@@ -1162,8 +1002,6 @@ async fn startup_requeues_nonterminal_operations_without_a_message() {
     assert_eq!(operation.items[0].status, OperationItemStatus::Succeeded);
     handle.stop().await;
 
-    // P0 retains completed operations forever; recovery must exclude them or
-    // every boot would re-enqueue the entire history.
     let recovered = registry
         .nonterminal_operation_page(None, 128)
         .await
@@ -1176,7 +1014,6 @@ async fn startup_requeues_nonterminal_operations_without_a_message() {
     );
 }
 
-/// After shutdown, dispatch rejects new submissions.
 #[tokio::test]
 async fn stopping_the_pipeline_leaves_no_silent_enqueue() {
     let db = test_db_with_outbox().await;
@@ -1203,13 +1040,6 @@ async fn stopping_the_pipeline_leaves_no_silent_enqueue() {
     );
 }
 
-/// Binding a second pipeline to a dispatch that already has one is refused at
-/// `start`, not warned about.
-///
-/// The binding is a `OnceLock`: acceptance would go on enqueueing into the
-/// first pipeline whatever the second one did, so a second worker would poll a
-/// queue nothing writes to — alive, leased, and delivering nothing. A start
-/// that cannot be reached is a failed start.
 #[tokio::test]
 async fn a_second_pipeline_refuses_to_bind_rather_than_starting_unreachable() {
     let db = test_db_with_outbox().await;
@@ -1219,7 +1049,6 @@ async fn a_second_pipeline_refuses_to_bind_rather_than_starting_unreachable() {
         .await
         .expect("the first pipeline binds");
 
-    // `let else` rather than `expect_err`: `OutboxHandle` is not `Debug`.
     let Err(refused) = types_registry::infra::outbox::start(db.db(), &registry, &dispatch).await
     else {
         panic!("the second pipeline must not bind");
@@ -1232,7 +1061,6 @@ async fn a_second_pipeline_refuses_to_bind_rather_than_starting_unreachable() {
         "a second bind is its own failure, not a generic outbox error: {refused}",
     );
 
-    // The first pipeline is untouched by the refusal and still delivers.
     let accepted = registry
         .submit(&registration("after-refused-bind", TARGET), NOW)
         .await
@@ -1251,17 +1079,6 @@ async fn a_second_pipeline_refuses_to_bind_rather_than_starting_unreachable() {
     first.stop().await;
 }
 
-// ---------------------------------------------------------------------------
-// The two branches of `LeasedHandler::handle` that only a real `Batch` reaches
-// ---------------------------------------------------------------------------
-
-/// A temporary failure returns `HandlerResult::Retry`, and the pipeline
-/// redelivers until the failure stops.
-///
-/// Every other retry test calls `admit_payload` directly, which returns a
-/// `MessageResult` to the test rather than to the loop: what the loop does with
-/// it — abandoning the batch and leaving the message for redelivery instead of
-/// acking it — is only exercised here.
 #[tokio::test]
 async fn a_temporary_failure_is_redelivered_by_the_pipeline_until_it_clears() {
     const FAILURES: usize = 1;
@@ -1305,11 +1122,6 @@ async fn a_temporary_failure_is_redelivered_by_the_pipeline_until_it_clears() {
     handle.stop().await;
 }
 
-/// A rejected message becomes a dead-letter row whose recorded reason names why.
-///
-/// The reject branch and the row it writes are the other half the direct
-/// `admit_payload` tests cannot reach: they observe the `MessageResult` and stop
-/// there, so nothing until now read what the outbox stored for an operator.
 #[tokio::test]
 async fn a_rejected_message_lands_in_a_dead_letter_row_that_names_the_reason() {
     use toolkit_db::outbox::{DeadLetterFilter, DeadLetterScope, Record};
@@ -1320,8 +1132,6 @@ async fn a_rejected_message_lands_in_a_dead_letter_row_that_names_the_reason() {
         .await
         .expect("start the admission outbox");
 
-    // A foreign envelope: right queue, wrong payload type. No redelivery can
-    // change either, so the handler must reject rather than retry.
     let provider: DBProvider<DbError> = DBProvider::new(db.db());
     let outbox = Arc::clone(handle.outbox());
     provider
@@ -1386,23 +1196,6 @@ async fn a_rejected_message_lands_in_a_dead_letter_row_that_names_the_reason() {
     handle.stop().await;
 }
 
-/// A failed startup must not consume the dispatch binding.
-///
-/// `start` builds the pipeline, runs the boot recovery scan, and binds the
-/// dispatch to the outbox. Binding is a `OnceLock`, so whichever of those two
-/// steps runs first decides what a *failed* start leaves behind: bind-then-recover
-/// leaves the binding set to a `Weak` whose pipeline the dropped handle has
-/// already stopped, and every later start in the same process answers
-/// `AlreadyBound` — reporting a running pipeline that does not exist, and making
-/// one failed recovery scan unrecoverable without a restart.
-///
-/// Recovering first is safe because recovery does not go through the dispatch:
-/// it enqueues into `handle.outbox()` directly, precisely because the registry
-/// is not published yet.
-///
-/// The injected failure is the recovery page read alone; every other call serves
-/// real storage, so the second start runs against the same usable database and
-/// the assertion is about the binding rather than about the store.
 #[tokio::test]
 async fn a_failed_recovery_scan_leaves_the_dispatch_bindable_by_the_next_start() {
     let db = test_db_with_outbox().await;
@@ -1425,7 +1218,6 @@ async fn a_failed_recovery_scan_leaves_the_dispatch_bindable_by_the_next_start()
         "the start must fail on recovery, not on the binding: {refused}",
     );
 
-    // Same dispatch, working store: the retry must be able to bind and deliver.
     let healthy = service_with(
         &db,
         stores(),
@@ -1458,16 +1250,6 @@ async fn a_failed_recovery_scan_leaves_the_dispatch_bindable_by_the_next_start()
     handle.stop().await;
 }
 
-// ---------------------------------------------------------------------------
-// Abandonment is coupled to the message's fate (the three terminalization cases)
-// ---------------------------------------------------------------------------
-
-/// The baseline the two failing cases below are read against: the abandonment
-/// write lands, so the dead letter tells the whole story and the message ends.
-///
-/// Stated as its own test rather than inferred from the others, because
-/// "rejected" is what the old unconditional code did in every case; the claim
-/// worth pinning is that rejecting is what *success* looks like.
 #[tokio::test]
 async fn an_abandonment_whose_write_lands_is_dead_lettered() {
     let db = test_db_with_outbox().await;
@@ -1479,8 +1261,6 @@ async fn an_abandonment_whose_write_lands_is_dead_lettered() {
         .submit(&registration("terminalized", TARGET), NOW)
         .await
         .expect("accept");
-    // A first delivery, with the budget still open: the reject below is the
-    // write landing, not the budget running out.
     let result = handler
         .admit_payload(accepted.operation_id.to_string().as_bytes(), 0)
         .await;
@@ -1504,16 +1284,6 @@ async fn an_abandonment_whose_write_lands_is_dead_lettered() {
     assert_eq!(operation.items[0].status, OperationItemStatus::Failed);
 }
 
-/// A terminalization that fails while deliveries remain must keep the message,
-/// not dead-letter it.
-///
-/// This is the invariant the reserve alone did not restore. Rejecting here
-/// produces the one state nothing resolves: the message is in the dead-letter
-/// table, so no queued work is left, while the operation is still `pending`, so
-/// a caller polling it never learns anything — and only the next process start,
-/// through the boot recovery scan, would pick it up. `Retry` keeps a live
-/// delivery path over the same durable row, and the operation row being
-/// unchanged is exactly what makes a redelivery re-attempt the same abandonment.
 #[tokio::test]
 async fn a_retryable_terminalization_failure_keeps_the_message_instead_of_dead_lettering_it() {
     let db = test_db_with_outbox().await;
@@ -1554,9 +1324,6 @@ async fn a_retryable_terminalization_failure_keeps_the_message_instead_of_dead_l
     );
     assert_eq!(operation.items[0].status, OperationItemStatus::Pending);
 
-    // Still recoverable at the next boot, which is the second half of why
-    // rejecting would have been wrong: with the message gone, that scan was the
-    // only remaining path.
     let recovered = registry
         .nonterminal_operation_page(None, 128)
         .await
@@ -1569,15 +1336,6 @@ async fn a_retryable_terminalization_failure_keeps_the_message_instead_of_dead_l
     );
 }
 
-/// The bound on the retry above: once the delivery budget is spent, the dead
-/// letter stands even though the operation is still non-terminal.
-///
-/// Without this arm a terminalization that never succeeds would hold its
-/// partition forever and drive `attempts` past the `i16` the outbox stores it
-/// in — retrying a write that cannot land is not more correct than stopping, it
-/// is only unbounded. The state this leaves is strictly worse than
-/// terminalizing and strictly better than that loop, and the boot recovery scan
-/// remains its resolution.
 #[tokio::test]
 async fn an_unterminalizable_abandonment_is_dead_lettered_once_the_budget_is_spent() {
     let db = test_db_with_outbox().await;
@@ -1589,8 +1347,6 @@ async fn an_unterminalizable_abandonment_is_dead_lettered_once_the_budget_is_spe
         .submit(&registration("unterminalizable", TARGET), NOW)
         .await
         .expect("accept");
-    // The last delivery the budget allows: `may_retry` is false, so the arm
-    // above cannot apply however the write goes.
     let result = handler
         .admit_payload(accepted.operation_id.to_string().as_bytes(), LAST_ATTEMPT)
         .await;
@@ -1619,10 +1375,6 @@ async fn an_unterminalizable_abandonment_is_dead_lettered_once_the_budget_is_spe
     );
 }
 
-/// The log has to say which of the two happened, because the `MessageResult`
-/// does not reach an operator and the two outcomes need different responses: a
-/// redelivery resolves itself, a dead letter with a `pending` operation waits
-/// for a restart.
 #[tokio::test]
 async fn a_retried_terminalization_failure_says_so_in_the_log() {
     let log_dir = common::TestDir::new("terminalization-log");

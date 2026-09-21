@@ -12,9 +12,7 @@ use crate::domain::dependency::DependencyEdge;
 use crate::domain::enums::DependencyKind;
 use crate::domain::gts_store::StoreBuildError;
 
-/// Infrastructure failures; [`Self::transient`] classifies retryability.
-/// `#[non_exhaustive]` lets T13, T15, T17, T19 and T20 add failures without
-/// breaking downstream matches.
+/// Infrastructure failures with retry classification.
 #[domain_model]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -26,35 +24,23 @@ pub enum WorkerError {
     /// The dry-run overlay has no terminal item write after a successful admission.
     #[error("the commit path for operation item {item_id} recorded no terminal item write")]
     MissingItemWrite { item_id: i64 },
-    /// Worker bug: `order_batch` partitions ordered/cyclic candidates so every
-    /// prediction slot must be written exactly once; one was left unfilled.
+    /// `order_batch` left a prediction slot unwritten.
     #[error("the dry-run pass left operation item {item_id} without a prediction")]
     MissingPrediction { item_id: i64 },
-    /// Rolls back entity writes behind an already-terminal item. The worker
-    /// catches this and reports the other pass's outcome; callers never see it.
+    /// Internal rollback after another pass terminalized the item.
     #[error("operation item {item_id} was terminalized by another pass")]
     ItemAlreadyTerminal { item_id: i64 },
-    /// A concurrent pass won this item's CAS, but the reread that should hand
-    /// back its stored outcome does not contain the row.
-    ///
-    /// Distinct from [`Self::OperationNotFound`], which this path used to report:
-    /// the operation plainly does exist — it was just read — and the REST mapping
-    /// turns that variant into `404 No operation with id: {id}`, which is a lie
-    /// about a live operation and loses the one identifier that says what
-    /// actually went missing.
+    /// A concurrent pass won the item CAS, but its outcome row is missing.
     #[error("operation item {item_id} lost the outcome a concurrent pass recorded")]
     ItemOutcomeVanished { item_id: i64 },
     #[error("building the transient store failed: {0}")]
     StoreBuild(#[source] StoreBuildError),
     #[error("the blocking evaluation task failed: {0}")]
     EvaluationTask(#[source] tokio::task::JoinError),
-    /// Missing or wrong-kind current-state row. D3 writes entity, revision and
-    /// current state atomically, so this is corruption, not a race or candidate fault.
+    /// Missing or wrong-kind current-state row after an atomic D3 write.
     #[error("entity '{gts_id}' (id {entity_id}) has no current-state row of its kind")]
     CurrentStateMissing { gts_id: String, entity_id: i64 },
-    /// An `entity` row vanished between reads in one transaction, though admission
-    /// never deletes it. Unlike [`Self::CurrentStateMissing`], the missing row is
-    /// in `entity`, not its `type_schema` / `instance` projection.
+    /// An entity row vanished between reads in one transaction.
     #[error("entity '{gts_id}' (id {entity_id}) vanished mid-transaction")]
     EntityVanished { gts_id: String, entity_id: i64 },
     /// A stored `gts_id` no longer parses despite acceptance-time canonicalization.
@@ -97,10 +83,7 @@ pub enum WorkerError {
 }
 
 impl WorkerError {
-    /// Whether a redelivery can reach a different answer (see
-    /// [`crate::domain::retry`] for which storage failures those are, and why
-    /// an unrecognized one is retried rather than dead-lettered).
-    /// Missing dependencies are candidate refusals and never reach this type.
+    /// Return whether redelivery may clear this infrastructure failure.
     #[must_use]
     pub fn transient(&self) -> bool {
         match self {
@@ -108,7 +91,7 @@ impl WorkerError {
             Self::Db(error) => crate::domain::retry::database_failure_may_clear(error),
             Self::StoreBuild(error) => error.is_transient(),
             Self::RevalidationRequired(_) => true,
-            // A cancelled task can be recovered on redelivery; a panic cannot.
+            // Cancellation is recoverable; a panic is not.
             Self::EvaluationTask(error) => error.is_cancelled(),
             Self::OperationNotFound { .. }
             | Self::MissingPayload { .. }
@@ -154,16 +137,8 @@ impl WorkerError {
     }
 }
 
-/// The dependency an [`ItemFailure`] names, as the stored payload carries it.
-///
-/// `kind` is the payload token (`base`, `conforming_type`, `ref`) rather than
-/// [`DependencyKind`], for the reason [`AdmissionFailureReason::Unknown`]
-/// exists: a payload written by a later version can name a kind this binary
-/// does not know, and refusing to parse it would drop `target` too — the one
-/// field a reader needs in order to say *what* is missing. `DependencyKind`
-/// stays closed because its storage counterpart and the DDL's CHECK are
-/// exhaustive against it; this type is the diagnostic side, where an unknown
-/// token is data rather than corruption.
+/// Dependency details preserved from a stored failure payload.
+/// `kind` stays a string for forward compatibility with newer writers.
 #[domain_model]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FailureDependency {
@@ -244,10 +219,7 @@ impl ItemFailure {
         payload.to_string()
     }
 
-    /// Inverse of [`Self::to_payload`]: preserves `{reason, message}` on redelivery
-    /// for T16's per-reason metrics instead of reporting `recorded` with JSON in
-    /// `message`. REST reads the row's `error_payload` directly. Invalid payloads
-    /// remain verbatim with a diagnostic reason so corruption stays visible.
+    /// Parse stored failures while preserving invalid payloads as diagnostics.
     #[must_use]
     pub fn from_payload(payload: &str) -> Self {
         match serde_json::from_str::<serde_json::Value>(payload) {
@@ -258,9 +230,7 @@ impl ItemFailure {
                     (Some(reason), Some(message)) => Self {
                         reason: AdmissionFailureReason::from_wire(reason),
                         message: message.to_owned(),
-                        // An unrecognized `dependency_kind` is kept rather than
-                        // dropped: the pair is what a later version wrote, and
-                        // discarding it would take `dependency_id` with it.
+                        // Preserve unknown kinds written by newer versions.
                         dependency: value
                             .get("dependency_id")
                             .and_then(serde_json::Value::as_str)
@@ -304,10 +274,7 @@ mod tests {
         );
     }
 
-    /// The query half of this case moved to `domain::retry`, which owns the
-    /// storage-failure direction; what is worth pinning on `WorkerError` is
-    /// that a configuration failure does not inherit the retry default its
-    /// neighbouring engine failures do.
+    /// Configuration failures must not inherit the retry default.
     #[test]
     fn a_database_configuration_error_is_permanent() {
         assert!(
@@ -325,9 +292,7 @@ mod tests {
         );
     }
 
-    /// The split exists because `StoreBuildError` carries both a contention error
-    /// and statements about stored data. Treating the whole variant as permanent
-    /// dead-letters an operation a redelivery would have admitted.
+    /// `StoreBuildError` mixes retryable contention with permanent data errors.
     #[test]
     fn a_failed_closure_read_inside_store_build_is_retryable() {
         let contention = WorkerError::StoreBuild(StoreBuildError::Storage(ScopeError::Db(

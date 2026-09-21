@@ -71,8 +71,6 @@ async def read_created(client, api_path, expected, operation):
     assert response.headers["content-type"].startswith("application/json")
     entity = response.json()
     actual = deepcopy(entity)
-    # These fixtures use named GTS IDs (no UUID tail). The Registry Reference
-    # must be UUIDv5(URL-namespace UUIDv5("gts"), full GTS ID), not any valid UUID.
     assert actual["gts_uuid"] == str(uuid.uuid5(GTS_NAMESPACE, expected["gts_id"]))
     created = timestamp(actual["created_at"])
     assert created == timestamp(actual["updated_at"]), actual
@@ -106,16 +104,12 @@ def _accept(response, expected_receipt):
     normalized = {**receipt, "operation_id": "<operation_id>", "status": "<status>"}
     assert_json(normalized, expected_receipt)
     assert "location" in response.headers, response.headers
-    # Follow the actual Location, including any gateway prefix.
     return receipt, urljoin(str(response.url), response.headers["location"])
 
 
 async def _poll(client, receipt, location, kind):
     """Return terminal outcomes; completed never implies all items succeeded."""
     last_operation = None
-    # A latency requirement, not a tuning knob: an accepted submission must
-    # reach a terminal status promptly. Exhausting this deadline means the work
-    # waited for some periodic sweep instead of being picked up on acceptance.
     try:
         async with asyncio.timeout(4):
             while True:

@@ -1,20 +1,12 @@
-//! Persistence ports and shared row/input types. The domain orchestrates SPEC §8
-//! acceptance/admission transactions via `&DbTx<'_>`; ports hide `SeaORM` entities,
-//! active models and column enums. `infra::storage::repo` uses these same types,
-//! so `store.rs` forwards without translation and the domain names only `toolkit_db`.
+//! Persistence ports and shared row/input types for admission transactions.
+//! Ports hide SeaORM details and expose only `toolkit_db` transactions.
 //!
 //! # Why every port takes `&DbTx<'_>` and not a runner
 //!
-//! - `&impl DBRunner` makes trait methods non-dyn-safe, preventing `Arc<dyn Stores>`
-//!   and propagating generics through the domain to gear wiring.
-//! - Sealing permits coercion to `&dyn DBRunner`, but secure queries require
-//!   `&impl DBRunner` with implicit `Sized` (`toolkit-db/src/secure/select.rs`).
-//!   Only `toolkit_db::outbox` accepts `&(impl DBRunner + Sync + ?Sized)`.
-//! - Concrete `&DbTx<'_>` preserves dyn safety. Every call, including reads, uses
-//!   a transaction so multi-table reads cannot straddle commits ([`snapshot_read`]).
+//! Concrete `&DbTx<'_>` keeps [`Stores`] dyn-safe and gives multi-table reads a
+//! consistent snapshot; secure query helpers do not accept `dyn DBRunner`.
 //!
-//! Repositories retain `runner: &impl DBRunner` per `11_database_patterns.md`
-//! and remain usable outside transactions.
+//! Repository internals still use `&impl DBRunner` per the database guidelines.
 //!
 //! # Rows mirror their tables
 //!
@@ -44,15 +36,9 @@ pub mod metrics;
 // Read transactions
 // ---------------------------------------------------------------------------
 
-/// Multi-statement read snapshot. `PostgreSQL`'s default `READ COMMITTED` takes
-/// per-statement snapshots that can straddle a commit. Request `RepeatableRead`
-/// explicitly on it and `MySQL`/`InnoDB` (where it is the default); `ReadOnly`
-/// makes both engines reject writes.
+/// Read-only repeatable snapshot for multi-statement server-database reads.
 ///
-/// `SQLite` already holds a serializable WAL snapshot/shared lock. Request no
-/// settings: `SeaORM` does not translate them, and `sqlx_sqlite`'s
-/// `set_transaction_config` emits a `WARN` per unsupported setting (two per read
-/// with `quickstart.yaml`). Atomic single-statement reads use plain transactions.
+/// SQLite uses its native transaction settings to avoid unsupported-setting warnings.
 #[must_use]
 pub fn snapshot_read(db: &Db) -> TxConfig {
     snapshot_read_for(db.db_engine())
@@ -70,11 +56,7 @@ fn snapshot_read_for(engine: &str) -> TxConfig {
     }
 }
 
-/// Commit rechecks need the latest state (SPEC §8.1 step 4): request `READ COMMITTED`
-/// on `PostgreSQL` (its default) and `MySQL`/`InnoDB`. The latter's default
-/// `REPEATABLE READ` would hide the winner after an absorbed unique conflict
-/// (`repo::conflict_do_nothing`). No `access_mode` because commits write;
-/// no `SQLite` settings, as in [`snapshot_read`].
+/// Read-committed transaction for commit rechecks that must see conflict winners.
 #[must_use]
 pub fn commit_write(db: &Db) -> TxConfig {
     commit_write_for(db.db_engine())
@@ -650,10 +632,7 @@ pub trait EntityStore: Send + Sync {
         gts_uuid: Uuid,
     ) -> Result<Option<EntityRow>, ScopeError>;
 
-    /// Batch exact read by Registry Reference, for a caller resolving a whole
-    /// batch of deletion targets. References with no row are absent from the
-    /// result rather than reported, so the caller keeps request order when it
-    /// names the first unresolved one.
+    /// Resolve a batch of Registry References; omit missing rows.
     async fn find_by_gts_uuids(
         &self,
         tx: &DbTx<'_>,
@@ -823,8 +802,7 @@ pub trait InstanceStore: Send + Sync {
     ) -> Result<bool, ScopeError>;
 }
 
-/// Recovery ordering key and operation id. Client-allocated UUIDs carry no time
-/// component, so `created_at` supplies chronological order.
+/// Chronological recovery cursor; the client UUID only breaks timestamp ties.
 #[domain_model]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecoveryCursor {
@@ -850,13 +828,7 @@ pub trait OperationStore: Send + Sync {
         id: Uuid,
     ) -> Result<Option<OperationRow>, ScopeError>;
 
-    /// Page non-terminal operations after interruption or outbox rollout without
-    /// reading the entire boot backlog. Keyset paging advances while prior rows
-    /// await admission. Start with `None`, then use the last cursor; a short page ends the scan.
-    ///
-    /// One page of [`RecoveryCursor`]s — `(created_at, id)` pairs, not bare ids:
-    /// the caller hands the last one back as `after`, and `created_at` is what
-    /// makes that resumable. Reach for `.id` when only the operation is wanted.
+    /// Read one keyset page of non-terminal operations for recovery.
     async fn nonterminal_page(
         &self,
         tx: &DbTx<'_>,
@@ -906,9 +878,7 @@ pub trait OperationStore: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError>;
 
-    /// Terminalize an operation that delivery abandoned, from either non-terminal
-    /// status. Unlike [`Self::mark_completed`] this also moves a `pending` row: an
-    /// operation can be abandoned before its pass ever marked it running.
+    /// Terminalize abandonment from either pending or running.
     async fn mark_abandoned(
         &self,
         tx: &DbTx<'_>,
@@ -950,10 +920,7 @@ pub trait OperationStore: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError>;
 
-    /// Fail every still-undecided item of one operation in a single statement,
-    /// for the abandonment path — which runs on the delivery's remaining lease
-    /// and cannot afford one round trip per item. Items an earlier pass decided
-    /// keep their outcomes; the count is how many this call moved.
+    /// Fail undecided items in one statement and return the number moved.
     async fn fail_nonterminal_items(
         &self,
         tx: &DbTx<'_>,

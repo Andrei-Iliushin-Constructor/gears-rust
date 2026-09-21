@@ -4642,7 +4642,7 @@
       },
       "DeleteEntitiesRequest": {
         "additionalProperties": false,
-        "description": "A deletion batch.\n\n`deny_unknown_fields`, like every request body and query on this surface:\n`api_dto` renames to `snake_case` and nothing else, so a client posting\n`\"dryRun\": true` otherwise deserializes to `dry_run: None`, defaults to\n`false`, and has a batch of entities really deleted. On a destructive route\nthe safe answer to a field the server does not recognize is `400`, not a\ncommit. v1's `RegisterEntitiesRequest` / `ListEntitiesQuery` are deliberately\nleft tolerant — P12 keeps that contract and its e2e suite unchanged.",
+        "description": "A deletion batch. Unknown fields are rejected to prevent ignored safety options.",
         "properties": {
           "dry_run": {
             "description": "Predict without changing entities. Defaults to `false`; part of the idempotency fingerprint.",
@@ -4652,7 +4652,7 @@
             ]
           },
           "items": {
-            "description": "No `max_items`: the ceiling is `limits.batch_candidates`, which a deployment\nconfigures. A literal here would be a second, fixed number that disagrees\nwith the server the moment anyone changes that setting. `RegistryService::delete`\nenforces the real one before reading anything.",
+            "description": "Runtime configuration supplies the batch limit.",
             "items": {
               "$ref": "#/components/schemas/DeleteEntityDto"
             },
@@ -4670,7 +4670,7 @@
         "description": "A batch deletion target, resolved like `GET /entities/{entity_key}`.",
         "properties": {
           "expected_resource_version": {
-            "description": "Required positive version. Optional in Rust so acceptance returns the same\n`400 deletion_requires_version` on both deletion routes rather than letting\nthe extractor answer first.\n\n`value_type = i64` alongside `required` is what keeps the generated schema a\nplain `integer`: `required` on its own leaves the property nullable, so the\ndocument would promise that an explicit `null` is accepted while acceptance\nanswers `400` — and it would disagree with the DELETE route, which declares\nthe same precondition as a non-nullable `integer` query parameter.",
+            "description": "Required positive version; optional internally for uniform validation errors.",
             "format": "int64",
             "minimum": 1,
             "type": "integer"
@@ -9267,7 +9267,7 @@
         "description": "One candidate's durable outcome.",
         "properties": {
           "error": {
-            "description": "The refusal as `{reason, message}`, when this candidate failed.\n`reason` is a stable machine-readable code; `message` is an explanation for humans.\nMissing dependencies also carry `dependency_id` and `dependency_kind`\n(`base`, `conforming_type`, `ref`). System abandonment carries a safe\n`error_code` and `operation_id` for correlation with operator logs.\nCompatibility messages include causes and schema locations where available.\nClients must not parse `message` or depend on its wording."
+            "description": "The refusal as `{reason, message}`, when this candidate failed.\n`reason` is a stable machine-readable code; `message` is an explanation for humans.\nStructured candidate or abandonment details.\nCompatibility messages include causes and schema locations where available.\nClients must not parse `message` or depend on its wording."
           },
           "gts_id": {
             "type": "string"
@@ -17385,7 +17385,7 @@
             "description": "The authored document."
           },
           "expected_resource_version": {
-            "description": "Optimistic precondition. **Omit** to require that the identifier does not\nexist; a literal `0` is refused. A positive version names a content\nrevision: the entity must exist at exactly that `resource_version`, and a\nmismatch fails the candidate terminally rather than rebasing it.\n\n`minimum = 1` documents the refusal of `0` and negatives that acceptance\nalready enforces. No `value_type` here, unlike [`DeleteEntityDto`]: this\nproperty stays nullable, because omitting it is a meaningful request and\n`serde(default)` accepts an explicit `null` as that same omission.",
+            "description": "Optimistic precondition. **Omit** to require that the identifier does not\nexist; a literal `0` is refused. A positive version names a content\nrevision: the entity must exist at exactly that `resource_version`, and a\nmismatch fails the candidate terminally rather than rebasing it.\n\nOptional positive precondition; acceptance rejects zero and negatives.",
             "format": "int64",
             "minimum": 1,
             "type": [

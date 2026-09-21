@@ -72,7 +72,6 @@ async def test_register_schema(
             "created_at": "<created_at>",
             "updated_at": "<updated_at>",
             "content": schema["content"],
-            # No inheritance or $ref: resolution preserves this entire schema.
             "resolved_schema": schema["content"],
             "effective_traits": {},
             "effective_traits_schema": {

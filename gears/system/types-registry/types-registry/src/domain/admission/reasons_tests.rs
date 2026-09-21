@@ -255,15 +255,8 @@ fn t18s_quarantine_and_dialect_reasons_are_four_distinct_codes() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// DeliveryFailure — the second axis: why a *delivery* gave up
-// ---------------------------------------------------------------------------
-
 use super::DeliveryFailure as Delivery;
 
-/// Every variant that names a code of its own. `Admission` is deliberately
-/// absent: it forwards `WorkerError::code()` rather than being a member of this
-/// vocabulary, and is covered by its own test below.
 fn delivery_codes() -> Vec<Delivery> {
     vec![
         Delivery::UnexpectedPayloadType,
@@ -275,14 +268,6 @@ fn delivery_codes() -> Vec<Delivery> {
     ]
 }
 
-/// These strings are read back by a client on `GET /operations/{id}` and by an
-/// operator in a dead-letter row, so they are pinned literally rather than
-/// derived from the variant names: renaming a variant must stay free, renaming
-/// the wire value must not.
-///
-/// No source-parsing guard like [`variant_names_in_source`] here — `as_str` is
-/// an exhaustive `const fn` match with no wildcard, so a variant added without a
-/// code does not compile.
 #[test]
 fn delivery_codes_are_the_stable_wire_strings() {
     assert_eq!(
@@ -329,9 +314,6 @@ fn delivery_codes_are_distinct_and_snake_case() {
     }
 }
 
-/// `Admission` is a passthrough, not a code of its own: flattening
-/// `WorkerError`'s vocabulary into this enum would give it a second copy to
-/// drift from.
 #[test]
 fn an_admission_failure_forwards_the_workers_own_code() {
     let worker = crate::domain::admission::errors::WorkerError::ItemOutcomeVanished { item_id: 7 };
@@ -343,9 +325,6 @@ fn an_admission_failure_forwards_the_workers_own_code() {
     );
 }
 
-/// The one string these two axes share, asserted so it reads as a decision
-/// rather than a collision: both mean the operation row is gone, and a client
-/// cannot act on which layer noticed.
 #[test]
 fn the_operation_not_found_code_is_shared_with_the_worker_on_purpose() {
     let worker = crate::domain::admission::errors::WorkerError::OperationNotFound {

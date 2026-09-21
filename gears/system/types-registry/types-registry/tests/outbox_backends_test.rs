@@ -1,18 +1,3 @@
-//! Outbox delivery on `PostgreSQL` and `MySQL`, with `SQLite` as a control.
-//!
-//! Exercise dialect-specific claim, acknowledgement and cursor SQL, including
-//! `MySQL` ID allocation hidden by `SQLite`'s single-writer model.
-//!
-//! [`assert_single_admission_under_two_pipelines`] runs two pipelines over one
-//! database and asserts the candidate is admitted once. It pins the mechanism as
-//! well as the outcome: both services' ports sit behind one gate at
-//! [`PausePoint::OperationRead`] that attributes arrivals to a single operation,
-//! holds the first of them, and counts the rest — so the test states, while that
-//! pass is provably inside admission and both pipelines have been told to look
-//! at its partition, that no second pass entered. That is the lease excluding the
-//! other worker before the store, distinguished from an item CAS refusing it
-//! after.
-
 #![cfg(feature = "integration")]
 
 mod common;
@@ -41,19 +26,8 @@ const DRAFT_07: &str = "http://json-schema.org/draft-07/schema#";
 
 const TARGET: &str = gts_id!("cf.core.obxback.target.v1~");
 
-/// How long the other worker is given to enter admission after being told, by
-/// an explicit `flush_partition`, to look at the held message's partition.
-///
-/// A dirty push wakes that pipeline's sequencer immediately rather than leaving
-/// it to a poll interval, so this window covers one sequencer pass plus the
-/// processor claim it schedules — not a cold reconciliation. The assertion it
-/// serves is a negative one, and a worker that got in later would still show up
-/// in the outcome assertions below as a second revision.
 const CONTENTION_WINDOW: Duration = Duration::from_millis(300);
 
-/// A warm-up candidate, registered through the second pipeline before any
-/// contention, so the silence at the gate afterwards cannot be explained by a
-/// pipeline that never delivers anything.
 const WARMUP: &str = gts_id!("cf.core.obxback.warmup.v1~");
 
 fn schema(gts_id: &str) -> Value {
@@ -65,7 +39,6 @@ fn schema(gts_id: &str) -> Value {
     })
 }
 
-/// Verify registration delivery through the outbox without calling the worker.
 async fn assert_delivery(db: &Arc<DBProvider<DbError>>, backend: &str) {
     let dispatch = Arc::new(OutboxDispatch::new());
     let registry = Arc::new(RegistryService::new(
@@ -131,45 +104,9 @@ async fn assert_delivery(db: &Arc<DBProvider<DbError>>, backend: &str) {
     handle.stop().await;
 }
 
-/// Two pipelines, one database, one message: admit once, with no second revision
-/// or resource-version bump, whether the lease or the item CAS excludes the
-/// other worker.
-///
-/// The two passes are made to overlap rather than left to chance, and every step
-/// that used to be probabilistic is now driven:
-///
-/// - **Both services' ports sit behind one gate** at [`PausePoint::OperationRead`]
-///   which attributes arrivals to a *single* operation. A shared counter over all
-///   traffic could not say which operation or which delivery path reached the
-///   store, so a count of `1` meant little; this one is asserted against the
-///   contended operation's own id.
-/// - **The second pipeline is proved alive first.** It is started on its own and
-///   a warm-up registration is enqueued through its dispatch and admitted to
-///   completion — with no other pipeline running, so nothing else could have
-///   delivered it. Without that, `reached() == 1` below is equally well explained
-///   by a second pipeline that never ran, never bound, or was never instrumented.
-///   The warm-up passes the gate untouched because the gate is still disarmed.
-/// - **The other pipeline is made to attempt the same queued partition.** Once a
-///   pass is held, both outboxes get an explicit `flush_partition` for the contended
-///   operation's partition. Enqueueing through one dispatch wakes only that
-///   pipeline, and the other's sequencer is idle for a minute at a time — so
-///   without this push the window below observed a pipeline that had never been
-///   asked to look, and the test proved nothing about contention.
-///
-/// Both pipelines are pushed rather than only the second: which of them wins the
-/// claim on a message neither was told about first is not controllable, and the
-/// invariant does not care. The holder is identified by the gate, and the push
-/// guarantees the *other* one has been asked for the same partition — which is
-/// the contention the assertion is about.
-///
-/// A barrier would not do in place of the count: when exclusion works by keeping
-/// the other worker out of the store entirely, waiting for it deadlocks, and
-/// "it never arrived" is the answer rather than a hang.
 async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError>>, backend: &str) {
     let gts_id = gts_id!("cf.core.obxback.contended.v1~");
 
-    // Two independent services over the same `Db`, so two leased workers compete
-    // for the same partition, both reading through one gate.
     let (first_ports, gate, reached, resume) =
         TestStores::pausing_shared_for_one_operation(PausePoint::OperationRead);
     let second_ports = TestStores::sharing_pause(&gate);
@@ -194,8 +131,6 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
         metrics(),
     ));
 
-    // The second pipeline alone, so the warm-up below has exactly one possible
-    // deliverer. The gate is disarmed, so none of that traffic is held or counted.
     let second_handle = types_registry::infra::outbox::start(db.db(), &second, &second_dispatch)
         .await
         .unwrap_or_else(|e| panic!("{backend}: start the second pipeline: {e}"));
@@ -251,8 +186,6 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
         .await
         .unwrap_or_else(|e| panic!("{backend}: start the first pipeline: {e}"));
 
-    // From here the next operation read through either service's ports is the
-    // one the gate attributes, holds and counts.
     gate.arm();
 
     let accepted = submitter
@@ -273,7 +206,6 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
         .await
         .unwrap_or_else(|e| panic!("{backend}: accept: {e}"));
 
-    // One pass is now inside admission and holding its lease.
     reached
         .await
         .unwrap_or_else(|e| panic!("{backend}: a pass must reach the admission read: {e}"));
@@ -289,9 +221,6 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
         "{backend}: the gate holds the first arrival, so exactly one pass is inside",
     );
 
-    // Tell both pipelines to look at that partition. The holder already has the
-    // lease; the other one now genuinely attempts the same queued message
-    // instead of waiting out a sequencer interval it was never woken from.
     let partition = types_registry::infra::outbox::partition_of(accepted.operation_id);
     let queue = types_registry::infra::outbox::QUEUE;
     second_handle
@@ -303,8 +232,6 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
         .flush_partition(queue, partition)
         .unwrap_or_else(|e| panic!("{backend}: signal the partition on the first pipeline: {e}"));
 
-    // Nothing may arrive: a second arrival here means both workers read the same
-    // operation, and only the item CAS would be left to separate them.
     tokio::time::sleep(CONTENTION_WINDOW).await;
     assert_eq!(
         gate.reached(),

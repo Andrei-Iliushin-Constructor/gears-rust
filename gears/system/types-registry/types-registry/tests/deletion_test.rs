@@ -183,7 +183,6 @@ async fn entity_of(db: &Provider, gts_id: &str) -> Option<EntityRow> {
         .expect("read")
 }
 
-/// The stored operation items, for a test asserting what a redelivery would find.
 async fn items_of(db: &Provider, operation_id: Uuid) -> Vec<OperationItemRow> {
     let provider = worker(db);
     let conn = provider.conn().expect("conn");
@@ -696,8 +695,6 @@ async fn a_deletion_whose_write_matches_no_row_is_refused_not_reported_as_done()
     );
 }
 
-/// Outcome-write failure must roll back the tombstone, or redelivery would
-/// misreport a committed deletion as `NotActive`.
 #[tokio::test]
 async fn deletion_rolls_back_when_its_item_outcome_cannot_be_written() {
     let db = test_db().await;
@@ -733,8 +730,6 @@ async fn deletion_rolls_back_when_its_item_outcome_cannot_be_written() {
         LATER,
     )
     .await;
-    // The variant matters: `is_err()` would also hold for a failure raised before
-    // the deletion was attempted, which would make the rollback claim below vacuous.
     assert!(
         matches!(result, Err(WorkerError::Storage(_))),
         "the injected item write must surface as the storage failure it is: {result:?}",
@@ -744,8 +739,6 @@ async fn deletion_rolls_back_when_its_item_outcome_cannot_be_written() {
         LifecycleStatus::Active,
         "the entity mutation must roll back with the item outcome",
     );
-    // What a redelivery sees, which is what the docstring is about: the item is
-    // still non-terminal, so the next pass owes it an outcome.
     let items = items_of(&db, op).await;
     assert_eq!(items.len(), 1);
     assert_eq!(
@@ -755,21 +748,6 @@ async fn deletion_rolls_back_when_its_item_outcome_cannot_be_written() {
     );
 }
 
-/// When the item CAS returns `Ok(false)` — another pass has already terminalized
-/// the item — the tombstone must roll back with the transaction, not be committed
-/// without an accompanying item outcome. If it committed, the entity would appear
-/// deleted while the stored item holds the prior pass's terminal reason, leaving
-/// the two in an inconsistent state.
-///
-/// Treating the miss as "the entity write is committed either way, so report the
-/// stored outcome" is the shape that leaves them inconsistent: the CAS guards the
-/// item row, not the tombstone, so only a rollback covers both.
-///
-/// Deterministic, with no timing: the item is terminalized in the database
-/// *before* the worker runs, and `StaleFirstFindItemsHooks` makes the pass's first
-/// `find_items` return the snapshot taken before that. The worker then calls the
-/// real `mark_item_succeeded`, which genuinely misses because the item is already
-/// `Failed`.
 #[tokio::test]
 async fn deletion_rolls_back_tombstone_when_item_cas_loses() {
     let db = test_db().await;
@@ -789,33 +767,26 @@ async fn deletion_rolls_back_tombstone_when_item_cas_loses() {
     .await
     .expect("accepted");
 
-    // Save the Pending snapshot before any terminalisation.
     let pending_items = items_of(&db, op).await;
     assert_eq!(pending_items[0].status, OperationItemStatus::Pending);
     let item_id = pending_items[0].id;
 
-    // Simulate a prior pass having failed this item. The specific payload lets
-    // the test verify the stored outcome is preserved, not overwritten.
     let prior_payload = r#"{"reason":"prior_pass_terminated"}"#.to_owned();
     let conn = db.conn().expect("conn");
     OperationRepo::mark_item_failed(&conn, &allow_all(), item_id, prior_payload.clone(), NOW)
         .await
         .expect("terminalize item as Failed before this pass runs");
 
-    // First find_items returns the stale Pending snapshot so the worker enters
-    // process_deletion. Subsequent reads (stored_item fallback) are real.
     let hooked: Arc<dyn types_registry::domain::ports::Stores> =
         common::TestStores::with_stale_snapshot(pending_items);
 
     let outcome = run_with(&db, &hooked, op).await;
 
-    // Tombstone must have rolled back; entity must still be Active.
     assert_eq!(
         entity_of(&db, TARGET).await.expect("row").lifecycle_status,
         LifecycleStatus::Active,
         "tombstone must roll back when the item CAS loses (pre-fix: entity would be Tombstoned)",
     );
-    // The stored item is the prior pass's Failed outcome, not overwritten.
     let items = items_of(&db, op).await;
     assert_eq!(items.len(), 1);
     assert_eq!(
@@ -828,7 +799,6 @@ async fn deletion_rolls_back_tombstone_when_item_cas_loses() {
         Some(prior_payload.as_str()),
         "the stored payload must be the prior pass's reason, not a new one from this pass",
     );
-    // The worker reported the stored Failed outcome via the stored_item fallback.
     assert_eq!(
         outcome.items[0].status,
         OperationItemStatus::Failed,

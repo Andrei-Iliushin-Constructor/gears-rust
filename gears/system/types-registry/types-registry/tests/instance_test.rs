@@ -237,7 +237,6 @@ async fn a_value_violating_its_schema_is_refused_on_its_merits() {
     );
 }
 
-/// Missing conformance is a terminal candidate refusal, visible without redelivery.
 #[tokio::test]
 async fn an_instance_without_its_type_fails_with_dependency_diagnostics() {
     let db = test_db().await;

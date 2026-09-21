@@ -99,9 +99,6 @@ async def test_batch_deletion_orders_dependants_before_their_target(
     instance = deletion_fixture("person_instance")
     await given_registered(schema, instance)
 
-    # The target is submitted *before* its dependant deliberately: executing the
-    # batch in submission order would refuse the schema with
-    # has_registered_dependents. Deletion reorders dependant-first instead.
     operation = await delete_batch_and_poll(
         registry_http,
         registry_api_path,
@@ -129,9 +126,6 @@ async def test_batch_deletion_reports_outcomes_in_request_order(
     person = deletion_fixture("person_schema")
     other = deletion_fixture("other_schema")
     await given_registered(person, other)
-    # Two independent schemas, so nothing reorders them for dependency reasons.
-    # `other.v1~` sorts before `person.v1~`, so submitting person first makes
-    # request order distinguishable from identifier order.
     assert other["gts_id"] < person["gts_id"]
 
     operation = await delete_batch_and_poll(
@@ -158,8 +152,6 @@ async def test_a_stale_expected_version_is_a_terminal_item_not_a_412(
     schema = deletion_fixture("person_schema")
     await given_registered(schema)
 
-    # The submission is still accepted with 202 — asserted inside the helper —
-    # because the precondition is checked asynchronously at admission.
     operation = await delete_one_and_poll(
         registry_http, registry_api_path, schema["gts_id"], 7, RECEIPT
     )
@@ -183,8 +175,6 @@ async def test_a_live_dependant_outside_the_batch_blocks_the_deletion(
     instance = deletion_fixture("person_instance")
     await given_registered(schema, instance)
 
-    # Only the schema is named, so its Instance stays live and the commit-time
-    # check refuses. The refusal reports how many dependants, never which ones.
     operation = await delete_one_and_poll(
         registry_http, registry_api_path, schema["gts_id"], 1, RECEIPT
     )

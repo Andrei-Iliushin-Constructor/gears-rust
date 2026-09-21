@@ -732,20 +732,8 @@ impl Outbox {
         *self.prioritizer.write().await = Some(prioritizer);
     }
 
-    /// Sequence one partition's rows now, rather than when the cold reconciler
-    /// next discovers them.
-    ///
-    /// [`flush`](Self::flush) wakes the sequencers without naming a partition,
-    /// which is all a caller that just committed through
-    /// [`transaction`](Self::transaction) can say. A caller that knows which
-    /// partition it filled says so here, and the rows are picked up even when
-    /// the hint [`enqueue`](Self::enqueue) raised was consumed before the
-    /// enclosing transaction committed.
-    ///
-    /// Takes the queue and the queue-local partition index the [`Record`] was
-    /// addressed with, not the `partition_id` those resolve to: that id is a
-    /// row key allocated across every queue, and nothing outside this crate can
-    /// obtain one.
+    /// Sequence one partition immediately instead of waiting for reconciliation.
+    /// `partition` is the queue-local index used by [`Record`], not a database id.
     ///
     /// # Errors
     ///

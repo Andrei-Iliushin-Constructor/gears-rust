@@ -1,9 +1,3 @@
-//! Platform-plane REST contract (T9), via `register_routes` and `Router::oneshot`:
-//! actual paths, `OperationBuilder` registration, `Extension` wiring, status codes,
-//! headers, problem documents and submit-then-poll behavior.
-//! Authentication is not exercised: api-gateway enforces `.authenticated()` in
-//! layers absent from this harness.
-
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::sync::Arc;
@@ -30,8 +24,6 @@ mod common;
 use common::{stores, test_db};
 
 const CF_TYPE: &str = gts_id!("cf.core.example.type.v1~");
-/// Two more targets, so a deletion batch can mix key spellings and hold more
-/// than one Registry Reference.
 const CF_OTHER: &str = gts_id!("cf.core.example.other.v1~");
 const CF_THIRD: &str = gts_id!("cf.core.example.third.v1~");
 /// An Instance of [`CF_TYPE`]: a full five-token last segment with no trailing `~`.
@@ -40,8 +32,6 @@ const INVALID_ARGUMENT_TYPE: &str =
     gts_uri!("cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~");
 const HTTP_REQUEST_RESOURCE_TYPE: &str = gts_id!("cf.core.http.request.v1~");
 
-/// Every mutation `operation_id`, v1's included: ceiling C8 keeps all of them
-/// internal-only.
 const MUTATION_OPERATIONS: [&str; 4] = [
     "types_registry.register",
     "types_registry.submit_entities",
@@ -49,24 +39,12 @@ const MUTATION_OPERATIONS: [&str; 4] = [
     "types_registry.delete_entity",
 ];
 
-/// The v2 mutations, which share one receipt contract: `Idempotency-Key` in,
-/// `Location` / `Retry-After` / `Idempotency-Replayed` out.
 const V2_MUTATION_OPERATIONS: [&str; 3] = [
     "types_registry.submit_entities",
     "types_registry.batch_delete_entities",
     "types_registry.delete_entity",
 ];
 
-/// `OpenAPI` parameter shape as the generated document will carry it: typed
-/// location, scalar type, and the two constraints `query_param_typed` cannot
-/// express.
-///
-/// The scalar type catches swapped description/type arguments in
-/// `query_param_typed`, which compile but emit `string`. `format` and `minimum`
-/// are here because `register_delete_entity` spells out a full `ParamSpec` to
-/// declare them: without recording them, that spec could go back to
-/// `query_param_typed` and the generated client stop rejecting `0`, with every
-/// assertion below still passing.
 type DeclaredParam = (
     String,
     ParamLocation,
@@ -76,8 +54,6 @@ type DeclaredParam = (
     Option<f64>,
 );
 
-/// A parameter's `format` as the generated document renders it — the token
-/// `ParamSpec` carries, which `OpenApiRegistryImpl` emits verbatim.
 fn declared_format(param: &toolkit::api::ParamSpec) -> Option<String> {
     param.format.clone()
 }
@@ -92,7 +68,6 @@ type DeclaredResponseHeader = (u16, String, ResponseHeaderType);
 struct TestOpenApi {
     /// `(method, path, operation_id)` in registration order.
     operations: std::sync::Mutex<Vec<(String, String, String)>>,
-    /// `operation_id -> [(param name, location, required, scalar type)]`.
     params: std::sync::Mutex<Vec<(String, Vec<DeclaredParam>)>>,
     /// `operation_id -> [(status, content type)]`.
     responses: std::sync::Mutex<Vec<(String, Vec<DeclaredResponse>)>>,
@@ -207,8 +182,6 @@ async fn router_with(v1_ready: bool) -> Router {
     )
 }
 
-/// Router with real outbox delivery. Other tests use inline admission to avoid
-/// waiting; this harness exercises SPEC §13's delivery exception.
 async fn router_with_outbox() -> (Router, OutboxHandle) {
     let db = common::test_db_with_outbox().await;
     let openapi = TestOpenApi::default();
@@ -319,8 +292,6 @@ async fn call(router: &Router, req: Request<Body>) -> Response {
     }
 }
 
-/// Distinguish acceptance/extractor `400`s by resource: the offending candidate
-/// versus the HTTP request for a rejected query string.
 fn assert_candidate_refusal(
     response: &Response,
     expected_resource: &str,
@@ -535,10 +506,6 @@ async fn a_registration_is_accepted_polled_and_read_back() {
     assert!(entity.body["content"].is_object());
 }
 
-/// Instance reads return the authored value: the old schema-only path returned
-/// `200` with `content: null` despite `succeeded` admission. The three `effective_*`
-/// artifacts remain absent by contract: T10 Instances have authored values,
-/// immutable schema revisions and no derived state.
 #[tokio::test]
 async fn an_instance_reads_back_with_its_authored_value() {
     let router = router_with_db().await;
@@ -555,7 +522,6 @@ async fn an_instance_reads_back_with_its_authored_value() {
     .await;
     assert_eq!(accepted.status, StatusCode::ACCEPTED);
 
-    // Confirm admission first to distinguish refusal from a broken read.
     let operation_id = accepted.body["operation_id"]
         .as_str()
         .expect("operation_id");
@@ -586,7 +552,6 @@ async fn an_instance_reads_back_with_its_authored_value() {
     );
 }
 
-/// UUID reads preserve the Instance value: row kind, not key spelling, selects the store.
 #[tokio::test]
 async fn an_instance_is_readable_by_registry_reference() {
     let router = router_with_db().await;
@@ -674,10 +639,6 @@ async fn a_different_request_under_one_key_is_a_conflict_problem() {
     );
 }
 
-/// Follow `Location` under api-gateway's `prefix_path` (`/cf` in `quickstart.yaml`).
-/// RFC 9110 §10.2.2 resolves it against the effective request URI; an absolute-path
-/// reference without the prefix yields `404`. Since `nest` rewrites `Uri`, handlers
-/// must derive the path from `OriginalUri`.
 #[tokio::test]
 async fn the_receipt_is_followable_under_a_gateway_prefix() {
     let prefixed = Router::new().nest("/cf", router_with_db().await);
@@ -706,7 +667,6 @@ async fn the_receipt_is_followable_under_a_gateway_prefix() {
         ),
     );
 
-    // Follow the receipt verbatim through the prefixed router.
     let followed = call(&prefixed, get(location)).await;
     assert_eq!(
         followed.status,
@@ -715,7 +675,6 @@ async fn the_receipt_is_followable_under_a_gateway_prefix() {
     );
     assert_eq!(followed.body["status"], json!("completed"));
 
-    // The old unprefixed header value must fail on this router.
     let unprefixed = call(
         &prefixed,
         get(&format!(
@@ -841,9 +800,6 @@ async fn a_zero_precondition_is_refused() {
     assert_eq!(refused.status, StatusCode::BAD_REQUEST);
 }
 
-/// `expected_resource_version` cannot bypass a closed region to create an entity.
-/// SPEC §8.1 accepts revisions despite closure so existing entities remain mutable;
-/// the worker then terminally refuses an identifier absent at the named version.
 #[tokio::test]
 async fn naming_a_version_does_not_get_a_candidate_past_a_closed_region() {
     let router = router_with_db().await;
@@ -1251,8 +1207,6 @@ fn mutation_routes_are_internal_only() {
     }
 }
 
-/// Declare `Idempotency-Key` so generated clients send the required header.
-/// `OperationBuilder` supports it; only `header_param` is missing (upstream #4614).
 #[test]
 fn the_idempotency_key_header_is_declared_as_a_required_parameter() {
     let openapi = TestOpenApi::default();
@@ -1286,7 +1240,6 @@ fn the_idempotency_key_header_is_declared_as_a_required_parameter() {
     }
 }
 
-/// Single deletion declares both query parameters and requires the version.
 #[test]
 fn the_single_deletion_query_parameters_are_declared() {
     let openapi = TestOpenApi::default();
@@ -1314,8 +1267,6 @@ fn the_single_deletion_query_parameters_are_declared() {
             None,
             None,
         ),
-        // The precondition, with both constraints: a generated client has to
-        // reject `0` on its own, which a bare `integer` does not make it do.
         (
             "expected_resource_version".to_owned(),
             ParamLocation::Query,
@@ -1419,12 +1370,6 @@ fn json_extractor_error_statuses_are_declared_for_both_post_operations() {
     }
 }
 
-// Deletion parity: exercise both routes with matching entities, preconditions and modes.
-
-/// Both deletion routes, including `POST {V2}/entities:batchDelete`, use mounted
-/// `Location` paths, as `the_receipt_is_followable_under_a_gateway_prefix` requires.
-/// Suffix checks miss the old pre-`rfind` fallback: stripping trailing `/entities`
-/// produced `{V2}/operations/{id}` without the mount prefix.
 #[tokio::test]
 async fn deletion_receipts_are_followable_under_a_gateway_prefix() {
     let prefixed = Router::new().nest("/cf", router_with_db().await);
@@ -1450,8 +1395,6 @@ async fn deletion_receipts_are_followable_under_a_gateway_prefix() {
         );
     }
 
-    // The single-delete spelling, and the batch one, which takes a different
-    // branch through the same path derivation.
     let single = Request::builder()
         .method("DELETE")
         .uri(format!(
@@ -1489,7 +1432,6 @@ async fn deletion_receipts_are_followable_under_a_gateway_prefix() {
             "{case} deletion must keep the mount prefix",
         );
 
-        // Follow verbatim through the prefixed router.
         let followed = call(&prefixed, get(location)).await;
         assert_eq!(
             followed.status,
@@ -1504,8 +1446,6 @@ fn batch_delete(key: Option<&str>, body: &Value) -> Request<Body> {
     submit_to(&format!("{V2}/entities:batchDelete"), key, body)
 }
 
-/// `DELETE {V2}/entities/{entity_key}`, with `query` spelled by the caller so the
-/// malformed-precondition cases can pass what a client would actually send.
 fn delete_one(key: Option<&str>, entity_key: &str, query: &str) -> Request<Body> {
     let mut builder = Request::builder()
         .method("DELETE")
@@ -1516,12 +1456,10 @@ fn delete_one(key: Option<&str>, entity_key: &str, query: &str) -> Request<Body>
     builder.body(Body::empty()).expect("request")
 }
 
-/// One `:batchDelete` body naming one entity.
 fn one_target(key: &str, expected_resource_version: i64) -> Value {
     json!({ "items": [{ "key": key, "expected_resource_version": expected_resource_version }] })
 }
 
-/// Register one Type Schema and assert it was accepted.
 async fn register_entity(router: &Router, idempotency_key: &str, gts_id: &str) {
     let accepted = call(
         router,
@@ -1536,7 +1474,6 @@ async fn register_entity(router: &Router, idempotency_key: &str, gts_id: &str) {
     );
 }
 
-/// Follow a receipt's `operation_id` to the operation document.
 async fn poll(router: &Router, accepted: &Response) -> Value {
     let operation_id = accepted.body["operation_id"]
         .as_str()
@@ -1594,7 +1531,6 @@ async fn a_deletion_is_accepted_polled_and_leaves_a_tombstone() {
     assert_eq!(entity.body["lifecycle_status"], json!("deleted"));
 }
 
-/// Request order lets UUID callers match identifier-keyed outcomes (DESIGN §3.3).
 #[tokio::test]
 async fn a_batch_deletion_reports_outcomes_in_request_order() {
     let router = router_with_db().await;
@@ -1652,13 +1588,6 @@ async fn deleting_by_registry_reference_reports_the_identifier() {
     assert_eq!(operation["items"][0]["status"], json!("succeeded"));
 }
 
-/// A batch mixing both key spellings, and two references at once.
-///
-/// This is the case the `resolved` lookup exists to serve: with only one
-/// identifier or only one reference per batch, a mis-paired target still
-/// produces a plausible-looking outcome, so nothing would notice if the map
-/// handed a UUID the wrong identifier. Asserting each item by `gts_id` in
-/// request order is what pins the pairing.
 #[tokio::test]
 async fn a_batch_mixing_identifiers_and_references_pairs_every_outcome() {
     let router = router_with_db().await;
@@ -1667,8 +1596,6 @@ async fn a_batch_mixing_identifiers_and_references_pairs_every_outcome() {
     register_entity(&router, "seed-b", CF_OTHER).await;
     register_entity(&router, "seed-c", CF_THIRD).await;
 
-    // Two of the three go in as references, so the batch exercises a map with
-    // more than one entry as well as the mixed spelling.
     let mut references = Vec::new();
     for id in [CF_OTHER, CF_THIRD] {
         let entity = call(&router, get(&format!("{V2}/entities/{id}"))).await;
@@ -1702,8 +1629,6 @@ async fn a_batch_mixing_identifiers_and_references_pairs_every_outcome() {
         .expect("the operation carries its items");
     assert_eq!(items.len(), 3, "{items:?}");
 
-    // Request order, identifiers throughout — a reference submission is reported
-    // by the identifier it resolved to, never by the UUID the client sent.
     for (position, expected) in [CF_TYPE, CF_OTHER, CF_THIRD].iter().enumerate() {
         assert_eq!(
             items[position]["gts_id"],
@@ -1718,8 +1643,6 @@ async fn a_batch_mixing_identifiers_and_references_pairs_every_outcome() {
     }
 }
 
-/// An unknown UUID returns `404`: it cannot be reversed into an outcome identifier.
-/// An absent GTS identifier instead produces an asynchronous item failure.
 #[tokio::test]
 async fn an_unknown_registry_reference_is_a_not_found_problem() {
     let router = router_with_db().await;
@@ -1749,7 +1672,6 @@ async fn an_unknown_registry_reference_is_a_not_found_problem() {
     );
 }
 
-/// An absent identifier fails at admission with `precondition_failed`.
 #[tokio::test]
 async fn deleting_an_absent_identifier_is_a_terminal_item_failure() {
     let router = router_with_db().await;
@@ -1771,14 +1693,10 @@ async fn deleting_an_absent_identifier_is_a_terminal_item_failure() {
     );
 }
 
-/// Each batch item carries its own positive precondition; absence and zero are
-/// envelope errors, not item outcomes.
 #[tokio::test]
 async fn batch_deletion_requires_a_positive_expected_resource_version() {
     let router = router_with_db().await;
 
-    // Same field, same reason as the DELETE route below: one precondition rule,
-    // reported one way, whichever spelling the client used.
     for (case, body) in [
         ("missing", json!({ "items": [{ "key": CF_TYPE }] })),
         ("zero", one_target(CF_TYPE, 0)),
@@ -1794,14 +1712,6 @@ async fn batch_deletion_requires_a_positive_expected_resource_version() {
     }
 }
 
-/// A field the server does not recognize is a `400`, not a silent default.
-///
-/// `api_dto` renames to `snake_case` and nothing else, so before
-/// `deny_unknown_fields` a client sending the camelCase spelling of `dry_run`
-/// had it dropped: the flag deserialized to `None`, defaulted to `false`, and a
-/// batch of entities was really deleted by a request that asked for a
-/// prediction. The entity is registered first so the assertion cannot pass
-/// because the target was missing anyway.
 #[tokio::test]
 async fn a_misspelled_dry_run_is_refused_rather_than_committed() {
     let router = router_with_db().await;
@@ -1818,11 +1728,6 @@ async fn a_misspelled_dry_run_is_refused_rather_than_committed() {
         ),
     )
     .await;
-    // `422`, not the `400` the query route answers below: a body field the
-    // server does not recognize is caught by the JSON extractor, while an
-    // unrecognized query parameter is caught by the `Query` extractor. Both
-    // refuse, and neither commits — the differing status is toolkit's existing
-    // contract for the two extractors, not a choice this route makes.
     assert_eq!(
         refused.status,
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -1835,14 +1740,10 @@ async fn a_misspelled_dry_run_is_refused_rather_than_committed() {
         refused.body,
     );
 
-    // The control: the entity is still there, so the refusal really did stop the
-    // deletion rather than merely answering after it.
     let read = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
     assert_eq!(read.status, StatusCode::OK, "{:?}", read.body);
 }
 
-/// The same rule on the query string, where `serde_urlencoded` is just as happy
-/// to ignore a parameter it was not asked about.
 #[tokio::test]
 async fn an_unrecognized_deletion_query_parameter_is_refused() {
     let router = router_with_db().await;
@@ -1861,13 +1762,10 @@ async fn an_unrecognized_deletion_query_parameter_is_refused() {
     }
 }
 
-/// The same three refusals through the query string.
 #[tokio::test]
 async fn single_deletion_requires_a_positive_expected_resource_version() {
     let router = router_with_db().await;
 
-    // Absent, zero and negative versions must name the precondition field,
-    // preserving `DeleteEntityDto`'s identical `400` contract for both routes.
     for (case, query) in [
         ("absent", ""),
         ("zero", "?expected_resource_version=0"),
@@ -1889,8 +1787,6 @@ async fn single_deletion_requires_a_positive_expected_resource_version() {
         );
     }
 
-    // A non-numeric value never reaches acceptance: `Query` rejects it, and the
-    // two 400s must stay distinguishable rather than both reading as the domain's.
     let malformed = call(
         &router,
         delete_one(
@@ -1908,7 +1804,6 @@ async fn single_deletion_requires_a_positive_expected_resource_version() {
     );
 }
 
-/// Reject `If-Match`; deletion's version check is asynchronous (DESIGN §3.3).
 #[tokio::test]
 async fn single_deletion_refuses_an_if_match_header() {
     let router = router_with_db().await;
@@ -1940,7 +1835,6 @@ async fn single_deletion_refuses_an_if_match_header() {
     );
 }
 
-/// Both deletion routes return `202` then identical `precondition_failed` outcomes.
 #[tokio::test]
 async fn the_two_deletion_spellings_agree_on_a_version_mismatch() {
     let router = router_with_db().await;
@@ -1977,7 +1871,6 @@ async fn the_two_deletion_spellings_agree_on_a_version_mismatch() {
     assert_eq!(entity.body["resource_version"], json!(1));
 }
 
-/// Verify dry-run isolation on both routes against a committed control.
 #[tokio::test]
 async fn a_dry_run_deletion_predicts_and_the_commit_performs() {
     let router = router_with_db().await;
@@ -2031,7 +1924,6 @@ async fn a_dry_run_deletion_predicts_and_the_commit_performs() {
         );
     }
 
-    // The control: the same request committed does what the dry runs predicted.
     let committed = call(
         &router,
         delete_one(Some("commit"), CF_TYPE, "?expected_resource_version=1"),
@@ -2051,7 +1943,6 @@ async fn a_dry_run_deletion_predicts_and_the_commit_performs() {
     assert_eq!(entity.body["lifecycle_status"], json!("deleted"));
 }
 
-/// Verify registration dry-run isolation against a committed control.
 #[tokio::test]
 async fn a_dry_run_registration_reaches_a_terminal_outcome_and_writes_nothing() {
     let router = router_with_db().await;
@@ -2079,7 +1970,6 @@ async fn a_dry_run_registration_reaches_a_terminal_outcome_and_writes_nothing() 
         StatusCode::NOT_FOUND,
     );
 
-    // The control: committed, the same candidate is readable at version 1.
     let committed = call(&router, submit(Some("commit"), &one_candidate(CF_TYPE))).await;
     assert_eq!(
         committed.status,
@@ -2092,7 +1982,6 @@ async fn a_dry_run_registration_reaches_a_terminal_outcome_and_writes_nothing() 
     assert_eq!(entity.body["resource_version"], json!(1));
 }
 
-/// Every mutation requires an `Idempotency-Key`, both deletion spellings included.
 #[tokio::test]
 async fn both_deletion_spellings_require_an_idempotency_key() {
     let router = router_with_db().await;
@@ -2113,8 +2002,6 @@ async fn both_deletion_spellings_require_an_idempotency_key() {
     );
 }
 
-/// A replay of a terminal deletion answers `200` with `Idempotency-Replayed: true`
-/// and no `Retry-After`; the first submission carries neither.
 #[tokio::test]
 async fn a_terminal_deletion_replay_answers_200_and_marks_the_replay() {
     let router = router_with_db().await;
@@ -2140,8 +2027,6 @@ async fn a_terminal_deletion_replay_answers_200_and_marks_the_replay() {
     assert_eq!(replay.body["replayed"], json!(true));
 }
 
-/// The mode is part of the request fingerprint, so reusing one key for a dry run and
-/// then a commit is a conflict rather than a replay.
 #[tokio::test]
 async fn reusing_one_key_for_a_dry_run_then_a_commit_is_a_conflict() {
     let router = router_with_db().await;
@@ -2174,7 +2059,6 @@ async fn reusing_one_key_for_a_dry_run_then_a_commit_is_a_conflict() {
     assert_eq!(entity.body["lifecycle_status"], json!("active"));
 }
 
-/// The two spellings answer the same way where no database is bound.
 #[tokio::test]
 async fn without_a_database_the_deletion_routes_report_service_unavailable() {
     let router = router_without_db();
@@ -2204,10 +2088,6 @@ async fn without_a_database_the_deletion_routes_report_service_unavailable() {
     );
 }
 
-// Real outbox delivery via common::await_delivery (SPEC §13).
-// The harness starts the pipeline as init() does, without a stateful start phase (P3).
-
-/// Which mutation spelling a case exercises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mutation {
     Register,
@@ -2215,7 +2095,6 @@ enum Mutation {
     DeleteOne,
 }
 
-/// Follow a receipt to its terminal operation document, waiting for the outbox.
 async fn await_operation(router: &Router, receipt: &Response, what: &str) -> Value {
     let operation_id = receipt.body["operation_id"]
         .as_str()
@@ -2227,7 +2106,6 @@ async fn await_operation(router: &Router, receipt: &Response, what: &str) -> Val
         assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
         match response.body["status"].as_str() {
             Some("completed") => Some(response.body),
-            // The one observation worth re-reading.
             Some("pending" | "running") => None,
             other => panic!("unexpected operation status {other:?}: {:?}", response.body),
         }
@@ -2235,7 +2113,6 @@ async fn await_operation(router: &Router, receipt: &Response, what: &str) -> Val
     .await
 }
 
-/// All mutation routes deliver through the outbox; dry runs preserve entity state.
 #[tokio::test]
 async fn every_mutation_reaches_a_terminal_outcome_through_the_outbox() {
     let cases = vec![
@@ -2249,10 +2126,8 @@ async fn every_mutation_reaches_a_terminal_outcome_through_the_outbox() {
 
     for (mutation, dry_run) in cases {
         let case = format!("{mutation:?} dry_run={dry_run}");
-        // Isolate each case's pipeline and database.
         let (router, handle) = router_with_outbox().await;
 
-        // Arrange deletion targets through the same outbox.
         let deleting = mutation != Mutation::Register;
         if deleting {
             let seeded = call(&router, submit(Some("arrange"), &one_candidate(CF_TYPE))).await;
@@ -2357,17 +2232,6 @@ async fn every_mutation_reaches_a_terminal_outcome_through_the_outbox() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Receipt caching
-// ---------------------------------------------------------------------------
-
-/// Every receipt refuses to be stored, on all three mutation routes and on the
-/// replay that answers `200` rather than `202`.
-///
-/// A receipt names one caller's operation and carries its replay state; both
-/// move underneath any copy. The router mounts no response-header layer — that
-/// is the platform edge's job for HSTS/CSP and the rest — so this one header
-/// has to come from the handler, and nothing else pins it.
 #[tokio::test]
 async fn every_mutation_receipt_refuses_to_be_cached() {
     let router = router_with_db().await;
@@ -2381,8 +2245,6 @@ async fn every_mutation_receipt_refuses_to_be_cached() {
     );
     assert_eq!(submitted.cache_control.as_deref(), Some("no-store"));
 
-    // The replay answers 200 with the recorded outcome, and is the response a
-    // cache would most plausibly keep.
     let replayed = call(&router, submit(Some("cache-1"), &one_candidate(CF_TYPE))).await;
     assert_eq!(
         replayed.body["replayed"],
@@ -2414,22 +2276,6 @@ async fn every_mutation_receipt_refuses_to_be_cached() {
     assert_eq!(single.cache_control.as_deref(), Some("no-store"));
 }
 
-/// The polling response refuses to be cached too, which is the other half of
-/// the receipt rule.
-///
-/// `GET /v2/operations/{id}` is mutable state under a stable URL: a client polls
-/// the same path while `status` moves `pending` → `running` → `completed` and the
-/// item outcomes appear underneath it. A cache that keeps one answer hands back
-/// progress that has already advanced — a poller that never terminates, or one
-/// that reports a candidate as undecided after it failed. The document also
-/// names one caller's operation and its per-candidate errors, so a shared cache
-/// would disclose it to the next reader of the same URL.
-///
-/// `router_with_db` admits inline, so the poll below is the terminal document
-/// rather than a `pending`/`running` one. That is the harder case for the header
-/// anyway — a completed operation is the answer a cache would most plausibly
-/// consider stable — and the status is asserted so the claim stays honest if
-/// that wiring ever changes.
 #[tokio::test]
 async fn the_operation_polling_response_refuses_to_be_cached() {
     let router = router_with_db().await;

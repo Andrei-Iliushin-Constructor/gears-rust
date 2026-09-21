@@ -5131,13 +5131,6 @@ async fn dirty_set_populated_after_enqueue() {
     assert_eq!(dirty, vec![ids[0], ids[2]]);
 }
 
-/// `flush_partition` resolves its queue-local index the way `enqueue` does.
-///
-/// Partition ids are row keys allocated across every queue, so an index and the
-/// id it resolves to coincide nowhere — ids start at one, and a second queue's
-/// start past the first queue's. A signal that took the index for an id would
-/// reach some other queue's partition, or none, and the rows it meant to hand a
-/// sequencer would wait for the cold reconciler instead.
 #[tokio::test]
 async fn flush_partition_takes_the_queue_local_partition_index() {
     let db = setup_db("ch13_flush_partition_index").await;

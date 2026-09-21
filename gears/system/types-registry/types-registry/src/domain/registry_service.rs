@@ -1,15 +1,6 @@
-//! Database-backed domain service for all transports (SPEC §8.4). REST only maps
-//! domain values, allowing a future `api/grpc` adapter without new domain methods.
-//! `Idempotency-Key` is a field; no `StatusCode`, `HeaderMap` or `Json` crosses here.
-//!
-//! API traffic uses [`AdmissionMode::Outbox`]: T21 starts the worker in `init()`
-//! and enqueues in the acceptance transaction. Seeding permanently uses
-//! [`AdmissionMode::Inline`], accepting and admitting in one call (SPEC §8.1).
-//!
-//! ponytail C6: no PDP or `SecurityContext` here; managed entities are
-//! `#[secure(unrestricted)]`. `allow_all` authorizes without row filtering;
-//! `AccessScope::default()` denies all. Every repository already takes a scope
-//! for P1's request-scoped `AccessScope` derived from `SecurityContext`.
+//! Transport-neutral, database-backed registry service (SPEC §8.4).
+//! API traffic uses outbox admission; inventory seeding runs inline.
+//! P0 managed entities are unrestricted, but ports already accept an access scope.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -37,8 +28,7 @@ use crate::domain::ports::{
     snapshot_read,
 };
 
-/// Identifier or deterministic Registry Reference (`GtsId::to_uuid()`) for the
-/// same row. [`EntityKey::parse`] keeps classification in the domain.
+/// GTS identifier or deterministic Registry Reference for the same row.
 #[domain_model]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EntityKey {
@@ -47,8 +37,7 @@ pub enum EntityKey {
 }
 
 impl EntityKey {
-    /// Parse UUIDs as Registry References; otherwise validate identifiers on read.
-    /// Unambiguous: GTS identifier segments contain dots and a version, never a bare UUID.
+    /// Parse a UUID as a Registry Reference; otherwise keep the GTS identifier.
     #[must_use]
     pub fn parse(key: &str) -> Self {
         match Uuid::parse_str(key) {
@@ -63,8 +52,7 @@ impl EntityKey {
 #[derive(Clone, Debug)]
 pub struct DeleteTarget {
     pub key: EntityKey,
-    /// Acceptance rejects missing, zero and negative versions with
-    /// `deletion_requires_version`, `zero_precondition` and `negative_precondition`.
+    /// Required positive version, validated during acceptance.
     pub expected_resource_version: Option<i64>,
 }
 
@@ -72,7 +60,7 @@ pub struct DeleteTarget {
 #[domain_model]
 #[derive(Clone, Debug)]
 pub struct DeleteRequest {
-    /// Mandatory, and `Option` for [`SubmitRequest::idempotency_key`]'s reason.
+    /// Required; optional only to share acceptance validation.
     pub idempotency_key: Option<String>,
     pub dry_run: bool,
     pub targets: Vec<DeleteTarget>,
@@ -124,8 +112,7 @@ pub struct EntityRecord {
     pub effective_traits_schema: Option<Value>,
 }
 
-/// Kind-specific current state. Like `EvaluatedOutcome` on writes, the enum
-/// prevents invalid combinations such as an Instance carrying a resolved schema.
+/// Kind-specific state that prevents invalid artifact combinations.
 enum CurrentState {
     /// The authored document and D3's materialized artifacts.
     TypeSchema {
@@ -151,30 +138,13 @@ pub enum ServiceError {
     Db(#[from] DbError),
     #[error("a stored document could not be read as JSON: {0}")]
     CorruptDocument(String),
-    /// Unresolvable Registry Reference: no identifier exists to record an item outcome.
-    /// An absent GTS identifier instead fails asynchronously during admission.
+    /// Registry Reference with no identifier for an asynchronous item outcome.
     #[error("no entity has Registry Reference {gts_uuid}")]
     UnresolvedReference { gts_uuid: Uuid },
 }
 
 impl ServiceError {
-    /// The failure's kind, as one word from a fixed allowlist.
-    ///
-    /// The whole diagnostic a log may carry about *why* an admission was
-    /// abandoned. Never `Display`: [`Self::Storage`] and [`Self::Db`] render the
-    /// driver's own text, which can carry SQL, connection strings, credentials
-    /// or row content, and [`Self::CorruptDocument`] carries a stored document
-    /// verbatim. A log is an information-disclosure surface like a response body
-    /// (PLID-53.02), so nothing derived from the cause's text crosses into one.
-    ///
-    /// It is still worth emitting, because `error_code` alone cannot separate
-    /// the failures that share it: `admission_service_failure` covers four
-    /// variants, and an abandoned operation leaves no other record of which one
-    /// it was. The variant name is fixed vocabulary — bounded, safe to put on a
-    /// log field, and enough to route an operator to the right subsystem.
-    ///
-    /// Exhaustive, so a variant added later is a compile error here rather than
-    /// a silently missing or, worse, a wildcard-rendered cause.
+    /// Return an exhaustive, log-safe cause kind without formatting sensitive data.
     #[must_use]
     pub const fn cause_kind(&self) -> &'static str {
         match self {
@@ -202,7 +172,7 @@ pub enum AdmissionMode {
 #[domain_model]
 pub struct RegistryService {
     db: Db,
-    /// Injected persistence ports keep `SeaORM` out; the gear supplies `infra::storage::Repos`.
+    /// Injected ports keep SeaORM out of the domain.
     stores: Arc<dyn Stores>,
     policy: RegistrationPolicy,
     config: TypesRegistryConfig,
@@ -213,7 +183,7 @@ pub struct RegistryService {
 }
 
 impl RegistryService {
-    /// `admission_mode` selects the inline/outbox driver described in the module docs.
+    /// Build the service with inline or outbox admission.
     #[must_use]
     pub fn new(
         db: Db,
@@ -250,8 +220,7 @@ impl RegistryService {
         self.metrics.as_ref()
     }
 
-    /// Page the startup recovery backlog without reading it all at once.
-    /// Start with `None`, then use the last cursor; fewer than `limit` rows means EOF.
+    /// Read one keyset page of the startup-recovery backlog.
     pub async fn nonterminal_operation_page(
         &self,
         after: Option<RecoveryCursor>,
@@ -269,9 +238,7 @@ impl RegistryService {
             .await
     }
 
-    /// Terminalize abandoned delivery, recording `reason` only on undecided items;
-    /// terminal items retain their outcomes. This exposes abandonment through
-    /// `GET /operations/{id}` and removes the operation from boot recovery.
+    /// Fail undecided items and terminalize an abandoned operation.
     ///
     /// # Errors
     /// [`ServiceError::Storage`] or [`ServiceError::Db`] if the write fails.
@@ -284,8 +251,7 @@ impl RegistryService {
         let provider: DBProvider<ServiceError> = DBProvider::new(self.db.clone());
         let stores = Arc::clone(&self.stores);
         let scope = Self::scope();
-        // Safe diagnostic codes correlate the operation and dead letter with logs.
-        // Never expose an infrastructure error's Display (SQL/credentials/content).
+        // Expose stable codes, never infrastructure error text.
         let payload = serde_json::json!({
             "reason": AdmissionFailureReason::AdmissionAbandoned.as_str(),
             "message": "admission could not complete because of a system failure",
@@ -296,21 +262,11 @@ impl RegistryService {
         provider
             .transaction(move |tx| {
                 Box::pin(async move {
-                    // One statement over the operation's undecided items, not a
-                    // read plus an UPDATE each: this transaction runs on whatever
-                    // is left of the delivery's lease, and a batch at
-                    // `limits.batch_candidates` spent that budget on round trips
-                    // instead of on the write it exists to make. The port carries
-                    // the non-terminal guard, so decided items keep their outcomes.
+                    // One guarded statement fits the remaining lease and preserves outcomes.
                     stores
                         .fail_nonterminal_items(tx, &scope, operation_id, payload, now)
                         .await?;
-                    // One statement from either non-terminal status: an
-                    // operation abandoned before its pass reached `mark_running`
-                    // is still `pending`, and `mark_completed` would not move it —
-                    // leaving a non-terminal operation with terminal items that
-                    // every boot's recovery scan picks up again. `false` means
-                    // another writer terminalized it first, which is fine.
+                    // Abandonment can move either pending or running operations.
                     stores.mark_abandoned(tx, &scope, operation_id, now).await?;
                     Ok(())
                 })
@@ -325,10 +281,7 @@ impl RegistryService {
 
     /// Accept a submission, and — while admission is inline — admit it.
     ///
-    /// **NOT cancel-safe.** A disconnect/timeout after acceptance commits but
-    /// before inline admission leaves durable `pending` work and its idempotency
-    /// key. Replay under that key resumes non-terminal work; before T21's outbox,
-    /// this was the only recovery path. The acceptance record must not be undone.
+    /// Not cancel-safe: inline cancellation leaves durable work that replay resumes.
     ///
     /// # Errors
     /// [`ServiceError::Acceptance`] for every synchronous refusal, including the
@@ -356,29 +309,19 @@ impl RegistryService {
         )
         .await?;
 
-        // Gate on `!terminal`, not `!replayed`, to resume interrupted inline work.
-        // `run_operation` is idempotent: completed operations and terminal items are skipped.
+        // Replayed non-terminal work must resume; admission is idempotent.
         let mut accepted = accepted;
         if self.admission_mode == AdmissionMode::Inline && !accepted.terminal() {
             // After the acceptance transaction committed, never inside it: the
             // worker reads the operation it is admitting.
             self.admit(accepted.operation_id, now).await?;
-            // `Ok` means completed or already terminal; no receipt status reread is needed.
             accepted.status = OperationStatus::Completed;
         }
         Ok(accepted)
     }
 
-    /// Admit an accepted operation with shared inline/outbox tuning.
-    /// Completed operations and terminal items are skipped, making redelivery safe.
-    ///
-    /// **NOT cancel-safe**, and this is the future the outbox drops: the leased
-    /// handler runs it under `timeout_at`, so a pass that outlives its share of
-    /// the lease is dropped mid-flight. What that leaves behind is recoverable
-    /// rather than partial — the operation stays `running`, items a per-candidate
-    /// transaction already committed stay terminal with their real outcomes, and
-    /// the rest stay `pending`, so a redelivery skips the decided ones and resumes
-    /// the others. A caller that cannot tolerate a dropped pass must not drop it.
+    /// Admit an operation, skipping completed work on redelivery.
+    /// Cancellation is recoverable because candidate outcomes commit independently.
     ///
     /// # Errors
     /// [`ServiceError::Worker`] for infrastructure failures. Candidate refusals are
@@ -412,16 +355,14 @@ impl RegistryService {
         request: &DeleteRequest,
         now: OffsetDateTime,
     ) -> Result<Accepted, ServiceError> {
-        // Enforce `limits.batch_candidates` before `resolve_targets` can perform
-        // unbounded reads; acceptance's own check runs after resolution.
+        // Bound Registry Reference lookups before resolving targets.
         let limit = self.config.limits.batch_candidates;
         if request.targets.len() > limit {
             let error = AcceptanceError::BatchTooLarge {
                 count: request.targets.len(),
                 limit,
             };
-            // Counted here because `accept` counts at its own exit and this refusal
-            // never reaches it; the series must not depend on which check fired.
+            // This refusal never reaches acceptance's metric.
             self.metrics.refused(
                 RefusalStage::Acceptance,
                 error.reason(),
@@ -442,9 +383,7 @@ impl RegistryService {
         .await
     }
 
-    /// Resolve deletion keys to candidate identifiers before acceptance, which reads
-    /// no entity state (SPEC §8.1). UUID-to-identifier mappings are immutable;
-    /// admission rechecks lifecycle and preconditions under its locks.
+    /// Resolve immutable Registry References; admission rechecks mutable state.
     async fn resolve_targets(
         &self,
         targets: &[DeleteTarget],

@@ -135,14 +135,8 @@ impl<S> HandlerSlot<S> for Present {
 
 pub use state::{AuthNotSet, AuthSet, LicenseNotSet, LicenseSet, Missing, Present};
 
-/// Parameter specification for API operations.
-///
-/// Built through [`ParamSpec::path`], [`ParamSpec::query`],
-/// [`ParamSpec::header`] or [`ParamSpec::cookie`] and refined with the setters
-/// below. The struct is `#[non_exhaustive]` on purpose: a JSON Schema keyword
-/// added here must not become a mechanical `field: None` in every declaration
-/// site of every gear, which is exactly what `format` and `minimum` cost when
-/// they arrived as literal fields.
+/// Parameter specification built with location constructors and fluent setters.
+/// `#[non_exhaustive]` allows new schema keywords without changing call sites.
 ///
 /// ```
 /// # use toolkit::api::operation_builder::{ParamLocation, ParamSpec};
@@ -167,14 +161,7 @@ pub struct ParamSpec {
     /// `style: form, explode: true` — i.e. `?tag=a&tag=b`, which is how the
     /// generated REST client encodes a `Vec<T>` query field.
     pub array: bool,
-    /// Optional JSON Schema `format` token, rendered into the document
-    /// verbatim: `int64`, `uuid`, or a custom extension such as
-    /// `resource-version`.
-    ///
-    /// A `String` rather than `utoipa`'s `SchemaFormat` so that declaring a
-    /// format costs a declaration site no `utoipa` dependency, and so that this
-    /// struct stays `Debug` without `utoipa`'s `debug` feature — a diagnostic
-    /// feature that would otherwise be on in every build that links toolkit.
+    /// Optional JSON Schema format token, kept independent of `utoipa` types.
     pub format: Option<String>,
     /// Optional JSON Schema `minimum`.
     pub minimum: Option<f64>,
@@ -219,9 +206,7 @@ impl ParamSpec {
         }
     }
 
-    /// Whether a caller must send this parameter. Path parameters are required
-    /// regardless of what is set here — the `OpenAPI` document has no other
-    /// reading of a path placeholder.
+    /// Whether the caller must send this parameter; path parameters are always required.
     #[must_use]
     pub fn required(mut self, required: bool) -> Self {
         self.required = required;
@@ -235,8 +220,7 @@ impl ParamSpec {
         self
     }
 
-    /// The JSON Schema type — `string`, `integer`, `number` or `boolean`. For a
-    /// repeating parameter this is the *item* type.
+    /// JSON Schema type, or item type for arrays.
     #[must_use]
     pub fn param_type(mut self, param_type: impl Into<String>) -> Self {
         self.param_type = param_type.into();

@@ -27,50 +27,12 @@ use crate::infra::InMemoryGtsRepository;
 use crate::infra::outbox::{OutboxDispatch, TABLE_PREFIX as OUTBOX_TABLE_PREFIX};
 use crate::infra::storage::Repos;
 
-/// Types Registry gear.
-///
-/// Provides GTS entity registration, storage, validation, and REST API endpoints.
-///
-/// ## Capabilities
-///
-/// - `system` — Core infrastructure gear, initialized early in startup
-/// - `db` — Owns the managed-state schema (`docs/database.sql`, P0 subset)
-/// - `rest` — Exposes REST API endpoints
-/// - `stateful` — Owns the admission outbox worker's lifetime (T21)
-///
-/// ## Worker lifecycle
-///
-/// Start in `init()` so consumers can await registration during their own `init()`;
-/// all gears initialize before any stateful `start` runs (plan P3).
-/// `serve` awaits runtime cancellation and calls `OutboxHandle::stop()` to cancel
-/// the outbox's internal token and join its workers.
-///
-/// ## Link-time inventory seeding
-///
-/// Seed all `toolkit-gts` inventory entries: `InventoryTypeSchema` / `InventoryInstance`
-/// populated by linked crates' `#[gts_type_schema]` / `gts_instance!`. Call internal
-/// `TypesRegistryService::register` before publishing the client (no `ClientHub`
-/// round-trip), so consumers see base types on first access.
-///
-/// `all_inventory_type_schemas()` / `all_inventory_instances()` discover entries
-/// from the dependency graph without naming specific types in types-registry.
+/// Types Registry gear: REST, managed storage, inventory seeding and admission worker.
 #[toolkit::gear(
     name = "types-registry",
     capabilities = [system, db, rest, stateful],
-    // 30s, matching `HostRuntime::DEFAULT_SHUTDOWN_DEADLINE`'s assumption that a
-    // gear's lifecycle timeout fires 5s before the runtime's 35s hard backstop.
-    // This does NOT cover the worst-case outbox lease (`worker.operation_timeout`
-    // + 2s, 5 minutes by default): the processor ignores cancellation while a
-    // leased handler runs, so a long admission outlives the drain and `serve` is
-    // aborted. Declaring a larger value would not help — the host hard-stops at 35s
-    // whatever the gear asks for.
-    //
-    // Aborting `serve` destroys the future awaiting the drain, not the spawned
-    // outbox tasks, so a pass in flight keeps running with no bound on when it ends.
-    // What that costs is bounded, not what it takes: an interrupted pass is
-    // resumable (see the cancel-safety note on `AdmissionHandler::admit_payload`)
-    // and recovery re-enqueues whatever stayed non-terminal on the next boot. Task
-    // lifetime itself is a lifecycle guarantee this gear does not provide.
+    // Leave five seconds before the host's hard shutdown deadline. Durable state
+    // makes longer admissions recoverable on the next boot.
     lifecycle(entry = "serve", stop_timeout = "30s", await_ready)
 )]
 pub struct TypesRegistryGear {
@@ -78,13 +40,7 @@ pub struct TypesRegistryGear {
     /// The database-backed path. Absent when no database is bound to this gear.
     registry: OnceLock<Arc<RegistryService>>,
     local_client: OnceLock<Arc<TypesRegistryLocalClient>>,
-    /// Pipeline retained from `init()` for shutdown; absent without a DB or after draining.
-    ///
-    /// A synchronous mutex on purpose. The two holders — `init` storing the
-    /// handle and `serve` taking it — each do one non-async move under the
-    /// lock, and nothing waits on it. An async mutex would make it *possible*
-    /// to hold the lock across the drain `serve` performs next, which is the
-    /// one thing this field must not do.
+    /// Pipeline retained for shutdown; the mutex guards only non-async moves.
     outbox: Mutex<Option<OutboxHandle>>,
 }
 
@@ -100,16 +56,7 @@ impl Default for TypesRegistryGear {
 }
 
 impl TypesRegistryGear {
-    /// Wire the database-backed admission path: the registry service, the
-    /// dispatch it hands accepted operations to, and the outbox pipeline that
-    /// delivers them.
-    ///
-    /// Its own step because it is the one part of `init` that leaves something
-    /// running — the handle it stores in `self.outbox` is what [`serve`] drains
-    /// at shutdown — and the one part a deployment can do without: `no-db.yaml`
-    /// and `--mock` skip it, and T7-T9's routes answer `503` instead.
-    ///
-    /// [`serve`]: Self::serve
+    /// Start the optional database-backed admission pipeline.
     async fn wire_admission(
         &self,
         db: &DBProvider<DbError>,
@@ -117,10 +64,8 @@ impl TypesRegistryGear {
         cfg: TypesRegistryConfig,
         metrics: Arc<dyn AdmissionMetrics>,
     ) -> anyhow::Result<()> {
-        // Bind after pipeline creation; the weak link breaks the ownership cycle.
         let dispatch = Arc::new(OutboxDispatch::new());
-        // The domain names its persistence ports and never the repositories;
-        // this is the one place the database-backed adapter is chosen.
+        // Choose database adapters at the composition root.
         let stores: Arc<dyn Stores> = Arc::new(Repos);
         let registry = Arc::new(RegistryService::new(
             db.db(),
@@ -128,12 +73,12 @@ impl TypesRegistryGear {
             registration_policy,
             cfg,
             Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
-            // Dispatch production admissions; seeding uses a separate inline service (SPEC §8.1).
+            // Seeding uses a separate inline service.
             crate::domain::registry_service::AdmissionMode::Outbox,
             metrics,
         ));
 
-        // Start after inline seeding to avoid concurrent seed admission (plan P3).
+        // Start after inline seeding.
         let handle = crate::infra::outbox::start(db.db(), &registry, &dispatch).await?;
         *self.outbox.lock() = Some(handle);
 
@@ -157,9 +102,7 @@ impl TypesRegistryGear {
         ready.notify();
         cancel.cancelled().await;
 
-        // Taking the handle makes repeated shutdown a no-op. Taken in its own
-        // statement so the guard is released before the drain below rather
-        // than held across it.
+        // Release the mutex before awaiting the drain.
         let handle = self.outbox.lock().take();
         if let Some(handle) = handle {
             info!("types_registry draining the admission outbox");

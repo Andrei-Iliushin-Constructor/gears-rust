@@ -116,15 +116,11 @@ fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
     types_registry::infra::storage::Migrator::migrations()
 }
 
-/// Isolated in-memory `SQLite` pool with managed-state and outbox migrations.
-/// A UUID-named shared cache lets background connections see the same tables;
-/// multiple connections let acceptance and outbox tasks run concurrently.
 pub async fn test_db_with_outbox() -> Arc<DBProvider<DbError>> {
     let name = format!("tr-outbox-{}", uuid::Uuid::new_v4());
     provider_for_with_outbox(&format!("sqlite:file:{name}?mode=memory&cache=shared"), 4).await
 }
 
-/// Apply managed-state and outbox migrations using the production table prefix.
 pub async fn provider_for_with_outbox(dsn: &str, max_conns: u32) -> Arc<DBProvider<DbError>> {
     let opts = ConnectOpts {
         max_conns: Some(max_conns),
@@ -148,18 +144,6 @@ pub async fn provider_for_with_outbox(dsn: &str, max_conns: u32) -> Arc<DBProvid
     Arc::new(DBProvider::new(db))
 }
 
-// ---------------------------------------------------------------------------
-// The outbox-delivery wait (SPEC §13's scoped exception)
-// ---------------------------------------------------------------------------
-
-/// Wait for real outbox delivery only (SPEC §13). Other tests call the worker directly.
-///
-/// `read` returns `Some` when terminal, `None` only for `pending`/`running`, and
-/// asserts on other responses. Observe immediately, then back off 10–100 ms under
-/// one deadline covering reads and waits. Never retry submissions or assertions.
-///
-/// # Panics
-/// If the deadline expires before `read` returns `Some`.
 pub async fn await_delivery<T, F, Fut>(what: &str, read: F) -> T
 where
     F: Fn() -> Fut,
@@ -167,7 +151,6 @@ where
 {
     use std::time::Duration;
 
-    /// Failure deadline; the passing suite must still meet SPEC §13's 5 s budget.
     const DEADLINE: Duration = Duration::from_secs(2);
     const FIRST_BACKOFF: Duration = Duration::from_millis(10);
     const MAX_BACKOFF: Duration = Duration::from_millis(100);
@@ -208,22 +191,12 @@ pub fn metrics() -> std::sync::Arc<dyn types_registry::domain::ports::metrics::A
     std::sync::Arc::new(types_registry::domain::ports::metrics::NoopMetrics)
 }
 
-/// Instruments that record the delivery outcomes the outbox handler counts.
-///
-/// The one instrument a delivery test has to read: `retried` and
-/// `dead_lettered` are what a stall alert distinguishes, and two of the
-/// handler's branches differ only in which of them they emit — a `Retry` that
-/// counted `dead_lettered` would still return the right `MessageResult` and
-/// still lie to the alert. Everything else forwards to nothing, because the
-/// per-candidate and duration instruments have their own contract tests over a
-/// real exporter in `observability_test`.
 #[derive(Debug, Default)]
 pub struct RecordingDeliveryMetrics {
     outcomes: parking_lot::Mutex<Vec<types_registry::domain::ports::metrics::DeliveryOutcome>>,
 }
 
 impl RecordingDeliveryMetrics {
-    /// Every delivery outcome counted so far, in order.
     #[must_use]
     pub fn outcomes(&self) -> Vec<types_registry::domain::ports::metrics::DeliveryOutcome> {
         self.outcomes.lock().clone()

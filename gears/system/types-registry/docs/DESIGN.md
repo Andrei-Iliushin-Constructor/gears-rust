@@ -454,26 +454,14 @@ Authored-content equality is established once by the worker per candidate. The h
 
 The leased ToolKit outbox owns multi-pod claiming, lease expiry, retry, and dead letters. Delivery is at least once, so admission-unit commits are idempotent and guarded by operation-item identity, authored equality, unique revisions, and compare-and-swap; outbox lease state is not duplicated in `operation`. The operation status index only terminalizes work abandoned after outbox retries and is not a second dispatcher.
 
-Candidate rejection is a successful dispatch outcome (`Ack`), including an absent base,
-conforming Type Schema or `$ref` target. The item fails on its first evaluation with
-`dependency_not_found`, `dependency_id` and `dependency_kind` (`base`, `conforming_type`,
-`ref`). There is no dependency-wait window. Dependencies submitted together are ordered
-within the batch; across submissions, the caller waits for successful prerequisite admission.
+Candidate rejection, including a missing dependency, is acknowledged and stored with
+structured details. In-batch dependencies are ordered; cross-request dependencies require
+the caller to await the prerequisite.
 
-Only recognized temporary database contention, transport failures or connection-acquisition
-timeouts permit delivery retry. Invalid scope, access denial, configuration/query errors,
-corrupt stored data, invariant failures and evaluation panics are permanent system failures.
-Evaluation cancellation leaves work recoverable; lease-timeout recovery remains bounded by
-`worker.max_delivery_attempts`. Stale evaluation uses the separate revalidation budget.
-
-`Reject`/dead-letter is reserved for unusable internal messages, permanent system failures
-and exhausted delivery recovery. Unfinished items receive `admission_abandoned`; already
-terminal outcomes remain intact. Operation diagnostics and dead-letter reasons carry a safe
-`error_code` and the `operation_id` used in logs, never raw SQL, credentials or candidate
-content. If terminalization fails, startup recovery can re-enqueue the still-active operation.
-Dead letters are operator diagnostics, not client results; replaying an already-completed
-operation does not restart admission. Long-running P2 hooks split into bounded durable stages
-rather than retaining one lease.
+Only failures that may clear are retried, within `worker.max_delivery_attempts`. Permanent or
+exhausted delivery terminalizes undecided items as `admission_abandoned` before dead-lettering.
+Diagnostics contain stable codes and operation IDs, never raw infrastructure or candidate data.
+Startup recovery re-enqueues any operation left non-terminal.
 
 The end-to-end flow this pipeline drives — read, reconcile, submit, dispatch, admit, poll — is `cpt-cf-types-registry-seq-batch-admission` in §3.6.
 

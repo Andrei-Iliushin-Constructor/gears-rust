@@ -922,15 +922,6 @@ async fn the_same_repository_methods_run_inside_a_transaction() {
     assert_eq!(row.id, committed);
 }
 
-/// Abandonment fails a whole operation's undecided items in one statement, and
-/// the write-once guard still holds.
-///
-/// The loop this replaced issued a read plus an UPDATE per item, up to
-/// `limits.batch_candidates` of them, inside the transaction the outbox handler
-/// bounds with what is left of the delivery's lease — which is how the
-/// abandonment write came to time out without ever being issued. Asserting the
-/// count is what shows one statement covered the set; asserting the untouched
-/// item is what shows the guard did not widen along with it.
 #[tokio::test]
 async fn abandonment_fails_every_undecided_item_of_one_operation_and_no_other() {
     const ABANDONED: &str = r#"{"reason":"admission_abandoned"}"#;
@@ -973,8 +964,6 @@ async fn abandonment_fails_every_undecided_item_of_one_operation_and_no_other() 
         .await
         .expect("insert items");
 
-    // One item is already decided, as it would be after a pass that committed it
-    // before the delivery was abandoned. Its outcome must survive.
     let seeded = OperationRepo::find_items(&conn, &scope, operation.id)
         .await
         .expect("read items");
@@ -1033,7 +1022,6 @@ async fn abandonment_fails_every_undecided_item_of_one_operation_and_no_other() 
         }
     }
 
-    // Idempotent: a redelivery that abandons again finds nothing left to move.
     let again = OperationRepo::fail_nonterminal_items(
         &conn,
         &scope,
@@ -1046,15 +1034,6 @@ async fn abandonment_fails_every_undecided_item_of_one_operation_and_no_other() 
     assert_eq!(again, 0, "the guard makes a repeated abandonment a no-op");
 }
 
-/// Boot recovery pages by keyset, and the tie-break is load-bearing.
-///
-/// The only production caller asks for 256 rows at a time and every recovery
-/// test seeds one or two operations, so `after` was always `None` and this
-/// branch never ran. A wrong comparison here either skips operations at boot or
-/// re-reads the same page forever, and both are invisible without a second page.
-///
-/// Every operation shares one `created_at`, so ordering rests entirely on the
-/// `id` tie-break — which is the half a `created_at`-only cursor would drop.
 #[tokio::test]
 async fn nonterminal_paging_walks_every_operation_once_across_pages() {
     const OPERATIONS: usize = 5;
@@ -1080,7 +1059,6 @@ async fn nonterminal_paging_walks_every_operation_once_across_pages() {
                 idempotency_scope_hash: ScopeHash::from_stored(vec![0x01; 32]).expect("32 bytes"),
                 request_fingerprint: RequestFingerprint::from_stored(vec![0x02; 32])
                     .expect("32 bytes"),
-                // One instant for all of them: the `id` tie-break is the test.
                 now: NOW,
             },
         )
@@ -1089,8 +1067,6 @@ async fn nonterminal_paging_walks_every_operation_once_across_pages() {
         expected.push(operation.id);
     }
 
-    // The order the cursor promises: `created_at` then `id`, and they all share
-    // the first, so this is `id` order.
     expected.sort_unstable();
 
     let mut walked: Vec<Uuid> = Vec::new();
@@ -1119,8 +1095,6 @@ async fn nonterminal_paging_walks_every_operation_once_across_pages() {
         "the scan must visit every non-terminal operation exactly once, in cursor order",
     );
 
-    // Passing the last cursor back must end the scan rather than return the row
-    // it already handed over — the `>` in the tie-break, not `>=`.
     let past_the_end = OperationRepo::nonterminal_page(
         &conn,
         &scope,

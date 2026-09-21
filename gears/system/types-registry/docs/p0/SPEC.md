@@ -365,78 +365,32 @@ Replay of a matching fingerprint under the same key returns the stored operation
 `202` while active, `200` when terminal. A different fingerprint under the same key
 returns `409`.
 
-**The worker is a plain function:** `(operation_id, runner)` performs one pass; the
-outbox shell maps its result to `Ok` / `Retry` / `Reject`. Direct calls keep worker/domain
-tests wait-free (§13) and concurrency cases testable with `#[tokio::test]` on SQLite `:memory:`.
+**The worker is a plain function:** `(operation_id, runner)` performs one pass;
+the outbox only maps its result to `Ok`, `Retry` or `Reject`. Domain tests call
+the worker directly (§13).
 
-**Admission failures and delivery failures.** A missing base, conforming Type Schema or
-schema `$ref` target is a terminal candidate refusal on the first evaluation. Store
-`reason: dependency_not_found`, a human-readable `message`, `dependency_id`, and
-`dependency_kind` (`base`, `conforming_type`, `ref`) on the item. Complete the operation
-once all items are terminal and acknowledge the outbox message. Malformed schema/value,
-compatibility and precondition refusals follow the same successful-dispatch path.
-An in-batch dependency is evaluated first; a failed one blocks its dependants. No retry
-waits for a dependency from a separate submission.
+**Admission and delivery failures.** Candidate problems, including missing external
+dependencies, become terminal item outcomes and acknowledge delivery. In-batch
+dependencies are ordered; cross-request dependencies require the caller to await the
+prerequisite.
 
-Delivery retry is restricted to recognized temporary DB contention, connection loss and
-connection-acquisition timeout. Scope/configuration/SQL failures, evaluation panics,
-corruption and broken invariants are permanent system failures. Cancelled evaluation is
-recoverable; stale evaluation uses `max_revalidation_attempts`. Missing entity identity
-at edge commit is an invariant failure, unlike an absent input dependency at evaluation.
+Retry is reserved for failures that may clear. Permanent system failures and exhausted
+recovery mark undecided items `admission_abandoned` before dead-lettering. Diagnostics
+contain only stable `error_code`, `operation_id` and allowlisted `cause_kind` values.
+If terminalization fails while attempts remain, redeliver; after the bounded budget,
+dead-letter and leave startup recovery to resume any non-terminal operation.
 
-Only system failures and unusable internal messages enter dead letters. On permanent
-failure or exhausted recovery, mark unfinished items `failed` with `admission_abandoned`
-and complete the operation, preserving prior terminal outcomes. Store a safe `error_code`
-and `operation_id` in both the client-visible error and the dead-letter reason; use that
-operation ID in logs. Do not serialize raw infrastructure errors, and do not log them
-either: logs carry an allowlisted `cause_kind` naming the failing subsystem, never a
-driver's or document's own text. No automatic dead-letter replay restarts a completed
-operation.
+The default budget is eight admission attempts. `operation_timeout` bounds each leased
+handler, and delivery `N + 1` resolves stored status without running admission again.
 
-Terminalize before dead-lettering, and let the write decide the message's fate. A message
-rejected while its operation is still `pending`/`running` leaves no queued work, so nothing
-but the next startup scan can resume it. If the terminal write fails while delivery
-attempts remain, redeliver instead — the operation row is unchanged, so the next delivery
-re-attempts the same abandonment. Once `max_delivery_attempts` is spent, dead-letter
-regardless: an unbounded retry would hold the partition and overflow the stored attempt
-count. Only on that last path does the operation stay non-terminal, and it remains eligible
-for startup recovery.
+**Partitioning.** Eight persisted partitions route by the operation UUID's last two
+bytes modulo eight. Partitions run concurrently; `entity_write_order` still serializes
+entity commits. Retries block only their partition. Changing the count requires recreating
+the disposable dev/test outbox; live repartitioning is unsupported.
 
-The default delivery policy allows eight admission attempts. Processor backoff starts at
-100 ms, doubles to a 10 s cap, and is local/interruption-sensitive, not a persisted retry
-deadline. Seven uninterrupted pauses total 12.7 s plus execution time. `operation_timeout`
-(default 5 min) limits each leased handler invocation, not the operation's total lifetime.
-After repeated lease timeouts, delivery `N + 1` decides from stored status without admitting.
-
-**Partitioning.** The admission queue has eight fixed partitions shared by all pods.
-Normal enqueue and startup recovery both select the partition from the operation UUID's
-last two bytes, interpreted big-endian, modulo eight. Different partitions can evaluate
-concurrently; `entity_write_order` still serializes entity-state commits. The outbox's
-default processor limit permits four concurrent processors per pod. Retries delay only
-their partition. Separate operations have no execution or completion ordering guarantee;
-dependent candidates belong in one batch, or the caller awaits and checks the prerequisite
-operation before submitting the next request.
-
-The partition count is persisted: `toolkit-db` refuses to start against a queue created
-with a different count (`PartitionCountMismatch`). This branch targets disposable dev/test
-databases. When upgrading from the single-partition layout, stop all registry pods and
-recreate the dev database, then run migrations and restart with the same build on every pod.
-If resetting only the outbox, recreate its complete schema through its migration as well
-as its migration bookkeeping; nonterminal operations are re-enqueued on startup, while
-outbox delivery attempts and dead letters are discarded. No live repartitioning is provided.
-
-**Where it runs.** Start the outbox at the end of types-registry's `init()`; retain its
-`OutboxHandle` for shutdown. All gears initialize before any stateful `start`, so deferring
-the worker would leave consumer `init()` submissions `pending`.
-
-`OutboxBuilder::start()` owns an internal cancellation token with no external setter.
-The stateful entry point awaits runtime cancellation, then calls `OutboxHandle::stop()`
-to cancel and join the workers. `TaskSet::Drop` cancels without joining as a backstop.
-Startup order inside `init()`: repositories → inline seeding → start worker → publish client.
-No snapshot or warm-up read: seeding builds a transient store like other admissions (D2);
-later reads use the database.
-Seeding precedes the worker start and enqueues nothing, so seed operations cannot be leased
-concurrently.
+**Where it runs.** Startup order is repositories → inline seeding → outbox worker →
+client publication. The stateful entry point stops the retained `OutboxHandle` on
+runtime cancellation. Starting during `init()` lets consumer initialization await results.
 
 **Two seed sources, one inline pass.** Seeding covers (1) all process-linked toolkit-gts
 inventory, including other gears' declarations, and (2) the operator-configured

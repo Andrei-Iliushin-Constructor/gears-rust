@@ -1,4 +1,3 @@
-//! `PostgreSQL`/`MySQL` partial admission (T19): per-candidate transactions must
 //! preserve independent successes and leave no state for blocked candidates.
 
 #![cfg(feature = "integration")]

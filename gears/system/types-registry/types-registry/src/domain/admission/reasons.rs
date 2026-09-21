@@ -8,10 +8,7 @@ use toolkit_macros::domain_model;
 #[non_exhaustive]
 pub enum AdmissionFailureReason {
     ActivationWriteSetExceeded,
-    /// A permanent system failure or exhausted delivery budget stopped admission,
-    /// so the candidate was never decided. Distinct from every other reason here, which
-    /// states something about the candidate: this one states that admission
-    /// stopped trying.
+    /// Admission stopped after a permanent failure or exhausted delivery budget.
     AdmissionAbandoned,
     AlreadyExists,
     /// The baseline's own references no longer resolve, so no comparison could be
@@ -161,57 +158,29 @@ impl std::fmt::Display for AdmissionFailureReason {
     }
 }
 
-/// Why delivery gave up on a message, as the `error_code` a client reads back.
-///
-/// A second axis to [`AdmissionFailureReason`], not a part of it: that one says
-/// something about a *candidate*, this one about a *delivery*. The one place they
-/// meet is [`AdmissionFailureReason::AdmissionAbandoned`], which is the reason
-/// stored on the items of an operation delivery abandoned for one of the codes
-/// below.
-///
-/// This is wire vocabulary, not a log field: it travels in the dead-letter
-/// `reason` and in the item's `error_payload`, which REST hands back on
-/// `GET /operations/{id}`. Those two must agree, which is why it is an enum —
-/// the same reason [`AdmissionFailureReason::AdmissionAbandoned`] stopped being
-/// a literal in `infra::outbox`.
-///
-/// `abandonment_write_failed` / `abandonment_write_timeout` are deliberately
-/// absent: they name a *log* field on the terminalization attempt, are never
-/// returned to a caller, and putting them here would suggest they are.
+/// Stable client-facing code for an abandoned delivery.
+/// Candidate failures remain in [`AdmissionFailureReason`].
 #[domain_model]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeliveryFailure {
-    /// Admission ran and failed on its own terms; the code is
-    /// `WorkerError::code()`'s, already exhaustive over a closed enum.
-    ///
-    /// Kept as a payload rather than flattened into variants here so the two
-    /// vocabularies stay one each: duplicating `WorkerError`'s codes would give
-    /// this enum a second, drifting copy of them.
+    /// Admission failed with a `WorkerError` code.
     Admission(&'static str),
     /// The envelope declared a `payload_type` this queue does not handle.
     UnexpectedPayloadType,
-    /// The message body is not an operation `UUID`. No redelivery changes bytes.
+    /// The message body is not an operation UUID.
     InvalidOperationPayload,
-    /// A `ServiceError` that is not a `WorkerError`, so it carries no code of its
-    /// own. Broad on purpose — the cause goes to the operator log, never here.
+    /// A non-worker service failure; details remain in operator logs.
     ServiceFailure,
-    /// The delivery budget was spent and the operation row no longer exists.
-    ///
-    /// Shares its string with `WorkerError::OperationNotFound`, and that is
-    /// intended: both say the operation row is gone, and a client cannot act on
-    /// which layer noticed.
+    /// The operation row disappeared before exhausted delivery could finish.
     OperationNotFound,
     /// The delivery budget was spent and the operation is still not terminal.
     DeliveryBudgetExhausted,
-    /// Admission was cut off at its own deadline, leaving the reserve that the
-    /// abandonment write needs. Distinct from [`Self::DeliveryBudgetExhausted`]:
-    /// that is the delivery *after* the last one admission was allowed to run.
+    /// Admission exceeded its deadline before the delivery budget was exhausted.
     AdmissionDeadlineExceeded,
 }
 
 impl DeliveryFailure {
-    /// The stable `error_code` string. Exhaustive, so a variant added later is a
-    /// compile error rather than a silently missing code.
+    /// Return the stable `error_code` string.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {

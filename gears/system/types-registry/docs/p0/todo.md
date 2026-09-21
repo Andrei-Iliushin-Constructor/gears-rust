@@ -1847,26 +1847,11 @@ With `PATH="$HOME/.cargo/bin:$PATH"`, whole-workspace `make clippy`
 **Acceptance criteria:**
 - [x] Production submissions use `AdmissionMode::Outbox`; acceptance and enqueue share a
       transaction, while seeding stays inline and never enqueues (P3)
-- [x] After acceptance/recovery commits, call `Outbox::push_dirty(partition_id)` for the
-      partitions just committed. `enqueue` pushes the same signal, but from inside the
-      caller's transaction, so it can be consumed before the rows are visible; the
-      post-commit push is what restores that work. Naming the partition is the point —
-      `Outbox::flush()` wakes a sequencer without saying which partition is dirty, so it
-      leaves the sequencer to discover the work, and discovery is a `SELECT DISTINCT
-      partition_id` over the whole incoming table. That scan now runs only on the cold
-      paths that own it: once at startup, and in the reconciler worker on its own idle
-      interval. It is no longer on any per-commit path, and there is no call site left in
-      `Sequencer::execute` to regress into.
-      Acceptance tests assert post-transaction notification and no notification on
-      rollback/refusal/replay; toolkit-db tests reproduce the early drain with a real
-      transaction and sequencer, including the auto-flush transaction helper.
-      The registration e2e scenarios below exposed this gap.
+- [x] Signal the exact partition after acceptance/recovery commits; transaction-time
+      signals can arrive before rows are visible. Cold scans remain startup/reconciler work.
 - [x] Handler contains no admission logic — it resolves the operation UUID and calls the worker
 - [x] Delivery is at-least-once and commits are idempotent; duplicate delivery is a no-op
-- [x] Transient database failure returns `Retry`. `Reject` covers a permanently invalid
-      message *and* a transient one whose `worker.max_delivery_attempts` budget is spent —
-      without the second case a persistently failing message never leaves the single
-      partition
+- [x] Retry failures that may clear; reject invalid messages and exhausted deliveries
 - [x] Candidate content never enters an outbox or dead-letter payload
 - [x] Add `stateful`, deferred by T2: `[system, db, rest, stateful]` (SPEC §5)
 - [x] Start the worker at the end of `init()`, before stateful `start` (P3); retain `OutboxHandle` and call `stop()` after `ctx.cancellation_token()` fires (see lifecycle deviation)
@@ -1880,96 +1865,37 @@ With `PATH="$HOME/.cargo/bin:$PATH"`, whole-workspace `make clippy`
       entity state, revisions and resource versions
 - [x] Test: duplicate delivery of one operation UUID changes nothing
 - [x] Test: an operation submitted immediately after `init()` returns reaches `completed` without the `start` phase running
-- [ ] Test: shutdown drains or cancels cleanly — no task leak after `stop()`.
-      **Reopened.** `serve` awaits `OutboxHandle::stop`, but the host hard-stops at
-      `HostRuntime::DEFAULT_SHUTDOWN_DEADLINE` (35s), and aborting `serve` destroys the
-      future awaiting the drain rather than the spawned worker tasks. A pass in flight
-      keeps going, and no mechanism here bounds when it ends. Stored state stays
-      recoverable; task lifetime is a separate guarantee the gear does not provide. A
-      lifecycle limitation rather than a T21 defect, but the box was ticked on a claim the
-      code does not make
+- [ ] Prove shutdown does not leak tasks. Reopened: the host's 35s hard stop can abort
+      `serve` while spawned outbox work continues. State is recoverable, task lifetime is not bounded
 - [x] Manual: submit over REST against `make example` and observe the operation reach `completed` without direct worker invocation
 
-**Testing exception (SPEC §§13–14):** Only real delivery uses `common::await_delivery`:
-immediate read, 10–100 ms capped backoff, one 2 s deadline; retry only `pending`/`running`,
-fail on expiry/unexpected responses. Drivers are private and `Outbox::flush()` requests
-a scan without waiting for delivery. Worker/domain tests call directly; the passing suite retains its 5 s budget.
+**Testing exception (SPEC §§13–14):** Only real delivery uses
+`common::await_delivery` with bounded backoff and a 2s deadline. Domain tests call directly.
 
 **Implementation notes:**
-- `AdmissionHandler::admit_payload` tests mapping/idempotency directly; pipeline tests
-  cover domain delivery, all six REST route/mode combinations and PostgreSQL/MySQL leases.
-- Both drivers share `RegistryService::admit` and tuning. `WorkerError::transient()` retries
-  stale evaluation, cancelled evaluation tasks and any storage failure `domain::retry`
-  does not name as permanent; `StoreBuild` uses the same classifier. Permanent means
-  scope decisions, database *configuration*, panics, corruption, vanished commit targets,
-  worker-invariant violations and exhausted counters. **Lock contention is not decided here**
-  — `commit_prepared` and the deletion commit run under `Db::transaction_with_retry`, which
-  absorbs it with its own budget and jittered backoff, so a redelivery is never the first
-  answer to a busy database. Failures that did reach the engine, including invalid SQL, are
-  retried rather than dead-lettered on sight: `worker.max_delivery_attempts` already bounds
-  them, and the reverse error dead-letters work a reread would have admitted. That direction
-  is deliberate and is what `domain::retry`'s module doc argues; the classifier takes no
-  `DbBackend`, because no engine code changes the answer.
-  Missing input dependencies are terminal `dependency_not_found` candidate
-  refusals with structured ID/kind, acknowledged without delivery retry or dead-lettering.
-- Retries block their partition. `worker.max_delivery_attempts` (default 8, capped at
-  `i16::MAX` because the outbox stores the count in an `i16`) makes the last attempt reject.
-  The processor runs with `batch_size(1)`: `attempts` is per-partition and is handed to every
-  message in a read batch, so a larger batch would let unrelated messages share and reset the
-  budget. Lease timeouts increment `attempts` even if the handler never returns. Delivery
-  `N + 1` skips admission and reads the stored status, acknowledging a completed operation or
-  rejecting an unfinished one. Terminal-path reads/writes stop before the remaining lease
-  deadline so cancellation does not turn the terminal decision back into another retry.
-  **Admission itself is bounded too**, at the work deadline minus a terminalization reserve
-  (absolute, capped at a quarter of a short lease). Unreserved, a failure surfacing late left
-  the abandonment write a deadline already past: the message was dead-lettered while the
-  operation stayed non-terminal with nothing queued, so only the next process start recovered
-  it. A pass cut off at that bound is `admission_deadline_exceeded` — redelivered while the
-  budget allows, abandoned inside the reserve when it does not.
-  `RegistryService::abandon` records `admission_abandoned` only on non-terminal items and
-  completes the operation from either `pending` or `running`, in **one** guarded UPDATE over
-  the operation's undecided items rather than a read plus an UPDATE each: this transaction
-  runs on what the delivery has left, and a batch at `limits.batch_candidates` spent that
-  budget on round trips. Client errors and dead-letter
-  reasons carry safe `error_code` and `operation_id` fields that correlate with logs, without
-  raw infrastructure error text; the cause itself goes to the operator log and nowhere else,
-  which is the split `api::rest::error::opaque_internal` already makes for the REST path and
-  the only record of *why* an operation was abandoned.
-  These are system failures, not ordinary candidate refusals.
-  `types_registry_admission_deliveries_total{outcome}` counts retries/dead letters for alerts,
-  including the unusable-payload rejection.
-- The lease lasts `operation_timeout + 2s` and handlers ignore cancellation, so shutdown
-  waits for the active pass. `stop_timeout` stays `30s`, matching the host's 35s hard
-  backstop; it deliberately does **not** cover the worst-case lease, because no gear-declared
-  value could — `HostRuntime::DEFAULT_SHUTDOWN_DEADLINE` stops the gear at 35s regardless. An
-  aborted pass is resumable, which bounds the data risk but not the task lifetime (see the
-  reopened shutdown check above).
-- `recover_nonterminal_operations` reads 256 rows per page via `find_nonterminal_ids`
-  (keyset cursor `created_at`, `id`, plus limit), avoiding a whole-backlog boot read.
-  Keysets advance while previously returned rows remain non-terminal awaiting admission.
-- `OutboxDispatch` holds a weak reference to break the handler/service/dispatch/outbox
-  cycle. Submissions fail after the pipeline is dropped.
-- Eight partitions route by operation UUID tail in both enqueue and recovery, allowing
-  concurrent evaluation across operations/pods; `entity_write_order` serializes commits.
-  Separate operations have no ordering guarantee. Existing single-partition dev outboxes
-  must be recreated (SPEC §8.1).
-  `low_latency` avoids pacing consumers waiting during `init()`.
-- Runtime and tests share `infra::outbox::start` settings.
+- `RegistryService::admit` is shared by inline and outbox drivers. Missing input
+  dependencies are terminal item refusals; retry classification covers only system failures.
+- `batch_size(1)` gives each message its own bounded attempt budget. After repeated lease
+  timeouts, delivery `N + 1` reads stored status without rerunning admission.
+- Admission reserves lease time for one guarded bulk abandonment write. Client and
+  dead-letter diagnostics contain stable codes and operation IDs, never raw errors.
+- Startup recovery keyset-pages non-terminal operations. Eight UUID-derived partitions run
+  concurrently, while entity commits remain serialized.
+- `OutboxDispatch` uses a weak reference to avoid an ownership cycle; runtime and tests
+  share the same pipeline settings.
 
-**Lifecycle deviation:** The outbox creates its own token and has no external-token setter.
-`serve` awaits runtime cancellation and drains the retained `OutboxHandle`; `TaskSet::Drop`
-cancels without joining as a backstop (SPEC §8.1). Worker startup remains in `init()`.
+**Lifecycle deviation:** The outbox owns its cancellation token. `serve` drains the retained
+handle after runtime cancellation; worker startup remains in `init()`.
 
 **Receipt behavior:** Production submissions return `pending`; terminal replays return
 `200` only after outbox admission completes.
 
-**Recorded verification:** SQLite 903/903 (2.05–2.26 s steady, 4.6 s cold);
-PostgreSQL/MySQL 39/39 in three consecutive combined runs; E2E 324 passed, 19 skipped,
-no e2e edits. Formatting/clippy passed. Live REST: registration and dry-run/committed deletion
-returned `202 pending` then completed; `SIGTERM` drained the outbox before gear shutdown.
+**Recorded verification:** SQLite 903/903; PostgreSQL/MySQL 39/39 in three runs;
+E2E 324 passed, 19 skipped; formatting and clippy passed. Live REST mutations completed,
+and `SIGTERM` drained the outbox.
 
-**Observed flakiness:** `migration_backends_test` failed on both backends once before three
-passing runs; suspected container startup contention. Consider a longer wait if it recurs.
+**Observed flakiness:** `migration_backends_test` failed once before three passing runs,
+likely from container startup contention.
 
 **Dependencies:** T20 (worker supports both mutation kinds and dry run); T20a precedes this
 task so the REST-to-outbox flow can be verified before Checkpoint 5

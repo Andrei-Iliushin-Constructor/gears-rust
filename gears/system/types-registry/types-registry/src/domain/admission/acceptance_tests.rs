@@ -133,10 +133,6 @@ fn items_are_numbered_in_submission_order() {
 // Step 1: envelope
 // ---------------------------------------------------------------------------
 
-/// `None` is a transport that had no key to report; `Some("")` and `Some("  ")`
-/// are a caller that sent one and said nothing with it. They are distinct in
-/// the type and identical as a refusal — which is the whole contract, now that
-/// absence no longer arrives disguised as an empty string.
 #[test]
 fn a_missing_idempotency_key_is_refused_synchronously() {
     let pair = closed();
