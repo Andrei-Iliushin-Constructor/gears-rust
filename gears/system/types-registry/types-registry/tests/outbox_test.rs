@@ -142,9 +142,14 @@ async fn started(
     ports: Arc<dyn Stores>,
 ) -> (Arc<RegistryService>, OutboxHandle) {
     let (registry, dispatch) = service(db, ports);
-    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
-        .await
-        .expect("start the admission outbox");
+    let handle = types_registry::infra::outbox::start(
+        db.db(),
+        &registry,
+        &dispatch,
+        &common::no_cancellation(),
+    )
+    .await
+    .expect("start the admission outbox");
     (registry, handle)
 }
 
@@ -869,9 +874,14 @@ async fn assert_partitions_progress_independently(recover_second: bool) {
 
     let (ports, reached, resume) = common::TestStores::pausing(common::PausePoint::OperationRead);
     let (registry, dispatch) = service(&db, ports);
-    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
-        .await
-        .expect("start production pipeline");
+    let handle = types_registry::infra::outbox::start(
+        db.db(),
+        &registry,
+        &dispatch,
+        &common::no_cancellation(),
+    )
+    .await
+    .expect("start production pipeline");
     let reached = std::sync::Mutex::new(reached);
     await_delivery("first admission enters its handler", || async {
         match reached.lock().unwrap().try_recv() {
@@ -982,9 +992,14 @@ async fn startup_requeues_nonterminal_operations_without_a_message() {
     assert_eq!(accepted.status, OperationStatus::Pending);
 
     let (registry, dispatch) = service(&db, stores());
-    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
-        .await
-        .expect("start the admission outbox");
+    let handle = types_registry::infra::outbox::start(
+        db.db(),
+        &registry,
+        &dispatch,
+        &common::no_cancellation(),
+    )
+    .await
+    .expect("start the admission outbox");
 
     let operation = await_delivery("startup recovery through the outbox", || async {
         let record = registry
@@ -1015,12 +1030,171 @@ async fn startup_requeues_nonterminal_operations_without_a_message() {
 }
 
 #[tokio::test]
+async fn shutdown_during_startup_stops_recovery_before_it_reads_a_page() {
+    let db = test_db_with_outbox().await;
+
+    // Strand a non-terminal operation with no outbox message: the exact state
+    // startup recovery exists to re-drive.
+    let legacy = service_without_dispatch(&db, stores());
+    let accepted = legacy
+        .submit(&registration("stranded-by-shutdown", TARGET), NOW)
+        .await
+        .expect("accept through the pre-outbox dispatch");
+    assert_eq!(accepted.status, OperationStatus::Pending);
+
+    // Every page read fails, so a scan that runs at all fails the start. This is
+    // what makes the assertion below about *not scanning* rather than about a
+    // scan that happened to find nothing.
+    let dispatch = Arc::new(OutboxDispatch::new());
+    let registry = service_with(
+        &db,
+        common::TestStores::failing_recovery_scan(),
+        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
+    );
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+
+    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch, &cancel)
+        .await
+        .expect(
+            "a start under a cancelled token must stop before reading a recovery page, so the \
+             injected page failure must never fire",
+        );
+
+    // The stranded operation stays non-terminal, which is what lets the next boot
+    // re-drive it.
+    let reader = service_without_dispatch(&db, stores());
+    let recovered = reader
+        .nonterminal_operation_page(None, 128)
+        .await
+        .expect("read the recovery page");
+    assert!(
+        recovered
+            .iter()
+            .any(|cursor| cursor.id == accepted.operation_id),
+        "recovery stopped by shutdown must leave the operation for the next boot: {recovered:?}",
+    );
+
+    handle.stop().await;
+}
+
+/// One full `RECOVERY_PAGE` plus one: the smallest backlog that needs a second page.
+const TWO_PAGES: usize = 257;
+
+/// Commit `count` non-terminal operations with no outbox message, the state startup
+/// recovery re-drives. They all target one `gts_id`, so only the first admission can
+/// write an entity and the rest are cheap terminal refusals — recovery does not care
+/// about outcomes, only about which operations are still non-terminal.
+async fn strand_nonterminal_operations(db: &Arc<DBProvider<DbError>>, count: usize) {
+    let legacy = service_without_dispatch(db, stores());
+    for nth in 0..count {
+        let accepted = legacy
+            .submit(&registration(&format!("stranded-{nth}"), TARGET), NOW)
+            .await
+            .expect("accept through the pre-outbox dispatch");
+        assert_eq!(accepted.status, OperationStatus::Pending);
+    }
+}
+
+#[tokio::test]
+async fn startup_recovery_advances_its_cursor_onto_a_second_page() {
+    let db = test_db_with_outbox().await;
+    strand_nonterminal_operations(&db, TWO_PAGES).await;
+
+    let observed = common::TestStores::builder()
+        .recording_recovery_pages()
+        .build();
+    let dispatch = Arc::new(OutboxDispatch::new());
+    let registry = service_with(
+        &db,
+        Arc::clone(&observed) as Arc<dyn Stores>,
+        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
+    );
+
+    let handle = types_registry::infra::outbox::start(
+        db.db(),
+        &registry,
+        &dispatch,
+        &common::no_cancellation(),
+    )
+    .await
+    .expect("start the admission outbox");
+
+    let calls = observed.recovery_page_calls();
+    assert_eq!(
+        calls.len(),
+        2,
+        "a {TWO_PAGES}-operation backlog is one full page plus a short one, so the scan reads \
+         exactly two pages and stops on the short one: {calls:?}",
+    );
+    assert_eq!(calls[0].after, None, "the first page starts at no cursor");
+    assert_eq!(
+        calls[0].returned, 256,
+        "the first page must come back full, or this backlog never reached a second page",
+    );
+    assert_eq!(
+        calls[1].after, calls[0].last,
+        "the loop must hand the second read the exact cursor the first read ended on",
+    );
+    assert_eq!(
+        calls[1].returned,
+        TWO_PAGES - 256,
+        "the second page carries the remainder and is short, which is what ends the scan",
+    );
+
+    handle.stop().await;
+}
+
+#[tokio::test]
+async fn shutdown_between_recovery_pages_stops_the_scan() {
+    let db = test_db_with_outbox().await;
+    strand_nonterminal_operations(&db, TWO_PAGES).await;
+
+    // Cancelled once the first page has been served, so the scan is interrupted
+    // between two pages rather than before it read anything.
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let observed = common::TestStores::builder()
+        .cancelling_after_recovery_page(1, &cancel)
+        .build();
+    let dispatch = Arc::new(OutboxDispatch::new());
+    let registry = service_with(
+        &db,
+        Arc::clone(&observed) as Arc<dyn Stores>,
+        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
+    );
+
+    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch, &cancel)
+        .await
+        .expect("a cancelled scan must not fail the start; serve still has to drain the pipeline");
+
+    let calls = observed.recovery_page_calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "the scan must stop at the page boundary: without the check it would read the second \
+         page that this backlog has: {calls:?}",
+    );
+    assert_eq!(
+        calls[0].returned, 256,
+        "the page it did read still came back in full: cancellation defers to the boundary \
+         rather than truncating work already in flight",
+    );
+
+    handle.stop().await;
+}
+
+#[tokio::test]
 async fn stopping_the_pipeline_leaves_no_silent_enqueue() {
     let db = test_db_with_outbox().await;
     let (registry, dispatch) = service(&db, stores());
-    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
-        .await
-        .expect("start");
+    let handle = types_registry::infra::outbox::start(
+        db.db(),
+        &registry,
+        &dispatch,
+        &common::no_cancellation(),
+    )
+    .await
+    .expect("start");
 
     handle.stop().await;
 
@@ -1045,11 +1219,22 @@ async fn a_second_pipeline_refuses_to_bind_rather_than_starting_unreachable() {
     let db = test_db_with_outbox().await;
     let (registry, dispatch) = service(&db, stores());
 
-    let first = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
-        .await
-        .expect("the first pipeline binds");
+    let first = types_registry::infra::outbox::start(
+        db.db(),
+        &registry,
+        &dispatch,
+        &common::no_cancellation(),
+    )
+    .await
+    .expect("the first pipeline binds");
 
-    let Err(refused) = types_registry::infra::outbox::start(db.db(), &registry, &dispatch).await
+    let Err(refused) = types_registry::infra::outbox::start(
+        db.db(),
+        &registry,
+        &dispatch,
+        &common::no_cancellation(),
+    )
+    .await
     else {
         panic!("the second pipeline must not bind");
     };
@@ -1086,9 +1271,14 @@ async fn a_temporary_failure_is_redelivered_by_the_pipeline_until_it_clears() {
     let db = test_db_with_outbox().await;
     let ports = common::TestStores::failing_running_transiently(FAILURES);
     let (registry, dispatch) = service(&db, Arc::clone(&ports) as Arc<dyn Stores>);
-    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
-        .await
-        .expect("start the admission outbox");
+    let handle = types_registry::infra::outbox::start(
+        db.db(),
+        &registry,
+        &dispatch,
+        &common::no_cancellation(),
+    )
+    .await
+    .expect("start the admission outbox");
 
     let accepted = registry
         .submit(&registration("retried-key", TARGET), NOW)
@@ -1128,9 +1318,14 @@ async fn a_rejected_message_lands_in_a_dead_letter_row_that_names_the_reason() {
 
     let db = test_db_with_outbox().await;
     let (registry, dispatch) = service(&db, stores());
-    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
-        .await
-        .expect("start the admission outbox");
+    let handle = types_registry::infra::outbox::start(
+        db.db(),
+        &registry,
+        &dispatch,
+        &common::no_cancellation(),
+    )
+    .await
+    .expect("start the admission outbox");
 
     let provider: DBProvider<DbError> = DBProvider::new(db.db());
     let outbox = Arc::clone(handle.outbox());
@@ -1206,7 +1401,13 @@ async fn a_failed_recovery_scan_leaves_the_dispatch_bindable_by_the_next_start()
         Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
     );
 
-    let Err(refused) = types_registry::infra::outbox::start(db.db(), &broken, &dispatch).await
+    let Err(refused) = types_registry::infra::outbox::start(
+        db.db(),
+        &broken,
+        &dispatch,
+        &common::no_cancellation(),
+    )
+    .await
     else {
         panic!("a failing recovery scan must fail the start");
     };
@@ -1223,7 +1424,14 @@ async fn a_failed_recovery_scan_leaves_the_dispatch_bindable_by_the_next_start()
         stores(),
         Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
     );
-    let handle = match types_registry::infra::outbox::start(db.db(), &healthy, &dispatch).await {
+    let handle = match types_registry::infra::outbox::start(
+        db.db(),
+        &healthy,
+        &dispatch,
+        &common::no_cancellation(),
+    )
+    .await
+    {
         Ok(handle) => handle,
         Err(error) => panic!(
             "the second start must bind: a recovery failure left the binding spent, so nothing \

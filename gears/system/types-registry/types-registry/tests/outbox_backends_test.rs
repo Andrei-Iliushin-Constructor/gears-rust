@@ -50,9 +50,14 @@ async fn assert_delivery(db: &Arc<DBProvider<DbError>>, backend: &str) {
         AdmissionMode::Outbox,
         metrics(),
     ));
-    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
-        .await
-        .unwrap_or_else(|e| panic!("{backend}: start the admission outbox: {e}"));
+    let handle = types_registry::infra::outbox::start(
+        db.db(),
+        &registry,
+        &dispatch,
+        &common::no_cancellation(),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{backend}: start the admission outbox: {e}"));
 
     let request = SubmitRequest {
         idempotency_key: Some("backends-key".to_owned()),
@@ -131,9 +136,14 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
         metrics(),
     ));
 
-    let second_handle = types_registry::infra::outbox::start(db.db(), &second, &second_dispatch)
-        .await
-        .unwrap_or_else(|e| panic!("{backend}: start the second pipeline: {e}"));
+    let second_handle = types_registry::infra::outbox::start(
+        db.db(),
+        &second,
+        &second_dispatch,
+        &common::no_cancellation(),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{backend}: start the second pipeline: {e}"));
 
     let warmup = second
         .submit(
@@ -182,9 +192,14 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
          counted as contention",
     );
 
-    let first_handle = types_registry::infra::outbox::start(db.db(), &submitter, &dispatch)
-        .await
-        .unwrap_or_else(|e| panic!("{backend}: start the first pipeline: {e}"));
+    let first_handle = types_registry::infra::outbox::start(
+        db.db(),
+        &submitter,
+        &dispatch,
+        &common::no_cancellation(),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{backend}: start the first pipeline: {e}"));
 
     gate.arm();
 

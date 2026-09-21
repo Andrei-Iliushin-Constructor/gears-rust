@@ -172,7 +172,7 @@ pub enum AdmissionMode {
 #[domain_model]
 pub struct RegistryService {
     db: Db,
-    /// Injected ports keep SeaORM out of the domain.
+    /// Injected ports keep `SeaORM` out of the domain.
     stores: Arc<dyn Stores>,
     policy: RegistrationPolicy,
     config: TypesRegistryConfig,

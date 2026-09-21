@@ -1,5 +1,5 @@
 //! Persistence ports and shared row/input types for admission transactions.
-//! Ports hide SeaORM details and expose only `toolkit_db` transactions.
+//! Ports hide `SeaORM` details and expose only `toolkit_db` transactions.
 //!
 //! # Why every port takes `&DbTx<'_>` and not a runner
 //!
@@ -38,7 +38,7 @@ pub mod metrics;
 
 /// Read-only repeatable snapshot for multi-statement server-database reads.
 ///
-/// SQLite uses its native transaction settings to avoid unsupported-setting warnings.
+/// `SQLite` uses its native transaction settings to avoid unsupported-setting warnings.
 #[must_use]
 pub fn snapshot_read(db: &Db) -> TxConfig {
     snapshot_read_for(db.db_engine())

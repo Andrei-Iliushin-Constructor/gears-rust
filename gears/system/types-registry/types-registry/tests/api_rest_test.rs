@@ -200,9 +200,14 @@ async fn router_with_outbox() -> (Router, OutboxHandle) {
         AdmissionMode::Outbox,
         common::metrics(),
     ));
-    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
-        .await
-        .expect("start the admission outbox");
+    let handle = types_registry::infra::outbox::start(
+        db.db(),
+        &registry,
+        &dispatch,
+        &common::no_cancellation(),
+    )
+    .await
+    .expect("start the admission outbox");
     let router = types_registry::api::rest::routes::register_routes(
         Router::new(),
         &openapi,

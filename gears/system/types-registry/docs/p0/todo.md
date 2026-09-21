@@ -1880,12 +1880,20 @@ With `PATH="$HOME/.cargo/bin:$PATH"`, whole-workspace `make clippy`
 - Admission reserves lease time for one guarded bulk abandonment write. Client and
   dead-letter diagnostics contain stable codes and operation IDs, never raw errors.
 - Startup recovery keyset-pages non-terminal operations. Eight UUID-derived partitions run
-  concurrently, while entity commits remain serialized.
+  concurrently, while entity commits remain serialized. The scan takes the gear's
+  `ctx.cancellation_token()` and stops on a page boundary when it fires: the scan runs inside
+  `init()`, before the host reaches the phase that awaits cancellation, so neither the gear's
+  `stop_timeout` nor the host's hard backstop is armed while it runs. A page read and its
+  enqueue are not interruptible, so the bound is the page, not wall-clock time. Operations the
+  scan never reached are only missing *its* re-enqueue: the pipeline is already running, so any
+  that carry an outbox message still progress, and the rest wait for the next boot.
 - `OutboxDispatch` uses a weak reference to avoid an ownership cycle; runtime and tests
   share the same pipeline settings.
 
-**Lifecycle deviation:** The outbox owns its cancellation token. `serve` drains the retained
-handle after runtime cancellation; worker startup remains in `init()`.
+**Lifecycle deviation:** The outbox pipeline owns its own cancellation token; `serve` drains
+the retained handle after runtime cancellation, and worker startup remains in `init()`. Startup
+recovery is the one part of that startup which does observe the gear's token, because nothing
+else bounds it while `init()` holds the host.
 
 **Receipt behavior:** Production submissions return `pending`; terminal replays return
 `200` only after outbox admission completes.

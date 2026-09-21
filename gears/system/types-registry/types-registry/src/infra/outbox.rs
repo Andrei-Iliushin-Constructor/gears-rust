@@ -1,4 +1,4 @@
-//! At-least-once admission delivery backed by the ToolKit outbox.
+//! At-least-once admission delivery backed by the `ToolKit` outbox.
 //!
 //! Acceptance enqueues an operation UUID transactionally. Refusals are stored on
 //! operation items; infrastructure failures retry within a bounded budget, then
@@ -7,6 +7,7 @@
 
 use std::sync::{Arc, OnceLock, Weak};
 
+use tokio_util::sync::CancellationToken;
 use toolkit_db::outbox::{
     Batch, HandlerResult, LeaseConfig, LeasedHandler, MessageResult, Outbox, OutboxError,
     OutboxHandle, OutboxMessage, OutboxProfile, Partitions, Record, Records, WorkerTuning,
@@ -548,12 +549,18 @@ impl LeasedHandler for AdmissionHandler {
 
 /// Start, recover and bind the admission pipeline.
 ///
+/// When `cancel` is already set, the pipeline is still built and bound but the
+/// recovery scan is skipped: `init()` has to hand back something for `serve` to
+/// drain, and failing the start instead would drop the handle without joining its
+/// tasks. So a cancelled start means "bound, not recovered", not "not started".
+///
 /// # Errors
 /// Returns [`StartError`] for startup, recovery or duplicate binding failures.
 pub async fn start(
     db: Db,
     registry: &Arc<RegistryService>,
     dispatch: &Arc<OutboxDispatch>,
+    cancel: &CancellationToken,
 ) -> Result<OutboxHandle, StartError> {
     let handle = Outbox::builder(db.clone())
         .table_prefix(TABLE_PREFIX)?
@@ -569,7 +576,7 @@ pub async fn start(
         .start()
         .await?;
     // Bind last so a failed recovery does not consume the OnceLock.
-    recover_nonterminal_operations(&db, registry, handle.outbox()).await?;
+    recover_nonterminal_operations(&db, registry, handle.outbox(), cancel).await?;
     dispatch.bind(handle.outbox())?;
     Ok(handle)
 }
@@ -585,14 +592,33 @@ fn signal_recovered_partitions(outbox: &Outbox, page: &[RecoveryCursor]) {
 }
 
 /// Re-enqueue non-terminal operations at boot using keyset pagination.
+///
+/// `cancel` is the gear's runtime token. This scan runs inside `init()`, before
+/// the host reaches the phase that awaits cancellation, so nothing else bounds it
+/// once shutdown starts: neither the gear's `stop_timeout` nor the host's hard
+/// backstop is armed yet. Stopping on a page boundary is therefore the only bound
+/// there is. Operations this scan never reached are simply not re-enqueued by it;
+/// the pipeline is already running, so any that do carry an outbox message still
+/// progress, and whatever stays non-terminal is picked up by the next boot — the
+/// same resolution path a crash mid-scan already has.
 async fn recover_nonterminal_operations(
     db: &Db,
     registry: &Arc<RegistryService>,
     outbox: &Arc<Outbox>,
+    cancel: &CancellationToken,
 ) -> Result<(), StartError> {
     let mut after: Option<RecoveryCursor> = None;
     let mut total = 0usize;
     loop {
+        // A page read and its enqueue are not interruptible, so shutdown is
+        // observed between pages rather than within one.
+        if cancel.is_cancelled() {
+            warn!(
+                recovered = total,
+                "types_registry stopped nonterminal recovery on shutdown"
+            );
+            return Ok(());
+        }
         let page = registry
             .nonterminal_operation_page(after, RECOVERY_PAGE)
             .await

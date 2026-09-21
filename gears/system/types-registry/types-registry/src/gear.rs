@@ -63,6 +63,7 @@ impl TypesRegistryGear {
         registration_policy: RegistrationPolicy,
         cfg: TypesRegistryConfig,
         metrics: Arc<dyn AdmissionMetrics>,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let dispatch = Arc::new(OutboxDispatch::new());
         // Choose database adapters at the composition root.
@@ -78,8 +79,9 @@ impl TypesRegistryGear {
             metrics,
         ));
 
-        // Start after inline seeding.
-        let handle = crate::infra::outbox::start(db.db(), &registry, &dispatch).await?;
+        // Start after inline seeding. The token lets startup recovery stop on a
+        // page boundary when shutdown arrives while `init()` still holds the host.
+        let handle = crate::infra::outbox::start(db.db(), &registry, &dispatch, cancel).await?;
         *self.outbox.lock() = Some(handle);
 
         self.registry
@@ -216,8 +218,14 @@ impl Gear for TypesRegistryGear {
         // T7–T9's database path is optional for `no-db.yaml` / `--mock` deployments.
         // Without a DB, routes return canonical `503 Service Unavailable`; warn why.
         if let Some(db) = ctx.db() {
-            self.wire_admission(&db, registration_policy, cfg_for_registry, metrics)
-                .await?;
+            self.wire_admission(
+                &db,
+                registration_policy,
+                cfg_for_registry,
+                metrics,
+                ctx.cancellation_token(),
+            )
+            .await?;
         } else {
             tracing::warn!(
                 "types_registry has no database bound: POST /entities, GET /operations/{{id}} and \

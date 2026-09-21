@@ -9,7 +9,9 @@ mod test_stores;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub use test_stores::{FailingCall, Hooks, PausePoint, SharedPause, TestStores, TestStoresBuilder};
+pub use test_stores::{
+    FailingCall, Hooks, PausePoint, RecoveryPageCall, SharedPause, TestStores, TestStoresBuilder,
+};
 
 use gts::GtsConfig;
 use types_registry::{
@@ -184,6 +186,13 @@ pub fn stores() -> Arc<dyn types_registry::domain::ports::Stores> {
 /// would give.
 pub fn allow_all() -> AccessScope {
     AccessScope::allow_all()
+}
+
+/// A token that never fires, for tests that do not exercise shutdown. Startup
+/// recovery stops on a page boundary once this is cancelled.
+#[must_use]
+pub fn no_cancellation() -> tokio_util::sync::CancellationToken {
+    tokio_util::sync::CancellationToken::new()
 }
 
 #[must_use]

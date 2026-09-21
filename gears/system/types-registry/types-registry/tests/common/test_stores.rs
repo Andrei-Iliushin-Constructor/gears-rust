@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use time::OffsetDateTime;
+use tokio_util::sync::CancellationToken;
 use toolkit_db::DbTx;
 use toolkit_db::secure::{AccessScope, ScopeError};
 use types_registry::domain::admission::fingerprint::ScopeHash;
@@ -51,6 +52,23 @@ pub struct Hooks {
     pub stall_mark_abandoned: Option<std::time::Duration>,
     pub stall_mark_running: Option<std::time::Duration>,
     injected_cause: Option<&'static str>,
+    recovery_pages: Option<RecoveryPages>,
+}
+
+/// One observed `nonterminal_page` call: the cursor it was given, how many rows it
+/// returned, and the cursor a caller would page from next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecoveryPageCall {
+    pub after: Option<RecoveryCursor>,
+    pub returned: usize,
+    pub last: Option<RecoveryCursor>,
+}
+
+#[derive(Default)]
+struct RecoveryPages {
+    seen: parking_lot::Mutex<Vec<RecoveryPageCall>>,
+    /// Cancel this token once that many pages have been served.
+    cancel_after: Option<(usize, CancellationToken)>,
 }
 
 struct Pause {
@@ -337,6 +355,26 @@ impl TestStoresBuilder {
         self
     }
 
+    /// Observe every startup-recovery page read.
+    pub fn recording_recovery_pages(mut self) -> Self {
+        self.hooks.recovery_pages = Some(RecoveryPages::default());
+        self
+    }
+
+    /// Observe page reads and cancel `cancel` once `nth` pages have been served,
+    /// which puts the shutdown between two pages rather than before the first.
+    pub fn cancelling_after_recovery_page(
+        mut self,
+        nth: usize,
+        cancel: &CancellationToken,
+    ) -> Self {
+        self.hooks.recovery_pages = Some(RecoveryPages {
+            seen: parking_lot::Mutex::default(),
+            cancel_after: Some((nth, cancel.clone())),
+        });
+        self
+    }
+
     pub fn stale_find_items(mut self, snapshot: Vec<OperationItemRow>) -> Self {
         self.hooks.stale_find_items = parking_lot::Mutex::new(Some(snapshot));
         self
@@ -498,6 +536,16 @@ impl TestStores {
     #[must_use]
     pub fn failing_operation_read() -> Arc<Self> {
         Self::builder().failing(FailingCall::FindById).build()
+    }
+
+    /// Every startup-recovery page read this decorator served.
+    #[must_use]
+    pub fn recovery_page_calls(&self) -> Vec<RecoveryPageCall> {
+        self.hooks
+            .recovery_pages
+            .as_ref()
+            .map(|pages| pages.seen.lock().clone())
+            .unwrap_or_default()
     }
 
     #[must_use]
@@ -863,7 +911,26 @@ impl OperationStore for TestStores {
                 "this recovery page read is under failure injection",
             ));
         }
-        self.inner.nonterminal_page(tx, scope, after, limit).await
+        let page = self.inner.nonterminal_page(tx, scope, after, limit).await?;
+        if let Some(pages) = self.hooks.recovery_pages.as_ref() {
+            let served = {
+                let mut seen = pages.seen.lock();
+                seen.push(RecoveryPageCall {
+                    after,
+                    returned: page.len(),
+                    last: page.last().copied(),
+                });
+                seen.len()
+            };
+            // Cancel after the page is served but before it is enqueued, so the
+            // loop sees shutdown at its next iteration rather than mid-page.
+            if let Some((nth, cancel)) = pages.cancel_after.as_ref()
+                && served == *nth
+            {
+                cancel.cancel();
+            }
+        }
+        Ok(page)
     }
 
     async fn insert_operation(
