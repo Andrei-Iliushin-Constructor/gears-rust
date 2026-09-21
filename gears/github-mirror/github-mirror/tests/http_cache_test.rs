@@ -153,3 +153,58 @@ async fn clearing_by_prefix_drops_only_the_matching_repository() {
         "the other repository's entries must survive"
     );
 }
+
+#[tokio::test]
+async fn a_row_keeps_the_compression_it_was_written_with() {
+    let db = common::inmem_db().await;
+    let provider = Arc::new(DBProvider::<DbError>::new(db));
+    let writer = SeaOrmHttpCache::new(Arc::clone(&provider), Compression::Gzip);
+    let reader = SeaOrmHttpCache::new(provider, Compression::None);
+    let tenant = Uuid::new_v4();
+    let scope = AccessScope::for_tenant(tenant);
+    let key = CacheKey::compute("GET", URL, "application/json");
+
+    writer
+        .put(&scope, tenant, &key, URL, entry())
+        .await
+        .unwrap();
+    assert_eq!(
+        reader.get(&scope, &key).await.unwrap(),
+        Some(entry()),
+        "the row records gzip, so a cache configured for none still decodes it"
+    );
+}
+
+#[tokio::test]
+async fn a_tampered_body_is_a_miss_not_an_error() {
+    use github_mirror::infra::storage::entity::http_cache;
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait};
+    use toolkit_db::secure::SecureUpdateExt;
+
+    let db = common::inmem_db().await;
+    let cache = SeaOrmHttpCache::new(
+        Arc::new(DBProvider::<DbError>::new(db.clone())),
+        Compression::Gzip,
+    );
+    let tenant = Uuid::new_v4();
+    let scope = AccessScope::for_tenant(tenant);
+    let key = CacheKey::compute("GET", URL, "application/json");
+    cache.put(&scope, tenant, &key, URL, entry()).await.unwrap();
+
+    let conn = db.conn().unwrap();
+    http_cache::Entity::update_many()
+        .secure()
+        .scope_with(&scope)
+        .filter(sea_orm::Condition::all().add(http_cache::Column::CacheKey.eq(key.as_str())))
+        .col_expr(http_cache::Column::ContentHash, Expr::value("0000"))
+        .exec(&conn)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        cache.get(&scope, &key).await.unwrap(),
+        None,
+        "a body that fails its integrity check is dropped, not surfaced"
+    );
+}

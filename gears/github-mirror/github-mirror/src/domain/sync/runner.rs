@@ -364,3 +364,8 @@ impl RepoPhaseRunner {
         report.failures.push(failure);
     }
 }
+
+#[cfg(test)]
+#[path = "runner_tests.rs"]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod runner_tests;

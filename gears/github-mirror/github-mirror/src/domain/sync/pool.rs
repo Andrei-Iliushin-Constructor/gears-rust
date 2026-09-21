@@ -201,3 +201,58 @@ impl SyncPoolRunner {
         info!("github-mirror sync pool stopped");
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use toolkit_security::SecurityContext;
+
+    use super::*;
+    use crate::domain::scope::ScopeConfig;
+
+    fn job(tenant: Uuid, name: &str) -> SyncJob {
+        SyncJob {
+            session_id: Uuid::new_v4(),
+            ctx: SecurityContext::builder()
+                .subject_id(Uuid::new_v4())
+                .subject_tenant_id(tenant)
+                .build()
+                .unwrap(),
+            owner: "acme".to_owned(),
+            name: name.to_owned(),
+            scope: ScopeConfig::default(),
+            force: false,
+            since: None,
+        }
+    }
+
+    #[test]
+    fn tenants_take_turns_and_each_stays_first_in_first_out() {
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut queue = SyncQueue::default();
+        for name in ["a1", "a2", "a3"] {
+            queue.enqueue(job(a, name));
+        }
+        queue.enqueue(job(b, "b1"));
+        assert_eq!(queue.len(), 4);
+
+        let order: Vec<String> =
+            std::iter::from_fn(|| queue.claim_next().map(|job| job.name)).collect();
+        assert_eq!(order, ["a1", "b1", "a2", "a3"]);
+        assert_eq!(queue.len(), 0);
+        assert!(queue.claim_next().is_none());
+    }
+
+    #[test]
+    fn a_tenant_that_queues_again_waits_behind_the_others() {
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut queue = SyncQueue::default();
+        queue.enqueue(job(a, "a1"));
+        queue.enqueue(job(b, "b1"));
+        assert_eq!(queue.claim_next().unwrap().name, "a1");
+
+        queue.enqueue(job(a, "a2"));
+        assert_eq!(queue.claim_next().unwrap().name, "b1");
+        assert_eq!(queue.claim_next().unwrap().name, "a2");
+    }
+}
