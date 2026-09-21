@@ -59,7 +59,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 httpmock = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 tokio-util = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 serde_json = { workspace = true }
