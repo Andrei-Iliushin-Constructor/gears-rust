@@ -80,6 +80,16 @@ jobs:
               - '.dockerignore'
               - 'tools/scripts/ci.py'
               - '.github/workflows/e2e.yml'
+              # Workspace-level pins. The in-image build is a full `cargo
+              # build` of the workspace, so a member list, a lockfile bump, a
+              # toolchain bump or the PDFIUM pin in .cargo/config.toml can
+              # break it without any Dockerfile changing — which is exactly
+              # how #4798 happened. Root files only: '**/Cargo.toml' would
+              # fire the 60-minute job on nearly every Rust PR.
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/config.toml'
 
   # Guard for the docker lane. It is NOT part of the `e2e` job below: that one
   # builds on the runner, this one builds inside an image, and the two failure
@@ -87,9 +97,11 @@ jobs:
   # at all, which is how every Dockerfile in the repo came to reference a
   # package that does not exist (#4798).
   #
-  # Scheduled/manual only — a full in-image workspace build is too slow to put
-  # on every PR. It builds with BUILD_PROFILE=dev for the same reason; the image
-  # is a functional test subject here, not a performance subject.
+  # Not on every PR — a full in-image workspace build is too slow for that.
+  # It runs nightly, on manual dispatch, and on the PRs that touch the docker
+  # lane or the workspace pins it builds from (see `docker-changes`). It builds
+  # with BUILD_PROFILE=dev for the same reason; the image is a functional test
+  # subject here, not a performance subject.
   e2e-docker:
     needs: docker-changes
     if: >-
@@ -132,6 +144,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install system dependencies
         run: |
