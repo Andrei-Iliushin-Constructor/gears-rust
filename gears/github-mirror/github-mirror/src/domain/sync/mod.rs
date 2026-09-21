@@ -11,12 +11,13 @@
 //! - [`change_gate`]: [`ChangeGate`] — decides which entities need refining.
 //! - [`sweep_watermark`]: [`SweepWatermark`] — incremental sweep bounds.
 //! - [`verification`]: [`CountGap`] — declared versus stored count repair.
-//!
-//! One level up, `gear.rs`'s `SyncPoolRunner` decides *which repository* syncs
-//! next; everything here decides what happens inside one of those syncs.
+//! - [`pool`]: [`SyncPoolRunner`] — one level up, decides *which repository*
+//!   syncs next, a tenant at a time; everything else here decides what happens
+//!   inside one of those syncs.
 
 pub mod change_gate;
 pub mod mirror_worker;
+pub mod pool;
 pub mod queue;
 pub mod runner;
 pub mod sweep_watermark;
@@ -26,6 +27,7 @@ pub mod worker;
 
 pub use change_gate::{ChangeGate, GateInputs, GateReason};
 pub use mirror_worker::{MirrorWorker, RunState};
+pub use pool::SyncPoolRunner;
 pub use queue::TaskQueue;
 pub use runner::{RepoPhaseRunner, RunReport, TaskFailure};
 pub use sweep_watermark::SweepWatermark;
