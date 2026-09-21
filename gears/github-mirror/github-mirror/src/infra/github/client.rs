@@ -128,7 +128,8 @@ fn is_rate_limited(headers: &reqwest::header::HeaderMap) -> bool {
 
 /// How long to wait before retrying a rate-limited request: `Retry-After`
 /// when present, else time until `x-ratelimit-reset`, else exponential in
-/// the attempt number — always capped at [`MAX_RETRY_SLEEP`].
+/// the attempt number — never under a second, always capped at
+/// [`MAX_RETRY_SLEEP`].
 fn retry_delay(headers: &reqwest::header::HeaderMap, attempt: u32) -> std::time::Duration {
     let seconds = header_string(headers, "retry-after")
         .and_then(|v| v.parse::<u64>().ok())
@@ -140,7 +141,7 @@ fn retry_delay(headers: &reqwest::header::HeaderMap, attempt: u32) -> std::time:
             u64::try_from(reset - now).ok()
         })
         .unwrap_or(1u64 << attempt);
-    std::time::Duration::from_secs(seconds).min(MAX_RETRY_SLEEP)
+    std::time::Duration::from_secs(seconds.max(1)).min(MAX_RETRY_SLEEP)
 }
 
 /// One response header as an owned string, when it is present and printable.
@@ -858,11 +859,15 @@ fn actor_or_none<'de, D>(deserializer: D) -> Result<Option<GhActor>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
-    value
-        .filter(|actor| actor.get("login").is_some_and(serde_json::Value::is_string))
-        .map(GhActor::deserialize)
-        .transpose()
+    let Some(actor) = Option::<serde_json::Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    if !actor.get("login").is_some_and(serde_json::Value::is_string) {
+        tracing::warn!(%actor, "GitHub sent an actor without a login; recorded as no actor");
+        return Ok(None);
+    }
+    GhActor::deserialize(actor)
+        .map(Some)
         .map_err(serde::de::Error::custom)
 }
 

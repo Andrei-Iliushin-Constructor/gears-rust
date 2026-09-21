@@ -76,7 +76,9 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .json_response_with_schema::<dto::SyncAcceptedDto>(
             openapi,
             StatusCode::ACCEPTED,
-            "Sync queued; the body carries the session id to poll",
+            "Sync queued; the body carries the session id to poll. A repeat call for a \
+             repository whose sync is still queued or running answers with that existing \
+             session instead of starting another",
         )
         .error_400(openapi)
         .error_401(openapi)

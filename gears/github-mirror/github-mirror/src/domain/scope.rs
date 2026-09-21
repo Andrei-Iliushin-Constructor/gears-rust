@@ -99,12 +99,21 @@ impl SyncScope {
 
     /// # Errors
     /// `Validation` when the scope would collect nothing at all, which is
-    /// always a mistake rather than a cheap sync.
+    /// always a mistake rather than a cheap sync, or asks for `security`,
+    /// which no sync task collects yet, so the request would silently do
+    /// nothing for it.
     pub fn validate(&self) -> Result<(), DomainError> {
         if self.is_empty() {
             return Err(DomainError::Validation {
                 field: "scope".to_owned(),
                 message: "at least one object type must be enabled".to_owned(),
+            });
+        }
+        if self.security {
+            return Err(DomainError::Validation {
+                field: "scope".to_owned(),
+                message: "`security` is not collected yet: no sync task fetches security alerts"
+                    .to_owned(),
             });
         }
         Ok(())
