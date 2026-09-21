@@ -4,14 +4,18 @@
 use std::collections::HashMap;
 
 use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveValue::Set, ColumnTrait, Condition, EntityTrait, QueryFilter};
+use sea_orm::{
+    ActiveValue::Set, ColumnTrait, Condition, EntityTrait, FromQueryResult, QueryFilter,
+    QuerySelect,
+};
 use toolkit_db::secure::{
     AccessScope, DBRunner, ScopeError, SecureEntityExt, SecureUpdateExt, secure_insert,
 };
 
 use super::IN_CHUNK;
 use crate::domain::ports::{
-    CurrentDocument, CurrentSchemaCas, CurrentTypeSchemaRow, NewCurrentTypeSchema, NewRevision,
+    CurrentDocument, CurrentSchemaCas, CurrentSchemaProjection, CurrentTypeSchemaRow,
+    NewCurrentTypeSchema, NewRevision,
 };
 use crate::infra::storage::entity::{type_schema, type_schema_revision};
 
@@ -21,6 +25,23 @@ use crate::infra::storage::entity::{type_schema, type_schema_revision};
 /// expression — because each pair contributes two bound parameters rather than
 /// one.
 const PAIR_CHUNK: usize = 100;
+
+/// SQL projection used by the document loader, revision vector, and refresh guards.
+#[derive(FromQueryResult)]
+struct SchemaProjection {
+    entity_id: i64,
+    revision_no: i32,
+    resolution_fingerprint: Vec<u8>,
+}
+
+/// Authored content without revision provenance, which resolution does not consume.
+#[derive(FromQueryResult)]
+struct AuthoredDocument {
+    entity_id: i64,
+    revision_no: i32,
+    raw_schema: String,
+    content_hash: Vec<u8>,
+}
 
 /// One current-state row as the domain names it. See `entity_repo::row` for why
 /// the mapper sits beside the repository rather than on the entity.
@@ -65,39 +86,35 @@ impl TypeSchemaRepo {
         entity_ids: &[i64],
     ) -> Result<Vec<CurrentDocument>, ScopeError> {
         // Capture the projection that selected each immutable document for the later CAS.
-        let mut pointers: Vec<(i64, i32, Vec<u8>)> = Vec::with_capacity(entity_ids.len());
-        for chunk in entity_ids.chunks(IN_CHUNK) {
-            let rows = type_schema::Entity::find()
-                .filter(type_schema::Column::EntityId.is_in(chunk.iter().copied()))
-                .secure()
-                .scope_with(scope)
-                .all(runner)
-                .await?;
-            pointers.extend(
-                rows.into_iter()
-                    .map(|r| (r.entity_id, r.revision_no, r.resolution_fingerprint)),
-            );
-        }
+        let pointers = Self::current_projections(runner, scope, entity_ids).await?;
         let projections: HashMap<i64, Vec<u8>> = pointers
             .iter()
-            .map(|(entity_id, _, fingerprint)| (*entity_id, fingerprint.clone()))
+            .map(|row| (row.entity_id, row.cas.resolution_fingerprint.clone()))
             .collect();
 
         let mut out = Vec::with_capacity(pointers.len());
         for chunk in pointers.chunks(PAIR_CHUNK) {
             let mut pairs = Condition::any();
-            for (entity_id, revision_no, _) in chunk {
+            for row in chunk {
                 pairs = pairs.add(
                     Condition::all()
-                        .add(type_schema_revision::Column::EntityId.eq(*entity_id))
-                        .add(type_schema_revision::Column::RevisionNo.eq(*revision_no)),
+                        .add(type_schema_revision::Column::EntityId.eq(row.entity_id))
+                        .add(type_schema_revision::Column::RevisionNo.eq(row.cas.revision_no)),
                 );
             }
             let rows = type_schema_revision::Entity::find()
                 .filter(pairs)
                 .secure()
                 .scope_with(scope)
-                .all(runner)
+                .project_all(runner, |query| {
+                    query
+                        .select_only()
+                        .column(type_schema_revision::Column::EntityId)
+                        .column(type_schema_revision::Column::RevisionNo)
+                        .column(type_schema_revision::Column::RawSchema)
+                        .column(type_schema_revision::Column::ContentHash)
+                        .into_model::<AuthoredDocument>()
+                })
                 .await?;
             for r in rows {
                 let fingerprint = projections.get(&r.entity_id).cloned().ok_or_else(|| {
@@ -140,21 +157,34 @@ impl TypeSchemaRepo {
             .map(current_row))
     }
 
-    /// The current-state rows of many entities in one read, `entity_id`-sorted.
-    pub async fn current_states(
+    /// Current revision numbers and fingerprints, `entity_id`-sorted, without artifacts.
+    pub async fn current_projections(
         runner: &impl DBRunner,
         scope: &AccessScope,
         entity_ids: &[i64],
-    ) -> Result<Vec<CurrentTypeSchemaRow>, ScopeError> {
+    ) -> Result<Vec<CurrentSchemaProjection>, ScopeError> {
         let mut out = Vec::with_capacity(entity_ids.len());
         for chunk in entity_ids.chunks(IN_CHUNK) {
             let rows = type_schema::Entity::find()
                 .filter(type_schema::Column::EntityId.is_in(chunk.iter().copied()))
                 .secure()
                 .scope_with(scope)
-                .all(runner)
+                .project_all(runner, |query| {
+                    query
+                        .select_only()
+                        .column(type_schema::Column::EntityId)
+                        .column(type_schema::Column::RevisionNo)
+                        .column(type_schema::Column::ResolutionFingerprint)
+                        .into_model::<SchemaProjection>()
+                })
                 .await?;
-            out.extend(rows.into_iter().map(current_row));
+            out.extend(rows.into_iter().map(|row| CurrentSchemaProjection {
+                entity_id: row.entity_id,
+                cas: CurrentSchemaCas {
+                    revision_no: row.revision_no,
+                    resolution_fingerprint: row.resolution_fingerprint,
+                },
+            }));
         }
         // Sorted here rather than left to the chunk order, so a caller comparing two reads of the
         // same set compares two identically-ordered sequences.

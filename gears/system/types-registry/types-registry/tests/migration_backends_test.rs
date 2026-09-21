@@ -1,6 +1,6 @@
 //! Real up/down of the P0 initial migration on `PostgreSQL` and `MySQL`.
 //!
-//! Covers backend-specific schema behavior unavailable in SQLite, including an
+//! Covers backend-specific schema behavior unavailable in `SQLite`, including an
 //! idempotent coordination-state seed, then rolls the migration back.
 //!
 //! `constraint-multi-backend` makes this a correctness requirement: the CHECK
@@ -164,6 +164,18 @@ async fn assert_schema_behaves(db: &DatabaseConnection) {
     )
     .await
     .expect("insert pending registration operation");
+
+    exec(
+        db,
+        format!(
+            "INSERT INTO types_registry__operation_item \
+             (operation_id, item_no, gts_id, dry_run, kind, expected_resource_version, \
+              compat_forced, status, request_payload, created_at) \
+             VALUES ({op_id}, 0, '{GTS_TYPE}', FALSE, 1, 0, 7, 1, '{{}}', '{TS}')"
+        ),
+    )
+    .await
+    .expect_err("compat_forced must reject values outside the boolean domain");
 
     exec(
         db,

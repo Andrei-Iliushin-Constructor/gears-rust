@@ -458,7 +458,11 @@ fn compile_constraint(
         filters.push(filter);
     }
 
-    Ok(ScopeConstraint::new(filters))
+    // Fail closed on a predicate-free decision. `filters` is whatever the PDP
+    // returned, and a constraint with none of them is an AND over nothing: it
+    // matches every row, which `toolkit-db` compiles to an unconditional
+    // `WHERE true`. A PDP answer that narrows nothing must deny, not widen.
+    ScopeConstraint::try_new(filters).map_err(|e| ConstraintFailure::Other(e.to_string()))
 }
 
 /// Whether a group-bearing constraint also carries the mandatory tenant scope

@@ -198,10 +198,10 @@ pub async fn derive_from(
         .map(|row| row.id)
         .collect();
     let mut fingerprints: HashMap<i64, Vec<u8>> = stores
-        .current_schemas(tx, scope, &artifact_bearing)
+        .current_schema_projections(tx, scope, &artifact_bearing)
         .await?
         .into_iter()
-        .map(|row| (row.entity_id, row.resolution_fingerprint))
+        .map(|row| (row.entity_id, row.cas.resolution_fingerprint))
         .collect();
 
     for row in &dependents {
