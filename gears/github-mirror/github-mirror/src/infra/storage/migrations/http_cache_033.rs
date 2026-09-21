@@ -1,6 +1,10 @@
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::ConnectionTrait;
 
+/// The raw-response cache (PRD 5.6): one row per fetched URL with its
+/// conditional-request validators, the page GitHub linked next, and the body
+/// as stored bytes plus the compression mode and integrity hash that describe
+/// them.
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
@@ -17,9 +21,13 @@ CREATE TABLE IF NOT EXISTS gm_http_cache (
     tenant_id UUID NOT NULL,
     cache_key VARCHAR(64) NOT NULL,
     url TEXT NOT NULL,
+    status INTEGER NOT NULL,
     etag VARCHAR(255),
     last_modified VARCHAR(64),
-    body TEXT NOT NULL,
+    next_page TEXT,
+    body BYTEA NOT NULL,
+    compression VARCHAR(8) NOT NULL,
+    content_hash VARCHAR(64) NOT NULL,
     fetched_at VARCHAR(64) NOT NULL,
     PRIMARY KEY (tenant_id, cache_key)
 );
@@ -31,9 +39,13 @@ CREATE TABLE IF NOT EXISTS gm_http_cache (
     tenant_id VARCHAR(36) NOT NULL,
     cache_key VARCHAR(64) NOT NULL,
     url TEXT NOT NULL,
+    status INT NOT NULL,
     etag VARCHAR(255),
     last_modified VARCHAR(64),
-    body LONGTEXT NOT NULL,
+    next_page TEXT,
+    body LONGBLOB NOT NULL,
+    compression VARCHAR(8) NOT NULL,
+    content_hash VARCHAR(64) NOT NULL,
     fetched_at VARCHAR(64) NOT NULL,
     PRIMARY KEY (tenant_id, cache_key)
 );
@@ -45,9 +57,13 @@ CREATE TABLE IF NOT EXISTS gm_http_cache (
     tenant_id TEXT NOT NULL,
     cache_key TEXT NOT NULL,
     url TEXT NOT NULL,
+    status INTEGER NOT NULL,
     etag TEXT,
     last_modified TEXT,
-    body TEXT NOT NULL,
+    next_page TEXT,
+    body BLOB NOT NULL,
+    compression TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
     fetched_at TEXT NOT NULL,
     PRIMARY KEY (tenant_id, cache_key)
 );

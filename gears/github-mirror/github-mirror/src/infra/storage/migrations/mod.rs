@@ -11,8 +11,6 @@ pub mod contributors_012;
 pub mod deployments_020;
 pub mod entity_fingerprints_031;
 pub mod http_cache_033;
-pub mod http_cache_next_page_034;
-pub mod http_cache_rebuild_035;
 pub mod initial_001;
 pub mod issue_events_019;
 pub mod issue_reactions_024;
@@ -88,8 +86,6 @@ impl MigratorTrait for Migrator {
             Box::new(entity_fingerprints_031::Migration),
             Box::new(repo_sync_status_032::Migration),
             Box::new(http_cache_033::Migration),
-            Box::new(http_cache_next_page_034::Migration),
-            Box::new(http_cache_rebuild_035::Migration),
             Box::new(z_extracted_at_030::Migration),
             Box::new(z_contributor_derivation_032::Migration),
             Box::new(z_release_assets_031::Migration),
