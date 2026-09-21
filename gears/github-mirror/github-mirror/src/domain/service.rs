@@ -3409,7 +3409,7 @@ impl Service {
         }
 
         let now = now_rfc3339();
-        let mut session = SyncSessionRecord {
+        let session = SyncSessionRecord {
             id,
             repo_full_name: format!("{owner}/{name}"),
             repo_id: None,
@@ -3422,11 +3422,16 @@ impl Service {
             ended_at: None,
             updated_at: Some(now),
         };
-        let recorded = async {
-            self.sync_sessions
-                .upsert(scope, tenant_id, session.clone())
-                .await?;
-            self.mark_repo_status_in(
+        if let Err(e) = self
+            .sync_sessions
+            .upsert(scope, tenant_id, session.clone())
+            .await
+        {
+            self.release_in_flight(&key).await;
+            return Err(e);
+        }
+        if let Err(e) = self
+            .mark_repo_status_in(
                 &scopes.repo_status,
                 ctx,
                 &session.repo_full_name,
@@ -3435,10 +3440,10 @@ impl Service {
                 None,
             )
             .await
-        }
-        .await;
-        if let Err(e) = recorded {
+        {
             self.release_in_flight(&key).await;
+            self.fail_session(scope, tenant_id, session, e.public_text())
+                .await;
             return Err(e);
         }
 
@@ -3454,15 +3459,37 @@ impl Service {
         if let Err(e) = self.sync_tx.try_send(job) {
             self.release_in_flight(&key).await;
             let reason = format!("sync could not be queued: {e}");
-            session.status = SessionStatus::Failed;
-            session.ended_at = Some(now_rfc3339());
-            session.updated_at.clone_from(&session.ended_at);
-            session.error = Some(reason.clone());
-            self.sync_sessions.upsert(scope, tenant_id, session).await?;
+            self.fail_session(scope, tenant_id, session, reason.clone())
+                .await;
             return Err(DomainError::internal(reason));
         }
 
         Ok(id)
+    }
+
+    /// Close a queued session out as failed, so a caller polling it is not
+    /// told the work is waiting when nothing will ever run it.
+    ///
+    /// Failing to record that is logged rather than returned: the caller is
+    /// already getting the error that stopped the sync, and the start-up sweep
+    /// closes out whatever a dead process left behind.
+    async fn fail_session(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        mut session: SyncSessionRecord,
+        reason: String,
+    ) {
+        session.status = SessionStatus::Failed;
+        session.ended_at = Some(now_rfc3339());
+        session.updated_at.clone_from(&session.ended_at);
+        session.error = Some(reason);
+        if let Err(e) = self.sync_sessions.upsert(scope, tenant_id, session).await {
+            tracing::error!(
+                error = %crate::redact::redacted(&e.to_string()),
+                "a sync that could not be queued could not be marked failed either"
+            );
+        }
     }
 
     /// Give up a repository's claim so the next request queues a fresh sync.

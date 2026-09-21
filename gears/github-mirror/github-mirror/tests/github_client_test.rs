@@ -1914,6 +1914,7 @@ async fn a_rate_limit_seen_by_one_request_pauses_every_other_request() {
     let mut waited = std::time::Duration::ZERO;
     for attempt in 1..=4 {
         wait_for_calls(&limited, attempt).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let started = std::time::Instant::now();
         client
             .fetch_repository_metadata("acme", "free", &options)
