@@ -24,8 +24,8 @@ use crate::domain::enums::{
 use crate::domain::policy::RegistrationPolicy;
 use crate::domain::ports::metrics::{AdmissionMetrics, PassLabels, RefusalStage};
 use crate::domain::ports::{
-    CurrentDocument, CurrentInstanceValue, CurrentTypeSchemaRow, RecoveryCursor, Stores,
-    snapshot_read,
+    CurrentDocument, CurrentInstanceValue, CurrentTypeSchemaRow, RecoveryCursor, RecoveryPage,
+    Stores, snapshot_read,
 };
 
 /// GTS identifier or deterministic Registry Reference for the same row.
@@ -225,7 +225,7 @@ impl RegistryService {
         &self,
         after: Option<RecoveryCursor>,
         limit: u64,
-    ) -> Result<Vec<RecoveryCursor>, ServiceError> {
+    ) -> Result<RecoveryPage, ServiceError> {
         let provider: DBProvider<ServiceError> = DBProvider::new(self.db.clone());
         let stores = Arc::clone(&self.stores);
         let scope = Self::scope();

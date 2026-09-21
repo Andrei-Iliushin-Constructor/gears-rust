@@ -9,7 +9,6 @@ use toolkit::api::OpenApiRegistry;
 use toolkit::contracts::{DatabaseCapability, SystemCapability};
 use toolkit::lifecycle::ReadySignal;
 use toolkit::{Gear, GearCtx, RestApiCapability};
-use toolkit_db::outbox::OutboxHandle;
 use toolkit_db::{DBProvider, DbError};
 use toolkit_gts::{all_inventory_instances, all_inventory_type_schemas};
 use tracing::{debug, info, warn};
@@ -24,7 +23,7 @@ use crate::domain::ports::metrics::AdmissionMetrics;
 use crate::domain::registry_service::RegistryService;
 use crate::domain::service::TypesRegistryService;
 use crate::infra::InMemoryGtsRepository;
-use crate::infra::outbox::{OutboxDispatch, TABLE_PREFIX as OUTBOX_TABLE_PREFIX};
+use crate::infra::outbox::{Admission, OutboxDispatch, TABLE_PREFIX as OUTBOX_TABLE_PREFIX};
 use crate::infra::storage::Repos;
 
 /// Types Registry gear: REST, managed storage, inventory seeding and admission worker.
@@ -41,7 +40,7 @@ pub struct TypesRegistryGear {
     registry: OnceLock<Arc<RegistryService>>,
     local_client: OnceLock<Arc<TypesRegistryLocalClient>>,
     /// Pipeline retained for shutdown; the mutex guards only non-async moves.
-    outbox: Mutex<Option<OutboxHandle>>,
+    outbox: Mutex<Option<Admission>>,
 }
 
 impl Default for TypesRegistryGear {
@@ -79,10 +78,11 @@ impl TypesRegistryGear {
             metrics,
         ));
 
-        // Start after inline seeding. The token lets startup recovery stop on a
-        // page boundary when shutdown arrives while `init()` still holds the host.
-        let handle = crate::infra::outbox::start(db.db(), &registry, &dispatch, cancel).await?;
-        *self.outbox.lock() = Some(handle);
+        // Start after inline seeding. Startup recovery runs in the background, so
+        // `init()` returns once the pipeline is bound and the gear starts serving
+        // reads; the token stops that scan on a page boundary.
+        let admission = crate::infra::outbox::start(db.db(), &registry, &dispatch, cancel).await?;
+        *self.outbox.lock() = Some(admission);
 
         self.registry
             .set(registry)
@@ -105,10 +105,10 @@ impl TypesRegistryGear {
         cancel.cancelled().await;
 
         // Release the mutex before awaiting the drain.
-        let handle = self.outbox.lock().take();
-        if let Some(handle) = handle {
+        let admission = self.outbox.lock().take();
+        if let Some(admission) = admission {
             info!("types_registry draining the admission outbox");
-            handle.stop().await;
+            admission.stop().await;
             info!("types_registry admission outbox stopped");
         }
         Ok(())

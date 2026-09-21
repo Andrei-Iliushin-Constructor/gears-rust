@@ -17,6 +17,7 @@ use crate::domain::admission::Precondition;
 use crate::domain::admission::fingerprint::{RequestFingerprint, ScopeHash};
 use crate::domain::ports::{
     ItemSuccess, NewOperation, NewOperationItem, OperationItemRow, OperationRow, RecoveryCursor,
+    RecoveryPage,
 };
 use crate::infra::storage::entity::enums::{OperationItemStatus, OperationStatus};
 use crate::infra::storage::entity::{operation, operation_item};
@@ -130,7 +131,7 @@ impl OperationRepo {
         scope: &AccessScope,
         after: Option<RecoveryCursor>,
         limit: u64,
-    ) -> Result<Vec<RecoveryCursor>, ScopeError> {
+    ) -> Result<RecoveryPage, ScopeError> {
         let mut filter = Condition::all().add(
             Condition::any()
                 .add(operation::Column::Status.eq(OperationStatus::Pending))
@@ -159,12 +160,15 @@ impl OperationRepo {
             .all(runner)
             .await
             .map(|rows| {
-                rows.into_iter()
+                let cursors = rows
+                    .into_iter()
                     .map(|row| RecoveryCursor {
                         created_at: row.created_at,
                         id: row.id,
                     })
-                    .collect()
+                    .collect();
+                // Built here because this is the only place that knows `limit`.
+                RecoveryPage::new(cursors, limit)
             })
     }
 

@@ -1869,6 +1869,41 @@ async fn an_oversized_deletion_batch_is_refused_before_it_reads_and_counted_as_a
 }
 
 #[tokio::test]
+async fn the_recovery_scan_labels_are_exactly_retried_and_completed() {
+    use types_registry::domain::ports::metrics::RecoveryOutcome;
+
+    const NAME: &str = "types_registry_admission_recovery_scans_total";
+
+    let _serial = SERIAL.lock().await;
+
+    flush();
+    let before_retried = counter_sum_where(NAME, &[("outcome", "retried")]);
+    let before_completed = counter_sum_where(NAME, &[("outcome", "completed")]);
+
+    metrics().recovery_scan(RecoveryOutcome::Retried);
+    metrics().recovery_scan(RecoveryOutcome::Completed);
+
+    flush();
+    assert_eq!(
+        counter_sum_where(NAME, &[("outcome", "retried")]),
+        before_retried + 1,
+    );
+    assert_eq!(
+        counter_sum_where(NAME, &[("outcome", "completed")]),
+        before_completed + 1,
+    );
+
+    let mut vocabulary = label_values_of(NAME, "outcome");
+    vocabulary.dedup();
+    assert_eq!(
+        vocabulary,
+        vec!["completed".to_owned(), "retried".to_owned()],
+        "the retry is unbounded, so there is deliberately no third value for giving up: \
+         the alert is `retried` climbing while `completed` never arrives",
+    );
+}
+
+#[tokio::test]
 async fn the_delivery_outcome_labels_are_exactly_retried_and_dead_lettered() {
     use types_registry::domain::ports::metrics::DeliveryOutcome;
 

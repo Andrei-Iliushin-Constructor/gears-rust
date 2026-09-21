@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::macros::datetime;
-use toolkit_db::outbox::{MessageResult, OutboxHandle, OutboxMessage};
+use toolkit_db::outbox::{MessageResult, OutboxMessage};
 use toolkit_db::{DBProvider, DbError};
 use toolkit_gts::gts_id;
 use tracing::instrument::WithSubscriber;
@@ -19,8 +19,9 @@ use types_registry::domain::enums::{
     LifecycleStatus, OperationItemStatus, OperationKind, OperationStatus,
 };
 use types_registry::domain::policy::RegistrationPolicy;
+use types_registry::domain::ports::RecoveryCursor;
 use types_registry::domain::ports::Stores;
-use types_registry::domain::ports::metrics::{AdmissionMetrics, DeliveryOutcome};
+use types_registry::domain::ports::metrics::{AdmissionMetrics, DeliveryOutcome, RecoveryOutcome};
 use types_registry::domain::registry_service::{AdmissionMode, EntityKey, RegistryService};
 use types_registry::infra::outbox::{AdmissionHandler, OutboxDispatch};
 
@@ -117,13 +118,23 @@ fn service_recording_deliveries(
     db: &Arc<DBProvider<DbError>>,
     ports: Arc<dyn Stores>,
 ) -> (Arc<RegistryService>, Arc<common::RecordingDeliveryMetrics>) {
+    service_recording_with_dispatch(db, ports, Arc::new(NullDispatch))
+}
+
+/// Recording instruments plus a real dispatch, for a test that needs both the
+/// counted outcomes and a live pipeline.
+fn service_recording_with_dispatch(
+    db: &Arc<DBProvider<DbError>>,
+    ports: Arc<dyn Stores>,
+    dispatch: Arc<dyn OperationDispatch>,
+) -> (Arc<RegistryService>, Arc<common::RecordingDeliveryMetrics>) {
     let recorded = Arc::new(common::RecordingDeliveryMetrics::default());
     let registry = Arc::new(RegistryService::new(
         db.db(),
         ports,
         RegistrationPolicy::default(),
         TypesRegistryConfig::default(),
-        Arc::new(NullDispatch),
+        dispatch,
         AdmissionMode::Outbox,
         Arc::clone(&recorded) as Arc<dyn AdmissionMetrics>,
     ));
@@ -140,7 +151,10 @@ fn service_without_dispatch(
 async fn started(
     db: &Arc<DBProvider<DbError>>,
     ports: Arc<dyn Stores>,
-) -> (Arc<RegistryService>, OutboxHandle) {
+) -> (
+    Arc<RegistryService>,
+    types_registry::infra::outbox::Admission,
+) {
     let (registry, dispatch) = service(db, ports);
     let handle = types_registry::infra::outbox::start(
         db.db(),
@@ -386,6 +400,7 @@ async fn an_admission_past_the_delivery_budget_is_terminalized_without_being_adm
         .expect("read the recovery page");
     assert!(
         !recovered
+            .cursors()
             .iter()
             .any(|cursor| cursor.id == accepted.operation_id),
         "an operation abandoned past its budget must not be re-enqueued: {recovered:?}",
@@ -634,6 +649,7 @@ async fn abandoning_an_operation_that_never_ran_still_terminalizes_it() {
         .expect("read the recovery page");
     assert!(
         !recovered
+            .cursors()
             .iter()
             .any(|cursor| cursor.id == accepted.operation_id),
         "an abandoned operation must not be re-enqueued on the next boot: {recovered:?}",
@@ -1023,6 +1039,7 @@ async fn startup_requeues_nonterminal_operations_without_a_message() {
         .expect("read the recovery page");
     assert!(
         !recovered
+            .cursors()
             .iter()
             .any(|cursor| cursor.id == accepted.operation_id),
         "a completed operation must be outside the recovery set: {recovered:?}",
@@ -1042,24 +1059,28 @@ async fn shutdown_during_startup_stops_recovery_before_it_reads_a_page() {
         .expect("accept through the pre-outbox dispatch");
     assert_eq!(accepted.status, OperationStatus::Pending);
 
-    // Every page read fails, so a scan that runs at all fails the start. This is
-    // what makes the assertion below about *not scanning* rather than about a
-    // scan that happened to find nothing.
+    let observed = common::TestStores::builder()
+        .recording_recovery_pages()
+        .build();
     let dispatch = Arc::new(OutboxDispatch::new());
     let registry = service_with(
         &db,
-        common::TestStores::failing_recovery_scan(),
+        Arc::clone(&observed) as Arc<dyn Stores>,
         Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
     );
     let cancel = tokio_util::sync::CancellationToken::new();
     cancel.cancel();
 
-    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch, &cancel)
+    let mut handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch, &cancel)
         .await
-        .expect(
-            "a start under a cancelled token must stop before reading a recovery page, so the \
-             injected page failure must never fire",
-        );
+        .expect("a cancelled scan must not fail the start");
+    handle.recovered().await;
+
+    assert!(
+        observed.recovery_page_calls().is_empty(),
+        "a scan entered under a cancelled token must stop before reading anything: {:?}",
+        observed.recovery_page_calls(),
+    );
 
     // The stranded operation stays non-terminal, which is what lets the next boot
     // re-drive it.
@@ -1070,6 +1091,7 @@ async fn shutdown_during_startup_stops_recovery_before_it_reads_a_page() {
         .expect("read the recovery page");
     assert!(
         recovered
+            .cursors()
             .iter()
             .any(|cursor| cursor.id == accepted.operation_id),
         "recovery stopped by shutdown must leave the operation for the next boot: {recovered:?}",
@@ -1111,7 +1133,7 @@ async fn startup_recovery_advances_its_cursor_onto_a_second_page() {
         Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
     );
 
-    let handle = types_registry::infra::outbox::start(
+    let mut handle = types_registry::infra::outbox::start(
         db.db(),
         &registry,
         &dispatch,
@@ -1119,15 +1141,10 @@ async fn startup_recovery_advances_its_cursor_onto_a_second_page() {
     )
     .await
     .expect("start the admission outbox");
+    handle.recovered().await;
 
     let calls = observed.recovery_page_calls();
-    assert_eq!(
-        calls.len(),
-        2,
-        "a {TWO_PAGES}-operation backlog is one full page plus a short one, so the scan reads \
-         exactly two pages and stops on the short one: {calls:?}",
-    );
-    assert_eq!(calls[0].after, None, "the first page starts at no cursor");
+    assert_eq!(calls[0].after, None, "the first read starts at no cursor");
     assert_eq!(
         calls[0].returned, 256,
         "the first page must come back full, or this backlog never reached a second page",
@@ -1142,7 +1159,211 @@ async fn startup_recovery_advances_its_cursor_onto_a_second_page() {
         "the second page carries the remainder and is short, which is what ends the scan",
     );
 
+    // Asserted on the cursors rather than the read count: recovery enqueues while
+    // the pipeline is admitting the page before it, and on SQLite that single
+    // writer can make an enqueue lose a lock and its page be retried. A retry
+    // repeats a cursor, so the distinct sequence is what the protocol promises.
+    let mut walked: Vec<Option<RecoveryCursor>> = calls.iter().map(|call| call.after).collect();
+    walked.dedup();
+    assert_eq!(
+        walked,
+        vec![None, calls[0].last],
+        "the scan must visit exactly two cursors: a {TWO_PAGES}-operation backlog is one full \
+         page plus a short one, and no attempt may skip past a page: {calls:?}",
+    );
+
     handle.stop().await;
+}
+
+#[tokio::test]
+async fn a_failed_enqueue_does_not_advance_the_recovery_cursor() {
+    use sea_orm::{ConnectionTrait, Database, Statement};
+
+    // Own the DSN so a second connection can reach the same shared-cache
+    // database; the provider's pool is what keeps it alive.
+    let dsn = format!(
+        "sqlite:file:tr-enqueue-{}?mode=memory&cache=shared",
+        uuid::Uuid::new_v4()
+    );
+    let db = common::provider_for_with_outbox(&dsn, 4).await;
+    strand_nonterminal_operations(&db, TWO_PAGES).await;
+
+    // The page read succeeds and its enqueue transaction then fails for real,
+    // inside `enqueue_batch`. That is the only shape that catches a cursor
+    // adopted before its page committed: a read failure leaves the cursor alone
+    // either way, so it cannot tell the two implementations apart.
+    let raw = Database::connect(&dsn).await.expect("raw connection");
+    let sql = |text: &str| Statement::from_string(raw.get_database_backend(), text.to_owned());
+    raw.execute_raw(sql(
+        "CREATE TRIGGER tr_block_enqueue BEFORE INSERT ON types_registry__outbox_body \
+         BEGIN SELECT RAISE(ABORT, 'injected enqueue failure'); END;",
+    ))
+    .await
+    .expect("install the enqueue failure");
+
+    let observed = common::TestStores::builder()
+        .recording_recovery_pages()
+        .build();
+    let dispatch = Arc::new(OutboxDispatch::new());
+    let (registry, recorded) = service_recording_with_dispatch(
+        &db,
+        Arc::clone(&observed) as Arc<dyn Stores>,
+        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
+    );
+
+    let mut handle = types_registry::infra::outbox::start(
+        db.db(),
+        &registry,
+        &dispatch,
+        &common::no_cancellation(),
+    )
+    .await
+    .expect("a failing enqueue must not fail the start");
+
+    // Two attempts, so there is a retry whose cursor can be inspected.
+    await_delivery("the enqueue fails and the scan retries", || async {
+        (recorded.recoveries().len() >= 2).then_some(())
+    })
+    .await;
+
+    let calls = observed.recovery_page_calls();
+    // Control: the read really did return a full page, so the cursor had a value
+    // to wrongly advance to and a passing test cannot be a vacuous one.
+    assert_eq!(
+        calls[0].returned, 256,
+        "the first read must return a full page: {calls:?}",
+    );
+    assert!(
+        calls[0].last.is_some(),
+        "and that page must end on a cursor: {calls:?}",
+    );
+    assert!(
+        calls.iter().all(|call| call.after.is_none()),
+        "no page committed, so every attempt must restart at no cursor: adopting \
+         `RecoveryPage::next()` before the enqueue commits would skip these \
+         operations for the lifetime of the process: {calls:?}",
+    );
+
+    raw.execute_raw(sql("DROP TRIGGER tr_block_enqueue;"))
+        .await
+        .expect("let the enqueue succeed");
+
+    tokio::time::timeout(std::time::Duration::from_secs(30), handle.recovered())
+        .await
+        .expect("the scan must finish once the enqueue can commit");
+    assert_eq!(
+        recorded.recoveries().last(),
+        Some(&RecoveryOutcome::Completed),
+        "and report completion: {:?}",
+        recorded.recoveries(),
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(30), handle.stop())
+        .await
+        .expect("stop must not wait out an unbounded retry");
+}
+
+#[tokio::test]
+async fn a_failed_page_read_is_retried_from_the_same_cursor() {
+    let db = test_db_with_outbox().await;
+    strand_nonterminal_operations(&db, TWO_PAGES).await;
+
+    // The first page is served and enqueued; every read after it fails. The retry
+    // must come back to the second page rather than starting over or skipping it.
+    //
+    // Scope: this injects a *read* failure, so it cannot reproduce the
+    // advance-before-enqueue bug — that attempt never reaches `enqueue_batch`.
+    // `a_failed_enqueue_does_not_advance_the_recovery_cursor` covers that, by
+    // failing the enqueue transaction itself.
+    let observed = common::TestStores::builder()
+        .failing_recovery_page_after(1)
+        .build();
+    let dispatch = Arc::new(OutboxDispatch::new());
+    let registry = service_with(
+        &db,
+        Arc::clone(&observed) as Arc<dyn Stores>,
+        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
+    );
+
+    let handle = types_registry::infra::outbox::start(
+        db.db(),
+        &registry,
+        &dispatch,
+        &common::no_cancellation(),
+    )
+    .await
+    .expect("start the admission outbox");
+
+    let calls = await_delivery("the scan retries a failed page", || async {
+        let calls = observed.recovery_page_calls();
+        (calls.len() >= 3).then_some(calls)
+    })
+    .await;
+
+    assert_eq!(calls[0].after, None, "the first read starts at no cursor");
+    assert_eq!(
+        calls[1].after, calls[0].last,
+        "the second read continues from the first page, which did commit",
+    );
+    assert_eq!(
+        calls[2].after, calls[1].after,
+        "and the retry re-reads the page whose read failed instead of moving past it",
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(30), handle.stop())
+        .await
+        .expect("stop must not wait out an unbounded retry");
+}
+
+#[tokio::test]
+async fn a_cancelled_join_leaves_the_scan_joinable_by_stop() {
+    let db = test_db_with_outbox().await;
+    strand_nonterminal_operations(&db, 1).await;
+
+    // The scan will sit inside a page read that does not observe cancellation, so
+    // whether `stop()` waits is decided purely by whether it still holds the task.
+    let gate = common::PageGate::new();
+    let observed = common::TestStores::builder()
+        .holding_recovery_pages(&gate)
+        .build();
+    let dispatch = Arc::new(OutboxDispatch::new());
+    let registry = service_with(
+        &db,
+        Arc::clone(&observed) as Arc<dyn Stores>,
+        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
+    );
+
+    let held = gate.hold().await;
+    let mut handle = types_registry::infra::outbox::start(
+        db.db(),
+        &registry,
+        &dispatch,
+        &common::no_cancellation(),
+    )
+    .await
+    .expect("start the admission outbox");
+    tokio::time::timeout(std::time::Duration::from_secs(10), gate.arrival())
+        .await
+        .expect("the scan must reach the page read the gate holds");
+
+    // Abandon the join mid-scan.
+    tokio::time::timeout(std::time::Duration::from_millis(100), handle.recovered())
+        .await
+        .expect_err("a scan held at the gate cannot finish on its own");
+
+    // The discriminating assertion. `stop()` must still be holding the task, so
+    // it cannot return while the gate does. An implementation that took the
+    // handle out of the option before awaiting it would have detached the scan
+    // above, find nothing to join, and return here immediately.
+    let mut stopping = Box::pin(handle.stop());
+    tokio::time::timeout(std::time::Duration::from_millis(250), &mut stopping)
+        .await
+        .expect_err("stop must wait for the scan the abandoned join left behind");
+
+    drop(held);
+    tokio::time::timeout(std::time::Duration::from_secs(30), stopping)
+        .await
+        .expect("and must finish once the scan can observe its cancellation");
 }
 
 #[tokio::test]
@@ -1163,9 +1384,10 @@ async fn shutdown_between_recovery_pages_stops_the_scan() {
         Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
     );
 
-    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch, &cancel)
+    let mut handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch, &cancel)
         .await
         .expect("a cancelled scan must not fail the start; serve still has to drain the pipeline");
+    handle.recovered().await;
 
     let calls = observed.recovery_page_calls();
     assert_eq!(
@@ -1392,70 +1614,85 @@ async fn a_rejected_message_lands_in_a_dead_letter_row_that_names_the_reason() {
 }
 
 #[tokio::test]
-async fn a_failed_recovery_scan_leaves_the_dispatch_bindable_by_the_next_start() {
+async fn a_failing_recovery_scan_neither_fails_the_start_nor_gives_up() {
     let db = test_db_with_outbox().await;
+    strand_nonterminal_operations(&db, 1).await;
+
+    // The first two page reads fail, the third serves the backlog. A scan that
+    // gave up after a failure would never reach `Completed`, and one that never
+    // retried would never read a second page.
+    let observed = common::TestStores::builder()
+        .failing_recovery_page_transiently(2)
+        .recording_recovery_pages()
+        .build();
     let dispatch = Arc::new(OutboxDispatch::new());
-    let broken = service_with(
+    let (registry, recorded) = service_recording_with_dispatch(
         &db,
-        common::TestStores::failing_recovery_scan(),
+        Arc::clone(&observed) as Arc<dyn Stores>,
         Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
     );
 
-    let Err(refused) = types_registry::infra::outbox::start(
+    let mut handle = types_registry::infra::outbox::start(
         db.db(),
-        &broken,
+        &registry,
         &dispatch,
         &common::no_cancellation(),
     )
     .await
-    else {
-        panic!("a failing recovery scan must fail the start");
-    };
-    assert!(
-        matches!(
-            refused,
-            types_registry::infra::outbox::StartError::Recovery(_)
-        ),
-        "the start must fail on recovery, not on the binding: {refused}",
-    );
+    .expect("a failing recovery scan must not fail the start");
 
-    let healthy = service_with(
-        &db,
-        stores(),
-        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
-    );
-    let handle = match types_registry::infra::outbox::start(
-        db.db(),
-        &healthy,
-        &dispatch,
-        &common::no_cancellation(),
-    )
-    .await
-    {
-        Ok(handle) => handle,
-        Err(error) => panic!(
-            "the second start must bind: a recovery failure left the binding spent, so nothing \
-             but a process restart could recover: {error}"
-        ),
-    };
-
-    let accepted = healthy
-        .submit(&registration("after-failed-recovery", TARGET), NOW)
+    // The pipeline is bound and live while the scan is still failing: a new
+    // admission must not wait on a backlog nobody has managed to read yet.
+    let accepted = registry
+        .submit(&registration("during-failed-recovery", TARGET), NOW)
         .await
         .expect("accept");
     let operation = await_delivery("the bound pipeline delivers", || async {
-        let record = healthy.operation(accepted.operation_id).await.unwrap()?;
+        let record = registry.operation(accepted.operation_id).await.unwrap()?;
         (record.status == OperationStatus::Completed).then_some(record)
     })
     .await;
     assert_eq!(
         operation.items[0].status,
         OperationItemStatus::Succeeded,
-        "the recovered start is a real pipeline, not just a successful bind: {:?}",
+        "new admissions must not wait on a scan that is still failing: {:?}",
         operation.items,
     );
 
-    handle.stop().await;
+    // Bounded so the 35-minute shutdown deadlock this replaced fails fast.
+    tokio::time::timeout(std::time::Duration::from_secs(30), handle.recovered())
+        .await
+        .expect("the scan must finish once its store recovers");
+
+    assert_eq!(
+        recorded.recoveries(),
+        vec![
+            RecoveryOutcome::Retried,
+            RecoveryOutcome::Retried,
+            RecoveryOutcome::Completed,
+        ],
+        "two failures must count as retries and the third attempt must complete, \
+         proving the retry neither stops at one attempt nor gives up",
+    );
+    assert_eq!(
+        observed.recovery_page_calls().len(),
+        3,
+        "each attempt re-reads the page it failed on: {:?}",
+        observed.recovery_page_calls(),
+    );
+    assert!(
+        observed
+            .recovery_page_calls()
+            .iter()
+            .all(|call| call.after.is_none()),
+        "a failure before any page committed must leave the cursor unmoved, so every \
+         attempt restarts at the beginning: {:?}",
+        observed.recovery_page_calls(),
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(30), handle.stop())
+        .await
+        .expect("stop must not wait out an unbounded retry");
 }
 
 #[tokio::test]
@@ -1538,6 +1775,7 @@ async fn a_retryable_terminalization_failure_keeps_the_message_instead_of_dead_l
         .expect("read the recovery page");
     assert!(
         recovered
+            .cursors()
             .iter()
             .any(|cursor| cursor.id == accepted.operation_id),
         "a non-terminal operation must stay in the recovery set: {recovered:?}",

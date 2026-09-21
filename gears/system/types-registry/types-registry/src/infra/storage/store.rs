@@ -22,8 +22,8 @@ use crate::domain::ports::{
     DependencyStore, EdgeSide, EntityEdge, EntityRow, EntityStore, EntityWriteOrderStore,
     InstanceStore, ItemSuccess, NewCurrentInstance, NewCurrentTypeSchema, NewEntity,
     NewInstanceRevision, NewOperation, NewOperationItem, NewRevision, OperationItemRow,
-    OperationRow, OperationStore, RecoveryCursor, ReverseImpact, TypeSchemaStore, VersionFamilyRow,
-    VersionFamilyStore,
+    OperationRow, OperationStore, RecoveryCursor, RecoveryPage, ReverseImpact, TypeSchemaStore,
+    VersionFamilyRow, VersionFamilyStore,
 };
 
 use super::repo::{
@@ -308,7 +308,7 @@ impl OperationStore for Repos {
         scope: &AccessScope,
         after: Option<RecoveryCursor>,
         limit: u64,
-    ) -> Result<Vec<RecoveryCursor>, ScopeError> {
+    ) -> Result<RecoveryPage, ScopeError> {
         OperationRepo::nonterminal_page(tx, scope, after, limit).await
     }
 

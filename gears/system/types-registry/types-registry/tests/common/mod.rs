@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use test_stores::{
-    FailingCall, Hooks, PausePoint, RecoveryPageCall, SharedPause, TestStores, TestStoresBuilder,
+    FailingCall, Hooks, PageGate, PausePoint, RecoveryPageCall, SharedPause, TestStores,
+    TestStoresBuilder,
 };
 
 use gts::GtsConfig;
@@ -203,6 +204,7 @@ pub fn metrics() -> std::sync::Arc<dyn types_registry::domain::ports::metrics::A
 #[derive(Debug, Default)]
 pub struct RecordingDeliveryMetrics {
     outcomes: parking_lot::Mutex<Vec<types_registry::domain::ports::metrics::DeliveryOutcome>>,
+    recoveries: parking_lot::Mutex<Vec<types_registry::domain::ports::metrics::RecoveryOutcome>>,
 }
 
 impl RecordingDeliveryMetrics {
@@ -210,9 +212,19 @@ impl RecordingDeliveryMetrics {
     pub fn outcomes(&self) -> Vec<types_registry::domain::ports::metrics::DeliveryOutcome> {
         self.outcomes.lock().clone()
     }
+
+    /// Startup-recovery scan outcomes, in the order they were counted.
+    #[must_use]
+    pub fn recoveries(&self) -> Vec<types_registry::domain::ports::metrics::RecoveryOutcome> {
+        self.recoveries.lock().clone()
+    }
 }
 
 impl types_registry::domain::ports::metrics::AdmissionMetrics for RecordingDeliveryMetrics {
+    fn recovery_scan(&self, outcome: types_registry::domain::ports::metrics::RecoveryOutcome) {
+        self.recoveries.lock().push(outcome);
+    }
+
     fn unchanged_probe(&self, _hit: bool) {}
 
     fn candidate_terminalized(

@@ -1082,11 +1082,11 @@ async fn nonterminal_paging_walks_every_operation_once_across_pages() {
             u64::try_from(page.len()).expect("small page") <= PAGE,
             "a page must not exceed the limit it was asked for: {page:?}",
         );
-        walked.extend(page.iter().map(|cursor| cursor.id));
-        let short = u64::try_from(page.len()).expect("small page") < PAGE;
-        after = page.last().copied();
-        if short {
-            break;
+        walked.extend(page.cursors().iter().map(|cursor| cursor.id));
+        // The page says whether another follows; the walk derives nothing.
+        match page.next() {
+            Some(cursor) => after = Some(cursor),
+            None => break,
         }
     }
 

@@ -9,7 +9,7 @@ use opentelemetry::{InstrumentationScope, KeyValue};
 
 use crate::domain::admission::vector::VectorDrift;
 use crate::domain::ports::metrics::{
-    AdmissionMetrics, DeliveryOutcome, PassLabels, RefusalStage, TerminalStatus,
+    AdmissionMetrics, DeliveryOutcome, PassLabels, RecoveryOutcome, RefusalStage, TerminalStatus,
 };
 
 /// Instrumentation scope shared by this gear's metrics.
@@ -58,6 +58,8 @@ pub struct AdmissionMetricsMeter {
     revalidations: Counter<u64>,
     /// `types_registry_admission_deliveries_total{outcome}`.
     admission_deliveries: Counter<u64>,
+    /// `types_registry_admission_recovery_scans_total{outcome}`.
+    recovery_scans: Counter<u64>,
     /// Dependents rewritten by one revision (SPEC §8.1 step 4.6).
     activation_write_set: Histogram<f64>,
     /// `types_registry_operation_duration_seconds` — one admission pass, wall-clock.
@@ -108,6 +110,13 @@ impl AdmissionMetricsMeter {
                 .with_description(
                     "Outbox deliveries of an admission message that did not succeed, by \
                      outcome (retried / dead_lettered)",
+                )
+                .build(),
+            recovery_scans: meter
+                .u64_counter(format!("{prefix}_admission_recovery_scans_total"))
+                .with_description(
+                    "Startup-recovery scans of the non-terminal backlog, by outcome \
+                     (retried / completed)",
                 )
                 .build(),
             activation_write_set: meter
@@ -190,6 +199,11 @@ impl AdmissionMetrics for AdmissionMetricsMeter {
     fn admission_delivery(&self, outcome: DeliveryOutcome) {
         self.admission_deliveries
             // The static type enforces a closed label vocabulary.
+            .add(1, &[KeyValue::new("outcome", outcome.label())]);
+    }
+
+    fn recovery_scan(&self, outcome: RecoveryOutcome) {
+        self.recovery_scans
             .add(1, &[KeyValue::new("outcome", outcome.label())]);
     }
 }

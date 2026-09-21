@@ -17,8 +17,8 @@ use types_registry::domain::ports::{
     DependencyStore, EdgeSide, EntityEdge, EntityRow, EntityStore, EntityWriteOrderStore,
     InstanceStore, ItemSuccess, NewCurrentInstance, NewCurrentTypeSchema, NewEntity,
     NewInstanceRevision, NewOperation, NewOperationItem, NewRevision, OperationItemRow,
-    OperationRow, OperationStore, RecoveryCursor, ReverseImpact, Stores, TypeSchemaStore,
-    VersionFamilyRow, VersionFamilyStore,
+    OperationRow, OperationStore, RecoveryCursor, RecoveryPage, ReverseImpact, Stores,
+    TypeSchemaStore, VersionFamilyRow, VersionFamilyStore,
 };
 use uuid::Uuid;
 
@@ -48,6 +48,7 @@ pub struct Hooks {
     stale_find_items: parking_lot::Mutex<Option<Vec<OperationItemRow>>>,
     fail: std::collections::BTreeSet<FailingCall>,
     transient_mark_running: Option<TransientFailures>,
+    transient_recovery_page: Option<TransientFailures>,
     pub stall_find_by_id: Option<std::time::Duration>,
     pub stall_mark_abandoned: Option<std::time::Duration>,
     pub stall_mark_running: Option<std::time::Duration>,
@@ -64,11 +65,43 @@ pub struct RecoveryPageCall {
     pub last: Option<RecoveryCursor>,
 }
 
+/// Holds every recovery page read until released, and says when one arrived.
+///
+/// Deliberately a plain mutex with no token in sight: a gate that observed
+/// cancellation could not show that a join waits for a scan which is not
+/// observing it yet.
+#[derive(Default)]
+pub struct PageGate {
+    lock: tokio::sync::Mutex<()>,
+    arrived: tokio::sync::Notify,
+}
+
+impl PageGate {
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Block every page read until the returned guard is dropped.
+    pub async fn hold(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.lock.lock().await
+    }
+
+    /// Wait until a page read has reached the gate.
+    pub async fn arrival(&self) {
+        self.arrived.notified().await;
+    }
+}
+
 #[derive(Default)]
 struct RecoveryPages {
     seen: parking_lot::Mutex<Vec<RecoveryPageCall>>,
     /// Cancel this token once that many pages have been served.
     cancel_after: Option<(usize, CancellationToken)>,
+    /// Fail every read after that many have been served.
+    fail_after: Option<usize>,
+    /// Hold every read at this gate.
+    gate: Option<Arc<PageGate>>,
 }
 
 struct Pause {
@@ -204,6 +237,32 @@ impl Hooks {
 
     fn cause(&self, own: &'static str) -> &'static str {
         self.injected_cause.unwrap_or(own)
+    }
+
+    /// True once `fail_after` pages have been observed, failing every read after.
+    fn recovery_page_fails_after_serving(&self) -> bool {
+        let Some(pages) = &self.recovery_pages else {
+            return false;
+        };
+        let Some(nth) = pages.fail_after else {
+            return false;
+        };
+        pages.seen.lock().len() >= nth
+    }
+
+    fn takes_transient_recovery_page_failure(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        let Some(failures) = &self.transient_recovery_page else {
+            return false;
+        };
+        let taken = failures
+            .remaining
+            .fetch_update(SeqCst, SeqCst, |left| left.checked_sub(1))
+            .is_ok();
+        if taken {
+            failures.issued.fetch_add(1, SeqCst);
+        }
+        taken
     }
 
     fn takes_transient_mark_running_failure(&self) -> bool {
@@ -355,6 +414,16 @@ impl TestStoresBuilder {
         self
     }
 
+    /// Fail the first `times` recovery page reads, then serve them normally, so
+    /// a test can watch the scan retry and then finish.
+    pub fn failing_recovery_page_transiently(mut self, times: usize) -> Self {
+        self.hooks.transient_recovery_page = Some(TransientFailures {
+            remaining: std::sync::atomic::AtomicUsize::new(times),
+            issued: std::sync::atomic::AtomicUsize::new(0),
+        });
+        self
+    }
+
     /// Observe every startup-recovery page read.
     pub fn recording_recovery_pages(mut self) -> Self {
         self.hooks.recovery_pages = Some(RecoveryPages::default());
@@ -371,6 +440,32 @@ impl TestStoresBuilder {
         self.hooks.recovery_pages = Some(RecoveryPages {
             seen: parking_lot::Mutex::default(),
             cancel_after: Some((nth, cancel.clone())),
+            fail_after: None,
+            gate: None,
+        });
+        self
+    }
+
+    /// Hold every recovery page read at `gate`, so a test can keep a scan inside
+    /// a read that does not observe cancellation.
+    pub fn holding_recovery_pages(mut self, gate: &Arc<PageGate>) -> Self {
+        self.hooks.recovery_pages = Some(RecoveryPages {
+            seen: parking_lot::Mutex::default(),
+            cancel_after: None,
+            fail_after: None,
+            gate: Some(Arc::clone(gate)),
+        });
+        self
+    }
+
+    /// Serve `nth` page reads, then fail every read after them, so a test can
+    /// watch the scan resume from the cursor its last committed page ended on.
+    pub fn failing_recovery_page_after(mut self, nth: usize) -> Self {
+        self.hooks.recovery_pages = Some(RecoveryPages {
+            seen: parking_lot::Mutex::default(),
+            cancel_after: None,
+            fail_after: Some(nth),
+            gate: None,
         });
         self
     }
@@ -905,20 +1000,37 @@ impl OperationStore for TestStores {
         scope: &AccessScope,
         after: Option<RecoveryCursor>,
         limit: u64,
-    ) -> Result<Vec<RecoveryCursor>, ScopeError> {
-        if self.hooks.fails(FailingCall::NonterminalPage) {
-            return Err(ScopeError::Invalid(
-                "this recovery page read is under failure injection",
-            ));
+    ) -> Result<RecoveryPage, ScopeError> {
+        if let Some(pages) = self.hooks.recovery_pages.as_ref()
+            && let Some(gate) = pages.gate.as_ref()
+        {
+            gate.arrived.notify_one();
+            let _held = gate.lock.lock().await;
         }
-        let page = self.inner.nonterminal_page(tx, scope, after, limit).await?;
+
+        // Every attempt is recorded, failed ones included: a journal that skipped
+        // failures could not show that a retry re-read the page it failed on.
+        let failed = self.hooks.fails(FailingCall::NonterminalPage)
+            || self.hooks.takes_transient_recovery_page_failure()
+            || self.hooks.recovery_page_fails_after_serving();
+        let result = if failed {
+            Err(ScopeError::Invalid(
+                "this recovery page read is under failure injection",
+            ))
+        } else {
+            self.inner.nonterminal_page(tx, scope, after, limit).await
+        };
+
         if let Some(pages) = self.hooks.recovery_pages.as_ref() {
             let served = {
                 let mut seen = pages.seen.lock();
                 seen.push(RecoveryPageCall {
                     after,
-                    returned: page.len(),
-                    last: page.last().copied(),
+                    returned: result.as_ref().map_or(0, RecoveryPage::len),
+                    last: result
+                        .as_ref()
+                        .ok()
+                        .and_then(|page| page.cursors().last().copied()),
                 });
                 seen.len()
             };
@@ -930,7 +1042,7 @@ impl OperationStore for TestStores {
                 cancel.cancel();
             }
         }
-        Ok(page)
+        result
     }
 
     async fn insert_operation(

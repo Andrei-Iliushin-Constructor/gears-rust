@@ -7,7 +7,6 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use toolkit::api::{OpenApiRegistry, ParamLocation, ResponseHeaderType};
-use toolkit_db::outbox::OutboxHandle;
 use toolkit_gts::{gts_id, gts_uri};
 use tower::ServiceExt;
 
@@ -182,7 +181,7 @@ async fn router_with(v1_ready: bool) -> Router {
     )
 }
 
-async fn router_with_outbox() -> (Router, OutboxHandle) {
+async fn router_with_outbox() -> (Router, types_registry::infra::outbox::Admission) {
     let db = common::test_db_with_outbox().await;
     let openapi = TestOpenApi::default();
     let config = TypesRegistryConfig::default();

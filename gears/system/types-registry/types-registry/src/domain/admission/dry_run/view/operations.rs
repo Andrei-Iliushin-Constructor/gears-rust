@@ -11,7 +11,7 @@ use super::{AdmissionView, ItemOutcomeWrite, unsupported};
 use crate::domain::admission::fingerprint::ScopeHash;
 use crate::domain::ports::{
     ItemSuccess, NewOperation, NewOperationItem, OperationItemRow, OperationRow, OperationStore,
-    RecoveryCursor,
+    RecoveryCursor, RecoveryPage,
 };
 
 #[async_trait]
@@ -43,7 +43,7 @@ impl OperationStore for AdmissionView {
         scope: &AccessScope,
         after: Option<RecoveryCursor>,
         limit: u64,
-    ) -> Result<Vec<RecoveryCursor>, ScopeError> {
+    ) -> Result<RecoveryPage, ScopeError> {
         self.base.nonterminal_page(tx, scope, after, limit).await
     }
 
