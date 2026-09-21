@@ -29,6 +29,30 @@ pub fn is_stale(updated_at: Option<&str>, threshold: Option<DateTime<Utc>>) -> b
     DateTime::parse_from_rfc3339(updated_at).is_ok_and(|at| at.with_timezone(&Utc) < threshold)
 }
 
+/// The later of the watermark already stored and the candidate this sweep
+/// staged.
+///
+/// A sweep starts its high-water mark at its own lower bound, the stored
+/// watermark less [`SWEEP_OVERLAP`], so one that saw nothing new stages that
+/// bound rather than the watermark it started from. Promoting it as it comes
+/// would walk the watermark five minutes back on every idle sweep, widening
+/// the window each time.
+fn later_watermark(stored: Option<&str>, candidate: String) -> String {
+    let instant = |raw: &str| {
+        DateTime::parse_from_rfc3339(raw)
+            .ok()
+            .map(|at| at.with_timezone(&Utc))
+    };
+    let Some(stored) = stored else {
+        return candidate;
+    };
+    match (instant(stored), instant(&candidate)) {
+        (Some(stored_at), Some(candidate_at)) if candidate_at > stored_at => candidate,
+        (None, Some(_)) => candidate,
+        _ => stored.to_owned(),
+    }
+}
+
 #[must_use]
 pub fn high_water(seen: &[&str], threshold: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
     seen.iter()
@@ -120,6 +144,9 @@ impl SweepWatermark {
     /// leaves neither behind, so the next run walks the listing in full and
     /// the gate re-seeds whatever was left `pending`.
     ///
+    /// A family with nothing in it stages no candidate; the sweep still
+    /// finished, so the row is closed out with the watermark it already had.
+    ///
     /// # Errors
     /// `Database`/`Internal` when the watermark row cannot be read or written.
     pub async fn promote(
@@ -137,15 +164,19 @@ impl SweepWatermark {
         else {
             return Ok(());
         };
-        let Some(candidate) = stored.candidate_high_water.clone() else {
-            return Ok(());
+        let last_seen_updated_at = match stored.candidate_high_water.clone() {
+            Some(candidate) => Some(later_watermark(
+                stored.last_seen_updated_at.as_deref(),
+                candidate,
+            )),
+            None => stored.last_seen_updated_at.clone(),
         };
         self.watermark_store
             .upsert(
                 scope,
                 tenant_id,
                 SyncWatermarkRecord {
-                    last_seen_updated_at: Some(candidate),
+                    last_seen_updated_at,
                     page1_etag: page1_etag.or_else(|| stored.page1_etag.clone()),
                     sweep_in_progress: false,
                     candidate_high_water: None,

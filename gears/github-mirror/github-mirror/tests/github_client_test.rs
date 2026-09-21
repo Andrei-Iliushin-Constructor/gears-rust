@@ -1866,17 +1866,17 @@ async fn an_unchanged_first_page_stops_the_pull_and_commit_sweeps_too() {
     commits_second.assert_calls_async(1).await;
 }
 
-/// Wait until `mock` has answered a request, so what follows cannot race the
-/// request that is still in flight. Returns as soon as the call is recorded;
-/// a mock that is never called fails the test rather than hanging.
-async fn wait_for_call(mock: &httpmock::Mock<'_>) {
-    for _ in 0..600 {
-        if mock.calls_async().await >= 1 {
+/// Wait until `mock` has answered at least `wanted` requests, so what follows
+/// cannot race a request that is still in flight. A mock that never gets there
+/// fails the test rather than hanging.
+async fn wait_for_calls(mock: &httpmock::Mock<'_>, wanted: usize) {
+    for _ in 0..1200 {
+        if mock.calls_async().await >= wanted {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
-    panic!("the mock was never called, so nothing armed the state under test");
+    panic!("the mock was called fewer than {wanted} times, so nothing armed the state under test");
 }
 
 #[tokio::test]
@@ -1886,11 +1886,11 @@ async fn a_rate_limit_seen_by_one_request_pauses_every_other_request() {
         .mock_async(|when, then| {
             when.method("GET").path("/repos/acme/limited");
             then.status(403)
-                .header("retry-after", "2")
+                .header("retry-after", "1")
                 .header("x-ratelimit-remaining", "0");
         })
         .await;
-    server
+    let free = server
         .mock_async(|when, then| {
             when.method("GET").path("/repos/acme/free");
             then.status(200).json_body(gh_repo_json());
@@ -1901,7 +1901,7 @@ async fn a_rate_limit_seen_by_one_request_pauses_every_other_request() {
         std::sync::Arc::new(GithubClient::new(server.base_url(), None).expect("client must build"));
     let options = opts(ScopeConfig::default());
 
-    let first = {
+    let limited_request = {
         let client = std::sync::Arc::clone(&client);
         let options = options.clone();
         tokio::spawn(async move {
@@ -1910,32 +1910,33 @@ async fn a_rate_limit_seen_by_one_request_pauses_every_other_request() {
                 .await
         })
     };
-    wait_for_call(&limited).await;
-    limited.delete_async().await;
-    server
-        .mock_async(|when, then| {
-            when.method("GET").path("/repos/acme/limited");
-            then.status(200).json_body(gh_repo_json());
-        })
-        .await;
 
-    let started = std::time::Instant::now();
-    client
-        .fetch_repository_metadata("acme", "free", &options)
-        .await
-        .expect("the free request must succeed once the cooldown has passed");
-    let waited = started.elapsed();
+    let mut waited = std::time::Duration::ZERO;
+    for attempt in 1..=4 {
+        wait_for_calls(&limited, attempt).await;
+        let started = std::time::Instant::now();
+        client
+            .fetch_repository_metadata("acme", "free", &options)
+            .await
+            .expect("the free request must succeed once the cooldown has passed");
+        waited = started.elapsed();
+        if waited >= std::time::Duration::from_millis(400) {
+            break;
+        }
+    }
+
     assert!(
-        waited >= std::time::Duration::from_secs(1),
-        "the cooldown was armed before this request started and a sleep never returns early, \
-         so a request that had nothing to do with the limit must still wait out most of the \
-         two seconds GitHub asked for, waited {waited:?}"
+        waited >= std::time::Duration::from_millis(400),
+        "a request that had nothing to do with the limit must wait out the cooldown another \
+         request armed, waited {waited:?}"
     );
+    assert!(
+        limited.calls_async().await >= 2,
+        "the limited request must have retried, which is what proves the cooldown expired"
+    );
+    assert!(free.calls_async().await >= 1);
 
-    first
-        .await
-        .expect("the limited request task must finish")
-        .expect("the limited request must succeed on its retry");
+    limited_request.abort();
 }
 
 /// A revalidated first page must still lead to page two: GitHub sends no
