@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use super::change_gate::{self, ChangeGate, GateInputs};
 use super::sweep_watermark::{SweepWatermark, high_water, is_stale};
-use super::task::{Entity, ExtractionTask, Family, NewTask, TaskKind, TaskPriority};
+use super::task::{Entity, ExtractionTask, Family, NewTask, RunIdentity, TaskKind, TaskPriority};
 use super::verification::{CountGap, GapOutcome, pull_gaps};
 use super::worker::{Worker, WorkerContext};
 use crate::domain::error::DomainError;
@@ -96,6 +96,14 @@ impl RunState {
             .get()
             .copied()
             .ok_or_else(|| DomainError::internal("repository was not discovered before indexing"))
+    }
+
+    #[must_use]
+    pub fn identity(&self) -> RunIdentity {
+        RunIdentity {
+            session_id: self.session_id,
+            tenant_id: self.tenant_id,
+        }
     }
 
     /// # Errors
@@ -301,8 +309,7 @@ impl MirrorWorker {
         attempt: u32,
     ) {
         ctx.queue.enqueue_task(&NewTask {
-            session_id: self.run.session_id,
-            tenant_id: self.run.tenant_id,
+            run: self.run.identity(),
             kind,
             entity_id,
             priority,

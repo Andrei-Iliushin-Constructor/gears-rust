@@ -86,14 +86,16 @@ mod tests {
 
     use super::*;
     use crate::domain::sync::task::{
-        Entity, ExtractionTask, Family, TaskKind, TaskPriority, TaskStatus,
+        Entity, ExtractionTask, Family, RunIdentity, TaskKind, TaskPriority, TaskStatus,
     };
 
     fn dummy_task(kind: TaskKind) -> ExtractionTask {
         ExtractionTask {
             id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            run: RunIdentity {
+                session_id: Uuid::new_v4(),
+                tenant_id: Uuid::new_v4(),
+            },
             kind,
             entity_id: None,
             priority: TaskPriority::NORMAL,

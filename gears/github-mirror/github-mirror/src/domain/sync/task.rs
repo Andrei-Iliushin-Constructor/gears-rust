@@ -241,13 +241,19 @@ impl std::fmt::Display for TaskKind {
     }
 }
 
+/// The run a task belongs to: the sync session and the tenant it runs for,
+/// carried as one value so the two ids cannot be handed over the wrong way
+/// round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RunIdentity {
+    pub session_id: Uuid,
+    pub tenant_id: Uuid,
+}
+
 /// What [`crate::domain::sync::TaskQueue::enqueue_task`] inserts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewTask {
-    /// The sync session this task belongs to.
-    pub session_id: Uuid,
-    /// The tenant the session runs for.
-    pub tenant_id: Uuid,
+    pub run: RunIdentity,
     pub kind: TaskKind,
     /// Identifier for single-entity refinement tasks: an issue or pull number,
     /// a commit SHA, a workflow-run id.
@@ -261,8 +267,7 @@ pub struct NewTask {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractionTask {
     pub id: Uuid,
-    pub session_id: Uuid,
-    pub tenant_id: Uuid,
+    pub run: RunIdentity,
     pub kind: TaskKind,
     pub entity_id: Option<String>,
     pub priority: TaskPriority,

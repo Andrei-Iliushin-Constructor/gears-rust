@@ -3831,8 +3831,7 @@ impl Service {
         ));
         let runner = RepoPhaseRunner::new(
             vec![worker],
-            run.session_id,
-            run.tenant_id,
+            run.identity(),
             self.config.max_concurrent_tasks,
             cancel.child_token(),
             progress.handle(),

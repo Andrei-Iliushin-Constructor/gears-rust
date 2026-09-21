@@ -19,15 +19,14 @@ use chrono::{DateTime, Utc};
 use strum::IntoEnumIterator as _;
 use uuid::Uuid;
 
-use super::task::{ExtractionTask, Lane, NewTask, TaskKind, TaskPhase, TaskStatus};
+use super::task::{ExtractionTask, Lane, NewTask, RunIdentity, TaskKind, TaskPhase, TaskStatus};
 
 /// Idempotency key: a task is unique per `(session, kind, entity_id)`. The
 /// session already belongs to exactly one tenant, so tenancy
 /// is carried by the key without a separate column.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct DedupKey {
-    tenant_id: Uuid,
-    session_id: Uuid,
+    run: RunIdentity,
     kind: TaskKind,
     entity_id: Option<String>,
     attempt: u32,
@@ -36,8 +35,7 @@ struct DedupKey {
 impl DedupKey {
     fn of(task: &NewTask) -> Self {
         Self {
-            tenant_id: task.tenant_id,
-            session_id: task.session_id,
+            run: task.run,
             kind: task.kind,
             entity_id: task.entity_id.clone(),
             attempt: task.attempt,
@@ -104,8 +102,7 @@ impl TaskQueue {
         }
         let row = ExtractionTask {
             id: Uuid::new_v4(),
-            session_id: task.session_id,
-            tenant_id: task.tenant_id,
+            run: task.run,
             kind: task.kind,
             entity_id: task.entity_id.clone(),
             priority: task.priority,
@@ -115,7 +112,7 @@ impl TaskQueue {
         };
         inner
             .pending
-            .entry((row.session_id, row.kind.phase()))
+            .entry((row.run.session_id, row.kind.phase()))
             .or_default()
             .insert(OrderKey::of(&row), row.id);
         inner.dedup.insert(key, row.id);
@@ -202,7 +199,7 @@ impl TaskQueue {
         let Some(task) = inner.by_id.get(&task_id).cloned() else {
             return;
         };
-        let bucket_key: BucketKey = (task.session_id, task.kind.phase());
+        let bucket_key: BucketKey = (task.run.session_id, task.kind.phase());
         match task.status {
             TaskStatus::Running => {
                 if let Some(count) = inner.running.get_mut(&bucket_key) {
@@ -254,7 +251,7 @@ impl TaskQueue {
         inner
             .by_id
             .values()
-            .filter(|task| task.session_id == session_id && task.kind.phase() == phase)
+            .filter(|task| task.run.session_id == session_id && task.kind.phase() == phase)
             .count()
             .try_into()
             .unwrap_or(u64::MAX)
@@ -265,7 +262,7 @@ impl TaskQueue {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::domain::sync::task::{Entity, TaskPriority};
+    use crate::domain::sync::task::{Entity, RunIdentity, TaskPriority};
 
     fn all_phases() -> Vec<TaskPhase> {
         TaskPhase::iter().collect()
@@ -273,8 +270,10 @@ mod tests {
 
     fn discovery_task(session: Uuid) -> NewTask {
         NewTask {
-            session_id: session,
-            tenant_id: Uuid::nil(),
+            run: RunIdentity {
+                session_id: session,
+                tenant_id: Uuid::nil(),
+            },
             kind: TaskKind::Discover,
             entity_id: None,
             priority: TaskPriority::NORMAL,
@@ -284,8 +283,10 @@ mod tests {
 
     fn refinement_task(session: Uuid, entity_id: &str, priority: TaskPriority) -> NewTask {
         NewTask {
-            session_id: session,
-            tenant_id: Uuid::nil(),
+            run: RunIdentity {
+                session_id: session,
+                tenant_id: Uuid::nil(),
+            },
             kind: TaskKind::Refine(Entity::Issue),
             entity_id: Some(entity_id.to_owned()),
             priority,
@@ -295,8 +296,10 @@ mod tests {
 
     fn lane_task(session: Uuid, tenant: Uuid, entity: Entity, entity_id: &str) -> NewTask {
         NewTask {
-            session_id: session,
-            tenant_id: tenant,
+            run: RunIdentity {
+                session_id: session,
+                tenant_id: tenant,
+            },
             kind: TaskKind::Refine(entity),
             entity_id: Some(entity_id.to_owned()),
             priority: TaskPriority::NORMAL,

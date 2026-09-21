@@ -13,10 +13,9 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use super::queue::TaskQueue;
-use super::task::{ExtractionTask, Lane, NewTask, TaskKind, TaskPhase, TaskPriority};
+use super::task::{ExtractionTask, Lane, NewTask, RunIdentity, TaskKind, TaskPhase, TaskPriority};
 use super::worker::{Worker, WorkerContext, WorkerDispatcher};
 use crate::domain::error::DomainError;
 
@@ -118,8 +117,7 @@ struct TaskOutcome {
 pub struct RepoPhaseRunner {
     queue: Arc<TaskQueue>,
     dispatcher: Arc<WorkerDispatcher>,
-    session_id: Uuid,
-    tenant_id: Uuid,
+    run: RunIdentity,
     max_concurrent_tasks: usize,
     cancel: CancellationToken,
     progress: Arc<AtomicU8>,
@@ -129,8 +127,7 @@ impl RepoPhaseRunner {
     #[must_use]
     pub fn new(
         workers: Vec<Arc<dyn Worker>>,
-        session_id: Uuid,
-        tenant_id: Uuid,
+        run: RunIdentity,
         max_concurrent_tasks: std::num::NonZeroUsize,
         cancel: CancellationToken,
         progress: Arc<AtomicU8>,
@@ -142,8 +139,7 @@ impl RepoPhaseRunner {
         Self {
             queue: Arc::new(TaskQueue::new()),
             dispatcher: Arc::new(dispatcher),
-            session_id,
-            tenant_id,
+            run,
             max_concurrent_tasks: max_concurrent_tasks.get(),
             cancel,
             progress,
@@ -178,8 +174,9 @@ impl RepoPhaseRunner {
     fn estimate_permille(&self) -> u64 {
         let phase_counts = |phase| {
             (
-                self.queue.count_for_phase(self.session_id, phase),
-                self.queue.remaining_count_for_phase(self.session_id, phase),
+                self.queue.count_for_phase(self.run.session_id, phase),
+                self.queue
+                    .remaining_count_for_phase(self.run.session_id, phase),
             )
         };
 
@@ -208,8 +205,7 @@ impl RepoPhaseRunner {
     /// Seed the Discovery task and drain every phase in order.
     pub async fn run(&self) -> RunReport {
         self.queue.enqueue_task(&NewTask {
-            session_id: self.session_id,
-            tenant_id: self.tenant_id,
+            run: self.run,
             kind: TaskKind::Discover,
             entity_id: None,
             priority: TaskPriority::NORMAL,
@@ -253,7 +249,7 @@ impl RepoPhaseRunner {
             self.publish_progress();
 
             let saturated = in_flight.len() >= self.max_concurrent_tasks
-                || (self.queue.pending_count(self.session_id) >= BACKPRESSURE_HIGH
+                || (self.queue.pending_count(self.run.session_id) >= BACKPRESSURE_HIGH
                     && !in_flight.is_empty());
             if saturated {
                 if let Some(outcome) = in_flight.join_next().await {
@@ -289,9 +285,9 @@ impl RepoPhaseRunner {
     ) -> Option<ExtractionTask> {
         for step in 0..Lane::ALL.len() {
             let lane = Lane::ALL[(*next_lane + step) % Lane::ALL.len()];
-            if let Some(task) = self
-                .queue
-                .claim_next_task_in_lane(self.session_id, phases, lane)
+            if let Some(task) =
+                self.queue
+                    .claim_next_task_in_lane(self.run.session_id, phases, lane)
             {
                 *next_lane = (*next_lane + step + 1) % Lane::ALL.len();
                 return Some(task);
