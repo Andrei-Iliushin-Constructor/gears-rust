@@ -8,7 +8,12 @@
 //! work.
 //!
 //! Workers pull work via [`TaskQueue::claim_next_task_in`]; there are no
-//! leases, heartbeats, or crash recovery. Operations are O(1) or O(log n):
+//! leases, heartbeats, or crash recovery, which is what PRD
+//! `cpt-cf-github-mirror-fr-session-resume` asks for: recovery granularity is
+//! the repository phase, not the task. A process that dies mid-phase loses its
+//! queue, and the next run re-derives the work from the sweep watermark, the
+//! stored `ETag`s and the fingerprint gate rather than from a persisted task
+//! row. Operations are O(1) or O(log n):
 //! enqueue de-duplicates through a key index, and pending tasks are held in a
 //! per-`(session, phase)` ordered index so claims never scan the work set.
 
