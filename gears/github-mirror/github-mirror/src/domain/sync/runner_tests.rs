@@ -1,5 +1,5 @@
 use std::num::NonZeroUsize;
-use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -8,8 +8,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{
-    DISCOVERY_SPAN, LISTING_BASE, LISTING_SPAN, REFINE_BASE, REFINE_SPAN, RepoPhaseRunner,
-    TRANSIENT_RETRIES, TRANSIENT_RETRY_DELAY, VERIFY_BASE, ramp,
+    BACKPRESSURE_HIGH, DISCOVERY_SPAN, LISTING_BASE, LISTING_SPAN, REFINE_BASE, REFINE_SPAN,
+    RepoPhaseRunner, TRANSIENT_RETRIES, TRANSIENT_RETRY_DELAY, VERIFY_BASE, ramp,
 };
 use crate::domain::error::DomainError;
 use crate::domain::sync::task::{
@@ -242,4 +242,283 @@ async fn a_cancelled_run_does_not_retry_a_transient_error() {
     assert_eq!(worker.attempts(), [0], "no retry once the run is cancelled");
     assert_eq!(report.failures.len(), 1);
     assert!(report.cancelled);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Event {
+    Started {
+        kind: TaskKind,
+        in_flight: usize,
+        pending: u64,
+        after_cancel: bool,
+    },
+    Finished(TaskKind),
+}
+
+/// A worker that plays the whole engine: Discovery seeds two Index tasks,
+/// each Index task seeds `refines_per_index` Refine tasks, and a chosen
+/// Refine task may seed a Verify task or cancel the run.
+struct ScriptedWorker {
+    refines_per_index: usize,
+    verify_from: Option<&'static str>,
+    cancel_from: Option<(&'static str, CancellationToken)>,
+    pause: Option<Duration>,
+    in_flight: AtomicUsize,
+    max_in_flight: AtomicUsize,
+    events: Mutex<Vec<Event>>,
+}
+
+impl ScriptedWorker {
+    fn new(refines_per_index: usize, pause: Option<Duration>) -> Self {
+        Self {
+            refines_per_index,
+            verify_from: None,
+            cancel_from: None,
+            pause,
+            in_flight: AtomicUsize::new(0),
+            max_in_flight: AtomicUsize::new(0),
+            events: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn events(&self) -> Vec<Event> {
+        self.events.lock().unwrap().clone()
+    }
+
+    fn seed(ctx: &WorkerContext, task: &ExtractionTask, kind: TaskKind, entity_id: Option<String>) {
+        ctx.queue.enqueue_task(&NewTask {
+            run: task.run,
+            kind,
+            entity_id,
+            priority: TaskPriority::NORMAL,
+            attempt: 0,
+        });
+    }
+}
+
+#[async_trait]
+impl Worker for ScriptedWorker {
+    fn handles(&self, _kind: TaskKind) -> bool {
+        true
+    }
+
+    async fn execute(&self, ctx: &WorkerContext, task: &ExtractionTask) -> Result<(), DomainError> {
+        let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_in_flight.fetch_max(in_flight, Ordering::SeqCst);
+        self.events.lock().unwrap().push(Event::Started {
+            kind: task.kind,
+            in_flight,
+            pending: ctx.queue.pending_count(task.run.session_id),
+            after_cancel: ctx.cancel.is_cancelled(),
+        });
+
+        match task.kind {
+            TaskKind::Discover => {
+                Self::seed(ctx, task, TaskKind::Index(Family::Issues), None);
+                Self::seed(ctx, task, TaskKind::Index(Family::PullRequests), None);
+            }
+            TaskKind::Index(family) => {
+                let entity = match family {
+                    Family::PullRequests => Entity::PullRequest,
+                    _ => Entity::Issue,
+                };
+                for n in 0..self.refines_per_index {
+                    Self::seed(
+                        ctx,
+                        task,
+                        TaskKind::Refine(entity),
+                        Some(format!("{family:?}-{n}")),
+                    );
+                }
+            }
+            TaskKind::Refine(_) => {
+                let id = task.entity_id.as_deref().unwrap_or_default();
+                if self.verify_from == Some(id) {
+                    Self::seed(
+                        ctx,
+                        task,
+                        TaskKind::Verify(Entity::Issue),
+                        Some("1".to_owned()),
+                    );
+                }
+                if let Some((at, cancel)) = &self.cancel_from
+                    && *at == id
+                {
+                    cancel.cancel();
+                }
+            }
+            TaskKind::Verify(_) => {}
+        }
+
+        match self.pause {
+            Some(pause) => tokio::time::sleep(pause).await,
+            None => tokio::task::yield_now().await,
+        }
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        self.events.lock().unwrap().push(Event::Finished(task.kind));
+        Ok(())
+    }
+}
+
+fn runner_over(
+    worker: Arc<ScriptedWorker>,
+    lanes: usize,
+    cancel: CancellationToken,
+) -> RepoPhaseRunner {
+    RepoPhaseRunner::new(
+        vec![worker],
+        RunIdentity {
+            session_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+        },
+        NonZeroUsize::new(lanes).unwrap(),
+        cancel,
+        Arc::new(AtomicU8::new(0)),
+    )
+}
+
+fn position(events: &[Event], wanted: impl Fn(&Event) -> bool) -> Vec<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| wanted(event))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn starts_of(events: &[Event], phase: TaskPhase) -> Vec<usize> {
+    position(
+        events,
+        |event| matches!(event, Event::Started { kind, .. } if kind.phase() == phase),
+    )
+}
+
+fn ends_of(events: &[Event], phase: TaskPhase) -> Vec<usize> {
+    position(
+        events,
+        |event| matches!(event, Event::Finished(kind) if kind.phase() == phase),
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn phases_drain_in_order_with_three_tasks_in_flight() {
+    let worker = Arc::new(ScriptedWorker {
+        verify_from: Some("Issues-0"),
+        ..ScriptedWorker::new(4, Some(Duration::from_millis(1)))
+    });
+    let runner = runner_over(Arc::clone(&worker), 3, CancellationToken::new());
+
+    let report = runner.run().await;
+
+    assert_eq!(report.tasks_done, 1 + 2 + 8 + 1, "{:?}", report.failures);
+    assert!(report.failures.is_empty());
+    assert!(!report.cancelled);
+    assert_eq!(runner.progress.load(Ordering::Relaxed), 100);
+    assert_eq!(
+        worker.max_in_flight.load(Ordering::SeqCst),
+        3,
+        "the refinement flood must use every lane"
+    );
+
+    let events = worker.events();
+    let discovery_done = ends_of(&events, TaskPhase::Discovery)[0];
+    assert!(
+        starts_of(&events, TaskPhase::Indexing)
+            .iter()
+            .all(|&start| start > discovery_done),
+        "nothing is indexed before discovery has finished"
+    );
+    let last_refine_done = *ends_of(&events, TaskPhase::Refinement).last().unwrap();
+    assert!(
+        starts_of(&events, TaskPhase::Verification)
+            .iter()
+            .all(|&start| start > last_refine_done),
+        "verification waits for every refinement, even one seeded mid-way"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn above_the_backlog_bound_the_runner_claims_one_task_at_a_time() {
+    let per_index = usize::try_from(BACKPRESSURE_HIGH).unwrap().div_euclid(2) + 1;
+    let worker = Arc::new(ScriptedWorker::new(per_index, None));
+    let runner = runner_over(Arc::clone(&worker), 3, CancellationToken::new());
+
+    let report = runner.run().await;
+
+    assert_eq!(
+        report.tasks_done,
+        1 + 2 + 2 * u64::try_from(per_index).unwrap()
+    );
+    let starts: Vec<(u64, usize)> = worker
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::Started {
+                pending, in_flight, ..
+            } => Some((pending, in_flight)),
+            Event::Finished(_) => None,
+        })
+        .collect();
+    let throttled: Vec<&(u64, usize)> = starts
+        .iter()
+        .filter(|(pending, _)| *pending >= BACKPRESSURE_HIGH)
+        .collect();
+    assert!(
+        throttled.len() >= 2,
+        "the backlog must have crossed the bound"
+    );
+    assert!(
+        throttled.iter().all(|(_, in_flight)| *in_flight == 1),
+        "while the backlog is above the bound only one task runs at a time"
+    );
+    assert!(
+        starts.iter().any(|(_, in_flight)| *in_flight == 3),
+        "once the backlog drains the lanes fill up again"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_run_stops_claiming_and_lets_running_tasks_finish() {
+    let cancel = CancellationToken::new();
+    let worker = Arc::new(ScriptedWorker {
+        verify_from: Some("Issues-0"),
+        cancel_from: Some(("Issues-1", cancel.clone())),
+        ..ScriptedWorker::new(4, Some(Duration::from_millis(1)))
+    });
+    let runner = runner_over(Arc::clone(&worker), 3, cancel);
+
+    let report = runner.run().await;
+
+    assert!(report.cancelled);
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    let events = worker.events();
+    let started = starts_of(&events, TaskPhase::Refinement).len()
+        + starts_of(&events, TaskPhase::Indexing).len()
+        + 1;
+    assert_eq!(
+        report.tasks_done,
+        u64::try_from(started).unwrap(),
+        "every task that started was allowed to finish"
+    );
+    assert!(
+        report.tasks_done < 1 + 2 + 8,
+        "the rest of the refinements were never claimed"
+    );
+    let after_cancel = position(&events, |event| {
+        matches!(
+            event,
+            Event::Started {
+                after_cancel: true,
+                ..
+            }
+        )
+    });
+    assert!(
+        after_cancel.len() < 3,
+        "only tasks already spawned alongside the cancelling one may still start: {after_cancel:?}"
+    );
+    assert!(
+        starts_of(&events, TaskPhase::Verification).is_empty(),
+        "a cancelled run never reaches verification"
+    );
 }
