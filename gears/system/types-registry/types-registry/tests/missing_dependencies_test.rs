@@ -14,10 +14,9 @@ use uuid::Uuid;
 
 use types_registry::api::rest::dto::OperationDto;
 use types_registry::config::TypesRegistryConfig;
-use types_registry::domain::admission::{Candidate, NullDispatch, SubmitRequest};
+use types_registry::domain::admission::{Candidate, SubmitRequest};
 use types_registry::domain::enums::{OperationItemStatus, OperationKind, OperationStatus};
 use types_registry::domain::policy::RegistrationPolicy;
-use types_registry::domain::registry_service::AdmissionMode;
 use types_registry::domain::registry_service::{EntityKey, RegistryService};
 use types_registry::infra::outbox::AdmissionHandler;
 use types_registry::infra::storage::entity::operation_item;
@@ -37,8 +36,7 @@ fn registry(db: &Arc<DBProvider<DbError>>) -> Arc<RegistryService> {
         common::stores(),
         RegistrationPolicy::default(),
         TypesRegistryConfig::default(),
-        Arc::new(NullDispatch),
-        AdmissionMode::Outbox,
+        common::no_dispatch(),
         common::metrics(),
     ))
 }

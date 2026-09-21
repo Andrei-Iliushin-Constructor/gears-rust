@@ -61,38 +61,16 @@ impl TryFrom<OperationItemStatus> for TerminalStatus {
     }
 }
 
-/// Outbox delivery outcome, counted for stall alerts: rising `retried` with flat
-/// `dead_lettered` indicates repeated delivery without progress.
+/// Outbox delivery outcome, counted for stall alerts: `retried` climbing is
+/// repeated delivery without progress.
 #[domain_model]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeliveryOutcome {
-    /// A transient failure; the message goes back to the queue.
+    /// A transient failure, or a terminalization that did not land; the message
+    /// goes back to the queue.
     Retried,
-    /// Abandoned permanently — a bad payload, a permanent failure, or the attempt
-    /// budget exhausted.
+    /// The envelope named no operation, so it is dead-lettered for an operator.
     DeadLettered,
-}
-
-/// Startup-recovery scan outcome. The scan retries a failing store forever, so
-/// there is no "gave up" value: the alert is `retried` climbing while `completed`
-/// never arrives.
-#[domain_model]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RecoveryOutcome {
-    /// One attempt failed; it resumes from its last cursor after a backoff.
-    Retried,
-    /// The backlog was paged to the end.
-    Completed,
-}
-
-impl RecoveryOutcome {
-    /// Stable snake-case label value, independent of `Debug`.
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Retried => "retried",
-            Self::Completed => "completed",
-        }
-    }
 }
 
 impl DeliveryOutcome {
@@ -162,15 +140,10 @@ pub trait AdmissionMetrics: std::fmt::Debug + Send + Sync {
     fn observe_operation_duration(&self, elapsed: Duration);
 
     /// `types_registry_admission_deliveries_total{outcome}` — one increment per
-    /// outbox delivery that did not succeed. Successful deliveries are already
-    /// covered by the per-candidate and duration instruments.
+    /// delivery that did not succeed as a transport. A delivery that terminalizes
+    /// its operation, a system failure included, did succeed and is covered by the
+    /// per-candidate and duration instruments.
     fn admission_delivery(&self, outcome: DeliveryOutcome);
-
-    /// `types_registry_admission_recovery_scans_total{outcome}` — one increment per
-    /// startup-recovery attempt that ended, whether it finished the backlog or
-    /// failed and will retry. Recovery runs in the background, so this is the only
-    /// signal that a pod came up without re-driving its stranded operations.
-    fn recovery_scan(&self, outcome: RecoveryOutcome);
 }
 
 /// Instruments that count nothing, for a caller with no meter to inject.
@@ -194,6 +167,4 @@ impl AdmissionMetrics for NoopMetrics {
     fn observe_operation_duration(&self, _elapsed: Duration) {}
 
     fn admission_delivery(&self, _outcome: DeliveryOutcome) {}
-
-    fn recovery_scan(&self, _outcome: RecoveryOutcome) {}
 }

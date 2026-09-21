@@ -27,9 +27,7 @@ use types_registry::domain::enums::{
     DependencyKind, EntityKind, LifecycleStatus, OperationItemStatus, OperationKind,
     OwnershipScope, Plane,
 };
-use types_registry::domain::ports::{
-    ItemSuccess, NewEntity, NewOperation, NewOperationItem, RecoveryCursor,
-};
+use types_registry::domain::ports::{ItemSuccess, NewEntity, NewOperation, NewOperationItem};
 use types_registry::infra::storage::entity::dependency;
 use types_registry::infra::storage::repo::{
     DependencyRepo, EntityRepo, OperationRepo, PageRequest, VersionFamilyRepo,
@@ -923,8 +921,8 @@ async fn the_same_repository_methods_run_inside_a_transaction() {
 }
 
 #[tokio::test]
-async fn abandonment_fails_every_undecided_item_of_one_operation_and_no_other() {
-    const ABANDONED: &str = r#"{"reason":"admission_abandoned"}"#;
+async fn a_system_failure_fails_every_undecided_item_of_one_operation_and_no_other() {
+    const SYSTEM_FAILURE: &str = r#"{"reason":"system_failure"}"#;
 
     let db = test_db().await;
     let conn = db.conn().expect("conn");
@@ -940,7 +938,7 @@ async fn abandonment_fails_every_undecided_item_of_one_operation_and_no_other() 
             plane: Plane::Platform,
             tenant_id: None,
             principal_id: Uuid::nil(),
-            idempotency_key: "abandon-batch".to_owned(),
+            idempotency_key: "system-failure-batch".to_owned(),
             idempotency_scope_hash: ScopeHash::from_stored(vec![0x01; 32]).expect("32 bytes"),
             request_fingerprint: RequestFingerprint::from_stored(vec![0x02; 32]).expect("32 bytes"),
             now: NOW,
@@ -990,7 +988,7 @@ async fn abandonment_fails_every_undecided_item_of_one_operation_and_no_other() 
         &conn,
         &scope,
         operation.id,
-        ABANDONED.to_owned(),
+        SYSTEM_FAILURE.to_owned(),
         NOW,
     )
     .await
@@ -1015,8 +1013,8 @@ async fn abandonment_fails_every_undecided_item_of_one_operation_and_no_other() 
             assert_eq!(item.status, OperationItemStatus::Failed, "{}", item.gts_id);
             assert_eq!(
                 item.error_payload.as_deref(),
-                Some(ABANDONED),
-                "{}: every failed item carries the one abandonment reason",
+                Some(SYSTEM_FAILURE),
+                "{}: every failed item carries the one system-failure reason",
                 item.gts_id,
             );
         }
@@ -1026,88 +1024,10 @@ async fn abandonment_fails_every_undecided_item_of_one_operation_and_no_other() 
         &conn,
         &scope,
         operation.id,
-        ABANDONED.to_owned(),
+        SYSTEM_FAILURE.to_owned(),
         NOW,
     )
     .await
-    .expect("second abandonment");
-    assert_eq!(again, 0, "the guard makes a repeated abandonment a no-op");
-}
-
-#[tokio::test]
-async fn nonterminal_paging_walks_every_operation_once_across_pages() {
-    const OPERATIONS: usize = 5;
-    const PAGE: u64 = 2;
-
-    let db = test_db().await;
-    let conn = db.conn().expect("conn");
-    let scope = allow_all();
-
-    let mut expected: Vec<Uuid> = Vec::with_capacity(OPERATIONS);
-    for n in 0..OPERATIONS {
-        let operation = OperationRepo::insert(
-            &conn,
-            &scope,
-            NewOperation {
-                id: Uuid::new_v4(),
-                kind: OperationKind::Registration,
-                dry_run: false,
-                plane: Plane::Platform,
-                tenant_id: None,
-                principal_id: Uuid::nil(),
-                idempotency_key: format!("recover-{n}"),
-                idempotency_scope_hash: ScopeHash::from_stored(vec![0x01; 32]).expect("32 bytes"),
-                request_fingerprint: RequestFingerprint::from_stored(vec![0x02; 32])
-                    .expect("32 bytes"),
-                now: NOW,
-            },
-        )
-        .await
-        .expect("insert operation");
-        expected.push(operation.id);
-    }
-
-    expected.sort_unstable();
-
-    let mut walked: Vec<Uuid> = Vec::new();
-    let mut after = None;
-    loop {
-        let page = OperationRepo::nonterminal_page(&conn, &scope, after, PAGE)
-            .await
-            .expect("read a recovery page");
-        if page.is_empty() {
-            break;
-        }
-        assert!(
-            u64::try_from(page.len()).expect("small page") <= PAGE,
-            "a page must not exceed the limit it was asked for: {page:?}",
-        );
-        walked.extend(page.cursors().iter().map(|cursor| cursor.id));
-        // The page says whether another follows; the walk derives nothing.
-        match page.next() {
-            Some(cursor) => after = Some(cursor),
-            None => break,
-        }
-    }
-
-    assert_eq!(
-        walked, expected,
-        "the scan must visit every non-terminal operation exactly once, in cursor order",
-    );
-
-    let past_the_end = OperationRepo::nonterminal_page(
-        &conn,
-        &scope,
-        walked.last().copied().map(|id| RecoveryCursor {
-            created_at: NOW,
-            id,
-        }),
-        PAGE,
-    )
-    .await
-    .expect("read past the end");
-    assert!(
-        past_the_end.is_empty(),
-        "the cursor must exclude the row it names, or boot re-reads it forever: {past_the_end:?}",
-    );
+    .expect("second failure write");
+    assert_eq!(again, 0, "the guard makes a repeated failure write a no-op");
 }

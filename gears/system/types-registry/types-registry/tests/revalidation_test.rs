@@ -36,9 +36,7 @@ use types_registry::domain::policy::RegistrationPolicy;
 use types_registry::domain::ports::{
     CurrentSchemaCas, CurrentTypeSchemaRow, EntityRow, NewCurrentTypeSchema, Stores, commit_write,
 };
-use types_registry::domain::registry_service::{
-    AdmissionMode, EntityKey, RegistryService, ServiceError,
-};
+use types_registry::domain::registry_service::{EntityKey, RegistryService, ServiceError};
 use types_registry::infra::storage::repo::{
     CoordinationStateRepo, EntityRepo, OperationRepo, TypeSchemaRepo,
 };
@@ -1334,7 +1332,6 @@ fn service(db: &Provider) -> RegistryService {
         RegistrationPolicy::default(),
         TypesRegistryConfig::default(),
         dispatch,
-        AdmissionMode::Inline,
         common::metrics(),
     )
 }

@@ -129,8 +129,7 @@ pub struct Accepted {
     /// under its `Idempotency-Key` with a matching fingerprint.
     pub replayed: bool,
     /// The operation's status as of this call's return — `pending` for a fresh
-    /// acceptance, the stored value for a replay, and `completed` once inline
-    /// admission has run (T21 removes that last case along with inline admission).
+    /// acceptance, the stored value for a replay.
     ///
     /// Carried rather than left to the caller to look up: the REST layer needs it for
     /// the receipt, and re-reading the row it has just written cost a second snapshot
@@ -140,9 +139,8 @@ pub struct Accepted {
 
 impl Accepted {
     /// `true` when the operation will not change again. The REST layer answers `200`
-    /// for a terminal replay and `202` otherwise (SPEC §8.1), and inline admission is
-    /// skipped for one — derived from [`Self::status`] rather than stored beside it,
-    /// so the two cannot disagree.
+    /// for a terminal replay and `202` otherwise (SPEC §8.1) — derived from
+    /// [`Self::status`] rather than stored beside it, so the two cannot disagree.
     #[must_use]
     pub fn terminal(&self) -> bool {
         self.status == OperationStatus::Completed
@@ -174,24 +172,7 @@ pub trait OperationDispatch: Send + Sync {
     async fn enqueue(&self, tx: &DbTx<'_>, operation_id: Uuid) -> anyhow::Result<()>;
 
     /// Wake the consumer after acceptance commits. This is only a latency hint:
-    /// durable delivery still comes from the enqueued record and recovery.
-    /// Inline dispatchers need no wakeup. Must not perform blocking work.
+    /// durable delivery comes from the enqueued record and its lease. Must not
+    /// perform blocking work.
     fn committed(&self, _operation_id: Uuid) {}
-}
-
-/// A dispatcher that enqueues nothing.
-///
-/// Used by the two paths that admit **inline**: seeding, which SPEC §8.1 makes
-/// permanent (*"types-registry accepts and admits it itself, inline, with no
-/// outbox"*), and API traffic until T21 starts the outbox worker. The dispatch call
-/// still happens inside the acceptance transaction, so the shape T21 needs is
-/// already in place and swapping the implementation is the whole change.
-#[domain_model]
-pub struct NullDispatch;
-
-#[async_trait::async_trait]
-impl OperationDispatch for NullDispatch {
-    async fn enqueue(&self, _tx: &DbTx<'_>, _operation_id: Uuid) -> anyhow::Result<()> {
-        Ok(())
-    }
 }

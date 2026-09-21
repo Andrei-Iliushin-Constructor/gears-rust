@@ -72,22 +72,21 @@ Later phases widen that path without reshaping it.
 
 No decision from SPEC §3 changes. Only the order does.
 
-### P2. Types-registry seeds by invoking the admission worker directly
+### P2. Types-registry seeds itself through its own outbox
 
 types-registry owns the `toolkit-gts` base types and its own control-plane types (DESIGN:
 *"`toolkit-gts` base types default to `types-registry` ownership"*). It cannot register
 those through a client — it *is* the registry, same process, same database.
 
-It resolves itself from §8.1: the worker is a plain function of `(operation_id, runner)`,
-not a task. So `init()` creates the operations and calls the worker **inline**, with no
-outbox and no barrier. This is not a privileged second path; it is the same function the
-outbox handler calls. Seeding is deterministic and complete before the client is published.
+`init()` collects one deterministic seed batch and submits it like any other request, so
+acceptance and enqueue share a transaction and no seed operation exists without a driver.
+It then awaits that operation and requires every item `succeeded` or `unchanged` before
+publishing the client; a `failed` item fails boot. Seeding is therefore deterministic and
+complete at publication, which is what makes the §13 no-polling rule satisfiable. At T24,
+P18 extends the seed set to all process-linked inventory plus `cfg.entities`; per-gear
+selection is deferred to P1.
 
-This is also what makes the §13 no-polling rule satisfiable, so it is the same property
-being exploited twice. At T24, P18 extends this inline seed set to all process-linked
-inventory plus `cfg.entities`; per-gear selection is deferred to P1.
-
-### P3. The outbox worker starts at the end of types-registry's `init()`
+### P3. The outbox worker starts inside types-registry's `init()`, before seeding
 
 Verified phase order (`libs/toolkit/src/runtime/host_runtime.rs:6-15`):
 
@@ -108,9 +107,10 @@ with correct cancellation wiring and stops from the stateful `stop`. `init` orde
 topological and types-registry is a declared dependency of its consumers, so its worker is
 live before any consumer's `init()` body runs.
 
-**Order inside types-registry's `init()`:** repositories → inline seeding of
-the seed set (P2/P18) → start the outbox worker → publish the client. Seeding precedes the
-worker start and enqueues nothing, so seed operations cannot be leased concurrently. There is
+**Order inside types-registry's `init()`:** repositories → start the outbox worker →
+seed the seed set (P2/P18) → await its items → publish the client. The worker starts
+first because acceptance enqueues in its own transaction; publication requires every
+seed item `succeeded` or `unchanged`, and a `failed` one fails boot. There is
 no snapshot-load step: per P6 seeding builds its own transient store like any other
 admission, and reads go to the database.
 
@@ -161,7 +161,7 @@ process-wide pull with a per-gear push that works across processes."*
 - **`cfg.entities` is outside P4's scope.** It carries operator-controlled identities whose
   GTS identifiers are deployment-specific and cannot be expressed as gear-owned inventory items
   (e.g. the platform-root tenant type). These are seeded into the database at startup through
-  the same inline admission path as types-registry's own inventory (T24). They are not
+  the same outbox admission path as types-registry's own inventory (T24). They are not
   reconciled through the SDK — no gear owns them; the deployment operator does.
 
 **This is where registrant-side retry becomes real** — and it lives in the SDK helper. The
@@ -705,12 +705,13 @@ T28–T30 keep their IDs.
 
 - **Phase 5: T19 → T20 → T20a → T21 → Checkpoint 5.** T20a exposes single/batch
   deletion with dry run on all mutations (body for registration/batch deletion, query for
-  single deletion). T21 adds outbox submission; seeding remains inline (P3).
+  single deletion). T21 adds outbox submission for database-backed mutations; T24 later
+  moves startup seeding onto the same path (P3).
 - **Phase 6: T22a → T23 → Checkpoint 6.** (T22 deferred by P18.) T22a adds `:batchGet` and bounded,
   content-free discovery with cursors and `$select` refusal. REST and SDK follow SPEC
   §10.1/§10.2 (`items`, `key`, `EntityPage`).
 
-T20a works with inline admission. T21 depends on T20; scheduling it after T20a enables
+T20a predates T21. T21 depends on T20; scheduling it after T20a enables
 REST-to-outbox tests before Checkpoint 5. T22a needs database reads, v2 routes and T20a's
 mutation docs for the seven-route completeness check. T23 needs T4 reads and T21 dispatch
 for explicit-document reconciliation, and follows T22a by execution order. T22 is no longer

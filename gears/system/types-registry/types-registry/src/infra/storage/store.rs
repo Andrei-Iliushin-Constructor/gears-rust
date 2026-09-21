@@ -22,8 +22,8 @@ use crate::domain::ports::{
     DependencyStore, EdgeSide, EntityEdge, EntityRow, EntityStore, EntityWriteOrderStore,
     InstanceStore, ItemSuccess, NewCurrentInstance, NewCurrentTypeSchema, NewEntity,
     NewInstanceRevision, NewOperation, NewOperationItem, NewRevision, OperationItemRow,
-    OperationRow, OperationStore, RecoveryCursor, RecoveryPage, ReverseImpact, TypeSchemaStore,
-    VersionFamilyRow, VersionFamilyStore,
+    OperationRow, OperationStore, ReverseImpact, TypeSchemaStore, VersionFamilyRow,
+    VersionFamilyStore,
 };
 
 use super::repo::{
@@ -302,16 +302,6 @@ impl OperationStore for Repos {
         OperationRepo::find_by_id(tx, scope, id).await
     }
 
-    async fn nonterminal_page(
-        &self,
-        tx: &DbTx<'_>,
-        scope: &AccessScope,
-        after: Option<RecoveryCursor>,
-        limit: u64,
-    ) -> Result<RecoveryPage, ScopeError> {
-        OperationRepo::nonterminal_page(tx, scope, after, limit).await
-    }
-
     async fn insert_operation(
         &self,
         tx: &DbTx<'_>,
@@ -360,14 +350,14 @@ impl OperationStore for Repos {
         OperationRepo::mark_completed(tx, scope, id, now).await
     }
 
-    async fn mark_abandoned(
+    async fn mark_system_failed(
         &self,
         tx: &DbTx<'_>,
         scope: &AccessScope,
         id: Uuid,
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError> {
-        OperationRepo::mark_abandoned(tx, scope, id, now).await
+        OperationRepo::mark_system_failed(tx, scope, id, now).await
     }
 
     async fn mark_item_succeeded(

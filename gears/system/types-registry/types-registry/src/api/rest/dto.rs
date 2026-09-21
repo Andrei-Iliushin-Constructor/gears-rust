@@ -571,7 +571,7 @@ pub struct OperationItemDto {
     pub resource_version: Option<i64>,
     /// The refusal as `{reason, message}`, when this candidate failed.
     /// `reason` is a stable machine-readable code; `message` is an explanation for humans.
-    /// Structured candidate or abandonment details.
+    /// Structured candidate or system-failure details.
     /// Compatibility messages include causes and schema locations where available.
     /// Clients must not parse `message` or depend on its wording.
     pub error: Option<serde_json::Value>,

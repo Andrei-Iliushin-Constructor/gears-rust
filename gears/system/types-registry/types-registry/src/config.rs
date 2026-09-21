@@ -131,7 +131,8 @@ pub struct WorkerSettings {
     pub operation_timeout: Duration,
     /// Revalidation attempts before failure; `1` allows no retry.
     pub max_revalidation_attempts: u32,
-    /// Admission attempts before terminalization and dead-lettering; `1` disables retries.
+    /// Admission attempts before remaining items are terminalized as `system_failure`
+    /// and the operation completes; `1` disables retries.
     pub max_delivery_attempts: u32,
 }
 
@@ -362,8 +363,8 @@ impl TypesRegistryConfig {
         }
         if self.worker.max_delivery_attempts == 0 {
             return Err(ConfigError::Worker(
-                "worker.max_delivery_attempts must be positive: 0 dead-letters every operation \
-                 without attempting it"
+                "worker.max_delivery_attempts must be positive: 0 terminalizes every \
+                 operation's items as system_failure without attempting them"
                     .to_owned(),
             ));
         }

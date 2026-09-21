@@ -281,7 +281,7 @@ async fn commit_prepared(
     // Short READ COMMITTED recheck/write transaction; `Arc` avoids cloning artifacts.
     // Retry lock contention: both paths re-read and rollback leaves nothing to undo.
     // Otherwise a CAS deadlock escapes `process_item` before `mark_completed`,
-    // leaving the operation `running` and items `pending` until recovery.
+    // leaving the operation `running` and items `pending` until redelivery.
     //
     // The stored precondition selects the commit, not candidate shape/declared kind.
     // Revisions bypass acceptance policy (SPEC §8.1 step 3), so their commit must

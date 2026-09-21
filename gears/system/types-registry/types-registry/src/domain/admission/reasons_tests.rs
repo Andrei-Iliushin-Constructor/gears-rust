@@ -15,7 +15,6 @@ use super::AdmissionFailureReason as Reason;
 fn known() -> Vec<Reason> {
     vec![
         Reason::ActivationWriteSetExceeded,
-        Reason::AdmissionAbandoned,
         Reason::AlreadyExists,
         Reason::BaselineUnresolvable,
         Reason::BlockedByDependency,
@@ -42,6 +41,7 @@ fn known() -> Vec<Reason> {
         Reason::RevalidationExhausted,
         Reason::StableDerivesFromMajorZero,
         Reason::StableRefsMajorZero,
+        Reason::SystemFailure,
         Reason::UnparsablePayload,
         Reason::UnreadableVersion,
         Reason::UnrecognizedPayload,
@@ -115,7 +115,6 @@ fn variant_name(reason: &Reason) -> &'static str {
     {
         match reason {
             Reason::ActivationWriteSetExceeded => "ActivationWriteSetExceeded",
-            Reason::AdmissionAbandoned => "AdmissionAbandoned",
             Reason::AlreadyExists => "AlreadyExists",
             Reason::BaselineUnresolvable => "BaselineUnresolvable",
             Reason::BlockedByDependency => "BlockedByDependency",
@@ -142,6 +141,7 @@ fn variant_name(reason: &Reason) -> &'static str {
             Reason::RevalidationExhausted => "RevalidationExhausted",
             Reason::StableDerivesFromMajorZero => "StableDerivesFromMajorZero",
             Reason::StableRefsMajorZero => "StableRefsMajorZero",
+            Reason::SystemFailure => "SystemFailure",
             Reason::UnparsablePayload => "UnparsablePayload",
             Reason::UnreadableVersion => "UnreadableVersion",
             Reason::UnrecognizedPayload => "UnrecognizedPayload",

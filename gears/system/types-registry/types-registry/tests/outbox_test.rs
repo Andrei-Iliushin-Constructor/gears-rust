@@ -5,24 +5,20 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::macros::datetime;
-use toolkit_db::outbox::{MessageResult, OutboxMessage};
+use toolkit_db::outbox::{MessageResult, OutboxHandle, OutboxMessage};
 use toolkit_db::{DBProvider, DbError};
 use toolkit_gts::gts_id;
-use tracing::instrument::WithSubscriber;
 use uuid::Uuid;
 
 use types_registry::config::TypesRegistryConfig;
-use types_registry::domain::admission::{
-    Candidate, NullDispatch, OperationDispatch, SubmitRequest,
-};
+use types_registry::domain::admission::{Candidate, OperationDispatch, SubmitRequest};
 use types_registry::domain::enums::{
     LifecycleStatus, OperationItemStatus, OperationKind, OperationStatus,
 };
 use types_registry::domain::policy::RegistrationPolicy;
-use types_registry::domain::ports::RecoveryCursor;
 use types_registry::domain::ports::Stores;
-use types_registry::domain::ports::metrics::{AdmissionMetrics, DeliveryOutcome, RecoveryOutcome};
-use types_registry::domain::registry_service::{AdmissionMode, EntityKey, RegistryService};
+use types_registry::domain::ports::metrics::{AdmissionMetrics, DeliveryOutcome};
+use types_registry::domain::registry_service::{EntityKey, RegistryService};
 use types_registry::infra::outbox::{AdmissionHandler, OutboxDispatch};
 
 mod common;
@@ -66,7 +62,6 @@ fn service_with(
         RegistrationPolicy::default(),
         TypesRegistryConfig::default(),
         dispatch,
-        AdmissionMode::Outbox,
         metrics(),
     ))
 }
@@ -96,6 +91,14 @@ const SENSITIVE_CAUSE: &str = "could not execute UPDATE on \
 
 const SENSITIVE_FRAGMENT: &str = "hunter2";
 
+/// Serializes the tests that read captured output: they share one subscriber.
+static LOG_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn capture() -> &'static common::CapturedLog {
+    static CAPTURE: std::sync::OnceLock<common::CapturedLog> = std::sync::OnceLock::new();
+    CAPTURE.get_or_init(common::CapturedLog::install_global)
+}
+
 fn service_with_operation_timeout(
     db: &Arc<DBProvider<DbError>>,
     ports: Arc<dyn Stores>,
@@ -108,8 +111,7 @@ fn service_with_operation_timeout(
         ports,
         RegistrationPolicy::default(),
         config,
-        Arc::new(NullDispatch),
-        AdmissionMode::Outbox,
+        Arc::new(common::NoDispatch),
         metrics(),
     ))
 }
@@ -118,7 +120,7 @@ fn service_recording_deliveries(
     db: &Arc<DBProvider<DbError>>,
     ports: Arc<dyn Stores>,
 ) -> (Arc<RegistryService>, Arc<common::RecordingDeliveryMetrics>) {
-    service_recording_with_dispatch(db, ports, Arc::new(NullDispatch))
+    service_recording_with_dispatch(db, ports, Arc::new(common::NoDispatch))
 }
 
 /// Recording instruments plus a real dispatch, for a test that needs both the
@@ -135,7 +137,6 @@ fn service_recording_with_dispatch(
         RegistrationPolicy::default(),
         TypesRegistryConfig::default(),
         dispatch,
-        AdmissionMode::Outbox,
         Arc::clone(&recorded) as Arc<dyn AdmissionMetrics>,
     ));
     (registry, recorded)
@@ -145,25 +146,17 @@ fn service_without_dispatch(
     db: &Arc<DBProvider<DbError>>,
     ports: Arc<dyn Stores>,
 ) -> Arc<RegistryService> {
-    service_with(db, ports, Arc::new(NullDispatch))
+    service_with(db, ports, Arc::new(common::NoDispatch))
 }
 
 async fn started(
     db: &Arc<DBProvider<DbError>>,
     ports: Arc<dyn Stores>,
-) -> (
-    Arc<RegistryService>,
-    types_registry::infra::outbox::Admission,
-) {
+) -> (Arc<RegistryService>, OutboxHandle) {
     let (registry, dispatch) = service(db, ports);
-    let handle = types_registry::infra::outbox::start(
-        db.db(),
-        &registry,
-        &dispatch,
-        &common::no_cancellation(),
-    )
-    .await
-    .expect("start the admission outbox");
+    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
+        .await
+        .expect("start the admission outbox");
     (registry, handle)
 }
 
@@ -301,7 +294,7 @@ async fn a_storage_failure_during_admission_is_retried() {
 }
 
 #[tokio::test]
-async fn a_transient_failure_on_the_last_attempt_is_dead_lettered() {
+async fn a_transient_failure_on_the_last_attempt_is_terminalized_and_acked() {
     let db = test_db_with_outbox().await;
     let registry = service_without_dispatch(&db, common::TestStores::failing_item_success());
     let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
@@ -315,9 +308,9 @@ async fn a_transient_failure_on_the_last_attempt_is_dead_lettered() {
         .admit_payload(accepted.operation_id.to_string().as_bytes(), LAST_ATTEMPT)
         .await;
     assert!(
-        matches!(result, MessageResult::Reject(_)),
-        "the same failure that is retried on attempt 0 must be rejected once the \
-         budget is spent, or the partition never advances: {result:?}",
+        matches!(result, MessageResult::Ok),
+        "the same failure that is retried on attempt 0 must terminalize and ack once \
+         the budget is spent, or the partition never advances: {result:?}",
     );
 
     let operation = registry
@@ -328,19 +321,19 @@ async fn a_transient_failure_on_the_last_attempt_is_dead_lettered() {
     assert_eq!(
         operation.status,
         OperationStatus::Completed,
-        "an abandoned operation must not stay non-terminal",
+        "a failed operation must not stay non-terminal",
     );
     assert_eq!(operation.items[0].status, OperationItemStatus::Failed);
     let error: Value = serde_json::from_str(
         operation.items[0]
             .error
             .as_deref()
-            .expect("an abandoned item carries a stored error payload"),
+            .expect("a failed item carries a stored error payload"),
     )
     .expect("the stored payload is JSON");
     assert_eq!(
         error["reason"],
-        json!("admission_abandoned"),
+        json!("system_failure"),
         "the reason must say admission stopped trying, not that the candidate was refused",
     );
 }
@@ -361,8 +354,9 @@ async fn an_admission_past_the_delivery_budget_is_terminalized_without_being_adm
         .admit_payload(accepted.operation_id.to_string().as_bytes(), PAST_BUDGET)
         .await;
     assert!(
-        matches!(result, MessageResult::Reject(_)),
-        "a delivery past the budget must leave the queue rather than admit again: {result:?}",
+        matches!(result, MessageResult::Ok),
+        "a delivery past the budget must terminalize and leave the queue rather than \
+         admit again: {result:?}",
     );
 
     let operation = registry
@@ -380,10 +374,10 @@ async fn an_admission_past_the_delivery_budget_is_terminalized_without_being_adm
         operation.items[0]
             .error
             .as_deref()
-            .expect("an abandoned item carries a stored error payload"),
+            .expect("a failed item carries a stored error payload"),
     )
     .expect("the stored payload is JSON");
-    assert_eq!(error["reason"], json!("admission_abandoned"));
+    assert_eq!(error["reason"], json!("system_failure"));
 
     assert!(
         registry
@@ -392,18 +386,6 @@ async fn an_admission_past_the_delivery_budget_is_terminalized_without_being_adm
             .expect("read")
             .is_none(),
         "the handler must not have run admission for a message past its budget",
-    );
-
-    let recovered = registry
-        .nonterminal_operation_page(None, 128)
-        .await
-        .expect("read the recovery page");
-    assert!(
-        !recovered
-            .cursors()
-            .iter()
-            .any(|cursor| cursor.id == accepted.operation_id),
-        "an operation abandoned past its budget must not be re-enqueued: {recovered:?}",
     );
 }
 
@@ -427,7 +409,7 @@ async fn a_delivery_past_the_budget_acks_an_operation_a_prior_pass_completed() {
         .await;
     assert!(
         matches!(result, MessageResult::Ok),
-        "a completed operation must be acked, not dead-lettered, past the budget: {result:?}",
+        "a completed operation must be acked without re-admission past the budget: {result:?}",
     );
 
     let operation = registry
@@ -458,9 +440,9 @@ async fn a_status_read_that_fails_past_the_budget_terminalizes_rather_than_retri
         .admit_payload(accepted.operation_id.to_string().as_bytes(), PAST_BUDGET)
         .await;
     assert!(
-        matches!(result, MessageResult::Reject(_)),
-        "an unreadable status past the budget must leave the queue, not come back to \
-         the same branch: {result:?}",
+        matches!(result, MessageResult::Ok),
+        "an unreadable status past the budget must terminalize and leave the queue, \
+         not come back to the same branch: {result:?}",
     );
 
     let unhooked = service_without_dispatch(&db, stores());
@@ -472,19 +454,19 @@ async fn a_status_read_that_fails_past_the_budget_terminalizes_rather_than_retri
     assert_eq!(
         operation.status,
         OperationStatus::Completed,
-        "rejecting the message is not enough; the operation must be terminalized too",
+        "acking the message is only allowed because the operation was terminalized",
     );
     assert_eq!(operation.items[0].status, OperationItemStatus::Failed);
     let error: Value = serde_json::from_str(
         operation.items[0]
             .error
             .as_deref()
-            .expect("an abandoned item carries a stored error payload"),
+            .expect("a failed item carries a stored error payload"),
     )
     .expect("the stored payload is JSON");
     assert_eq!(
         error["reason"],
-        json!("admission_abandoned"),
+        json!("system_failure"),
         "the item must say admission stopped, not that the candidate was refused",
     );
 }
@@ -512,27 +494,28 @@ async fn a_stalled_status_path_is_bounded_by_the_handler_as_a_whole() {
     let elapsed = started.elapsed();
 
     assert!(
-        matches!(result, MessageResult::Reject(_)),
-        "a stalled status path must still produce a terminal result: {result:?}",
+        matches!(result, MessageResult::Retry),
+        "a stall that terminalizes nothing must keep the message, past the budget or \
+         not: the operation is the only thing that can end it: {result:?}",
     );
     assert!(
         elapsed < LEASE,
         "the handler took {elapsed:?} of a {LEASE:?} lease on a path stalled for {STALL:?}; \
-         the read and the abandonment after it must share one deadline, or two individually \
+         the read and the failure write after it must share one deadline, or two individually \
          safe budgets spend the lease twice and `timeout_at` decides instead",
     );
 }
 
 #[tokio::test]
-async fn abandoning_after_a_slow_admission_stays_inside_the_delivery_deadline() {
+async fn a_failure_write_after_a_slow_admission_stays_inside_the_delivery_deadline() {
     const LEASE: std::time::Duration = std::time::Duration::from_secs(1);
     const SPENT_ADMITTING: std::time::Duration = std::time::Duration::from_millis(700);
-    const ABANDON_STALL: std::time::Duration = std::time::Duration::from_millis(500);
+    const WRITE_STALL: std::time::Duration = std::time::Duration::from_millis(500);
 
     let db = test_db_with_outbox().await;
     let registry = service_with_operation_timeout(
         &db,
-        common::TestStores::slow_admission_then_stalled_abandon(SPENT_ADMITTING, ABANDON_STALL),
+        common::TestStores::slow_admission_then_stalled_failure_write(SPENT_ADMITTING, WRITE_STALL),
         LEASE,
     );
     let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
@@ -546,8 +529,9 @@ async fn abandoning_after_a_slow_admission_stays_inside_the_delivery_deadline() 
         .admit_payload(accepted.operation_id.to_string().as_bytes(), LAST_ATTEMPT)
         .await;
     assert!(
-        matches!(result, MessageResult::Reject(_)),
-        "a failure on the last attempt must be dead-lettered: {result:?}",
+        matches!(result, MessageResult::Retry),
+        "a failure write cut off by the deadline leaves the operation non-terminal, so \
+         the message must stay deliverable: {result:?}",
     );
 
     let unhooked = service_without_dispatch(&db, stores());
@@ -559,22 +543,22 @@ async fn abandoning_after_a_slow_admission_stays_inside_the_delivery_deadline() 
     assert_eq!(
         operation.status,
         OperationStatus::Pending,
-        "the abandonment write must have been cut off by the deadline the delivery started \
+        "the failure write must have been cut off by the deadline the delivery started \
          with; reaching a terminal status here means it ran on a budget measured from when \
          admission gave up, which is lease the delivery no longer had",
     );
 }
 
 #[tokio::test]
-async fn an_overrunning_admission_is_cut_off_with_lease_left_to_abandon_it() {
+async fn an_overrunning_admission_is_cut_off_with_lease_left_to_fail_it() {
     const LEASE: std::time::Duration = std::time::Duration::from_secs(2);
     const SPENT_ADMITTING: std::time::Duration = std::time::Duration::from_millis(1600);
-    const ABANDON_STALL: std::time::Duration = std::time::Duration::from_millis(300);
+    const WRITE_STALL: std::time::Duration = std::time::Duration::from_millis(300);
 
     let db = test_db_with_outbox().await;
     let registry = service_with_operation_timeout(
         &db,
-        common::TestStores::slow_admission_then_stalled_abandon(SPENT_ADMITTING, ABANDON_STALL),
+        common::TestStores::slow_admission_then_stalled_failure_write(SPENT_ADMITTING, WRITE_STALL),
         LEASE,
     );
     let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
@@ -587,14 +571,9 @@ async fn an_overrunning_admission_is_cut_off_with_lease_left_to_abandon_it() {
     let result = handler
         .admit_payload(accepted.operation_id.to_string().as_bytes(), LAST_ATTEMPT)
         .await;
-    let MessageResult::Reject(reason) = result else {
-        panic!("an overrun on the last attempt must be dead-lettered: {result:?}");
-    };
-    let diagnostic: Value =
-        serde_json::from_str(&reason).expect("structured dead-letter diagnostic");
-    assert_eq!(
-        diagnostic["error_code"], "admission_deadline_exceeded",
-        "an overrun is its own diagnostic, not a failure code borrowed from admission",
+    assert!(
+        matches!(result, MessageResult::Ok),
+        "an overrun on the last attempt terminalizes and acks: {result:?}",
     );
 
     let unhooked = service_without_dispatch(&db, stores());
@@ -606,13 +585,24 @@ async fn an_overrunning_admission_is_cut_off_with_lease_left_to_abandon_it() {
     assert_eq!(
         operation.status,
         OperationStatus::Completed,
-        "the reserve exists so this write lands: a dead-lettered message whose \
-         operation stays non-terminal has no queued work left to resume it",
+        "the reserve exists so this write lands: acking a message whose operation \
+         stays non-terminal would leave no queued work to resume it",
+    );
+    let error: Value = serde_json::from_str(
+        operation.items[0]
+            .error
+            .as_deref()
+            .expect("a failed item carries a stored error payload"),
+    )
+    .expect("the stored payload is JSON");
+    assert_eq!(
+        error["error_code"], "admission_deadline_exceeded",
+        "an overrun is its own diagnostic, not a failure code borrowed from admission",
     );
 }
 
 #[tokio::test]
-async fn abandoning_an_operation_that_never_ran_still_terminalizes_it() {
+async fn failing_an_operation_that_never_ran_still_terminalizes_it() {
     let db = test_db_with_outbox().await;
     let registry = service_without_dispatch(&db, common::TestStores::failing_running());
     let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
@@ -626,10 +616,7 @@ async fn abandoning_an_operation_that_never_ran_still_terminalizes_it() {
     let result = handler
         .admit_payload(accepted.operation_id.to_string().as_bytes(), LAST_ATTEMPT)
         .await;
-    assert!(
-        matches!(result, MessageResult::Reject(_)),
-        "got: {result:?}"
-    );
+    assert!(matches!(result, MessageResult::Ok), "got: {result:?}");
 
     let operation = registry
         .operation(accepted.operation_id)
@@ -639,32 +626,16 @@ async fn abandoning_an_operation_that_never_ran_still_terminalizes_it() {
     assert_eq!(
         operation.status,
         OperationStatus::Completed,
-        "an operation abandoned before its pass started must still reach a terminal status",
+        "an operation failed before its pass started must still reach a terminal status",
     );
     assert_eq!(operation.items[0].status, OperationItemStatus::Failed);
-
-    let recovered = registry
-        .nonterminal_operation_page(None, 128)
-        .await
-        .expect("read the recovery page");
-    assert!(
-        !recovered
-            .cursors()
-            .iter()
-            .any(|cursor| cursor.id == accepted.operation_id),
-        "an abandoned operation must not be re-enqueued on the next boot: {recovered:?}",
-    );
 }
 
 #[tokio::test]
-async fn abandonment_records_the_cause_kind_and_never_the_drivers_own_text() {
-    let log_dir = common::TestDir::new("abandonment-log");
-    let log_path = log_dir.path().join("admission.log");
-    let log_file = std::fs::File::create(&log_path).expect("create log capture");
-    let subscriber = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_writer(move || log_file.try_clone().expect("clone log capture"))
-        .finish();
+async fn a_system_failure_records_the_cause_kind_and_never_the_drivers_own_text() {
+    let _serial = LOG_TESTS.lock().await;
+    let captured = capture();
+    captured.clear();
     let db = test_db_with_outbox().await;
     let registry = service_without_dispatch(
         &db,
@@ -678,11 +649,11 @@ async fn abandonment_records_the_cause_kind_and_never_the_drivers_own_text() {
         .expect("accept");
     let result = handler
         .admit_payload(accepted.operation_id.to_string().as_bytes(), LAST_ATTEMPT)
-        .with_subscriber(subscriber)
         .await;
-    let log = std::fs::read_to_string(&log_path).expect("read captured log");
+    let log = captured.lines_for(accepted.operation_id);
+    // The whole buffer: a leak anywhere is a leak.
     assert!(
-        !log.contains(SENSITIVE_CAUSE) && !log.contains(SENSITIVE_FRAGMENT),
+        !captured.contains(SENSITIVE_CAUSE) && !captured.contains(SENSITIVE_FRAGMENT),
         "no part of the driver's own text may reach the operator log: {log}",
     );
     assert!(
@@ -691,21 +662,8 @@ async fn abandonment_records_the_cause_kind_and_never_the_drivers_own_text() {
          failures behind one error_code stay indistinguishable: {log}",
     );
     assert!(
-        log.contains("abandonment=\"written\""),
-        "and the log must say whether the operation was actually terminalized, \
-         which is what separates a complete dead letter from a message that left \
-         a `pending` operation behind: {log}",
-    );
-    let MessageResult::Reject(reason) = result else {
-        panic!("exhausted system failure must be rejected: {result:?}");
-    };
-    let diagnostic: Value =
-        serde_json::from_str(&reason).expect("structured dead-letter diagnostic");
-    assert_eq!(diagnostic["reason"], "admission_abandoned");
-    assert_eq!(diagnostic["error_code"], "storage_failure");
-    assert_eq!(
-        diagnostic["operation_id"],
-        accepted.operation_id.to_string()
+        matches!(result, MessageResult::Ok),
+        "an exhausted system failure terminalizes and acks: {result:?}",
     );
 
     let operation = registry
@@ -716,23 +674,22 @@ async fn abandonment_records_the_cause_kind_and_never_the_drivers_own_text() {
     let stored = operation.items[0]
         .error
         .as_deref()
-        .expect("an abandoned item carries a stored error payload");
+        .expect("a failed item carries a stored error payload");
     assert!(
         !stored.contains(SENSITIVE_CAUSE) && !stored.contains(SENSITIVE_FRAGMENT),
         "the injected cause must not reach the client-visible payload: {stored}",
     );
-    assert!(
-        !reason.contains(SENSITIVE_CAUSE) && !reason.contains(SENSITIVE_FRAGMENT),
-        "nor the dead-letter reason, which an operator reads over the same API: {reason}",
-    );
     let error: Value = serde_json::from_str(stored).expect("the stored payload is JSON");
-    assert_eq!(error["reason"], json!("admission_abandoned"));
-    assert_eq!(error["error_code"], diagnostic["error_code"]);
-    assert_eq!(error["operation_id"], diagnostic["operation_id"]);
+    assert_eq!(error["reason"], json!("system_failure"));
+    assert_eq!(error["error_code"], json!("storage_failure"));
+    assert_eq!(
+        error["operation_id"],
+        json!(accepted.operation_id.to_string())
+    );
 }
 
 #[tokio::test]
-async fn invalid_scope_is_dead_lettered_on_the_first_delivery_with_a_system_diagnostic() {
+async fn invalid_scope_is_terminalized_on_the_first_delivery_with_a_system_diagnostic() {
     let db = test_db_with_outbox().await;
     let registry = service_without_dispatch(&db, common::TestStores::failing_running());
     let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
@@ -743,14 +700,10 @@ async fn invalid_scope_is_dead_lettered_on_the_first_delivery_with_a_system_diag
     let result = handler
         .admit_payload(accepted.operation_id.to_string().as_bytes(), 0)
         .await;
-    let MessageResult::Reject(reason) = result else {
-        panic!("invalid scope cannot be repaired by redelivery: {result:?}");
-    };
-    let diagnostic: Value = serde_json::from_str(&reason).expect("safe diagnostic");
-    assert_eq!(diagnostic["error_code"], "storage_failure");
-    assert_eq!(
-        diagnostic["operation_id"],
-        accepted.operation_id.to_string()
+    assert!(
+        matches!(result, MessageResult::Ok),
+        "invalid scope cannot be repaired by redelivery, so the first delivery \
+         terminalizes it rather than spending the budget: {result:?}",
     );
     let operation = registry
         .operation(accepted.operation_id)
@@ -759,6 +712,18 @@ async fn invalid_scope_is_dead_lettered_on_the_first_delivery_with_a_system_diag
         .expect("exists");
     assert_eq!(operation.status, OperationStatus::Completed);
     assert_eq!(operation.items[0].status, OperationItemStatus::Failed);
+    let error: Value = serde_json::from_str(
+        operation.items[0]
+            .error
+            .as_deref()
+            .expect("a failed item carries a stored error payload"),
+    )
+    .expect("the stored payload is JSON");
+    assert_eq!(error["error_code"], json!("storage_failure"));
+    assert_eq!(
+        error["operation_id"],
+        json!(accepted.operation_id.to_string())
+    );
 }
 
 #[tokio::test]
@@ -876,7 +841,8 @@ async fn seed_partition_operation(
         .expect("seed operation and dispatch atomically");
 }
 
-async fn assert_partitions_progress_independently(recover_second: bool) {
+#[tokio::test]
+async fn enqueue_routes_independent_operations_to_different_partitions() {
     const SECOND: &str = gts_id!("cf.core.outbox.independent.v1~");
 
     let dsn = format!(
@@ -886,18 +852,19 @@ async fn assert_partitions_progress_independently(recover_second: bool) {
     let db = common::provider_for_with_outbox(&dsn, 2).await;
     let first_id = Uuid::from_u128(1);
     let second_id = Uuid::from_u128(2);
-    seed_partition_operation(&db, first_id, TARGET, Arc::new(NullDispatch)).await;
 
     let (ports, reached, resume) = common::TestStores::pausing(common::PausePoint::OperationRead);
     let (registry, dispatch) = service(&db, ports);
-    let handle = types_registry::infra::outbox::start(
-        db.db(),
-        &registry,
-        &dispatch,
-        &common::no_cancellation(),
+    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
+        .await
+        .expect("start production pipeline");
+    seed_partition_operation(
+        &db,
+        first_id,
+        TARGET,
+        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
     )
-    .await
-    .expect("start production pipeline");
+    .await;
     let reached = std::sync::Mutex::new(reached);
     await_delivery("first admission enters its handler", || async {
         match reached.lock().unwrap().try_recv() {
@@ -908,14 +875,7 @@ async fn assert_partitions_progress_independently(recover_second: bool) {
     })
     .await;
 
-    let second_handle = if recover_second {
-        seed_partition_operation(&db, second_id, SECOND, Arc::new(NullDispatch)).await;
-        let (_, handle) = started(&db, stores()).await;
-        Some(handle)
-    } else {
-        seed_partition_operation(&db, second_id, SECOND, dispatch).await;
-        None
-    };
+    seed_partition_operation(&db, second_id, SECOND, dispatch).await;
     let operation = await_delivery(
         "another partition completes while the first is paused",
         || async {
@@ -947,19 +907,6 @@ async fn assert_partitions_progress_independently(recover_second: bool) {
     .await;
     assert_eq!(first.items[0].status, OperationItemStatus::Succeeded);
     handle.stop().await;
-    if let Some(handle) = second_handle {
-        handle.stop().await;
-    }
-}
-
-#[tokio::test]
-async fn enqueue_routes_independent_operations_to_different_partitions() {
-    assert_partitions_progress_independently(false).await;
-}
-
-#[tokio::test]
-async fn recovery_preserves_partition_routing_across_pipelines() {
-    assert_partitions_progress_independently(true).await;
 }
 
 #[tokio::test]
@@ -998,425 +945,12 @@ async fn an_accepted_operation_is_admitted_by_the_outbox() {
 }
 
 #[tokio::test]
-async fn startup_requeues_nonterminal_operations_without_a_message() {
-    let db = test_db_with_outbox().await;
-    let legacy = service_without_dispatch(&db, stores());
-    let accepted = legacy
-        .submit(&registration("legacy-key", TARGET), NOW)
-        .await
-        .expect("accept through the pre-outbox dispatch");
-    assert_eq!(accepted.status, OperationStatus::Pending);
-
-    let (registry, dispatch) = service(&db, stores());
-    let handle = types_registry::infra::outbox::start(
-        db.db(),
-        &registry,
-        &dispatch,
-        &common::no_cancellation(),
-    )
-    .await
-    .expect("start the admission outbox");
-
-    let operation = await_delivery("startup recovery through the outbox", || async {
-        let record = registry
-            .operation(accepted.operation_id)
-            .await
-            .expect("read the operation")
-            .expect("the operation exists");
-        match record.status {
-            OperationStatus::Completed => Some(record),
-            OperationStatus::Pending | OperationStatus::Running => None,
-        }
-    })
-    .await;
-
-    assert_eq!(operation.items[0].status, OperationItemStatus::Succeeded);
-    handle.stop().await;
-
-    let recovered = registry
-        .nonterminal_operation_page(None, 128)
-        .await
-        .expect("read the recovery page");
-    assert!(
-        !recovered
-            .cursors()
-            .iter()
-            .any(|cursor| cursor.id == accepted.operation_id),
-        "a completed operation must be outside the recovery set: {recovered:?}",
-    );
-}
-
-#[tokio::test]
-async fn shutdown_during_startup_stops_recovery_before_it_reads_a_page() {
-    let db = test_db_with_outbox().await;
-
-    // Strand a non-terminal operation with no outbox message: the exact state
-    // startup recovery exists to re-drive.
-    let legacy = service_without_dispatch(&db, stores());
-    let accepted = legacy
-        .submit(&registration("stranded-by-shutdown", TARGET), NOW)
-        .await
-        .expect("accept through the pre-outbox dispatch");
-    assert_eq!(accepted.status, OperationStatus::Pending);
-
-    let observed = common::TestStores::builder()
-        .recording_recovery_pages()
-        .build();
-    let dispatch = Arc::new(OutboxDispatch::new());
-    let registry = service_with(
-        &db,
-        Arc::clone(&observed) as Arc<dyn Stores>,
-        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
-    );
-    let cancel = tokio_util::sync::CancellationToken::new();
-    cancel.cancel();
-
-    let mut handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch, &cancel)
-        .await
-        .expect("a cancelled scan must not fail the start");
-    handle.recovered().await;
-
-    assert!(
-        observed.recovery_page_calls().is_empty(),
-        "a scan entered under a cancelled token must stop before reading anything: {:?}",
-        observed.recovery_page_calls(),
-    );
-
-    // The stranded operation stays non-terminal, which is what lets the next boot
-    // re-drive it.
-    let reader = service_without_dispatch(&db, stores());
-    let recovered = reader
-        .nonterminal_operation_page(None, 128)
-        .await
-        .expect("read the recovery page");
-    assert!(
-        recovered
-            .cursors()
-            .iter()
-            .any(|cursor| cursor.id == accepted.operation_id),
-        "recovery stopped by shutdown must leave the operation for the next boot: {recovered:?}",
-    );
-
-    handle.stop().await;
-}
-
-/// One full `RECOVERY_PAGE` plus one: the smallest backlog that needs a second page.
-const TWO_PAGES: usize = 257;
-
-/// Commit `count` non-terminal operations with no outbox message, the state startup
-/// recovery re-drives. They all target one `gts_id`, so only the first admission can
-/// write an entity and the rest are cheap terminal refusals — recovery does not care
-/// about outcomes, only about which operations are still non-terminal.
-async fn strand_nonterminal_operations(db: &Arc<DBProvider<DbError>>, count: usize) {
-    let legacy = service_without_dispatch(db, stores());
-    for nth in 0..count {
-        let accepted = legacy
-            .submit(&registration(&format!("stranded-{nth}"), TARGET), NOW)
-            .await
-            .expect("accept through the pre-outbox dispatch");
-        assert_eq!(accepted.status, OperationStatus::Pending);
-    }
-}
-
-#[tokio::test]
-async fn startup_recovery_advances_its_cursor_onto_a_second_page() {
-    let db = test_db_with_outbox().await;
-    strand_nonterminal_operations(&db, TWO_PAGES).await;
-
-    let observed = common::TestStores::builder()
-        .recording_recovery_pages()
-        .build();
-    let dispatch = Arc::new(OutboxDispatch::new());
-    let registry = service_with(
-        &db,
-        Arc::clone(&observed) as Arc<dyn Stores>,
-        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
-    );
-
-    let mut handle = types_registry::infra::outbox::start(
-        db.db(),
-        &registry,
-        &dispatch,
-        &common::no_cancellation(),
-    )
-    .await
-    .expect("start the admission outbox");
-    handle.recovered().await;
-
-    let calls = observed.recovery_page_calls();
-    assert_eq!(calls[0].after, None, "the first read starts at no cursor");
-    assert_eq!(
-        calls[0].returned, 256,
-        "the first page must come back full, or this backlog never reached a second page",
-    );
-    assert_eq!(
-        calls[1].after, calls[0].last,
-        "the loop must hand the second read the exact cursor the first read ended on",
-    );
-    assert_eq!(
-        calls[1].returned,
-        TWO_PAGES - 256,
-        "the second page carries the remainder and is short, which is what ends the scan",
-    );
-
-    // Asserted on the cursors rather than the read count: recovery enqueues while
-    // the pipeline is admitting the page before it, and on SQLite that single
-    // writer can make an enqueue lose a lock and its page be retried. A retry
-    // repeats a cursor, so the distinct sequence is what the protocol promises.
-    let mut walked: Vec<Option<RecoveryCursor>> = calls.iter().map(|call| call.after).collect();
-    walked.dedup();
-    assert_eq!(
-        walked,
-        vec![None, calls[0].last],
-        "the scan must visit exactly two cursors: a {TWO_PAGES}-operation backlog is one full \
-         page plus a short one, and no attempt may skip past a page: {calls:?}",
-    );
-
-    handle.stop().await;
-}
-
-#[tokio::test]
-async fn a_failed_enqueue_does_not_advance_the_recovery_cursor() {
-    use sea_orm::{ConnectionTrait, Database, Statement};
-
-    // Own the DSN so a second connection can reach the same shared-cache
-    // database; the provider's pool is what keeps it alive.
-    let dsn = format!(
-        "sqlite:file:tr-enqueue-{}?mode=memory&cache=shared",
-        uuid::Uuid::new_v4()
-    );
-    let db = common::provider_for_with_outbox(&dsn, 4).await;
-    strand_nonterminal_operations(&db, TWO_PAGES).await;
-
-    // The page read succeeds and its enqueue transaction then fails for real,
-    // inside `enqueue_batch`. That is the only shape that catches a cursor
-    // adopted before its page committed: a read failure leaves the cursor alone
-    // either way, so it cannot tell the two implementations apart.
-    let raw = Database::connect(&dsn).await.expect("raw connection");
-    let sql = |text: &str| Statement::from_string(raw.get_database_backend(), text.to_owned());
-    raw.execute_raw(sql(
-        "CREATE TRIGGER tr_block_enqueue BEFORE INSERT ON types_registry__outbox_body \
-         BEGIN SELECT RAISE(ABORT, 'injected enqueue failure'); END;",
-    ))
-    .await
-    .expect("install the enqueue failure");
-
-    let observed = common::TestStores::builder()
-        .recording_recovery_pages()
-        .build();
-    let dispatch = Arc::new(OutboxDispatch::new());
-    let (registry, recorded) = service_recording_with_dispatch(
-        &db,
-        Arc::clone(&observed) as Arc<dyn Stores>,
-        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
-    );
-
-    let mut handle = types_registry::infra::outbox::start(
-        db.db(),
-        &registry,
-        &dispatch,
-        &common::no_cancellation(),
-    )
-    .await
-    .expect("a failing enqueue must not fail the start");
-
-    // Two attempts, so there is a retry whose cursor can be inspected.
-    await_delivery("the enqueue fails and the scan retries", || async {
-        (recorded.recoveries().len() >= 2).then_some(())
-    })
-    .await;
-
-    let calls = observed.recovery_page_calls();
-    // Control: the read really did return a full page, so the cursor had a value
-    // to wrongly advance to and a passing test cannot be a vacuous one.
-    assert_eq!(
-        calls[0].returned, 256,
-        "the first read must return a full page: {calls:?}",
-    );
-    assert!(
-        calls[0].last.is_some(),
-        "and that page must end on a cursor: {calls:?}",
-    );
-    assert!(
-        calls.iter().all(|call| call.after.is_none()),
-        "no page committed, so every attempt must restart at no cursor: adopting \
-         `RecoveryPage::next()` before the enqueue commits would skip these \
-         operations for the lifetime of the process: {calls:?}",
-    );
-
-    raw.execute_raw(sql("DROP TRIGGER tr_block_enqueue;"))
-        .await
-        .expect("let the enqueue succeed");
-
-    tokio::time::timeout(std::time::Duration::from_secs(30), handle.recovered())
-        .await
-        .expect("the scan must finish once the enqueue can commit");
-    assert_eq!(
-        recorded.recoveries().last(),
-        Some(&RecoveryOutcome::Completed),
-        "and report completion: {:?}",
-        recorded.recoveries(),
-    );
-
-    tokio::time::timeout(std::time::Duration::from_secs(30), handle.stop())
-        .await
-        .expect("stop must not wait out an unbounded retry");
-}
-
-#[tokio::test]
-async fn a_failed_page_read_is_retried_from_the_same_cursor() {
-    let db = test_db_with_outbox().await;
-    strand_nonterminal_operations(&db, TWO_PAGES).await;
-
-    // The first page is served and enqueued; every read after it fails. The retry
-    // must come back to the second page rather than starting over or skipping it.
-    //
-    // Scope: this injects a *read* failure, so it cannot reproduce the
-    // advance-before-enqueue bug — that attempt never reaches `enqueue_batch`.
-    // `a_failed_enqueue_does_not_advance_the_recovery_cursor` covers that, by
-    // failing the enqueue transaction itself.
-    let observed = common::TestStores::builder()
-        .failing_recovery_page_after(1)
-        .build();
-    let dispatch = Arc::new(OutboxDispatch::new());
-    let registry = service_with(
-        &db,
-        Arc::clone(&observed) as Arc<dyn Stores>,
-        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
-    );
-
-    let handle = types_registry::infra::outbox::start(
-        db.db(),
-        &registry,
-        &dispatch,
-        &common::no_cancellation(),
-    )
-    .await
-    .expect("start the admission outbox");
-
-    let calls = await_delivery("the scan retries a failed page", || async {
-        let calls = observed.recovery_page_calls();
-        (calls.len() >= 3).then_some(calls)
-    })
-    .await;
-
-    assert_eq!(calls[0].after, None, "the first read starts at no cursor");
-    assert_eq!(
-        calls[1].after, calls[0].last,
-        "the second read continues from the first page, which did commit",
-    );
-    assert_eq!(
-        calls[2].after, calls[1].after,
-        "and the retry re-reads the page whose read failed instead of moving past it",
-    );
-
-    tokio::time::timeout(std::time::Duration::from_secs(30), handle.stop())
-        .await
-        .expect("stop must not wait out an unbounded retry");
-}
-
-#[tokio::test]
-async fn a_cancelled_join_leaves_the_scan_joinable_by_stop() {
-    let db = test_db_with_outbox().await;
-    strand_nonterminal_operations(&db, 1).await;
-
-    // The scan will sit inside a page read that does not observe cancellation, so
-    // whether `stop()` waits is decided purely by whether it still holds the task.
-    let gate = common::PageGate::new();
-    let observed = common::TestStores::builder()
-        .holding_recovery_pages(&gate)
-        .build();
-    let dispatch = Arc::new(OutboxDispatch::new());
-    let registry = service_with(
-        &db,
-        Arc::clone(&observed) as Arc<dyn Stores>,
-        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
-    );
-
-    let held = gate.hold().await;
-    let mut handle = types_registry::infra::outbox::start(
-        db.db(),
-        &registry,
-        &dispatch,
-        &common::no_cancellation(),
-    )
-    .await
-    .expect("start the admission outbox");
-    tokio::time::timeout(std::time::Duration::from_secs(10), gate.arrival())
-        .await
-        .expect("the scan must reach the page read the gate holds");
-
-    // Abandon the join mid-scan.
-    tokio::time::timeout(std::time::Duration::from_millis(100), handle.recovered())
-        .await
-        .expect_err("a scan held at the gate cannot finish on its own");
-
-    // The discriminating assertion. `stop()` must still be holding the task, so
-    // it cannot return while the gate does. An implementation that took the
-    // handle out of the option before awaiting it would have detached the scan
-    // above, find nothing to join, and return here immediately.
-    let mut stopping = Box::pin(handle.stop());
-    tokio::time::timeout(std::time::Duration::from_millis(250), &mut stopping)
-        .await
-        .expect_err("stop must wait for the scan the abandoned join left behind");
-
-    drop(held);
-    tokio::time::timeout(std::time::Duration::from_secs(30), stopping)
-        .await
-        .expect("and must finish once the scan can observe its cancellation");
-}
-
-#[tokio::test]
-async fn shutdown_between_recovery_pages_stops_the_scan() {
-    let db = test_db_with_outbox().await;
-    strand_nonterminal_operations(&db, TWO_PAGES).await;
-
-    // Cancelled once the first page has been served, so the scan is interrupted
-    // between two pages rather than before it read anything.
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let observed = common::TestStores::builder()
-        .cancelling_after_recovery_page(1, &cancel)
-        .build();
-    let dispatch = Arc::new(OutboxDispatch::new());
-    let registry = service_with(
-        &db,
-        Arc::clone(&observed) as Arc<dyn Stores>,
-        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
-    );
-
-    let mut handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch, &cancel)
-        .await
-        .expect("a cancelled scan must not fail the start; serve still has to drain the pipeline");
-    handle.recovered().await;
-
-    let calls = observed.recovery_page_calls();
-    assert_eq!(
-        calls.len(),
-        1,
-        "the scan must stop at the page boundary: without the check it would read the second \
-         page that this backlog has: {calls:?}",
-    );
-    assert_eq!(
-        calls[0].returned, 256,
-        "the page it did read still came back in full: cancellation defers to the boundary \
-         rather than truncating work already in flight",
-    );
-
-    handle.stop().await;
-}
-
-#[tokio::test]
 async fn stopping_the_pipeline_leaves_no_silent_enqueue() {
     let db = test_db_with_outbox().await;
     let (registry, dispatch) = service(&db, stores());
-    let handle = types_registry::infra::outbox::start(
-        db.db(),
-        &registry,
-        &dispatch,
-        &common::no_cancellation(),
-    )
-    .await
-    .expect("start");
+    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
+        .await
+        .expect("start");
 
     handle.stop().await;
 
@@ -1441,22 +975,11 @@ async fn a_second_pipeline_refuses_to_bind_rather_than_starting_unreachable() {
     let db = test_db_with_outbox().await;
     let (registry, dispatch) = service(&db, stores());
 
-    let first = types_registry::infra::outbox::start(
-        db.db(),
-        &registry,
-        &dispatch,
-        &common::no_cancellation(),
-    )
-    .await
-    .expect("the first pipeline binds");
+    let first = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
+        .await
+        .expect("the first pipeline binds");
 
-    let Err(refused) = types_registry::infra::outbox::start(
-        db.db(),
-        &registry,
-        &dispatch,
-        &common::no_cancellation(),
-    )
-    .await
+    let Err(refused) = types_registry::infra::outbox::start(db.db(), &registry, &dispatch).await
     else {
         panic!("the second pipeline must not bind");
     };
@@ -1493,14 +1016,9 @@ async fn a_temporary_failure_is_redelivered_by_the_pipeline_until_it_clears() {
     let db = test_db_with_outbox().await;
     let ports = common::TestStores::failing_running_transiently(FAILURES);
     let (registry, dispatch) = service(&db, Arc::clone(&ports) as Arc<dyn Stores>);
-    let handle = types_registry::infra::outbox::start(
-        db.db(),
-        &registry,
-        &dispatch,
-        &common::no_cancellation(),
-    )
-    .await
-    .expect("start the admission outbox");
+    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
+        .await
+        .expect("start the admission outbox");
 
     let accepted = registry
         .submit(&registration("retried-key", TARGET), NOW)
@@ -1540,14 +1058,9 @@ async fn a_rejected_message_lands_in_a_dead_letter_row_that_names_the_reason() {
 
     let db = test_db_with_outbox().await;
     let (registry, dispatch) = service(&db, stores());
-    let handle = types_registry::infra::outbox::start(
-        db.db(),
-        &registry,
-        &dispatch,
-        &common::no_cancellation(),
-    )
-    .await
-    .expect("start the admission outbox");
+    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
+        .await
+        .expect("start the admission outbox");
 
     let provider: DBProvider<DbError> = DBProvider::new(db.db());
     let outbox = Arc::clone(handle.outbox());
@@ -1614,89 +1127,7 @@ async fn a_rejected_message_lands_in_a_dead_letter_row_that_names_the_reason() {
 }
 
 #[tokio::test]
-async fn a_failing_recovery_scan_neither_fails_the_start_nor_gives_up() {
-    let db = test_db_with_outbox().await;
-    strand_nonterminal_operations(&db, 1).await;
-
-    // The first two page reads fail, the third serves the backlog. A scan that
-    // gave up after a failure would never reach `Completed`, and one that never
-    // retried would never read a second page.
-    let observed = common::TestStores::builder()
-        .failing_recovery_page_transiently(2)
-        .recording_recovery_pages()
-        .build();
-    let dispatch = Arc::new(OutboxDispatch::new());
-    let (registry, recorded) = service_recording_with_dispatch(
-        &db,
-        Arc::clone(&observed) as Arc<dyn Stores>,
-        Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
-    );
-
-    let mut handle = types_registry::infra::outbox::start(
-        db.db(),
-        &registry,
-        &dispatch,
-        &common::no_cancellation(),
-    )
-    .await
-    .expect("a failing recovery scan must not fail the start");
-
-    // The pipeline is bound and live while the scan is still failing: a new
-    // admission must not wait on a backlog nobody has managed to read yet.
-    let accepted = registry
-        .submit(&registration("during-failed-recovery", TARGET), NOW)
-        .await
-        .expect("accept");
-    let operation = await_delivery("the bound pipeline delivers", || async {
-        let record = registry.operation(accepted.operation_id).await.unwrap()?;
-        (record.status == OperationStatus::Completed).then_some(record)
-    })
-    .await;
-    assert_eq!(
-        operation.items[0].status,
-        OperationItemStatus::Succeeded,
-        "new admissions must not wait on a scan that is still failing: {:?}",
-        operation.items,
-    );
-
-    // Bounded so the 35-minute shutdown deadlock this replaced fails fast.
-    tokio::time::timeout(std::time::Duration::from_secs(30), handle.recovered())
-        .await
-        .expect("the scan must finish once its store recovers");
-
-    assert_eq!(
-        recorded.recoveries(),
-        vec![
-            RecoveryOutcome::Retried,
-            RecoveryOutcome::Retried,
-            RecoveryOutcome::Completed,
-        ],
-        "two failures must count as retries and the third attempt must complete, \
-         proving the retry neither stops at one attempt nor gives up",
-    );
-    assert_eq!(
-        observed.recovery_page_calls().len(),
-        3,
-        "each attempt re-reads the page it failed on: {:?}",
-        observed.recovery_page_calls(),
-    );
-    assert!(
-        observed
-            .recovery_page_calls()
-            .iter()
-            .all(|call| call.after.is_none()),
-        "a failure before any page committed must leave the cursor unmoved, so every \
-         attempt restarts at the beginning: {:?}",
-        observed.recovery_page_calls(),
-    );
-
-    tokio::time::timeout(std::time::Duration::from_secs(30), handle.stop())
-        .await
-        .expect("stop must not wait out an unbounded retry");
-}
-
-#[tokio::test]
-async fn an_abandonment_whose_write_lands_is_dead_lettered() {
+async fn a_system_failure_whose_write_lands_is_acked_without_a_failed_delivery() {
     let db = test_db_with_outbox().await;
     let (registry, counted) =
         service_recording_deliveries(&db, common::TestStores::failing_running());
@@ -1711,13 +1142,14 @@ async fn an_abandonment_whose_write_lands_is_dead_lettered() {
         .await;
 
     assert!(
-        matches!(result, MessageResult::Reject(_)),
+        matches!(result, MessageResult::Ok),
         "a permanent failure whose operation was terminalized ends the message: {result:?}",
     );
-    assert_eq!(
+    assert!(
+        counted.outcomes().is_empty(),
+        "a delivery that terminalized its operation succeeded as a transport, so the \
+         failed-delivery series must not move: {:?}",
         counted.outcomes(),
-        vec![DeliveryOutcome::DeadLettered],
-        "and counts exactly one dead letter",
     );
 
     let operation = registry
@@ -1730,10 +1162,10 @@ async fn an_abandonment_whose_write_lands_is_dead_lettered() {
 }
 
 #[tokio::test]
-async fn a_retryable_terminalization_failure_keeps_the_message_instead_of_dead_lettering_it() {
+async fn a_failed_terminalization_keeps_the_message_instead_of_acking_it() {
     let db = test_db_with_outbox().await;
     let (registry, counted) =
-        service_recording_deliveries(&db, common::TestStores::failing_running_and_abandonment());
+        service_recording_deliveries(&db, common::TestStores::failing_running_and_failure_write());
     let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
 
     let accepted = registry
@@ -1751,9 +1183,8 @@ async fn a_retryable_terminalization_failure_keeps_the_message_instead_of_dead_l
     assert_eq!(
         counted.outcomes(),
         vec![DeliveryOutcome::Retried],
-        "the series an operator alerts on must say redelivered, not dead-lettered: a \
-         `dead_lettered` increment here would report work as given up on while it is \
-         still queued",
+        "the series an operator alerts on must say redelivered: a silent delivery \
+         here would report work as finished while it is still queued",
     );
 
     let operation = registry
@@ -1768,25 +1199,13 @@ async fn a_retryable_terminalization_failure_keeps_the_message_instead_of_dead_l
         operation.items,
     );
     assert_eq!(operation.items[0].status, OperationItemStatus::Pending);
-
-    let recovered = registry
-        .nonterminal_operation_page(None, 128)
-        .await
-        .expect("read the recovery page");
-    assert!(
-        recovered
-            .cursors()
-            .iter()
-            .any(|cursor| cursor.id == accepted.operation_id),
-        "a non-terminal operation must stay in the recovery set: {recovered:?}",
-    );
 }
 
 #[tokio::test]
-async fn an_unterminalizable_abandonment_is_dead_lettered_once_the_budget_is_spent() {
+async fn an_unwritable_system_failure_is_redelivered_past_the_budget_too() {
     let db = test_db_with_outbox().await;
     let (registry, counted) =
-        service_recording_deliveries(&db, common::TestStores::failing_running_and_abandonment());
+        service_recording_deliveries(&db, common::TestStores::failing_running_and_failure_write());
     let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
 
     let accepted = registry
@@ -1794,45 +1213,32 @@ async fn an_unterminalizable_abandonment_is_dead_lettered_once_the_budget_is_spe
         .await
         .expect("accept");
     let result = handler
-        .admit_payload(accepted.operation_id.to_string().as_bytes(), LAST_ATTEMPT)
+        .admit_payload(accepted.operation_id.to_string().as_bytes(), PAST_BUDGET)
         .await;
 
-    let MessageResult::Reject(reason) = result else {
-        panic!("a message must leave the queue once its deliveries are spent: {result:?}");
-    };
-    let diagnostic: Value = serde_json::from_str(&reason).expect("a safe structured reason");
-    assert_eq!(diagnostic["reason"], "admission_abandoned");
-    assert_eq!(
-        counted.outcomes(),
-        vec![DeliveryOutcome::DeadLettered],
-        "and it is counted as the dead letter it is",
+    assert!(
+        matches!(result, MessageResult::Retry),
+        "the attempt budget bounds admission, not terminalization: removing this \
+         message would strand a non-terminal operation nothing else re-drives: {result:?}",
     );
+    assert_eq!(counted.outcomes(), vec![DeliveryOutcome::Retried]);
 
     let operation = registry
         .operation(accepted.operation_id)
         .await
         .expect("read")
         .expect("the operation exists");
-    assert_eq!(
-        operation.status,
-        OperationStatus::Pending,
-        "the honest cost of the bound: this operation is dead-lettered while \
-         non-terminal, and the next boot's recovery scan is what resolves it",
-    );
+    assert_eq!(operation.status, OperationStatus::Pending);
 }
 
 #[tokio::test]
 async fn a_retried_terminalization_failure_says_so_in_the_log() {
-    let log_dir = common::TestDir::new("terminalization-log");
-    let log_path = log_dir.path().join("admission.log");
-    let log_file = std::fs::File::create(&log_path).expect("create log capture");
-    let subscriber = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_writer(move || log_file.try_clone().expect("clone log capture"))
-        .finish();
+    let _serial = LOG_TESTS.lock().await;
+    let captured = capture();
+    captured.clear();
     let db = test_db_with_outbox().await;
     let registry =
-        service_without_dispatch(&db, common::TestStores::failing_running_and_abandonment());
+        service_without_dispatch(&db, common::TestStores::failing_running_and_failure_write());
     let handler = AdmissionHandler::new(Arc::clone(&registry), MAX_ATTEMPTS);
 
     let accepted = registry
@@ -1841,21 +1247,20 @@ async fn a_retried_terminalization_failure_says_so_in_the_log() {
         .expect("accept");
     let result = handler
         .admit_payload(accepted.operation_id.to_string().as_bytes(), 0)
-        .with_subscriber(subscriber)
         .await;
     assert!(matches!(result, MessageResult::Retry), "got: {result:?}");
 
-    let log = std::fs::read_to_string(&log_path).expect("read captured log");
+    let log = captured.lines_for(accepted.operation_id);
     assert!(
-        log.contains("the message will be redelivered rather than dead-lettered"),
+        log.contains("the message will be redelivered while the operation is non-terminal"),
         "the event must name the decision it made: {log}",
     );
     assert!(
-        !log.contains("the message is dead-lettered"),
+        !log.contains("the message is acknowledged"),
         "and must not also claim the opposite: {log}",
     );
     assert!(
-        log.contains("abandonment=\"abandonment_write_failed\""),
+        log.contains("write=\"write_failed\""),
         "with the reason the terminalization did not land: {log}",
     );
 }

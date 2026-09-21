@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use time::OffsetDateTime;
-use tokio_util::sync::CancellationToken;
 use toolkit_db::DbTx;
 use toolkit_db::secure::{AccessScope, ScopeError};
 use types_registry::domain::admission::fingerprint::ScopeHash;
@@ -17,8 +16,8 @@ use types_registry::domain::ports::{
     DependencyStore, EdgeSide, EntityEdge, EntityRow, EntityStore, EntityWriteOrderStore,
     InstanceStore, ItemSuccess, NewCurrentInstance, NewCurrentTypeSchema, NewEntity,
     NewInstanceRevision, NewOperation, NewOperationItem, NewRevision, OperationItemRow,
-    OperationRow, OperationStore, RecoveryCursor, RecoveryPage, ReverseImpact, Stores,
-    TypeSchemaStore, VersionFamilyRow, VersionFamilyStore,
+    OperationRow, OperationStore, ReverseImpact, Stores, TypeSchemaStore, VersionFamilyRow,
+    VersionFamilyStore,
 };
 use uuid::Uuid;
 
@@ -48,60 +47,10 @@ pub struct Hooks {
     stale_find_items: parking_lot::Mutex<Option<Vec<OperationItemRow>>>,
     fail: std::collections::BTreeSet<FailingCall>,
     transient_mark_running: Option<TransientFailures>,
-    transient_recovery_page: Option<TransientFailures>,
     pub stall_find_by_id: Option<std::time::Duration>,
-    pub stall_mark_abandoned: Option<std::time::Duration>,
+    pub stall_mark_system_failed: Option<std::time::Duration>,
     pub stall_mark_running: Option<std::time::Duration>,
     injected_cause: Option<&'static str>,
-    recovery_pages: Option<RecoveryPages>,
-}
-
-/// One observed `nonterminal_page` call: the cursor it was given, how many rows it
-/// returned, and the cursor a caller would page from next.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RecoveryPageCall {
-    pub after: Option<RecoveryCursor>,
-    pub returned: usize,
-    pub last: Option<RecoveryCursor>,
-}
-
-/// Holds every recovery page read until released, and says when one arrived.
-///
-/// Deliberately a plain mutex with no token in sight: a gate that observed
-/// cancellation could not show that a join waits for a scan which is not
-/// observing it yet.
-#[derive(Default)]
-pub struct PageGate {
-    lock: tokio::sync::Mutex<()>,
-    arrived: tokio::sync::Notify,
-}
-
-impl PageGate {
-    #[must_use]
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
-    }
-
-    /// Block every page read until the returned guard is dropped.
-    pub async fn hold(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.lock.lock().await
-    }
-
-    /// Wait until a page read has reached the gate.
-    pub async fn arrival(&self) {
-        self.arrived.notified().await;
-    }
-}
-
-#[derive(Default)]
-struct RecoveryPages {
-    seen: parking_lot::Mutex<Vec<RecoveryPageCall>>,
-    /// Cancel this token once that many pages have been served.
-    cancel_after: Option<(usize, CancellationToken)>,
-    /// Fail every read after that many have been served.
-    fail_after: Option<usize>,
-    /// Hold every read at this gate.
-    gate: Option<Arc<PageGate>>,
 }
 
 struct Pause {
@@ -152,8 +101,7 @@ pub enum FailingCall {
     MarkItemSucceeded,
     MarkRunning,
     FindById,
-    NonterminalPage,
-    MarkAbandoned,
+    MarkSystemFailed,
 }
 
 #[derive(Default)]
@@ -237,32 +185,6 @@ impl Hooks {
 
     fn cause(&self, own: &'static str) -> &'static str {
         self.injected_cause.unwrap_or(own)
-    }
-
-    /// True once `fail_after` pages have been observed, failing every read after.
-    fn recovery_page_fails_after_serving(&self) -> bool {
-        let Some(pages) = &self.recovery_pages else {
-            return false;
-        };
-        let Some(nth) = pages.fail_after else {
-            return false;
-        };
-        pages.seen.lock().len() >= nth
-    }
-
-    fn takes_transient_recovery_page_failure(&self) -> bool {
-        use std::sync::atomic::Ordering::SeqCst;
-        let Some(failures) = &self.transient_recovery_page else {
-            return false;
-        };
-        let taken = failures
-            .remaining
-            .fetch_update(SeqCst, SeqCst, |left| left.checked_sub(1))
-            .is_ok();
-        if taken {
-            failures.issued.fetch_add(1, SeqCst);
-        }
-        taken
     }
 
     fn takes_transient_mark_running_failure(&self) -> bool {
@@ -414,62 +336,6 @@ impl TestStoresBuilder {
         self
     }
 
-    /// Fail the first `times` recovery page reads, then serve them normally, so
-    /// a test can watch the scan retry and then finish.
-    pub fn failing_recovery_page_transiently(mut self, times: usize) -> Self {
-        self.hooks.transient_recovery_page = Some(TransientFailures {
-            remaining: std::sync::atomic::AtomicUsize::new(times),
-            issued: std::sync::atomic::AtomicUsize::new(0),
-        });
-        self
-    }
-
-    /// Observe every startup-recovery page read.
-    pub fn recording_recovery_pages(mut self) -> Self {
-        self.hooks.recovery_pages = Some(RecoveryPages::default());
-        self
-    }
-
-    /// Observe page reads and cancel `cancel` once `nth` pages have been served,
-    /// which puts the shutdown between two pages rather than before the first.
-    pub fn cancelling_after_recovery_page(
-        mut self,
-        nth: usize,
-        cancel: &CancellationToken,
-    ) -> Self {
-        self.hooks.recovery_pages = Some(RecoveryPages {
-            seen: parking_lot::Mutex::default(),
-            cancel_after: Some((nth, cancel.clone())),
-            fail_after: None,
-            gate: None,
-        });
-        self
-    }
-
-    /// Hold every recovery page read at `gate`, so a test can keep a scan inside
-    /// a read that does not observe cancellation.
-    pub fn holding_recovery_pages(mut self, gate: &Arc<PageGate>) -> Self {
-        self.hooks.recovery_pages = Some(RecoveryPages {
-            seen: parking_lot::Mutex::default(),
-            cancel_after: None,
-            fail_after: None,
-            gate: Some(Arc::clone(gate)),
-        });
-        self
-    }
-
-    /// Serve `nth` page reads, then fail every read after them, so a test can
-    /// watch the scan resume from the cursor its last committed page ended on.
-    pub fn failing_recovery_page_after(mut self, nth: usize) -> Self {
-        self.hooks.recovery_pages = Some(RecoveryPages {
-            seen: parking_lot::Mutex::default(),
-            cancel_after: None,
-            fail_after: Some(nth),
-            gate: None,
-        });
-        self
-    }
-
     pub fn stale_find_items(mut self, snapshot: Vec<OperationItemRow>) -> Self {
         self.hooks.stale_find_items = parking_lot::Mutex::new(Some(snapshot));
         self
@@ -493,8 +359,8 @@ impl TestStoresBuilder {
         self
     }
 
-    pub fn stalling_mark_abandoned(mut self, delay: std::time::Duration) -> Self {
-        self.hooks.stall_mark_abandoned = Some(delay);
+    pub fn stalling_mark_system_failed(mut self, delay: std::time::Duration) -> Self {
+        self.hooks.stall_mark_system_failed = Some(delay);
         self
     }
 
@@ -633,48 +499,31 @@ impl TestStores {
         Self::builder().failing(FailingCall::FindById).build()
     }
 
-    /// Every startup-recovery page read this decorator served.
-    #[must_use]
-    pub fn recovery_page_calls(&self) -> Vec<RecoveryPageCall> {
-        self.hooks
-            .recovery_pages
-            .as_ref()
-            .map(|pages| pages.seen.lock().clone())
-            .unwrap_or_default()
-    }
-
-    #[must_use]
-    pub fn failing_recovery_scan() -> Arc<Self> {
-        Self::builder()
-            .failing(FailingCall::NonterminalPage)
-            .build()
-    }
-
     #[must_use]
     pub fn stalling_status_path(delay: std::time::Duration) -> Arc<Self> {
         Self::builder()
             .stalling_find_by_id(delay)
-            .stalling_mark_abandoned(delay)
+            .stalling_mark_system_failed(delay)
             .build()
     }
 
     #[must_use]
-    pub fn slow_admission_then_stalled_abandon(
+    pub fn slow_admission_then_stalled_failure_write(
         admit: std::time::Duration,
-        abandon: std::time::Duration,
+        write: std::time::Duration,
     ) -> Arc<Self> {
         Self::builder()
             .stalling_mark_running(admit)
             .failing(FailingCall::MarkRunning)
-            .stalling_mark_abandoned(abandon)
+            .stalling_mark_system_failed(write)
             .build()
     }
 
     #[must_use]
-    pub fn failing_running_and_abandonment() -> Arc<Self> {
+    pub fn failing_running_and_failure_write() -> Arc<Self> {
         Self::builder()
             .failing(FailingCall::MarkRunning)
-            .failing(FailingCall::MarkAbandoned)
+            .failing(FailingCall::MarkSystemFailed)
             .build()
     }
 
@@ -994,57 +843,6 @@ impl OperationStore for TestStores {
         self.inner.find_by_id(tx, scope, id).await
     }
 
-    async fn nonterminal_page(
-        &self,
-        tx: &DbTx<'_>,
-        scope: &AccessScope,
-        after: Option<RecoveryCursor>,
-        limit: u64,
-    ) -> Result<RecoveryPage, ScopeError> {
-        if let Some(pages) = self.hooks.recovery_pages.as_ref()
-            && let Some(gate) = pages.gate.as_ref()
-        {
-            gate.arrived.notify_one();
-            let _held = gate.lock.lock().await;
-        }
-
-        // Every attempt is recorded, failed ones included: a journal that skipped
-        // failures could not show that a retry re-read the page it failed on.
-        let failed = self.hooks.fails(FailingCall::NonterminalPage)
-            || self.hooks.takes_transient_recovery_page_failure()
-            || self.hooks.recovery_page_fails_after_serving();
-        let result = if failed {
-            Err(ScopeError::Invalid(
-                "this recovery page read is under failure injection",
-            ))
-        } else {
-            self.inner.nonterminal_page(tx, scope, after, limit).await
-        };
-
-        if let Some(pages) = self.hooks.recovery_pages.as_ref() {
-            let served = {
-                let mut seen = pages.seen.lock();
-                seen.push(RecoveryPageCall {
-                    after,
-                    returned: result.as_ref().map_or(0, RecoveryPage::len),
-                    last: result
-                        .as_ref()
-                        .ok()
-                        .and_then(|page| page.cursors().last().copied()),
-                });
-                seen.len()
-            };
-            // Cancel after the page is served but before it is enqueued, so the
-            // loop sees shutdown at its next iteration rather than mid-page.
-            if let Some((nth, cancel)) = pages.cancel_after.as_ref()
-                && served == *nth
-            {
-                cancel.cancel();
-            }
-        }
-        result
-    }
-
     async fn insert_operation(
         &self,
         tx: &DbTx<'_>,
@@ -1117,26 +915,26 @@ impl OperationStore for TestStores {
         self.inner.mark_completed(tx, scope, id, now).await
     }
 
-    async fn mark_abandoned(
+    async fn mark_system_failed(
         &self,
         tx: &DbTx<'_>,
         scope: &AccessScope,
         id: Uuid,
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError> {
-        if let Some(delay) = self.hooks.stall_mark_abandoned {
+        if let Some(delay) = self.hooks.stall_mark_system_failed {
             tokio::time::sleep(delay).await;
         }
-        if self.hooks.fails(FailingCall::MarkAbandoned) {
+        if self.hooks.fails(FailingCall::MarkSystemFailed) {
             return Err(ScopeError::Db(sea_orm::DbErr::Query(
                 sea_orm::RuntimeErr::Internal(
                     self.hooks
-                        .cause("(code: 5) database is locked: abandonment failure injection")
+                        .cause("(code: 5) database is locked: system-failure write injection")
                         .to_owned(),
                 ),
             )));
         }
-        self.inner.mark_abandoned(tx, scope, id, now).await
+        self.inner.mark_system_failed(tx, scope, id, now).await
     }
 
     async fn mark_item_succeeded(

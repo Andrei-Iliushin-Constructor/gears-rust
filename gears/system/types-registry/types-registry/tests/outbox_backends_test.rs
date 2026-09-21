@@ -18,7 +18,7 @@ use types_registry::config::TypesRegistryConfig;
 use types_registry::domain::admission::{Candidate, OperationDispatch, SubmitRequest};
 use types_registry::domain::enums::{OperationItemStatus, OperationKind, OperationStatus};
 use types_registry::domain::policy::RegistrationPolicy;
-use types_registry::domain::registry_service::{AdmissionMode, EntityKey, RegistryService};
+use types_registry::domain::registry_service::{EntityKey, RegistryService};
 use types_registry::infra::outbox::OutboxDispatch;
 
 const NOW: OffsetDateTime = datetime!(2026-09-14 12:00:00 UTC);
@@ -47,17 +47,11 @@ async fn assert_delivery(db: &Arc<DBProvider<DbError>>, backend: &str) {
         RegistrationPolicy::default(),
         TypesRegistryConfig::default(),
         Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
-        AdmissionMode::Outbox,
         metrics(),
     ));
-    let handle = types_registry::infra::outbox::start(
-        db.db(),
-        &registry,
-        &dispatch,
-        &common::no_cancellation(),
-    )
-    .await
-    .unwrap_or_else(|e| panic!("{backend}: start the admission outbox: {e}"));
+    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
+        .await
+        .unwrap_or_else(|e| panic!("{backend}: start the admission outbox: {e}"));
 
     let request = SubmitRequest {
         idempotency_key: Some("backends-key".to_owned()),
@@ -122,7 +116,6 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
         RegistrationPolicy::default(),
         TypesRegistryConfig::default(),
         Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
-        AdmissionMode::Outbox,
         metrics(),
     ));
     let second_dispatch = Arc::new(OutboxDispatch::new());
@@ -132,18 +125,12 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
         RegistrationPolicy::default(),
         TypesRegistryConfig::default(),
         Arc::clone(&second_dispatch) as Arc<dyn OperationDispatch>,
-        AdmissionMode::Outbox,
         metrics(),
     ));
 
-    let second_handle = types_registry::infra::outbox::start(
-        db.db(),
-        &second,
-        &second_dispatch,
-        &common::no_cancellation(),
-    )
-    .await
-    .unwrap_or_else(|e| panic!("{backend}: start the second pipeline: {e}"));
+    let second_handle = types_registry::infra::outbox::start(db.db(), &second, &second_dispatch)
+        .await
+        .unwrap_or_else(|e| panic!("{backend}: start the second pipeline: {e}"));
 
     let warmup = second
         .submit(
@@ -192,14 +179,9 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
          counted as contention",
     );
 
-    let first_handle = types_registry::infra::outbox::start(
-        db.db(),
-        &submitter,
-        &dispatch,
-        &common::no_cancellation(),
-    )
-    .await
-    .unwrap_or_else(|e| panic!("{backend}: start the first pipeline: {e}"));
+    let first_handle = types_registry::infra::outbox::start(db.db(), &submitter, &dispatch)
+        .await
+        .unwrap_or_else(|e| panic!("{backend}: start the first pipeline: {e}"));
 
     gate.arm();
 

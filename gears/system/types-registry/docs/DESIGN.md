@@ -254,7 +254,7 @@ Reverse-impact queries use a repository-owned recursive CTE over `dependency`, b
 
 - [ ] `p2` - **ID**: `cpt-cf-types-registry-constraint-boot-path`
 
-Because every other gear may depend on it, anything Types Registry waits for during startup is something the platform waits for. It publishes ready when its own storage is ready, has no notion of an expected registration set, and never blocks on a registrant. Registrants retry and gate their own readiness.
+Because every other gear may depend on it, anything Types Registry waits for during startup is something the platform waits for. It publishes ready when its own storage is ready and its own seed set has been admitted, has no notion of an expected registration set, and never blocks on a registrant. Registrants retry and gate their own readiness.
 
 **ADRs**: `cpt-cf-types-registry-adr-write-path-admission-protocol`
 
@@ -452,16 +452,18 @@ Authored-content equality is established once by the worker per candidate. The h
 
 ##### Dispatch and the outbox
 
-The leased ToolKit outbox owns multi-pod claiming, lease expiry, retry, and dead letters. Delivery is at least once, so admission-unit commits are idempotent and guarded by operation-item identity, authored equality, unique revisions, and compare-and-swap; outbox lease state is not duplicated in `operation`. The operation status index only terminalizes work abandoned after outbox retries and is not a second dispatcher.
+The leased ToolKit outbox owns multi-pod claiming, lease expiry, retry, and dead letters. Delivery is at least once, so admission-unit commits are idempotent and guarded by operation-item identity, authored equality, unique revisions, and compare-and-swap; outbox lease state is not duplicated in `operation`. The outbox is the only dispatcher: leases redeliver across pods, so no second index re-drives non-terminal work.
 
 Candidate rejection, including a missing dependency, is acknowledged and stored with
 structured details. In-batch dependencies are ordered; cross-request dependencies require
 the caller to await the prerequisite.
 
 Only failures that may clear are retried, within `worker.max_delivery_attempts`. Permanent or
-exhausted delivery terminalizes undecided items as `admission_abandoned` before dead-lettering.
+exhausted delivery terminalizes undecided items as `system_failure` and acknowledges the
+message; a terminalization that does not land is redelivered instead, past the budget too.
+A valid admission message is therefore never removed while its operation is
+non-terminal, and dead-lettering is reserved for envelopes that name no operation.
 Diagnostics contain stable codes and operation IDs, never raw infrastructure or candidate data.
-Startup recovery re-enqueues any operation left non-terminal.
 
 The end-to-end flow this pipeline drives — read, reconcile, submit, dispatch, admit, poll — is `cpt-cf-types-registry-seq-batch-admission` in §3.6.
 

@@ -406,7 +406,7 @@ fn zero_delivery_attempts_is_rejected() {
     }))
     .expect("deserialize config")
     .validate()
-    .expect_err("zero attempts would dead-letter every operation unattempted");
+    .expect_err("zero attempts would fail every operation unattempted");
 
     assert!(error.to_string().contains("max_delivery_attempts"));
 }

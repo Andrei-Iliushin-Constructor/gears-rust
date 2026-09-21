@@ -1,5 +1,5 @@
 //! Transport-neutral, database-backed registry service (SPEC §8.4).
-//! API traffic uses outbox admission; inventory seeding runs inline.
+//! Submissions are accepted here and admitted by the outbox.
 //! P0 managed entities are unrestricted, but ports already accept an access scope.
 
 use std::collections::BTreeMap;
@@ -24,8 +24,7 @@ use crate::domain::enums::{
 use crate::domain::policy::RegistrationPolicy;
 use crate::domain::ports::metrics::{AdmissionMetrics, PassLabels, RefusalStage};
 use crate::domain::ports::{
-    CurrentDocument, CurrentInstanceValue, CurrentTypeSchemaRow, RecoveryCursor, RecoveryPage,
-    Stores, snapshot_read,
+    CurrentDocument, CurrentInstanceValue, CurrentTypeSchemaRow, Stores, snapshot_read,
 };
 
 /// GTS identifier or deterministic Registry Reference for the same row.
@@ -158,16 +157,6 @@ impl ServiceError {
     }
 }
 
-/// How accepted operations are driven after their acceptance transaction commits.
-#[domain_model]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AdmissionMode {
-    /// Drive the worker before returning. Used by P0 API traffic and seeding.
-    Inline,
-    /// Leave the durable operation for the outbox worker.
-    Outbox,
-}
-
 /// The database-backed registry service.
 #[domain_model]
 pub struct RegistryService {
@@ -177,13 +166,11 @@ pub struct RegistryService {
     policy: RegistrationPolicy,
     config: TypesRegistryConfig,
     dispatch: Arc<dyn OperationDispatch>,
-    admission_mode: AdmissionMode,
     /// The admission instruments (T16).
     metrics: Arc<dyn AdmissionMetrics>,
 }
 
 impl RegistryService {
-    /// Build the service with inline or outbox admission.
     #[must_use]
     pub fn new(
         db: Db,
@@ -191,7 +178,6 @@ impl RegistryService {
         policy: RegistrationPolicy,
         config: TypesRegistryConfig,
         dispatch: Arc<dyn OperationDispatch>,
-        admission_mode: AdmissionMode,
         metrics: Arc<dyn AdmissionMetrics>,
     ) -> Self {
         Self {
@@ -200,7 +186,6 @@ impl RegistryService {
             policy,
             config,
             dispatch,
-            admission_mode,
             metrics,
         }
     }
@@ -220,29 +205,11 @@ impl RegistryService {
         self.metrics.as_ref()
     }
 
-    /// Read one keyset page of the startup-recovery backlog.
-    pub async fn nonterminal_operation_page(
-        &self,
-        after: Option<RecoveryCursor>,
-        limit: u64,
-    ) -> Result<RecoveryPage, ServiceError> {
-        let provider: DBProvider<ServiceError> = DBProvider::new(self.db.clone());
-        let stores = Arc::clone(&self.stores);
-        let scope = Self::scope();
-        provider
-            .transaction_with_config(snapshot_read(&self.db), move |tx| {
-                Box::pin(
-                    async move { Ok(stores.nonterminal_page(tx, &scope, after, limit).await?) },
-                )
-            })
-            .await
-    }
-
-    /// Fail undecided items and terminalize an abandoned operation.
+    /// Fail undecided items and terminalize the operation as a system failure.
     ///
     /// # Errors
     /// [`ServiceError::Storage`] or [`ServiceError::Db`] if the write fails.
-    pub(crate) async fn abandon(
+    pub(crate) async fn record_system_failure(
         &self,
         operation_id: Uuid,
         now: OffsetDateTime,
@@ -253,7 +220,7 @@ impl RegistryService {
         let scope = Self::scope();
         // Expose stable codes, never infrastructure error text.
         let payload = serde_json::json!({
-            "reason": AdmissionFailureReason::AdmissionAbandoned.as_str(),
+            "reason": AdmissionFailureReason::SystemFailure.as_str(),
             "message": "admission could not complete because of a system failure",
             "error_code": error_code,
             "operation_id": operation_id,
@@ -266,8 +233,10 @@ impl RegistryService {
                     stores
                         .fail_nonterminal_items(tx, &scope, operation_id, payload, now)
                         .await?;
-                    // Abandonment can move either pending or running operations.
-                    stores.mark_abandoned(tx, &scope, operation_id, now).await?;
+                    // A system failure can move either pending or running operations.
+                    stores
+                        .mark_system_failed(tx, &scope, operation_id, now)
+                        .await?;
                     Ok(())
                 })
             })
@@ -279,22 +248,20 @@ impl RegistryService {
         AccessScope::allow_all()
     }
 
-    /// Accept a submission, and — while admission is inline — admit it.
-    ///
-    /// Not cancel-safe: inline cancellation leaves durable work that replay resumes.
+    /// Accept a submission and dispatch it durably; the outbox admits it.
+    /// Acceptance and dispatch share one transaction, so a committed operation
+    /// always has a driver.
     ///
     /// # Errors
     /// [`ServiceError::Acceptance`] for every synchronous refusal, including the
-    /// fingerprint conflict; [`ServiceError::Worker`] only for an infrastructure
-    /// failure during inline admission, never for a candidate that was refused on
-    /// its merits.
+    /// fingerprint conflict.
     pub async fn submit(
         &self,
         request: &SubmitRequest,
         now: OffsetDateTime,
     ) -> Result<Accepted, ServiceError> {
         let provider: DBProvider<AcceptanceError> = DBProvider::new(self.db.clone());
-        let accepted = accept(
+        Ok(accept(
             &self.stores,
             &provider,
             &Self::scope(),
@@ -307,17 +274,7 @@ impl RegistryService {
             request,
             now,
         )
-        .await?;
-
-        // Replayed non-terminal work must resume; admission is idempotent.
-        let mut accepted = accepted;
-        if self.admission_mode == AdmissionMode::Inline && !accepted.terminal() {
-            // After the acceptance transaction committed, never inside it: the
-            // worker reads the operation it is admitting.
-            self.admit(accepted.operation_id, now).await?;
-            accepted.status = OperationStatus::Completed;
-        }
-        Ok(accepted)
+        .await?)
     }
 
     /// Admit an operation, skipping completed work on redelivery.

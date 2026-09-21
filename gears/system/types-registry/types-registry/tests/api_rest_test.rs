@@ -12,15 +12,15 @@ use tower::ServiceExt;
 
 use types_registry::api::rest::routes::{V1, V2};
 use types_registry::config::TypesRegistryConfig;
-use types_registry::domain::admission::{NullDispatch, OperationDispatch};
+use types_registry::domain::admission::OperationDispatch;
 use types_registry::domain::policy::RegistrationPolicy;
-use types_registry::domain::registry_service::{AdmissionMode, RegistryService};
+use types_registry::domain::registry_service::RegistryService;
 use types_registry::domain::service::TypesRegistryService;
 use types_registry::infra::InMemoryGtsRepository;
 use types_registry::infra::outbox::OutboxDispatch;
 
 mod common;
-use common::{stores, test_db};
+use common::stores;
 
 const CF_TYPE: &str = gts_id!("cf.core.example.type.v1~");
 const CF_OTHER: &str = gts_id!("cf.core.example.other.v1~");
@@ -140,19 +140,41 @@ impl OpenApiRegistry for TestOpenApi {
     }
 }
 
+/// A router and the pipeline that admits its submissions. Dropping the handle
+/// stops the workers, so the test holds both; fields drop in declaration order.
+struct TestApi {
+    router: Router,
+    _handle: toolkit_db::outbox::OutboxHandle,
+    _dir: common::TestDir,
+}
+
+impl std::ops::Deref for TestApi {
+    type Target = Router;
+
+    fn deref(&self) -> &Router {
+        &self.router
+    }
+}
+
 /// A router with both services wired, as `register_rest` builds it.
-async fn router_with_db() -> Router {
+async fn router_with_db() -> TestApi {
     router_with(false).await
 }
 
 /// The same router with the legacy service ready, so v1 answers instead of refusing
 /// on `is_ready()`.
-async fn router_with_v1_ready() -> Router {
+async fn router_with_v1_ready() -> TestApi {
     router_with(true).await
 }
 
-async fn router_with(v1_ready: bool) -> Router {
-    let db = test_db().await;
+async fn router_with(v1_ready: bool) -> TestApi {
+    // WAL: the partition workers must not lock out the request under test.
+    let dir = common::TestDir::new("tr-api");
+    let dsn = format!(
+        "sqlite://{}?mode=rwc&journal_mode=wal",
+        dir.path().join("api.db").display()
+    );
+    let db = common::provider_for_with_outbox(&dsn, 8).await;
     let openapi = TestOpenApi::default();
     let config = TypesRegistryConfig::default();
     let legacy = Arc::new(TypesRegistryService::new(
@@ -162,33 +184,6 @@ async fn router_with(v1_ready: bool) -> Router {
     if v1_ready {
         legacy.switch_to_ready().expect("switch legacy to ready");
     }
-    let dispatch: Arc<dyn OperationDispatch> = Arc::new(NullDispatch);
-    let registry = Arc::new(RegistryService::new(
-        db.db(),
-        stores(),
-        RegistrationPolicy::default(),
-        config,
-        dispatch,
-        // Admission inline, as `init()` wires it until T21.
-        AdmissionMode::Inline,
-        common::metrics(),
-    ));
-    types_registry::api::rest::routes::register_routes(
-        Router::new(),
-        &openapi,
-        legacy,
-        Some(registry),
-    )
-}
-
-async fn router_with_outbox() -> (Router, types_registry::infra::outbox::Admission) {
-    let db = common::test_db_with_outbox().await;
-    let openapi = TestOpenApi::default();
-    let config = TypesRegistryConfig::default();
-    let legacy = Arc::new(TypesRegistryService::new(
-        Arc::new(InMemoryGtsRepository::new(config.to_gts_config())),
-        config.clone(),
-    ));
     let dispatch = Arc::new(OutboxDispatch::new());
     let registry = Arc::new(RegistryService::new(
         db.db(),
@@ -196,24 +191,22 @@ async fn router_with_outbox() -> (Router, types_registry::infra::outbox::Admissi
         RegistrationPolicy::default(),
         config,
         Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
-        AdmissionMode::Outbox,
         common::metrics(),
     ));
-    let handle = types_registry::infra::outbox::start(
-        db.db(),
-        &registry,
-        &dispatch,
-        &common::no_cancellation(),
-    )
-    .await
-    .expect("start the admission outbox");
+    let handle = types_registry::infra::outbox::start(db.db(), &registry, &dispatch)
+        .await
+        .expect("start the admission outbox");
     let router = types_registry::api::rest::routes::register_routes(
         Router::new(),
         &openapi,
         legacy,
         Some(registry),
     );
-    (router, handle)
+    TestApi {
+        router,
+        _handle: handle,
+        _dir: dir,
+    }
 }
 
 /// The same routes with no database bound — `no-db.yaml` and `--mock`. Ready,
@@ -248,7 +241,17 @@ struct Response {
     body: Value,
 }
 
+/// Dispatch, then wait for the operation a `202` receipt names. Most cases here
+/// assert what the API reports once admission has run; [`call_raw`] opts out.
 async fn call(router: &Router, req: Request<Body>) -> Response {
+    let response = call_raw(router, req).await;
+    if response.status == StatusCode::ACCEPTED && response.body["operation_id"].is_string() {
+        await_operation(router, &response, "the outbox admits the submission").await;
+    }
+    response
+}
+
+async fn call_raw(router: &Router, req: Request<Body>) -> Response {
     let resp = router.clone().oneshot(req).await.expect("router dispatch");
     let status = resp.status();
     let content_type = resp
@@ -645,7 +648,8 @@ async fn a_different_request_under_one_key_is_a_conflict_problem() {
 
 #[tokio::test]
 async fn the_receipt_is_followable_under_a_gateway_prefix() {
-    let prefixed = Router::new().nest("/cf", router_with_db().await);
+    let api = router_with_db().await;
+    let prefixed = Router::new().nest("/cf", api.router.clone());
 
     let accepted = call(
         &prefixed,
@@ -1376,7 +1380,8 @@ fn json_extractor_error_statuses_are_declared_for_both_post_operations() {
 
 #[tokio::test]
 async fn deletion_receipts_are_followable_under_a_gateway_prefix() {
-    let prefixed = Router::new().nest("/cf", router_with_db().await);
+    let api = router_with_db().await;
+    let prefixed = Router::new().nest("/cf", api.router.clone());
     let batch_key = gts_id!("cf.core.example.batch_prefixed.v1~");
     for request in [
         submit_to(
@@ -2104,9 +2109,14 @@ async fn await_operation(router: &Router, receipt: &Response, what: &str) -> Val
         .as_str()
         .expect("a receipt carries an operation_id")
         .to_owned();
-    let uri = format!("{V2}/operations/{operation_id}");
+    // The receipt's own `Location` keeps any gateway prefix the router is nested
+    // under; a path rebuilt from `V2` would miss it.
+    let uri = receipt
+        .location
+        .clone()
+        .unwrap_or_else(|| format!("{V2}/operations/{operation_id}"));
     common::await_delivery(what, || async {
-        let response = call(router, get(&uri)).await;
+        let response = call_raw(router, get(&uri)).await;
         assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
         match response.body["status"].as_str() {
             Some("completed") => Some(response.body),
@@ -2130,7 +2140,7 @@ async fn every_mutation_reaches_a_terminal_outcome_through_the_outbox() {
 
     for (mutation, dry_run) in cases {
         let case = format!("{mutation:?} dry_run={dry_run}");
-        let (router, handle) = router_with_outbox().await;
+        let router = router_with_db().await;
 
         let deleting = mutation != Mutation::Register;
         if deleting {
@@ -2172,7 +2182,7 @@ async fn every_mutation_reaches_a_terminal_outcome_through_the_outbox() {
             ),
         };
 
-        let accepted = call(&router, request).await;
+        let accepted = call_raw(&router, request).await;
         assert_eq!(
             accepted.status,
             StatusCode::ACCEPTED,
@@ -2231,8 +2241,6 @@ async fn every_mutation_reaches_a_terminal_outcome_through_the_outbox() {
                 );
             }
         }
-
-        handle.stop().await;
     }
 }
 

@@ -443,7 +443,7 @@ shape (D10).
 Outcome and evidence: the criteria below. The per-task report was folded into these and deleted.
 
 **Acceptance criteria:**
-- [x] `POST /entities` returns `202` with operation `Location` and advisory `Retry-After`; `200` only on terminal replay. The `Location` is built from the path the request **arrived on** and is therefore followable under api-gateway's `prefix_path` — the credstore precedent, with one correction to it: `OriginalUri`, not `Uri`, because `apply_prefix` mounts every gear with `Router::nest`, which rewrites away exactly the prefix that has to survive (found at the Checkpoint 1 review). The receipt reports the operation's **real** status — with inline admission a fresh submission is already `completed`, and telling a caller to poll for something that has happened is worse than useless. It comes from `Accepted.status`, which `submit` already knows, rather than from the read-back this used to do: that read cost a second snapshot transaction over two statements and carried a `"pending"` fallback for an operation that had just been committed and so cannot be absent (found at the Checkpoint 1 review)
+- [x] `POST /entities` returns `202` with operation `Location` and advisory `Retry-After`; `200` only on terminal replay. The `Location` is built from the path the request **arrived on** and is therefore followable under api-gateway's `prefix_path` — the credstore precedent, with one correction to it: `OriginalUri`, not `Uri`, because `apply_prefix` mounts every gear with `Router::nest`, which rewrites away exactly the prefix that has to survive (found at the Checkpoint 1 review). The receipt reports the operation's **real** status: `pending` for a fresh submission, the stored value for a replay. It comes from `Accepted.status`, which `submit` already knows, rather than from the read-back this used to do: that read cost a second snapshot transaction over two statements and carried a `"pending"` fallback for an operation that had just been committed and so cannot be absent (found at the Checkpoint 1 review)
 - [x] `Idempotency-Key` is required; absence is a synchronous refusal. **A toolkit gap:** `OperationBuilder` exposes `path_param` / `query_param` and no header equivalent, so the requirement cannot be declared as an OpenAPI parameter from this gear. The route description states it *and* states that it is undeclared; fixing the builder is toolkit work outside this gear
 - [x] Errors are RFC-9457 problem details via `.standard_errors(openapi)`, never raw status tuples — one match arm per `AcceptanceError` variant, exhaustive, so a new refusal reason cannot reach the wire as an opaque `500` by omission
 - [x] Routes are `/types-registry/v1/...` and `.authenticated()`; DTOs live only in `api/rest/dto.rs`
@@ -461,11 +461,8 @@ restores v1 and moves this surface to `/types-registry/v2/`, for the reasons in 
 DTOs, handlers and tests below are the ones T9a re-registers under v2 — nothing here is discarded,
 only re-addressed.
 
-**Three interim shapes, each marked in code.** Admission runs **inline** until T21 starts the
-outbox worker — not a throwaway path, because seeding does exactly this permanently (SPEC §8.1),
-and the dispatch call still happens inside the acceptance transaction through `NullDispatch`, so
-T21 changes one implementation rather than the transaction's shape. The scope is `allow_all`
-(ceiling C6). Ceiling C8 is commented at the routes.
+**Two interim shapes, each marked in code.** The scope is `allow_all` (ceiling C6).
+Ceiling C8 is commented at the routes.
 
 **The database is optional.** `ctx.db()` rather than `db_required()`: `no-db.yaml` and `--mock`
 bind none, and failing their boot for a path they do not use would be a regression. Where none is
@@ -482,7 +479,6 @@ in no deployment at all.
 - `TR/src/api/rest/handlers.rs` — three new handlers; the two replaced ones deleted
 - `TR/src/api/rest/dto.rs` — the submit-then-poll DTOs and mappings; the old shape's four DTOs deleted
 - `TR/src/api/rest/error.rs` — `From<ServiceError>` / `From<WorkerError>` / `From<AcceptanceError>`
-- `TR/src/domain/admission/mod.rs` — `NullDispatch`
 - `TR/src/infra/storage/repo.rs` — `EntityRepo::find_by_gts_uuid`, `TypeSchemaRepo::find_current`
 - `TR/src/gear.rs` — wire the database-backed service when a database is bound
 - `TR/Cargo.toml` — `tower` dev-dependency
@@ -645,7 +641,7 @@ every `WorkerError` today, not something this task introduces; T21 makes it a re
 Outcome and evidence: the criteria below.
 
 - [x] A fixture Type Schema registers over REST, the operation reaches `completed`, the entity and its resolved artifacts are readable — as a test (`api_rest_test.rs::a_registration_is_accepted_polled_and_read_back`, driving the real `register_routes`) **and now at runtime**: `POST /cf/types-registry/v1/entities` `202` → operation `completed` with one `succeeded` item → entity `active`, `rv=1`, all four artifacts materialized, readable by `gts_id` and by `gts_uuid`. **T9's boot blocker was the invocation, not the code, and is retracted:** `oagw` is a non-optional dependency of the example server while every tenant-resolver plugin sits behind a cargo feature, so a bare `cargo run` compiles the resolver with no plugin and `oagw` is the first to notice. With `--features "$(cat config/e2e-features.txt)"` — which is what `make example` passes — all 25 gears boot and `/cf/docs` renders the four routes
-- [x] Durable registration state survives closing and reopening the database pool byte-identically — `TR/tests/restart_persistence_test.rs`, two tests. One admits both a Type Schema and an Instance, drops the service/provider/pool, reopens the SQLite file, re-runs test migrations, and compares whole `Model` values in stable primary-key order across all eight affected tables; it then proves both entities are readable through a fresh service and that the persisted idempotency record replays without a write. The other pins the pre-T21 crash-window recovery of a committed non-terminal operation. This is deliberately not called a process-restart test: real `TypesRegistryGear::init`, startup seeding and a new process remain T30's e2e/manual obligation
+- [x] Durable registration state survives closing and reopening the database pool byte-identically — `TR/tests/restart_persistence_test.rs`, two tests. One admits both a Type Schema and an Instance, drops the service/provider/pool, reopens the SQLite file, re-runs test migrations, and compares whole `Model` values in stable primary-key order across all eight affected tables; it then proves both entities are readable through a fresh service and that the persisted idempotency record replays without a write. The other pins the crash window: a committed non-terminal operation survives the reopen and completes when admitted. This is deliberately not called a process-restart test: real `TypesRegistryGear::init`, startup seeding and a new process remain T30's e2e/manual obligation
 - [x] Consumers untouched: the old `TypesRegistryClient` is still served from its existing in-memory repository; full workspace tests pass — **10593 passed, 368 skipped, 0 failures** (`cargo nextest run --workspace` minus the two macro crates, as `make test-no-macros` does). Structurally, the branch touches four files outside the gear — `Cargo.lock`, `Cargo.toml` (gts 0.11.0 → 0.12.0) and the two configs — and **not one file in `types-registry-sdk`**; the gear still holds `service` and `local_client` beside the new `registry`
 - [x] The new path holds no entity state between admissions: the store is built per unit and dropped, and the entity read in the first item above comes from the database — `RegistryService` has no store field and `grep ArcSwap src/gear.rs` finds nothing; `build_store` / `load_unit_store` are free functions returning an owned `UnitStore`, so there is no `self` to retain it in. T5's `two_sequential_builds_each_observe_the_committed_revision` proves the consequence, and the `503`-without-a-database case shows the read really is a database read
 - [x] Gear tests green on SQLite, PostgreSQL and MySQL (see [Commands](#commands)) — 423 tests on SQLite, and the **first ever** container run of the two backend suites, Docker having been down for T1–T9. It found a real defect: `sqlx` binds `Uuid` as 16 raw bytes on both non-native backends, so every uuid write failed on MySQL's `CHAR(36)` and was silently stored as a blob in `SQLite`'s `TEXT`. Fixed to `BINARY(16)` / `BLOB` + `ck_tr_*_uuid_len`
@@ -1754,7 +1750,7 @@ is untested; the deletion refusal itself is covered.
 ### - [x] T20a: REST deletion and dry run
 
 **Description:** Expose single/batch deletion on `/v2/` with dry run on all mutations.
-Uses inline admission until T21. Read completion belongs to T22a (P17).
+Read completion belongs to T22a (P17).
 
 **Acceptance criteria:**
 
@@ -1845,17 +1841,19 @@ With `PATH="$HOME/.cargo/bin:$PATH"`, whole-workspace `make clippy`
 `LeasedMessageHandler` mapping worker results to `Ok`/`Retry`/`Reject`. Payload: operation UUID only.
 
 **Acceptance criteria:**
-- [x] Production submissions use `AdmissionMode::Outbox`; acceptance and enqueue share a
-      transaction, while seeding stays inline and never enqueues (P3)
-- [x] Signal the exact partition after acceptance/recovery commits; transaction-time
-      signals can arrive before rows are visible. Cold scans remain startup/reconciler work.
+- [x] Every database-backed submission goes through the outbox; acceptance and enqueue
+      share a transaction, so no accepted operation lacks a driver (P3). Startup seeding
+      still writes the in-memory service; T24 moves it onto this path
+- [x] Signal the exact partition after the acceptance commit; transaction-time
+      signals can arrive before rows are visible.
 - [x] Handler contains no admission logic — it resolves the operation UUID and calls the worker
 - [x] Delivery is at-least-once and commits are idempotent; duplicate delivery is a no-op
-- [x] Retry failures that may clear; reject invalid messages and exhausted deliveries
+- [x] Retry failures that may clear; a permanent failure or an exhausted budget records
+      `system_failure` and ACKs. `Reject` is only for an envelope naming no operation
 - [x] Candidate content never enters an outbox or dead-letter payload
 - [x] Add `stateful`, deferred by T2: `[system, db, rest, stateful]` (SPEC §5)
 - [x] Start the worker at the end of `init()`, before stateful `start` (P3); retain `OutboxHandle` and call `stop()` after `ctx.cancellation_token()` fires (see lifecycle deviation)
-- [x] Started **after** inline seeding, so seed operations — which are never enqueued — cannot be leased concurrently
+- [x] Started before anything can submit, so an acceptance always has somewhere to enqueue. T24's seed batch takes the same path and gates client publication on its item outcomes
 - [x] An operation submitted from any consumer's `init()` is admitted without that consumer waiting for the `start` phase
 
 **Verification:**
@@ -1873,27 +1871,20 @@ With `PATH="$HOME/.cargo/bin:$PATH"`, whole-workspace `make clippy`
 `common::await_delivery` with bounded backoff and a 2s deadline. Domain tests call directly.
 
 **Implementation notes:**
-- `RegistryService::admit` is shared by inline and outbox drivers. Missing input
+- `RegistryService::admit` is the one admission driver. Missing input
   dependencies are terminal item refusals; retry classification covers only system failures.
 - `batch_size(1)` gives each message its own bounded attempt budget. After repeated lease
   timeouts, delivery `N + 1` reads stored status without rerunning admission.
-- Admission reserves lease time for one guarded bulk abandonment write. Client and
+- Admission reserves lease time for one guarded bulk system-failure write. Client and
   dead-letter diagnostics contain stable codes and operation IDs, never raw errors.
-- Startup recovery keyset-pages non-terminal operations. Eight UUID-derived partitions run
-  concurrently, while entity commits remain serialized. The scan takes the gear's
-  `ctx.cancellation_token()` and stops on a page boundary when it fires: the scan runs inside
-  `init()`, before the host reaches the phase that awaits cancellation, so neither the gear's
-  `stop_timeout` nor the host's hard backstop is armed while it runs. A page read and its
-  enqueue are not interruptible, so the bound is the page, not wall-clock time. Operations the
-  scan never reached are only missing *its* re-enqueue: the pipeline is already running, so any
-  that carry an outbox message still progress, and the rest wait for the next boot.
+- Eight UUID-derived partitions run concurrently, while entity commits remain serialized.
+  There is no recovery scan: acceptance and enqueue share a transaction, so every committed
+  operation carries a message the outbox lease redelivers.
 - `OutboxDispatch` uses a weak reference to avoid an ownership cycle; runtime and tests
   share the same pipeline settings.
 
-**Lifecycle deviation:** The outbox pipeline owns its own cancellation token; `serve` drains
-the retained handle after runtime cancellation, and worker startup remains in `init()`. Startup
-recovery is the one part of that startup which does observe the gear's token, because nothing
-else bounds it while `init()` holds the host.
+**Lifecycle deviation:** `serve` drains the retained handle after runtime cancellation, and
+worker startup remains in `init()`, before seeding.
 
 **Receipt behavior:** Production submissions return `pending`; terminal replays return
 `200` only after outbox admission completes.
@@ -2083,17 +2074,17 @@ T30 lands its replacement. Between here and T30 reads are uncached.
 field carries operator-controlled identities that cannot be expressed as inventory items — their
 GTS identifiers are deployment-specific (e.g. the platform-root and customer tenant types in
 `e2e-local.yaml`). Currently these are seeded only into the in-memory `TypesRegistryService`;
-T24 must seed them into the database through the same inline admission path used for
+T24 must seed them into the database through the same outbox admission path used for
 the linked inventory. An invalid or oversized combined seed set must fail boot loudly
 (current in-memory behaviour preserved). The `cfg.entities` field itself is not removed — it
 remains the deployment-time escape hatch for identities that no gear can own.
 
 **Acceptance criteria:**
 - [ ] Seeding covers all linked Type Schema and Instance inventory, including other gears, through the database admission path; no per-gear filter is introduced (D11/P18)
-- [ ] `cfg.entities` from the deployment configuration is seeded into the database at startup, through the same inline admission path; the field is validated and any failure fails boot
+- [ ] `cfg.entities` from the deployment configuration is seeded into the database at startup, through the same outbox admission path; the field is validated and any failure fails boot
 - [ ] Seeding is idempotent — a second start admits nothing new and reports `unchanged` for both linked inventory and `cfg.entities`
-- [ ] Seeding runs **before** the outbox worker starts (P3) and enqueues nothing — it invokes the worker inline
-- [ ] `init()` never waits on a registrant and never blocks on the outbox (`constraint-boot-path`)
+- [ ] Seeding runs **after** the outbox worker starts (P3) and enqueues like any other submission; startup awaits its items and fails boot on a `failed` one
+- [ ] `init()` never waits on a registrant; it blocks only on its own seed operations, before publishing the client (`constraint-boot-path`)
 - [ ] All linked inventory and `cfg.entities` together fit within `limits.batch_candidates` and other admission limits; if they exceed them, startup fails before publishing the client, with a diagnostic naming the exceeded limit. No truncation or silent split. Admission orders cross-crate dependencies inside this single batch
 - [ ] The v1 REST routes T9a restored are deleted **together with** the repository they read —
       `POST /v1/entities` (`types_registry.register`), `GET /v1/entities/{gts_id}`
@@ -2125,7 +2116,7 @@ remains the deployment-time escape hatch for identities that no gear can own.
 - `TR/src/gear.rs`
 - `TR/src/domain/seeding.rs`
 - `TR/src/domain/service.rs`
-- `TR/src/config.rs` (doc update: `entities` field comment names the inline seeding path)
+- `TR/src/config.rs` (doc update: `entities` field comment names the outbox seeding path)
 - `TR/src/infra/storage/in_memory_repo.rs` (deleted); `TR/src/infra/cache/` retyped in T30, not deleted
 - `TR/tests/seeding_test.rs`, `TR/tests/ready_mode_tests.rs` (deleted)
 **Scope:** M+

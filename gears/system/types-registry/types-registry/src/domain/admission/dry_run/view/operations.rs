@@ -11,7 +11,6 @@ use super::{AdmissionView, ItemOutcomeWrite, unsupported};
 use crate::domain::admission::fingerprint::ScopeHash;
 use crate::domain::ports::{
     ItemSuccess, NewOperation, NewOperationItem, OperationItemRow, OperationRow, OperationStore,
-    RecoveryCursor, RecoveryPage,
 };
 
 #[async_trait]
@@ -35,16 +34,6 @@ impl OperationStore for AdmissionView {
         id: Uuid,
     ) -> Result<Option<OperationRow>, ScopeError> {
         self.base.find_by_id(tx, scope, id).await
-    }
-
-    async fn nonterminal_page(
-        &self,
-        tx: &DbTx<'_>,
-        scope: &AccessScope,
-        after: Option<RecoveryCursor>,
-        limit: u64,
-    ) -> Result<RecoveryPage, ScopeError> {
-        self.base.nonterminal_page(tx, scope, after, limit).await
     }
 
     async fn insert_operation(
@@ -103,7 +92,7 @@ impl OperationStore for AdmissionView {
         ))
     }
 
-    async fn mark_abandoned(
+    async fn mark_system_failed(
         &self,
         _tx: &DbTx<'_>,
         _scope: &AccessScope,
@@ -159,8 +148,8 @@ impl OperationStore for AdmissionView {
         ))
     }
 
-    /// Reject abandonment: only the outbox delivery path terminalizes an
-    /// operation, and it never runs against a view.
+    /// Only the outbox delivery path terminalizes an operation, and it never
+    /// runs against a view.
     async fn fail_nonterminal_items(
         &self,
         _tx: &DbTx<'_>,
@@ -170,7 +159,7 @@ impl OperationStore for AdmissionView {
         _now: OffsetDateTime,
     ) -> Result<u64, ScopeError> {
         Err(unsupported(
-            "an admission view does not abandon an operation; delivery does that outside the snapshot",
+            "an admission view does not fail an operation; delivery does that outside the snapshot",
         ))
     }
 }

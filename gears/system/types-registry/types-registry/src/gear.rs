@@ -9,6 +9,7 @@ use toolkit::api::OpenApiRegistry;
 use toolkit::contracts::{DatabaseCapability, SystemCapability};
 use toolkit::lifecycle::ReadySignal;
 use toolkit::{Gear, GearCtx, RestApiCapability};
+use toolkit_db::outbox::OutboxHandle;
 use toolkit_db::{DBProvider, DbError};
 use toolkit_gts::{all_inventory_instances, all_inventory_type_schemas};
 use tracing::{debug, info, warn};
@@ -23,15 +24,15 @@ use crate::domain::ports::metrics::AdmissionMetrics;
 use crate::domain::registry_service::RegistryService;
 use crate::domain::service::TypesRegistryService;
 use crate::infra::InMemoryGtsRepository;
-use crate::infra::outbox::{Admission, OutboxDispatch, TABLE_PREFIX as OUTBOX_TABLE_PREFIX};
+use crate::infra::outbox::{OutboxDispatch, TABLE_PREFIX as OUTBOX_TABLE_PREFIX};
 use crate::infra::storage::Repos;
 
 /// Types Registry gear: REST, managed storage, inventory seeding and admission worker.
 #[toolkit::gear(
     name = "types-registry",
     capabilities = [system, db, rest, stateful],
-    // Leave five seconds before the host's hard shutdown deadline. Durable state
-    // makes longer admissions recoverable on the next boot.
+    // Leave five seconds before the host's hard shutdown deadline. An admission
+    // cut short keeps its outbox message, so the next boot's lease redelivers it.
     lifecycle(entry = "serve", stop_timeout = "30s", await_ready)
 )]
 pub struct TypesRegistryGear {
@@ -40,7 +41,7 @@ pub struct TypesRegistryGear {
     registry: OnceLock<Arc<RegistryService>>,
     local_client: OnceLock<Arc<TypesRegistryLocalClient>>,
     /// Pipeline retained for shutdown; the mutex guards only non-async moves.
-    outbox: Mutex<Option<Admission>>,
+    outbox: Mutex<Option<OutboxHandle>>,
 }
 
 impl Default for TypesRegistryGear {
@@ -62,7 +63,6 @@ impl TypesRegistryGear {
         registration_policy: RegistrationPolicy,
         cfg: TypesRegistryConfig,
         metrics: Arc<dyn AdmissionMetrics>,
-        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let dispatch = Arc::new(OutboxDispatch::new());
         // Choose database adapters at the composition root.
@@ -73,15 +73,12 @@ impl TypesRegistryGear {
             registration_policy,
             cfg,
             Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
-            // Seeding uses a separate inline service.
-            crate::domain::registry_service::AdmissionMode::Outbox,
             metrics,
         ));
 
-        // Start after inline seeding. Startup recovery runs in the background, so
-        // `init()` returns once the pipeline is bound and the gear starts serving
-        // reads; the token stops that scan on a page boundary.
-        let admission = crate::infra::outbox::start(db.db(), &registry, &dispatch, cancel).await?;
+        // The dispatch must be bound before anything submits: acceptance enqueues
+        // inside its own transaction and refuses if there is nowhere to enqueue.
+        let admission = crate::infra::outbox::start(db.db(), &registry, &dispatch).await?;
         *self.outbox.lock() = Some(admission);
 
         self.registry
@@ -95,7 +92,7 @@ impl TypesRegistryGear {
         Ok(())
     }
 
-    /// Await runtime cancellation, then stop and join the pipeline started in `init()`.
+    /// Await runtime cancellation, then drain the pipeline started in `init()`.
     pub(crate) async fn serve(
         self: Arc<Self>,
         cancel: CancellationToken,
@@ -218,14 +215,8 @@ impl Gear for TypesRegistryGear {
         // T7–T9's database path is optional for `no-db.yaml` / `--mock` deployments.
         // Without a DB, routes return canonical `503 Service Unavailable`; warn why.
         if let Some(db) = ctx.db() {
-            self.wire_admission(
-                &db,
-                registration_policy,
-                cfg_for_registry,
-                metrics,
-                ctx.cancellation_token(),
-            )
-            .await?;
+            self.wire_admission(&db, registration_policy, cfg_for_registry, metrics)
+                .await?;
         } else {
             tracing::warn!(
                 "types_registry has no database bound: POST /entities, GET /operations/{{id}} and \

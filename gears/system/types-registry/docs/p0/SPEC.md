@@ -97,7 +97,7 @@ correctness core, not scope.
 | D8 | **`gts`, `gts-id` and `gts-macros` are pinned at 0.12.0 and move together** | A split pin puts the identifier crate and the semantics crate on different specifications. `gts-dylint` / `gts-macros-cli` must not lag either — see §7 |
 | D9 | **Use `toolkit-db/preview-outbox`** | Closes DESIGN §4's outbox sign-off for this gear |
 | D10 | **`POST /entities` breaks**: `200` + results becomes `202` + operation | No compatibility path on that route. The gear's REST stability is `unstable`; the break is called out in the changelog |
-| D11 | **P0 retains registry-side inventory pull; per-gear push moves to P1** | Supersedes the original P0 push decision (plan P4/P18). types-registry seeds all linked inventory plus `cfg.entities` through inline admission. T23 reconciles explicitly supplied documents for existing registration callers; no per-gear inventory filter or new inventory startup calls in P0. C3 remains open until P1 integrates inventory attribution and push with the platform-plane client |
+| D11 | **P0 retains registry-side inventory pull; per-gear push moves to P1** | Supersedes the original P0 push decision (plan P4/P18). types-registry seeds all linked inventory plus `cfg.entities` through the outbox, requiring every seed item to be `succeeded` or `unchanged` before publishing its client. T23 reconciles explicitly supplied documents for existing registration callers; no per-gear inventory filter or new inventory startup calls in P0. C3 remains open until P1 integrates inventory attribution and push with the platform-plane client |
 | D12 | **`GET /entities` becomes a bounded content-free page with a cursor** | The current shape returns every match with its full `content`; with D3 that is *entity count* × up to 1 MB in one response, and the count is now every gear's declarations. DESIGN specifies this route as content-free discovery returning one page and a cursor. A `limit` without a cursor would bound the response by making the endpoint incomplete, so both land together (§10.2) |
 
 ---
@@ -374,11 +374,12 @@ dependencies, become terminal item outcomes and acknowledge delivery. In-batch
 dependencies are ordered; cross-request dependencies require the caller to await the
 prerequisite.
 
-Retry is reserved for failures that may clear. Permanent system failures and exhausted
-recovery mark undecided items `admission_abandoned` before dead-lettering. Diagnostics
-contain only stable `error_code`, `operation_id` and allowlisted `cause_kind` values.
-If terminalization fails while attempts remain, redeliver; after the bounded budget,
-dead-letter and leave startup recovery to resume any non-terminal operation.
+Retry is reserved for failures that may clear. Permanent system failures and an
+exhausted attempt budget mark undecided items `system_failure` and acknowledge
+the message. Diagnostics contain only stable `error_code`, `operation_id` and
+allowlisted `cause_kind` values. If terminalization fails, redeliver — past the
+budget too, because nothing else re-drives a non-terminal operation. Dead-lettering
+is reserved for envelopes that name no operation.
 
 The default budget is eight admission attempts. `operation_timeout` bounds each leased
 handler, and delivery `N + 1` resolves stored status without running admission again.
@@ -388,16 +389,21 @@ bytes modulo eight. Partitions run concurrently; `entity_write_order` still seri
 entity commits. Retries block only their partition. Changing the count requires recreating
 the disposable dev/test outbox; live repartitioning is unsupported.
 
-**Where it runs.** Startup order is repositories → inline seeding → outbox worker →
-client publication. The stateful entry point stops the retained `OutboxHandle` on
-runtime cancellation. Starting during `init()` lets consumer initialization await results.
+**Where it runs.** Startup order is repositories → outbox worker → seeding → await
+the seed operations → client publication. The outbox starts first because acceptance
+enqueues inside its own transaction and there is nowhere to enqueue before it is
+bound. Terminal is not enough to publish: `system_failure` and a refused candidate
+are terminal too, so startup requires every seed item to be `succeeded` or
+`unchanged`, and any `failed` item fails boot. The stateful entry point stops the
+retained `OutboxHandle` on runtime cancellation. Starting during `init()` lets
+consumer initialization await results.
 
-**Two seed sources, one inline pass.** Seeding covers (1) all process-linked toolkit-gts
+**Two seed sources, one pass.** Seeding covers (1) all process-linked toolkit-gts
 inventory, including other gears' declarations, and (2) the operator-configured
 `cfg.entities` from the deployment YAML — identities whose GTS identifiers are
 deployment-specific and cannot be expressed as gear-owned inventory items (e.g. the
-platform-root tenant type whose identity is chosen by the operator). Both sources are admitted
-together in a single inline pass; an invalid or oversized combined seed set fails startup
+platform-root tenant type whose identity is chosen by the operator). Both sources are submitted
+together in a single pass; an invalid or oversized combined seed set fails startup
 loudly. The combined set must fit `limits.batch_candidates` and the other admission limits;
 there is no silent truncation or split that could separate a candidate from its dependency.
 Admission orders the combined candidate graph. T24 verifies the real deployment inventory
@@ -412,8 +418,9 @@ inventory reconciliation. Repeated startup is idempotent; no ready-mode barrier 
 Acceptance and admission therefore have different executors. Acceptance is always
 synchronous, in the caller's task, inside registry code: the REST handler for API traffic, or
 the local client for an in-process SDK caller. Admission is performed by the types-registry
-outbox processors, with a database lease per partition shared across pods. Seeding is
-the exception both ways: types-registry accepts and admits it itself, inline, with no outbox.
+outbox processors, with a database lease per partition shared across pods. Seeding takes
+the same path: an accepted operation always carries a durable message, so there is no
+composition in which one is committed with no driver.
 
 **Worker, per admission unit:**
 
@@ -727,7 +734,7 @@ Do not write `version_family`, `entity`, revision, current-pointer or `dependenc
 or claim `entity_write_order`: a prediction must not serialize real writers behind a batch.
 Verify this with an adapter that rejects write attempts; unchanged tables alone permit rollback.
 Operation, outcome, idempotency and dispatch records remain durable. Publish outcomes and
-completion atomically after releasing the snapshot, preserving payloads for recovery on failure.
+completion atomically after releasing the snapshot, preserving payloads for redelivery on failure.
 
 ### 8.2 Read path, and why no store is held between admissions
 
@@ -1374,8 +1381,8 @@ gears:
                                        # bounded by stop_timeout: the host hard-stops
                                        # at 35s, so a long pass outlives the drain
         max_revalidation_attempts: 8   # the revalidation loop's bound, §8.1 step 4.3
-        max_delivery_attempts: 8       # T21: failed deliveries before dead-lettering
-                                       # and terminalizing as `admission_abandoned`.
+        max_delivery_attempts: 8       # T21: failed deliveries before the operation
+                                       # is terminalized as `system_failure`.
                                        # >0 and <= 32766: the outbox's i16 counter
                                        # less the increment the handler's own
                                        # delivery has already spent

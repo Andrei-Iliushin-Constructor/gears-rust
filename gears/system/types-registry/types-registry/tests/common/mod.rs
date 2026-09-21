@@ -9,10 +9,7 @@ mod test_stores;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub use test_stores::{
-    FailingCall, Hooks, PageGate, PausePoint, RecoveryPageCall, SharedPause, TestStores,
-    TestStoresBuilder,
-};
+pub use test_stores::{FailingCall, Hooks, PausePoint, SharedPause, TestStores, TestStoresBuilder};
 
 use gts::GtsConfig;
 use types_registry::{
@@ -189,22 +186,96 @@ pub fn allow_all() -> AccessScope {
     AccessScope::allow_all()
 }
 
-/// A token that never fires, for tests that do not exercise shutdown. Startup
-/// recovery stops on a page boundary once this is cancelled.
-#[must_use]
-pub fn no_cancellation() -> tokio_util::sync::CancellationToken {
-    tokio_util::sync::CancellationToken::new()
-}
-
 #[must_use]
 pub fn metrics() -> std::sync::Arc<dyn types_registry::domain::ports::metrics::AdmissionMetrics> {
     std::sync::Arc::new(types_registry::domain::ports::metrics::NoopMetrics)
 }
 
+/// In-memory `tracing` capture for a binary's one global subscriber: a
+/// per-future subscriber is not isolated from concurrent tests.
+#[derive(Clone, Default)]
+pub struct CapturedLog(Arc<parking_lot::Mutex<Vec<u8>>>);
+
+impl CapturedLog {
+    /// Install as the process-wide subscriber. Call once per test binary.
+    pub fn install_global() -> Self {
+        let captured = Self::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(captured.clone())
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("this binary installs exactly one subscriber");
+        captured
+    }
+
+    pub fn clear(&self) {
+        self.0.lock().clear();
+    }
+
+    /// Whether `needle` appears anywhere: a leak outside the operation's span
+    /// is still a leak.
+    #[must_use]
+    pub fn contains(&self, needle: &str) -> bool {
+        String::from_utf8_lossy(&self.0.lock()).contains(needle)
+    }
+
+    /// Only the lines naming `operation_id`, so a concurrent test cannot
+    /// satisfy or break an assertion.
+    #[must_use]
+    pub fn lines_for(&self, operation_id: uuid::Uuid) -> String {
+        let needle = operation_id.to_string();
+        String::from_utf8_lossy(&self.0.lock())
+            .lines()
+            .filter(|line| line.contains(&needle))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+impl std::io::Write for CapturedLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl tracing_subscriber::fmt::MakeWriter<'_> for CapturedLog {
+    type Writer = Self;
+
+    fn make_writer(&self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Enqueues nothing, for tests that drive `admit` themselves. Test-only: a
+/// production composition must never commit an operation with no message.
+#[derive(Debug, Default)]
+pub struct NoDispatch;
+
+#[async_trait::async_trait]
+impl types_registry::domain::admission::OperationDispatch for NoDispatch {
+    async fn enqueue(
+        &self,
+        _tx: &toolkit_db::DbTx<'_>,
+        _operation_id: uuid::Uuid,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[must_use]
+pub fn no_dispatch() -> Arc<dyn types_registry::domain::admission::OperationDispatch> {
+    Arc::new(NoDispatch)
+}
+
 #[derive(Debug, Default)]
 pub struct RecordingDeliveryMetrics {
     outcomes: parking_lot::Mutex<Vec<types_registry::domain::ports::metrics::DeliveryOutcome>>,
-    recoveries: parking_lot::Mutex<Vec<types_registry::domain::ports::metrics::RecoveryOutcome>>,
 }
 
 impl RecordingDeliveryMetrics {
@@ -212,19 +283,9 @@ impl RecordingDeliveryMetrics {
     pub fn outcomes(&self) -> Vec<types_registry::domain::ports::metrics::DeliveryOutcome> {
         self.outcomes.lock().clone()
     }
-
-    /// Startup-recovery scan outcomes, in the order they were counted.
-    #[must_use]
-    pub fn recoveries(&self) -> Vec<types_registry::domain::ports::metrics::RecoveryOutcome> {
-        self.recoveries.lock().clone()
-    }
 }
 
 impl types_registry::domain::ports::metrics::AdmissionMetrics for RecordingDeliveryMetrics {
-    fn recovery_scan(&self, outcome: types_registry::domain::ports::metrics::RecoveryOutcome) {
-        self.recoveries.lock().push(outcome);
-    }
-
     fn unchanged_probe(&self, _hit: bool) {}
 
     fn candidate_terminalized(

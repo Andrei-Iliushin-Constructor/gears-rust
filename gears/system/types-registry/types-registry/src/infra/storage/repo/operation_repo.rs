@@ -4,7 +4,6 @@
 use sea_orm::sea_query::{Expr, Func};
 use sea_orm::{
     ActiveValue::Set, ColumnTrait, Condition, EntityTrait, Order, QueryFilter, QueryOrder,
-    QuerySelect,
 };
 use time::OffsetDateTime;
 use toolkit_db::secure::{
@@ -16,8 +15,7 @@ use uuid::Uuid;
 use crate::domain::admission::Precondition;
 use crate::domain::admission::fingerprint::{RequestFingerprint, ScopeHash};
 use crate::domain::ports::{
-    ItemSuccess, NewOperation, NewOperationItem, OperationItemRow, OperationRow, RecoveryCursor,
-    RecoveryPage,
+    ItemSuccess, NewOperation, NewOperationItem, OperationItemRow, OperationRow,
 };
 use crate::infra::storage::entity::enums::{OperationItemStatus, OperationStatus};
 use crate::infra::storage::entity::{operation, operation_item};
@@ -123,53 +121,6 @@ impl OperationRepo {
             .await?
             .map(operation_row)
             .transpose()
-    }
-
-    /// Read one keyset page of non-terminal operations for startup recovery.
-    pub async fn nonterminal_page(
-        runner: &impl DBRunner,
-        scope: &AccessScope,
-        after: Option<RecoveryCursor>,
-        limit: u64,
-    ) -> Result<RecoveryPage, ScopeError> {
-        let mut filter = Condition::all().add(
-            Condition::any()
-                .add(operation::Column::Status.eq(OperationStatus::Pending))
-                .add(operation::Column::Status.eq(OperationStatus::Running)),
-        );
-        // Keyset paging advances while earlier rows remain non-terminal.
-        if let Some(cursor) = after {
-            filter = filter.add(
-                Condition::any()
-                    .add(operation::Column::CreatedAt.gt(cursor.created_at))
-                    .add(
-                        Condition::all()
-                            .add(operation::Column::CreatedAt.eq(cursor.created_at))
-                            .add(operation::Column::Id.gt(cursor.id)),
-                    ),
-            );
-        }
-        operation::Entity::find()
-            .filter(filter)
-            // Creation time orders recovery; the client UUID only breaks ties.
-            .order_by(operation::Column::CreatedAt, Order::Asc)
-            .order_by(operation::Column::Id, Order::Asc)
-            .limit(limit)
-            .secure()
-            .scope_with(scope)
-            .all(runner)
-            .await
-            .map(|rows| {
-                let cursors = rows
-                    .into_iter()
-                    .map(|row| RecoveryCursor {
-                        created_at: row.created_at,
-                        id: row.id,
-                    })
-                    .collect();
-                // Built here because this is the only place that knows `limit`.
-                RecoveryPage::new(cursors, limit)
-            })
     }
 
     /// Insert acceptance; the idempotency constraint serializes duplicates.
@@ -299,12 +250,12 @@ impl OperationRepo {
         Ok(result.rows_affected == 1)
     }
 
-    /// Terminalize abandonment from either non-terminal state.
+    /// Terminalize a system failure from either non-terminal state.
     /// Returns `false` if another writer already terminalized the operation.
     ///
     /// # Errors
     /// Propagates scope validation and database update failures.
-    pub async fn mark_abandoned(
+    pub async fn mark_system_failed(
         runner: &impl DBRunner,
         scope: &AccessScope,
         id: Uuid,
@@ -341,7 +292,7 @@ impl OperationRepo {
     /// Move an operation to `completed`. `completed` means every item is terminal;
     /// outcomes stay on the items and are not aggregated here (`database.sql`).
     ///
-    /// Complete only a running operation; abandonment may also move pending rows.
+    /// Complete only a running operation; a system failure may also move pending rows.
     ///
     /// # Errors
     /// Propagates the update's failure.

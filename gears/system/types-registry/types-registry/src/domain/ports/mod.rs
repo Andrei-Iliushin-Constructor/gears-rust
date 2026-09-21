@@ -802,58 +802,6 @@ pub trait InstanceStore: Send + Sync {
     ) -> Result<bool, ScopeError>;
 }
 
-/// Chronological recovery cursor; the client UUID only breaks timestamp ties.
-#[domain_model]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RecoveryCursor {
-    pub created_at: OffsetDateTime,
-    pub id: Uuid,
-}
-
-/// One keyset page of the startup-recovery backlog.
-///
-/// The page decides where the walk goes next, so a caller never derives a cursor
-/// or compares a length itself: [`Self::next`] is `None` exactly when the page
-/// came back short, which is what ends the walk.
-#[domain_model]
-#[derive(Clone, Debug, Default)]
-pub struct RecoveryPage {
-    cursors: Vec<RecoveryCursor>,
-    next: Option<RecoveryCursor>,
-}
-
-impl RecoveryPage {
-    /// Build from the rows a read of `limit` returned.
-    #[must_use]
-    pub fn new(cursors: Vec<RecoveryCursor>, limit: u64) -> Self {
-        let full = u64::try_from(cursors.len()).unwrap_or(u64::MAX) >= limit;
-        let next = if full { cursors.last().copied() } else { None };
-        Self { cursors, next }
-    }
-
-    /// The operations on this page, in keyset order.
-    #[must_use]
-    pub fn cursors(&self) -> &[RecoveryCursor] {
-        &self.cursors
-    }
-
-    /// The cursor to resume strictly after, or `None` when the walk is over.
-    #[must_use]
-    pub fn next(&self) -> Option<RecoveryCursor> {
-        self.next
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.cursors.is_empty()
-    }
-
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.cursors.len()
-    }
-}
-
 /// Operations and their per-candidate items.
 #[async_trait]
 pub trait OperationStore: Send + Sync {
@@ -871,16 +819,6 @@ pub trait OperationStore: Send + Sync {
         scope: &AccessScope,
         id: Uuid,
     ) -> Result<Option<OperationRow>, ScopeError>;
-
-    /// Read one keyset page of non-terminal operations for recovery. Resume
-    /// strictly after `after`; the returned page says whether another follows.
-    async fn nonterminal_page(
-        &self,
-        tx: &DbTx<'_>,
-        scope: &AccessScope,
-        after: Option<RecoveryCursor>,
-        limit: u64,
-    ) -> Result<RecoveryPage, ScopeError>;
 
     async fn insert_operation(
         &self,
@@ -923,8 +861,8 @@ pub trait OperationStore: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<bool, ScopeError>;
 
-    /// Terminalize abandonment from either pending or running.
-    async fn mark_abandoned(
+    /// Terminalize a system failure from either pending or running.
+    async fn mark_system_failed(
         &self,
         tx: &DbTx<'_>,
         scope: &AccessScope,
