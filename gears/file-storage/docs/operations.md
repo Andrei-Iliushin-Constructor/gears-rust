@@ -321,7 +321,8 @@ share `FileStorageConfig`. All of these are read once in `main()`.
 | `FS_SIDECAR_INTERNAL_TOKEN` | unset (header omitted) | Interim shared secret sent as `x-fs-internal-token` on both the finalize and report-part control-plane callbacks — the sidecar's half of the control plane's `finalize_internal_secret`/`require_finalize_internal_secret` (see above). Unset/empty = the header is not sent, matching a control plane with the check disabled. Must match the control plane's configured secret from the moment `finalize_internal_secret` is set on the control plane, regardless of `require_finalize_internal_secret`. |
 | `FS_SIDECAR_S3_BACKENDS` | unset (no S3 backends) | Optional JSON array of `S3BackendConfig` entries (mirrors the control plane's `s3_backends`), folded into the sidecar's own `BackendRegistry` alongside the always-present `local-fs` backend so a control-plane-registered `S3Backend` is reachable by real traffic dispatched per-request via `claims.backend_id`. Credentials embedded in this JSON blob are acceptable for the sidecar (the one component authorized to hold them, per ADR-0003) but should be sourced from a secrets manager / mounted file in production where supported. **Keep this list in lockstep with the control plane's `s3_backends`**: signed tokens carry `backend_id` and `backend_path`, and the sidecar resolves them against *its own* registry, with no reconciliation, handshake or version check between the two. A `backend_id` the sidecar does not know fails the request with `500` ("unknown backend") after the URL was already minted; worse, an id that resolves on both sides but points at a different endpoint/bucket fails silently in the other direction — the upload lands in the wrong bucket and the control plane's read-back finds nothing, surfacing as a `502` on finalize (or a `404` on a later download) rather than as a configuration error. |
 
-Every `FS_SIDECAR_*` numeric env var (`FS_SIDECAR_MAX_BODY_BYTES`, the two timeout vars, and
+Every `FS_SIDECAR_*` numeric env var (`FS_SIDECAR_MAX_BODY_BYTES`, `FS_SIDECAR_BODY_IDLE_TIMEOUT_SECS`,
+`FS_SIDECAR_FINALIZE_TIMEOUT_SECS`, `FS_SIDECAR_FINALIZE_CONNECT_TIMEOUT_SECS`, and
 `FS_SIDECAR_MAX_CONCURRENT_PART_UPLOADS`) fails sidecar startup with a
 descriptive error if the value is *set but does not parse* (`parse_optional`/`parse_env_or_default`,
 `src/bin/sidecar.rs`) — it does **not** silently fall back to the default on a typo like
@@ -360,11 +361,13 @@ The sweep runs **four** steps, in this order:
      `orphan_grace_secs`, best-effort deletes their backend blobs, and additionally deletes the parent `files` row
      too if reclaiming its last pending version leaves it a permanent zero-version orphan (no versions left **and**
      `content_id IS NULL`, and no blocking in-progress multipart session for that file).
-   - **(b)** Separately sweeps `files` rows that never had a version in the first place: `content_id IS NULL`, no
-     rows in `file_versions`, `created_at` older than the same `grace_cutoff` (`orphan_grace_secs`), and no blocking
-     `in_progress`/`completing` multipart session for that file — batched, each candidate re-verified and deleted
+   - **(b)** Separately sweeps `files` rows that never had a version in the first place. The list query's predicate
+     is exactly three conditions — `content_id IS NULL`, no rows in `file_versions`, and `created_at` older than the
+     same `grace_cutoff` (`orphan_grace_secs`) — and runs batched; each candidate is then re-verified and deleted
      through the same guarded `maybe_delete_orphaned_file` path that phase (a) uses for its own zero-version case,
-     with an `OrphanReconcile` audit row and a `file.deleted` event. This is the reaper for a `POST /files`
+     writing an `OrphanReconcile` audit row and a `file.deleted` event. The absence of a blocking
+     `in_progress`/`completing` multipart session for the file is deliberately **not** part of that list query: it is
+     checked per candidate, at delete time, inside `maybe_delete_orphaned_file`. This is the reaper for a `POST /files`
      multipart create whose control plane crashed between committing the bare file row and inserting the pending
      version, or whose synchronous `compensate_failed_multipart_initiate` compensation (see
      [concurrency-and-failure-model.md](./concurrency-and-failure-model.md) §2.2 M1) itself failed — before this
@@ -390,6 +393,21 @@ The sweep runs **four** steps, in this order:
    inserted with `published_at = NULL` and nothing in this gear ever sets it — no relay currently drains either
    outbox table, so an age-based purge here would silently drop rows that were never delivered. Both tables
    therefore grow without bound until an `EventBroker` relay exists to drain them.
+
+   **Operational signal**: since nothing currently drains either table, watch the trend rather than a fixed
+   threshold — the row count in `audit_outbox`/`events_outbox` (or, more precisely, the count of rows with
+   `published_at IS NULL`, which today is effectively all of them) and the age of the oldest unpublished row
+   (`MIN(occurred_at) WHERE published_at IS NULL`, the same predicate the `audit_outbox_unpublished_idx` partial
+   index — and its `events_outbox` counterpart — already covers). Steady growth by itself is **expected** and not
+   an incident: it is the direct consequence of the relay not existing yet, not a bug in the sweep or in
+   idempotency-key GC. What warrants operator attention is growth that looks abnormal for the deployment's actual
+   write volume, or an oldest-unpublished-row age that keeps climbing with no plateau — either can eventually
+   become a storage or query-performance problem for the table. Until the `EventBroker` relay ships, the only
+   available mitigation is manual: archive/export the older rows out of `audit_outbox`/`events_outbox` (e.g. to
+   cold storage) and delete them from the live table, accepting that the corresponding events are then permanently
+   undelivered — a deliberate, occasional maintenance action, not something this gear automates. Escalate instead
+   of deleting when the growth rate looks wrong for the deployment, since that usually points at a different
+   problem (e.g. an unexpectedly high write rate) rather than at the relay simply not existing yet.
 
 ## Idempotent-create semantics
 

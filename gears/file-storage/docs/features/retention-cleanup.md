@@ -231,6 +231,18 @@ retention_expired_deleted, idempotency_keys_deleted }`
 6. [x] - `p1` - RETURN the accumulated `SweepResult`; the gear also exports these five tallies as metrics counters
    at the point they are logged - `inst-sweep-return`
 
+> **Batching note.** Only two phases of this cycle are batched: the retention-expiry scan (keyset-paginated,
+> `RETENTION_SWEEP_BATCH` = 500 files per page — [Sweep Retention-Policy Expiry](#sweep-retention-policy-expiry)) and the
+> versionless-files list (`inst-sweep-versionless-list`, "in batches" — [Sweep Versionless
+> Files](#sweep-versionless-files-abandoned-multipart-create-orphans)). The other four queries in this cycle —
+> the abandoned-pending-versions list (step 1's first phase), the expired-multipart-sessions list (step 2), the all-retention-
+> rules load (step 3), and the expired-idempotency-keys delete (step 4) — run as a single unbounded query/statement,
+> with no limit or offset. That is acceptable today because each of those sets is bounded by the number of
+> currently-abandoned or currently-expired sessions/keys, or by the number of configured retention rules, not by
+> the size of the `files` table — none of them scales with total file count. If any of these sets grows large
+> enough to matter, batching will need to be introduced for it too, the same way it already has been for the other
+> two phases.
+
 ### Sweep Abandoned Pending Versions (Orphan Reconciliation)
 
 - [x] `p1` - **ID**: `cpt-cf-file-storage-algo-sweep-abandoned-pending`
@@ -244,7 +256,7 @@ retention_expired_deleted, idempotency_keys_deleted }`
 2. [x] - `p1` - FOR EACH candidate: write an `orphan_reconcile` audit row, then delete the version row **status-guarded** (`status = pending` only) -- the same CAS pattern step 2 below uses, so a version a racing `finalize_upload` already flipped to `available` between the list query and this delete is left completely untouched (row, blob, and debit alike) - `inst-sweep-pending-audit-delete`
 3. [x] - `p1` - **IF** deleted: debit the reclaimed bytes via the usage reporter (fire-and-forget; `bytes_delta = -size`, `file_count_delta = 0` — `size` is structurally `0` in practice since a version is only ever assigned a nonzero size by `finalize_version`, which a reclaimed-here version never reached) - `inst-sweep-pending-usage`
 4. [x] - `p1` - Best-effort: delete the backend blob at the version's `(backend_id, backend_path)` — a failure leaves an unreachable orphan blob, acceptable in P2 - `inst-sweep-pending-blob`
-5. [x] - `p1` - **IF** the parent file now has zero versions **AND** `content_id IS NULL` **AND** no `in_progress`, unexpired multipart session still references it (the same guard as step 1, re-checked because a session that has not yet expired could still legitimately have its backing version reclaimed by an unrelated grace-window aging in the *same* sweep pass): delete the `files` row too, transactionally re-verifying both conditions inside the delete so a version inserted in the gap is never lost — write a `file.deleted` event and debit `file_count_delta = -1`, `bytes_delta = 0` - `inst-sweep-pending-orphan-file`
+5. [x] - `p1` - **IF** the parent file now has zero versions **AND** `content_id IS NULL` **AND** no `in_progress`, unexpired multipart session still references it (the same guard as step 1, re-checked because a session that has not yet expired could still legitimately have its backing version reclaimed by an unrelated grace-window aging in the *same* sweep pass): delete the `files` row too — the multipart-session check just described is pre-transactional (see [Live-Multipart-Session Guard](#live-multipart-session-guard)); the transactional delete itself (`Store::delete_orphan_file_with_event`) re-verifies only the other two conditions, zero versions and `content_id IS NULL`, fresh inside the same transaction, so a version inserted in the gap is never lost — write a `file.deleted` event and debit `file_count_delta = -1`, `bytes_delta = 0` - `inst-sweep-pending-orphan-file`
 6. [x] - `p1` - RETURN the two counts - `inst-sweep-pending-return`
 
 ### Sweep Versionless Files (Abandoned Multipart-Create Orphans)
@@ -427,6 +439,15 @@ between them is reclaimed on the *next* cycle, not silently missed. The same liv
 independently, by `CleanupEngine::has_blocking_multipart_session` before deleting a permanently-orphaned zero-version
 `files` row (§3, step 5's `inst-sweep-pending-orphan-file`), for the same reason at the file-deletion granularity: a
 `files` row's `ON DELETE CASCADE` would otherwise take a still-`in_progress` `multipart_uploads` row down with it.
+This check runs **before** the delete transaction — inside `orphan_candidate_file`'s pre-transaction snapshot — not
+inside it. The transactional guard that performs the actual delete, `Store::delete_orphan_file_with_event`,
+re-verifies only two conditions fresh inside the transaction: zero remaining versions and `content_id IS NULL`; it
+does not re-check for a live multipart session. That is safe because `multipart_uploads.version_id` is `NOT NULL`
+and a session's backing version is pre-registered in the same operation that creates the session, so a live session
+always implies a row in `file_versions` — meaning the transactional zero-versions check alone already rejects the
+delete in exactly the scenario a transactional session re-check would have guarded against. The pre-transaction
+`has_blocking_multipart_session` check is still worth doing: it is a cheap early rejection, and it also guards
+against a version reclaimed earlier in the very same sweep pass, before this file-delete step runs.
 [Sweep Versionless Files](#sweep-versionless-files-abandoned-multipart-create-orphans) (step 1's second phase,
 `inst-sweep-versionless-delete`) reuses the very same `maybe_delete_orphaned_file` call and therefore the same
 guard, even though its candidates never had a pending version for the version-query-level check to apply to in the
