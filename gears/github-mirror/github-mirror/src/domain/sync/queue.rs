@@ -13,9 +13,10 @@
 //! the repository phase, not the task. A process that dies mid-phase loses its
 //! queue, and the next run re-derives the work from the sweep watermark, the
 //! stored `ETag`s and the fingerprint gate rather than from a persisted task
-//! row. Operations are O(1) or O(log n):
-//! enqueue de-duplicates through a key index, and pending tasks are held in a
-//! per-`(session, phase)` ordered index so claims never scan the work set.
+//! row. Operations are O(1) or O(log n): enqueue de-duplicates through a key
+//! index, pending tasks are held in a per-`(session, phase, lane)` ordered
+//! index so a claim never scans the work set, and each phase's enqueued total
+//! is counted as tasks arrive rather than recounted on demand.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -72,12 +73,42 @@ impl OrderKey {
 
 type BucketKey = (Uuid, TaskPhase);
 
+/// A pending bucket holds one lane of one phase, so claiming from a lane is a
+/// lookup rather than a walk of everything the phase has pending.
+type LaneKey = (Uuid, TaskPhase, Lane);
+
 #[derive(Debug, Default)]
 struct Inner {
     by_id: HashMap<Uuid, ExtractionTask>,
     dedup: HashMap<DedupKey, Uuid>,
-    pending: HashMap<BucketKey, BTreeMap<OrderKey, Uuid>>,
+    pending: HashMap<LaneKey, BTreeMap<OrderKey, Uuid>>,
     running: HashMap<BucketKey, u64>,
+    /// Tasks ever enqueued per phase. Only ever grows: it is the denominator
+    /// the progress estimate divides by.
+    enqueued: HashMap<BucketKey, u64>,
+}
+
+impl Inner {
+    fn lane_key(task: &ExtractionTask) -> LaneKey {
+        (task.run.session_id, task.kind.phase(), Lane::of(task.kind))
+    }
+
+    fn drop_pending(&mut self, key: LaneKey, order: &OrderKey) {
+        if let Some(bucket) = self.pending.get_mut(&key) {
+            bucket.remove(order);
+            if bucket.is_empty() {
+                self.pending.remove(&key);
+            }
+        }
+    }
+
+    fn pending_in(&self, session_id: Uuid, phase: TaskPhase) -> u64 {
+        Lane::ALL
+            .into_iter()
+            .filter_map(|lane| self.pending.get(&(session_id, phase, lane)))
+            .map(|bucket| u64::try_from(bucket.len()).unwrap_or(u64::MAX))
+            .sum()
+    }
 }
 
 /// In-memory pull-based task queue. Cheaply cloneable: the indexed state is
@@ -117,9 +148,13 @@ impl TaskQueue {
         };
         inner
             .pending
-            .entry((row.run.session_id, row.kind.phase()))
+            .entry(Inner::lane_key(&row))
             .or_default()
             .insert(OrderKey::of(&row), row.id);
+        *inner
+            .enqueued
+            .entry((row.run.session_id, row.kind.phase()))
+            .or_insert(0) += 1;
         inner.dedup.insert(key, row.id);
         inner.by_id.insert(row.id, row);
     }
@@ -158,30 +193,22 @@ impl TaskQueue {
     ) -> Option<ExtractionTask> {
         let mut inner = self.lock();
 
-        let (phase, key, id) = TaskPhase::iter()
-            .filter(|p| phases.contains(p))
-            .find_map(|p| {
-                let bucket = inner.pending.get(&(session_id, p))?;
-                bucket
-                    .iter()
-                    .find(|(_, id)| {
-                        lane.is_none_or(|lane| {
-                            inner
-                                .by_id
-                                .get(id)
-                                .is_some_and(|task| Lane::of(task.kind) == lane)
-                        })
+        let (lane_key, order, id) = TaskPhase::iter()
+            .filter(|phase| phases.contains(phase))
+            .find_map(|phase| {
+                Lane::ALL
+                    .into_iter()
+                    .filter(|candidate| lane.is_none_or(|wanted| wanted == *candidate))
+                    .filter_map(|candidate| {
+                        let key: LaneKey = (session_id, phase, candidate);
+                        let (order, id) = inner.pending.get(&key)?.iter().next()?;
+                        Some((key, *order, *id))
                     })
-                    .map(|(k, id)| (p, *k, *id))
+                    .min_by_key(|(_, order, _)| *order)
             })?;
 
-        let bucket_key: BucketKey = (session_id, phase);
-        if let Some(bucket) = inner.pending.get_mut(&bucket_key) {
-            bucket.remove(&key);
-            if bucket.is_empty() {
-                inner.pending.remove(&bucket_key);
-            }
-        }
+        let bucket_key: BucketKey = (session_id, lane_key.1);
+        inner.drop_pending(lane_key, &order);
         let running_count: &mut u64 = inner.running.entry(bucket_key).or_insert(0);
         *running_count += 1;
 
@@ -212,12 +239,7 @@ impl TaskQueue {
                 }
             }
             TaskStatus::Pending => {
-                if let Some(pending) = inner.pending.get_mut(&bucket_key) {
-                    pending.remove(&OrderKey::of(&task));
-                    if pending.is_empty() {
-                        inner.pending.remove(&bucket_key);
-                    }
-                }
+                inner.drop_pending(Inner::lane_key(&task), &OrderKey::of(&task));
             }
             TaskStatus::Done | TaskStatus::Failed => {}
         }
@@ -231,8 +253,7 @@ impl TaskQueue {
     pub fn pending_count(&self, session_id: Uuid) -> u64 {
         let inner = self.lock();
         TaskPhase::iter()
-            .filter_map(|p| inner.pending.get(&(session_id, p)))
-            .map(|bucket| u64::try_from(bucket.len()).unwrap_or(u64::MAX))
+            .map(|phase| inner.pending_in(session_id, phase))
             .sum()
     }
 
@@ -240,26 +261,22 @@ impl TaskQueue {
     #[must_use]
     pub fn remaining_count_for_phase(&self, session_id: Uuid, phase: TaskPhase) -> u64 {
         let inner = self.lock();
-        let bucket_key: BucketKey = (session_id, phase);
-        let pending = inner
-            .pending
-            .get(&bucket_key)
-            .map_or(0, |bucket| u64::try_from(bucket.len()).unwrap_or(u64::MAX));
-        let running = inner.running.get(&bucket_key).copied().unwrap_or(0);
-        pending + running
+        let running = inner
+            .running
+            .get(&(session_id, phase))
+            .copied()
+            .unwrap_or(0);
+        inner.pending_in(session_id, phase) + running
     }
 
     /// Every task of `phase` ever enqueued for `session_id`, whatever its state.
     #[must_use]
     pub fn count_for_phase(&self, session_id: Uuid, phase: TaskPhase) -> u64 {
-        let inner = self.lock();
-        inner
-            .by_id
-            .values()
-            .filter(|task| task.run.session_id == session_id && task.kind.phase() == phase)
-            .count()
-            .try_into()
-            .unwrap_or(u64::MAX)
+        self.lock()
+            .enqueued
+            .get(&(session_id, phase))
+            .copied()
+            .unwrap_or(0)
     }
 }
 
