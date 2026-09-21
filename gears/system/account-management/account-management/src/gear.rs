@@ -39,6 +39,7 @@ use crate::domain::metadata::registry::MetadataSchemaRegistry;
 use crate::domain::metadata::repo::MetadataRepo;
 use crate::domain::metadata::service::MetadataService;
 use crate::domain::metrics::install_facade_bridge;
+use crate::domain::root_type::validate_root_binding;
 use crate::domain::service_account::service::ServiceAccountService;
 use crate::domain::tenant::TenantRepo;
 use crate::domain::tenant::hooks::TenantHardDeleteHook;
@@ -64,6 +65,8 @@ use toolkit::gts::PluginV1;
 use types_registry_sdk::RegisterResult;
 
 type ConcreteService = TenantService<TenantRepoImpl>;
+
+const ROOT_BINDING_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Bootstrap dependencies captured in `init()` and consumed by
 /// `serve()`. Separating validation (fast, in `init`) from execution
@@ -538,41 +541,6 @@ fn check_task_join(
     }
 }
 
-fn validate_existing_root_binding(
-    existing_root_id: uuid::Uuid,
-    existing_type_uuid: uuid::Uuid,
-    bootstrap: Option<&crate::domain::bootstrap::BootstrapConfig>,
-    root_type: &crate::domain::root_type::RootTypeConfig,
-) -> Result<(), DomainError> {
-    if let Some(boot_cfg) = bootstrap
-        && existing_root_id != boot_cfg.root_id
-    {
-        return Err(DomainError::RootBindingMismatch {
-            detail: format!(
-                "existing platform root has id={existing_root_id}, but bootstrap.root_id={}; an explicit root migration is required",
-                boot_cfg.root_id
-            ),
-        });
-    }
-    let configured_type_uuid = gts::GtsId::try_new(root_type.gts_id.as_ref())
-        .map_err(|error| DomainError::InvalidTenantType {
-            detail: format!(
-                "invalid root_tenant_type.gts_id {}: {error}",
-                root_type.gts_id
-            ),
-        })?
-        .to_uuid();
-    if existing_type_uuid != configured_type_uuid {
-        return Err(DomainError::RootBindingMismatch {
-            detail: format!(
-                "existing platform root {existing_root_id} has tenant_type_uuid={existing_type_uuid}, but configured root_tenant_type.gts_id {} resolves to {configured_type_uuid}; an explicit root/schema migration is required",
-                root_type.gts_id
-            ),
-        });
-    }
-    Ok(())
-}
-
 #[async_trait]
 impl Gear for AccountManagementGear {
     #[tracing::instrument(skip_all, fields(gear = "account-management"))]
@@ -717,14 +685,28 @@ impl Gear for AccountManagementGear {
             // existing root row and its configured GTS contract. Reject drift
             // before mutating the process-local catalogue and before non-strict
             // bootstrap policy can suppress it.
-            if let Some(existing_root) = repo
-                .find_platform_root(&toolkit_db::secure::AccessScope::allow_all())
-                .await?
-            {
-                validate_existing_root_binding(
-                    existing_root.id,
-                    existing_root.tenant_type_uuid,
-                    cfg.bootstrap.as_ref(),
+            let root_scope = toolkit_db::secure::AccessScope::allow_all();
+            let existing_root = tokio::select! {
+                () = ctx.cancellation_token().cancelled() => {
+                    return Err(anyhow::anyhow!(
+                        "account-management root binding validation cancelled during init"
+                    ));
+                }
+                result = tokio::time::timeout(
+                    ROOT_BINDING_READ_TIMEOUT,
+                    repo.find_platform_root(&root_scope),
+                ) => {
+                    result
+                        .map_err(|_| anyhow::anyhow!(
+                            "account-management root binding validation timed out after {}s during init",
+                            ROOT_BINDING_READ_TIMEOUT.as_secs()
+                        ))??
+                }
+            };
+            if let Some(existing_root) = existing_root {
+                validate_root_binding(
+                    &existing_root,
+                    cfg.bootstrap.as_ref().map(|boot_cfg| boot_cfg.root_id),
                     root_cfg,
                 )?;
             }

@@ -81,6 +81,10 @@ pub enum NextAuditOutcome {
 pub struct RepoState {
     pub tenants: HashMap<Uuid, TenantModel>,
     pub closure: Vec<ClosureRow>,
+    /// Test-only stale-read mode: platform-root lookups return no row while
+    /// writes still observe the full tenant map and its single-root invariant.
+    /// This models a lagging repository view after a concurrent root insert.
+    pub hide_platform_root_reads: bool,
     /// Mirror of `tenant_idp_metadata` — one entry per activated
     /// tenant; the value is `None` when the `IdP` plugin returned no
     /// per-tenant state from `IdpProvisionResult::metadata`. Tests that
@@ -174,6 +178,11 @@ impl FakeTenantRepo {
 
     pub fn insert_tenant_raw(&self, t: TenantModel) {
         self.state.lock().expect("lock").tenants.insert(t.id, t);
+    }
+
+    /// Hide platform roots from reads without weakening insert constraints.
+    pub fn hide_platform_root_reads(&self) {
+        self.state.lock().expect("lock").hide_platform_root_reads = true;
     }
 
     /// Seed a `tenant_idp_metadata` row directly, without going
@@ -650,6 +659,9 @@ impl TenantRepo for FakeTenantRepo {
         scope: &AccessScope,
     ) -> Result<Option<TenantModel>, DomainError> {
         let state = self.state.lock().expect("lock");
+        if state.hide_platform_root_reads {
+            return Ok(None);
+        }
         let visible = visible_ids_for(&state, scope);
         Ok(state
             .tenants

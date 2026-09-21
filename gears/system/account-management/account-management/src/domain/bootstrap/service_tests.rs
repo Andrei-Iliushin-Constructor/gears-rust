@@ -1113,7 +1113,7 @@ fn bootstrap_cfg_long_deadline() -> BootstrapConfig {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn insert_retry_exhaustion_surfaces_service_unavailable() {
     let repo = Arc::new(FakeTenantRepo::new());
     let now = OffsetDateTime::now_utc();
@@ -1129,40 +1129,21 @@ async fn insert_retry_exhaustion_surfaces_service_unavailable() {
         updated_at: now,
         deleted_at: None,
     });
+    repo.hide_platform_root_reads();
 
     let idp = Arc::new(FakeIdpProvisioner::new(FakeOutcome::Ok));
     let svc = BootstrapService::new(
         Arc::clone(&repo),
-        idp as Arc<dyn IdpPluginClient>,
+        idp.clone() as Arc<dyn IdpPluginClient>,
         bootstrap_cfg_long_deadline(),
         root_type_cfg(),
     )
     .with_types_registry(StubTypesRegistry::arc());
-    let mut ctx = RunCtx {
-        scope: AccessScope::allow_all(),
-        deadline: Instant::now() + std::time::Duration::from_secs(30),
-        cap: std::time::Duration::from_secs(1),
-        stuck_threshold: time::Duration::seconds(60),
-        backoff: std::time::Duration::from_secs(1),
-        pending_takeover_precheck: false,
-        already_exists_streak: 0,
-    };
 
-    for attempt in 1..MAX_ALREADY_EXISTS_STREAK {
-        assert!(
-            matches!(
-                svc.step_insert(&mut ctx).await,
-                BootstrapState::Sleep {
-                    reason: SleepReason::AlreadyExistsRetry
-                }
-            ),
-            "attempt {attempt} must reclassify after losing the insert race"
-        );
-    }
-
-    let BootstrapState::Terminal(Err(err)) = svc.step_insert(&mut ctx).await else {
-        panic!("retry exhaustion must be terminal");
-    };
+    let err = svc
+        .run()
+        .await
+        .expect_err("an unobservable concurrent root must exhaust insert retries");
     assert!(
         matches!(
             err,
@@ -1170,6 +1151,11 @@ async fn insert_retry_exhaustion_surfaces_service_unavailable() {
                 if detail.contains("repository view did not expose")
         ),
         "an unobserved concurrent winner must not be reported as binding drift: {err:?}"
+    );
+    assert_eq!(
+        idp.provision_call_count(),
+        0,
+        "insert conflicts must exhaust before contacting the IdP"
     );
 }
 

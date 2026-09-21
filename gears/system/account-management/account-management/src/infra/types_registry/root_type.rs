@@ -64,7 +64,7 @@ pub fn desired_root_schema(cfg: &RootTypeConfig) -> anyhow::Result<Value> {
     Ok(json!({
         "$id": format!("{GTS_ID_URI_PREFIX}{type_id}"),
         "$schema": JSON_SCHEMA_DRAFT_07,
-        "description": "Platform-root tenant type owned by Account Management (no parents).",
+        "description": "Platform-root tenant type (no parents).",
         "type": "object",
         "allOf": [{ "$ref": format!("{GTS_ID_URI_PREFIX}{parent}") }],
         "x-gts-traits": {

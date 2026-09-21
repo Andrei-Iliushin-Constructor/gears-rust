@@ -5,6 +5,7 @@ use toolkit_gts::gts_id;
 use uuid::Uuid;
 
 const ROOT_TYPE: &str = gts_id!("cf.core.am.tenant_type.v1~cf.core.am.platform.v1~");
+const OTHER_ROOT_TYPE: &str = gts_id!("cf.core.am.tenant_type.v1~cf.core.am.alternate.v1~");
 
 fn root_type(idp_provisioning: bool) -> RootTypeConfig {
     RootTypeConfig {
@@ -57,7 +58,29 @@ fn deprecated_bootstrap_root_type_is_migrated() {
 }
 
 #[test]
-fn modern_and_legacy_root_type_conflict_is_fatal() {
+fn modern_and_legacy_root_type_id_conflict_is_fatal() {
+    let cfg = AccountManagementConfig {
+        root_tenant_type: Some(root_type(false)),
+        bootstrap: Some(BootstrapConfig {
+            root_tenant_type: Some(gts::GtsTypeId::new(OTHER_ROOT_TYPE)),
+            root_tenant_type_idp_provisioning: Some(false),
+            ..bootstrap()
+        }),
+        ..AccountManagementConfig::default()
+    };
+    let error = cfg
+        .validate()
+        .expect_err("GTS ID conflict must fail globally");
+    assert_eq!(
+        error,
+        format!(
+            "account-management configuration is invalid: root_tenant_type.gts_id `{ROOT_TYPE}` conflicts with deprecated bootstrap.root_tenant_type `{OTHER_ROOT_TYPE}`"
+        )
+    );
+}
+
+#[test]
+fn modern_and_legacy_idp_provisioning_conflict_is_fatal() {
     let cfg = AccountManagementConfig {
         root_tenant_type: Some(root_type(true)),
         bootstrap: Some(BootstrapConfig {
@@ -67,8 +90,13 @@ fn modern_and_legacy_root_type_conflict_is_fatal() {
         }),
         ..AccountManagementConfig::default()
     };
-    let error = cfg.validate().expect_err("conflict must fail globally");
-    assert!(error.contains("conflicts"), "{error}");
+    let error = cfg
+        .validate()
+        .expect_err("IdP provisioning conflict must fail globally");
+    assert_eq!(
+        error,
+        "account-management configuration is invalid: root_tenant_type.idp_provisioning=true conflicts with deprecated bootstrap.root_tenant_type_idp_provisioning=false"
+    );
 }
 
 #[test]

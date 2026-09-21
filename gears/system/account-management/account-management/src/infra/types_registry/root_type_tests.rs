@@ -162,6 +162,10 @@ fn desired_schema_is_the_am_owned_root_contract() {
         desired["$schema"],
         json!("http://json-schema.org/draft-07/schema#")
     );
+    assert_eq!(
+        desired["description"],
+        json!("Platform-root tenant type (no parents).")
+    );
     assert_eq!(desired["type"], json!("object"));
     assert_eq!(
         desired.pointer("/allOf/0/$ref"),

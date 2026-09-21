@@ -653,18 +653,14 @@ impl AccountManagementConfig {
         // strict mode: a malformed or conflicting schema contract must never be
         // downgraded to best-effort bootstrap behavior.
         let root_type_err = self.resolved_root_type().err();
-        // Bootstrap sub-section is NOT validated here. The bootstrap
-        // saga's `BootstrapConfig::strict` field is the
-        // operator-facing knob that selects whether a malformed
-        // `[bootstrap]` block is init-fatal or warn-and-skip:
-        // `AccountManagementGear::init` runs `boot_cfg.validate()`
-        // explicitly and routes the result via `strict`. Folding
-        // bootstrap validation into the global config check would
-        // make `strict = false` (best-effort posture for dev / CI /
-        // multi-region splits where the root tenant is bootstrapped
-        // out of band) unreachable — a malformed block would abort
-        // init before the strict-vs-non-strict branch in `init`
-        // could see the error. See `gear.rs::Gear::init`.
+        // Apart from its root-type contract, the bootstrap sub-section is NOT
+        // validated here. Root-type presence, identity, and migration conflicts
+        // are lifecycle-fatal regardless of `BootstrapConfig::strict`; schema
+        // drift cannot be downgraded to best effort. The remaining bootstrap
+        // fields are validated by `AccountManagementGear::init`, which routes a
+        // malformed block through the operator-facing `strict` policy. Folding
+        // all bootstrap validation into this global check would make
+        // `strict = false` unreachable before that branch can warn and skip.
         if bad.is_empty()
             && conversion_err.is_none()
             && integrity_err.is_none()

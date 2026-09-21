@@ -54,7 +54,7 @@ use serde_json::Value;
 use crate::domain::bootstrap::config::BootstrapConfig;
 use crate::domain::error::{DomainError, UnsupportedResource};
 use crate::domain::metrics::{AM_BOOTSTRAP_LIFECYCLE, MetricKind, emit_metric};
-use crate::domain::root_type::RootTypeConfig;
+use crate::domain::root_type::{RootTypeConfig, validate_root_binding};
 use crate::domain::system_actor::for_bootstrap;
 use crate::domain::tenant::TenantContext;
 use crate::domain::tenant::closure::build_activation_rows;
@@ -966,34 +966,7 @@ impl<R: TenantRepo> BootstrapService<R> {
             return Ok(BootstrapClassification::NoRoot);
         };
 
-        if existing.id != self.cfg.root_id {
-            return Err(DomainError::RootBindingMismatch {
-                detail: format!(
-                    "platform root already exists with id {}, but configured root_id is {}; an explicit root migration is required",
-                    existing.id, self.cfg.root_id
-                ),
-            });
-        }
-
-        let configured_type_uuid = gts::GtsId::try_new(self.root_type.gts_id.as_ref())
-            .map_err(|error| DomainError::InvalidTenantType {
-                detail: format!(
-                    "invalid root_tenant_type.gts_id chain `{}`: {error}",
-                    self.root_type.gts_id
-                ),
-            })?
-            .to_uuid();
-        if existing.tenant_type_uuid != configured_type_uuid {
-            return Err(DomainError::RootBindingMismatch {
-                detail: format!(
-                    "platform root {} has tenant_type_uuid={}, but configured root_tenant_type.gts_id {} resolves to {}; an explicit root/schema migration is required",
-                    existing.id,
-                    existing.tenant_type_uuid,
-                    self.root_type.gts_id,
-                    configured_type_uuid
-                ),
-            });
-        }
+        validate_root_binding(&existing, Some(self.cfg.root_id), &self.root_type)?;
 
         Ok(match existing.status {
             TenantStatus::Active => BootstrapClassification::ActiveRootExists(existing),

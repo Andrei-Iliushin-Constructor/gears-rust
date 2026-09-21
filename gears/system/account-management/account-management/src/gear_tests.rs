@@ -29,7 +29,7 @@ use crate::domain::tenant::test_support::{
 
 use crate::domain::bootstrap::BootstrapService;
 use crate::domain::tenant::TenantRepo;
-use crate::gear::{handle_bootstrap_failure, validate_existing_root_binding};
+use crate::gear::handle_bootstrap_failure;
 
 const TENANT_SCHEMA: &str = gts_id!("cf.core.am.tenant.v1~");
 const TENANT_TYPE_SCHEMA: &str = gts_id!("cf.core.am.tenant_type.v1~");
@@ -200,33 +200,6 @@ fn root_type_cfg() -> RootTypeConfig {
 
 fn root_id() -> Uuid {
     Uuid::from_u128(0x100)
-}
-
-#[test]
-fn existing_root_type_binding_must_match_configured_gts_id() {
-    let cfg = root_type_cfg();
-    let expected = gts::GtsId::try_new(ROOT_TENANT_TYPE)
-        .expect("valid root type")
-        .to_uuid();
-    validate_existing_root_binding(root_id(), expected, None, &cfg)
-        .expect("matching durable binding");
-
-    let error = validate_existing_root_binding(root_id(), Uuid::nil(), None, &cfg)
-        .expect_err("type drift must be lifecycle-fatal");
-    assert!(error.to_string().contains("explicit root/schema migration"));
-}
-
-#[test]
-fn existing_root_id_must_match_bootstrap_config() {
-    let cfg = root_type_cfg();
-    let expected = gts::GtsId::try_new(ROOT_TENANT_TYPE)
-        .expect("valid root type")
-        .to_uuid();
-    let bootstrap = valid_bootstrap_cfg(false);
-
-    let error = validate_existing_root_binding(Uuid::nil(), expected, Some(&bootstrap), &cfg)
-        .expect_err("root id drift must be lifecycle-fatal");
-    assert!(error.to_string().contains("explicit root migration"));
 }
 
 fn valid_bootstrap_cfg(strict: bool) -> BootstrapConfig {
