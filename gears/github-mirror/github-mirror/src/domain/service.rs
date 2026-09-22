@@ -3520,6 +3520,9 @@ impl Service {
             ended_at: None,
             updated_at: Some(now),
         };
+        self.release_lock_left_by_a_dead_run(scopes, tenant_id, &key.1)
+            .await;
+
         {
             // Held for this repository only, so two concurrent requests for it
             // cannot both decide they are the first while a request for
@@ -3816,6 +3819,12 @@ impl Service {
 
     /// Close out sessions left mid-flight by a previous process.
     ///
+    /// Only `queued` and `in_progress` rows are read. A row already
+    /// `interrupted` needs nothing done to it, and those rows are never
+    /// pruned, so reading them would make every restart walk work it finished
+    /// long ago. What is left is what one process had in flight, which the
+    /// pool width bounds.
+    ///
     /// The queue is in-memory, so a `queued` or `in_progress` row that survives a
     /// restart has no worker behind it and never will. Called once at startup,
     /// across every tenant — hence the unconstrained scope, which is why this
@@ -3829,14 +3838,7 @@ impl Service {
     ) -> Result<usize, DomainError> {
         let stale = self
             .sync_sessions
-            .list_by_statuses(
-                scope,
-                &[
-                    SessionStatus::Queued,
-                    SessionStatus::InProgress,
-                    SessionStatus::Interrupted,
-                ],
-            )
+            .list_by_statuses(scope, &[SessionStatus::Queued, SessionStatus::InProgress])
             .await?;
 
         let now = Utc::now();
@@ -3845,9 +3847,6 @@ impl Service {
             if abandoned(&session, now) {
                 self.release_stale_sync_lock(tenant_id, &session.repo_full_name)
                     .await;
-            }
-            if session.status == SessionStatus::Interrupted {
-                continue;
             }
             count += 1;
             session.status = SessionStatus::Interrupted;
@@ -3888,6 +3887,53 @@ impl Service {
                 error = %e,
                 "could not release a stale sync lock"
             ),
+        }
+    }
+
+    /// Drop the sync lock marker for `repo_full_name` when the run that took
+    /// it is gone.
+    ///
+    /// The start-up sweep reads only sessions still queued or in progress, so
+    /// a marker whose session an earlier sweep already marked `interrupted`
+    /// has nothing left to clean it, and every later request for that
+    /// repository would answer 409 with nothing running. A new request is the
+    /// next moment anyone asks about that repository, so the check belongs
+    /// here: the run-status row still names the session that took the lock,
+    /// because a request writes its own session into that row only further
+    /// down.
+    ///
+    /// Best effort throughout. A row that is not there, a status that is not
+    /// `in_progress`, or a read that fails leaves the marker alone, and the
+    /// request goes on to take the lock or to answer 409 exactly as before.
+    async fn release_lock_left_by_a_dead_run(
+        &self,
+        scopes: &EnqueueScopes,
+        tenant_id: Uuid,
+        repo_full_name: &str,
+    ) {
+        let Ok(Some(status)) = self
+            .repo_sync_status
+            .find(&scopes.repo_status, repo_full_name)
+            .await
+        else {
+            return;
+        };
+        if status.status != RepoRunStatus::InProgress {
+            return;
+        }
+        let Some(session_id) = status.last_session_id else {
+            return;
+        };
+        let Ok(Some(session)) = self
+            .sync_sessions
+            .find_by_id(&scopes.session, session_id)
+            .await
+        else {
+            return;
+        };
+        if abandoned(&session, Utc::now()) {
+            self.release_stale_sync_lock(tenant_id, repo_full_name)
+                .await;
         }
     }
 
