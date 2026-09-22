@@ -44239,7 +44239,7 @@
             "name": "limit",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "integer"
             }
           },
           {
@@ -44412,7 +44412,7 @@
             "name": "limit",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "integer"
             }
           },
           {
@@ -44583,7 +44583,7 @@
             "name": "limit",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "integer"
             }
           },
           {
@@ -44735,7 +44735,7 @@
             "name": "force",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "boolean"
             }
           },
           {
@@ -44858,7 +44858,7 @@
             "name": "limit",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "integer"
             }
           },
           {
@@ -45050,7 +45050,7 @@
             "name": "limit",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "integer"
             }
           },
           {
@@ -45146,7 +45146,7 @@
             "name": "force",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "boolean"
             }
           }
         ],

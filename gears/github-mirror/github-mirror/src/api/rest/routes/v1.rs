@@ -37,7 +37,12 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
-        .query_param("limit", false, "Maximum number of repositories to return")
+        .query_param_typed(
+            "limit",
+            false,
+            "Maximum number of repositories to return",
+            "integer",
+        )
         .query_param("cursor", false, "Cursor for pagination")
         .handler(handlers::list_repos)
         .json_response_with_schema::<toolkit_odata::Page<dto::RepoDto>>(
@@ -63,7 +68,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .require_license_features::<License>([])
         .path_param("owner", "Repo owner login")
         .path_param("name", "Repo name")
-        .query_param("force", false, "Bypass the HTTP cache and re-fetch everything")
+        .query_param_typed("force", false, "Bypass the HTTP cache and re-fetch everything", "boolean")
         .query_param(
             "include",
             false,
@@ -120,7 +125,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .authenticated()
         .require_license_features::<License>([])
         .query_param("repo", false, "Resume only this `owner/name` repository")
-        .query_param("force", false, "Bypass the HTTP cache and re-fetch everything")
+        .query_param_typed("force", false, "Bypass the HTTP cache and re-fetch everything", "boolean")
         .handler(handlers::resume_syncs)
         .json_response_with_schema::<dto::ResumeAcceptedDto>(
             openapi,
@@ -140,7 +145,12 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .authenticated()
         .require_license_features::<License>([])
         .query_param("status", false, "Only `in_progress` or only `complete`")
-        .query_param("limit", false, "Maximum number of repositories to return")
+        .query_param_typed(
+            "limit",
+            false,
+            "Maximum number of repositories to return",
+            "integer",
+        )
         .query_param("cursor", false, "`next_cursor` of the previous page")
         .handler(handlers::list_repo_sync_status)
         .json_response_with_schema::<toolkit_odata::Page<dto::RepoSyncStatusDto>>(
@@ -168,7 +178,12 @@ fn register_session_routes(mut router: Router, openapi: &dyn OpenApiRegistry) ->
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
-        .query_param("limit", false, "Maximum number of sessions to return")
+        .query_param_typed(
+            "limit",
+            false,
+            "Maximum number of sessions to return",
+            "integer",
+        )
         .query_param("cursor", false, "`next_cursor` of the previous page")
         .handler(handlers::list_sync_sessions)
         .json_response_with_schema::<toolkit_odata::Page<dto::SyncSessionDto>>(
@@ -215,7 +230,12 @@ fn register_session_routes(mut router: Router, openapi: &dyn OpenApiRegistry) ->
         .path_param("owner", "Repo owner login")
         .path_param("name", "Repo name")
         .path_param("sha", "Commit SHA")
-        .query_param("limit", false, "Maximum number of files to return")
+        .query_param_typed(
+            "limit",
+            false,
+            "Maximum number of files to return",
+            "integer",
+        )
         .handler(handlers::list_commit_files)
         .json_response_with_schema::<toolkit_odata::Page<dto::CommitFileDto>>(
             openapi,
@@ -242,7 +262,7 @@ fn register_session_routes(mut router: Router, openapi: &dyn OpenApiRegistry) ->
         .path_param("owner", "Repo owner login")
         .path_param("name", "Repo name")
         .path_param("number", "Pull request number")
-        .query_param("limit", false, "Maximum number of threads to return")
+        .query_param_typed("limit", false, "Maximum number of threads to return", "integer")
         .handler(handlers::list_review_threads)
         .json_response_with_schema::<toolkit_odata::Page<dto::ReviewThreadDto>>(
             openapi,

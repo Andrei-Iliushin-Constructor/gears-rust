@@ -3687,7 +3687,6 @@ impl Service {
         let completed = outcome.is_ok();
         match outcome {
             Ok(summary) => {
-                progress.finished();
                 session.status = SessionStatus::Complete;
                 session.summary_json = stored_summary_json(job.session_id, &summary);
             }
@@ -3706,6 +3705,10 @@ impl Service {
                 session.error = Some(e.public_text());
             }
         }
+        // Whatever the outcome: the run is over, and a caller watching the
+        // percentage should not be left waiting at the point a failed run
+        // stopped. What happened is in `status` and `error`.
+        progress.finished();
         session.progress_percent = i32::from(progress.percent());
         session.ended_at = Some(now_rfc3339());
         session.updated_at.clone_from(&session.ended_at);
