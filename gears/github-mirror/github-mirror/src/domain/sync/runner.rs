@@ -8,6 +8,7 @@
 //! being listed; Verification runs strictly last (once it exists, #4632
 //! slice 6 step 5).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -236,6 +237,10 @@ impl RepoPhaseRunner {
             cancel: self.cancel.clone(),
         };
         let mut in_flight: JoinSet<TaskOutcome> = JoinSet::new();
+        // What each spawned task is working on. A task that panics or is
+        // aborted comes back as a bare `JoinError`, and this is the only way
+        // left to say which task that was.
+        let mut running: HashMap<tokio::task::Id, ExtractionTask> = HashMap::new();
         let mut next_lane = 0usize;
 
         loop {
@@ -243,8 +248,8 @@ impl RepoPhaseRunner {
                 report.cancelled = true;
                 break;
             }
-            while let Some(outcome) = in_flight.try_join_next() {
-                Self::account(outcome, report);
+            while let Some(outcome) = in_flight.try_join_next_with_id() {
+                self.account(outcome, &mut running, report);
             }
             self.publish_progress();
 
@@ -252,26 +257,26 @@ impl RepoPhaseRunner {
                 || (self.queue.pending_count(self.run.session_id) >= BACKPRESSURE_HIGH
                     && !in_flight.is_empty());
             if saturated {
-                if let Some(outcome) = in_flight.join_next().await {
-                    Self::account(outcome, report);
+                if let Some(outcome) = in_flight.join_next_with_id().await {
+                    self.account(outcome, &mut running, report);
                 }
                 continue;
             }
 
             match self.claim_round_robin(phases, &mut next_lane) {
-                Some(task) => self.spawn(task, &ctx, &mut in_flight),
+                Some(task) => self.spawn(task, &ctx, &mut in_flight, &mut running),
                 // Nothing claimable right now: an in-flight Indexing task may
                 // still seed more, so wait for one to finish before deciding
                 // the phase is drained.
-                None => match in_flight.join_next().await {
-                    Some(outcome) => Self::account(outcome, report),
+                None => match in_flight.join_next_with_id().await {
+                    Some(outcome) => self.account(outcome, &mut running, report),
                     None => break,
                 },
             }
         }
 
-        while let Some(outcome) = in_flight.join_next().await {
-            Self::account(outcome, report);
+        while let Some(outcome) = in_flight.join_next_with_id().await {
+            self.account(outcome, &mut running, report);
         }
         self.publish_progress();
     }
@@ -301,11 +306,13 @@ impl RepoPhaseRunner {
         task: ExtractionTask,
         ctx: &WorkerContext,
         in_flight: &mut JoinSet<TaskOutcome>,
+        running: &mut HashMap<tokio::task::Id, ExtractionTask>,
     ) {
         let queue = Arc::clone(&self.queue);
         let dispatcher = Arc::clone(&self.dispatcher);
         let ctx = ctx.clone();
-        in_flight.spawn(async move {
+        let spawned = task.clone();
+        let handle = in_flight.spawn(async move {
             let mut task = task;
             let error = loop {
                 match dispatcher.dispatch(&ctx, &task).await {
@@ -336,29 +343,52 @@ impl RepoPhaseRunner {
             };
             TaskOutcome { task, error }
         });
+        running.insert(handle.id(), spawned);
     }
 
-    fn account(joined: Result<TaskOutcome, tokio::task::JoinError>, report: &mut RunReport) {
+    /// Record one finished task, and take it out of the queue if it did not
+    /// take itself out.
+    ///
+    /// A task that panicked or was aborted never reached its own bookkeeping,
+    /// so `running` says which task it was and the queue entry is failed here
+    /// instead of sitting as `Running` for the rest of the run.
+    fn account(
+        &self,
+        joined: Result<(tokio::task::Id, TaskOutcome), tokio::task::JoinError>,
+        running: &mut HashMap<tokio::task::Id, ExtractionTask>,
+        report: &mut RunReport,
+    ) {
         let failure = match joined {
-            Ok(TaskOutcome { error: None, .. }) => {
-                report.tasks_done += 1;
-                return;
+            Ok((id, outcome)) => {
+                running.remove(&id);
+                match outcome {
+                    TaskOutcome { error: None, .. } => {
+                        report.tasks_done += 1;
+                        return;
+                    }
+                    TaskOutcome {
+                        task,
+                        error: Some(error),
+                    } => TaskFailure {
+                        kind: Some(task.kind),
+                        entity_id: task.entity_id,
+                        error,
+                    },
+                }
             }
-            Ok(TaskOutcome {
-                task,
-                error: Some(error),
-            }) => TaskFailure {
-                kind: Some(task.kind),
-                entity_id: task.entity_id,
-                error,
-            },
-            Err(join_error) => TaskFailure {
-                kind: None,
-                entity_id: None,
-                error: DomainError::internal(format!(
-                    "sync task did not finish cleanly: {join_error}"
-                )),
-            },
+            Err(join_error) => {
+                let task = running.remove(&join_error.id());
+                if let Some(task) = &task {
+                    self.queue.fail_task(task.id);
+                }
+                TaskFailure {
+                    kind: task.as_ref().map(|task| task.kind),
+                    entity_id: task.and_then(|task| task.entity_id),
+                    error: DomainError::internal(format!(
+                        "sync task did not finish cleanly: {join_error}"
+                    )),
+                }
+            }
         };
         tracing::warn!(%failure, "sync task failed");
         report.failures.push(failure);
