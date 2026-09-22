@@ -5132,6 +5132,56 @@ async fn dirty_set_populated_after_enqueue() {
 }
 
 #[tokio::test]
+async fn flush_partition_takes_the_queue_local_partition_index() {
+    let db = setup_db("ch13_flush_partition_index").await;
+    let t = make_default_test_outbox().await;
+    t.outbox.register_queue(&db, "first", 2).await.unwrap();
+    t.outbox.register_queue(&db, "second", 2).await.unwrap();
+
+    let second = t.outbox.partition_ids_for_queue("second");
+    assert_ne!(
+        second[1], 1,
+        "the assertion below only discriminates while the index and the id differ",
+    );
+
+    t.outbox
+        .flush_partition("second", 1)
+        .expect("signal a registered queue's partition");
+
+    let guard = t.prioritizer.take().expect("the partition is dirty");
+    assert_eq!(guard.partition_id(), second[1]);
+    guard.processed();
+    assert!(
+        t.prioritizer.take().is_none(),
+        "only the signalled partition is dirty",
+    );
+}
+
+#[tokio::test]
+async fn flush_partition_rejects_an_unknown_queue_and_an_out_of_range_partition() {
+    let db = setup_db("ch13_flush_partition_rejects").await;
+    let t = make_default_test_outbox().await;
+    t.outbox.register_queue(&db, "q", 2).await.unwrap();
+
+    assert!(matches!(
+        t.outbox.flush_partition("absent", 0).unwrap_err(),
+        OutboxError::QueueNotRegistered(queue) if queue == "absent",
+    ));
+    assert!(matches!(
+        t.outbox.flush_partition("q", 2).unwrap_err(),
+        OutboxError::PartitionOutOfRange {
+            partition: 2,
+            max: 2,
+            ..
+        },
+    ));
+    assert!(
+        t.prioritizer.take().is_none(),
+        "a rejected signal marks nothing dirty",
+    );
+}
+
+#[tokio::test]
 async fn sequencer_processes_only_dirty_partitions() {
     let db = setup_db("ch13_only_dirty").await;
     let t = make_default_test_outbox().await;

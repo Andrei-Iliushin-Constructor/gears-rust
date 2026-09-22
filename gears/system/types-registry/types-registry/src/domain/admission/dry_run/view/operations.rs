@@ -92,6 +92,18 @@ impl OperationStore for AdmissionView {
         ))
     }
 
+    async fn mark_system_failed(
+        &self,
+        _tx: &DbTx<'_>,
+        _scope: &AccessScope,
+        _id: Uuid,
+        _now: OffsetDateTime,
+    ) -> Result<bool, ScopeError> {
+        Err(unsupported(
+            "an admission view does not move the operation row; the pass owns that",
+        ))
+    }
+
     /// Capture success and return `true`. The real CAS happens during publication;
     /// virtual effects must remain visible to dependent candidates until then.
     async fn mark_item_succeeded(
@@ -133,6 +145,21 @@ impl OperationStore for AdmissionView {
     ) -> Result<bool, ScopeError> {
         Err(unsupported(
             "an admission view records no refusal; the pass publishes it outside the snapshot",
+        ))
+    }
+
+    /// Only the outbox delivery path terminalizes an operation, and it never
+    /// runs against a view.
+    async fn fail_nonterminal_items(
+        &self,
+        _tx: &DbTx<'_>,
+        _scope: &AccessScope,
+        _operation_id: Uuid,
+        _error_payload: String,
+        _now: OffsetDateTime,
+    ) -> Result<u64, ScopeError> {
+        Err(unsupported(
+            "an admission view does not fail an operation; delivery does that outside the snapshot",
         ))
     }
 }

@@ -732,7 +732,20 @@ impl Outbox {
         *self.prioritizer.write().await = Some(prioritizer);
     }
 
+    /// Sequence one partition immediately instead of waiting for reconciliation.
+    /// `partition` is the queue-local index used by [`Record`], not a database id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the queue is not registered or the partition is out
+    /// of range.
+    pub fn flush_partition(&self, queue: &str, partition: u32) -> Result<(), OutboxError> {
+        self.push_dirty(self.resolve_partition(queue, partition)?);
+        Ok(())
+    }
+
     /// Push a partition into the prioritizer (dirty signal).
+    ///
     /// No-op if the prioritizer is not yet installed (before `start()`).
     fn push_dirty(&self, partition_id: i64) {
         if let Some(guard) = self.prioritizer.try_read().ok()
