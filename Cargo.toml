@@ -795,7 +795,7 @@ ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dy
 
 # Additional testing utilities
 tokio-test = "0.4"
-mockall = "0.13"
+mockall = "0.15"
 temp-env = { version = "0.3", features = ["async_closure"] }
 wiremock = "0.6"
 
