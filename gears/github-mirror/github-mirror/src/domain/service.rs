@@ -122,6 +122,29 @@ struct EnqueueScopes {
     repo_status: AccessScope,
 }
 
+/// The error a run that passed its deadline ends on, once it has been told to
+/// stop and has wound down. Whatever the run itself reported on the way out is
+/// logged rather than served: the deadline is the reason the caller needs.
+fn past_deadline(
+    job: &SyncJob,
+    deadline: std::time::Duration,
+    stopped_with: Option<DomainError>,
+) -> DomainError {
+    let minutes = deadline.as_secs().div_euclid(60);
+    tracing::warn!(
+        session_id = %job.session_id,
+        repository = %format!("{}/{}", job.owner, job.name),
+        deadline_minutes = minutes,
+        stopped_with = ?stopped_with.map(|e| crate::redact::redacted(&e.to_string())),
+        "sync passed its deadline and was stopped"
+    );
+    DomainError::internal(format!(
+        "the sync of {}/{} ran past its deadline of {minutes} minutes and was stopped; the next \
+         sync carries on from what it had already stored",
+        job.owner, job.name
+    ))
+}
+
 fn stored_summary_json(session_id: Uuid, summary: &SyncSummary) -> Option<String> {
     match serde_json::to_string(summary) {
         Ok(json) => Some(json),
@@ -399,6 +422,8 @@ pub struct ServiceConfig {
     pub max_concurrent_syncs: NonZeroUsize,
     /// How many tasks one repository's sync runs at the same time.
     pub max_concurrent_tasks: NonZeroUsize,
+    /// How long one repository's sync may run before it is stopped.
+    pub sync_deadline: std::time::Duration,
 }
 
 #[domain_model]
@@ -3549,7 +3574,7 @@ impl Service {
             .await?;
 
         let progress = SyncProgress::new();
-        let outcome = self.sync_with_heartbeat(job, &progress, cancel).await;
+        let outcome = self.sync_within_deadline(job, &progress, cancel).await;
 
         let completed = outcome.is_ok();
         match outcome {
@@ -3595,6 +3620,37 @@ impl Service {
         }
 
         Ok(())
+    }
+
+    /// Run the sync, stopping it if it passes the configured deadline.
+    ///
+    /// A run that will not end otherwise ends here: the engine is told to
+    /// stop and then given time to wind down, so the tasks in flight finish
+    /// their writes and the repository's lock is released. The durable state
+    /// keeps what the run reached, so the next sync or resume carries on from
+    /// there rather than starting again.
+    ///
+    /// The token cancelled is this job's own, a child of the pool's, so a
+    /// deadline stops one repository and a shutdown still stops them all.
+    async fn sync_within_deadline(
+        &self,
+        job: &SyncJob,
+        progress: &SyncProgress,
+        cancel: &CancellationToken,
+    ) -> Result<SyncSummary, DomainError> {
+        let job_cancel = cancel.child_token();
+        let deadline = self.config.sync_deadline;
+        let sync = self.sync_with_heartbeat(job, progress, &job_cancel);
+        let mut sync = std::pin::pin!(sync);
+
+        tokio::select! {
+            outcome = &mut sync => outcome,
+            () = tokio::time::sleep(deadline) => {
+                job_cancel.cancel();
+                let stopped_with = sync.await.err();
+                Err(past_deadline(job, deadline, stopped_with))
+            }
+        }
     }
 
     /// Run the sync while a ticker writes its progress to the session row.

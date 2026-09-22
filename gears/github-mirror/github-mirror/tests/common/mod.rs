@@ -497,6 +497,7 @@ pub fn service_with_enforcer(
             scope: github_mirror::domain::scope::ScopeConfig::default(),
             max_concurrent_syncs: std::num::NonZeroUsize::MIN,
             max_concurrent_tasks: std::num::NonZeroUsize::MIN,
+            sync_deadline: std::time::Duration::from_mins(5),
         },
     ))
 }

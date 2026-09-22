@@ -409,6 +409,17 @@ The system **MUST NOT** trigger GitHub secondary rate limits under normal operat
 - **Rationale**: Rate-limit violations cause temporary bans that halt synchronization for extended periods.
 - **Actors**: `cpt-cf-github-mirror-actor-github-rest`, `cpt-cf-github-mirror-actor-github-graphql`
 
+#### Synchronization Deadline
+
+- [ ] `p1` - **ID**: `cpt-cf-github-mirror-fr-sync-deadline`
+
+One repository's synchronization **MUST** run under a deadline, configurable per deployment, after which the system **MUST** stop that run rather than let it continue without bound. Stopping **MUST** be orderly: work in flight finishes its writes, the repository's synchronization lock is released, and the session records that the deadline was the reason. The deadline **MUST** apply to one repository's run, so stopping one leaves every other running repository alone.
+
+A stopped run **MUST NOT** lose what it achieved: its watermarks, cached responses and entity fingerprints stay, the repository stays marked as in progress, and the next synchronization or resume continues from there (`cpt-cf-github-mirror-fr-session-resume`).
+
+- **Rationale**: Per-request timeouts and retry limits bound a single call, not a run. Without a run-level deadline a synchronization that cannot make progress — an endless pagination cursor, a repository whose rate-limit budget never recovers — holds its repository's lock and its worker for as long as the process lives, and every later request for that repository collapses into it.
+- **Actors**: `cpt-cf-github-mirror-actor-lib-consumer`, `cpt-cf-github-mirror-actor-cli-operator`
+
 #### Idempotent and Resumable Operations
 
 - [ ] `p1` - **ID**: `cpt-cf-github-mirror-fr-idempotent`

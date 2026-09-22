@@ -151,6 +151,9 @@ impl Gear for GithubMirrorGear {
                 scope: cfg.scope,
                 max_concurrent_syncs: cfg.max_concurrent_syncs,
                 max_concurrent_tasks: cfg.max_concurrent_tasks,
+                sync_deadline: std::time::Duration::from_secs(
+                    cfg.sync_deadline_minutes.get().saturating_mul(60),
+                ),
             },
         ));
 
@@ -235,19 +238,23 @@ impl RunnableCapability for GithubMirrorGear {
     }
 
     /// Stop the pool. It takes no more jobs and finishes the syncs already
-    /// running; jobs still waiting are dropped, and any sync the framework's
-    /// deadline cuts short leaves its session row `running` until the next
-    /// startup sweep marks it `interrupted`. Resuming that work is #4632
-    /// slice 6.
+    /// running; jobs still waiting are dropped.
+    ///
+    /// When the framework's hard-stop deadline fires first the pool is
+    /// aborted rather than left running, as `RunnableCapability` requires. A
+    /// sync cut short that way leaves its session row `in_progress` until the
+    /// next start-up sweep marks it `interrupted`, and the repository stays
+    /// the `in_progress` that `POST /sync/resume` looks for, so the work
+    /// carries on from the watermarks and fingerprints already stored.
     async fn stop(&self, deadline_token: CancellationToken) -> anyhow::Result<()> {
         if let Some(token) = lock(&self.sync_cancel_token).take() {
             token.cancel();
         }
 
         let handle = lock(&self.sync_handle).take();
-        if let Some(handle) = handle {
+        if let Some(mut handle) = handle {
             tokio::select! {
-                result = handle => {
+                result = &mut handle => {
                     if let Err(e) = result
                         && !e.is_cancelled()
                     {
@@ -255,7 +262,8 @@ impl RunnableCapability for GithubMirrorGear {
                     }
                 }
                 () = deadline_token.cancelled() => {
-                    info!("github-mirror sync worker stop cancelled by framework deadline");
+                    handle.abort();
+                    info!("github-mirror sync worker aborted by the framework's stop deadline");
                 }
             }
         }

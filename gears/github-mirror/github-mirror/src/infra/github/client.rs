@@ -108,6 +108,37 @@ const RATE_LIMIT_RETRIES: u32 = 30;
 const UPSTREAM_RETRIES: u32 = 3;
 const UPSTREAM_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// The error a refused GraphQL query ends on.
+///
+/// Only the count and GitHub's own `type` vocabulary (`NOT_FOUND`,
+/// `RATE_LIMITED`, `FORBIDDEN` and the like) go into the message. The bodies
+/// carry `message` and `path` text written by GitHub about the thing that was
+/// refused, and the error text is stored on the session and served from the
+/// API, where [`crate::redact::redacted`] is a filter for the mirror's own
+/// sentences rather than for an upstream body. The whole answer is logged
+/// instead, where that assumption holds.
+fn graphql_refused(errors: &[serde_json::Value]) -> DomainError {
+    let kinds: Vec<&str> = errors
+        .iter()
+        .map(|error| {
+            error
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unspecified")
+        })
+        .collect();
+    tracing::warn!(
+        count = errors.len(),
+        answer = ?errors,
+        "GitHub refused a GraphQL query"
+    );
+    DomainError::internal(format!(
+        "GitHub refused the GraphQL query: {} error(s), {}",
+        errors.len(),
+        kinds.join(", ")
+    ))
+}
+
 fn upstream_backoff(attempt: u32) -> std::time::Duration {
     UPSTREAM_BACKOFF.saturating_mul(1u32 << attempt.min(8))
 }
@@ -682,9 +713,7 @@ impl GithubClient {
         if let Some(errors) = body.get("errors").and_then(serde_json::Value::as_array)
             && !errors.is_empty()
         {
-            return Err(DomainError::internal(format!(
-                "GitHub GraphQL errors: {errors:?}"
-            )));
+            return Err(graphql_refused(errors));
         }
 
         Ok(body)

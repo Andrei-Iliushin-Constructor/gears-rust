@@ -1,4 +1,4 @@
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 use serde::Deserialize;
 use toolkit_utils::SecretString;
@@ -53,6 +53,16 @@ pub struct GithubMirrorConfig {
     /// each extra concurrent repository would multiply the request rate.
     #[serde(default = "default_max_concurrent_requests")]
     pub max_concurrent_requests: NonZeroUsize,
+    /// How long one repository's sync may run before the gear stops it
+    /// (PRD §5.2 `fr-sync-deadline`).
+    ///
+    /// A stopped run is not lost work: its watermarks and fingerprints are
+    /// durable, the repository stays `in_progress`, and the next sync or
+    /// resume carries on from there. The default is wide enough for a first
+    /// sync of a large repository, which spends most of its time waiting out
+    /// GitHub's hourly rate limit rather than working.
+    #[serde(default = "default_sync_deadline_minutes")]
+    pub sync_deadline_minutes: NonZeroU64,
 }
 
 /// Repositories synced at once when the config says nothing: enough to keep
@@ -70,6 +80,13 @@ fn default_max_concurrent_requests() -> NonZeroUsize {
 /// Tasks in flight inside one sync when the config says nothing.
 fn default_max_concurrent_tasks() -> NonZeroUsize {
     NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN)
+}
+
+/// Six hours: a first sync of a repository the size of `rust-lang/rust` is
+/// dominated by rate-limit waits, so the bound is there to end a run that is
+/// stuck rather than to cut a healthy one short.
+fn default_sync_deadline_minutes() -> NonZeroU64 {
+    NonZeroU64::new(360).unwrap_or(NonZeroU64::MIN)
 }
 
 impl GithubMirrorConfig {
@@ -152,6 +169,7 @@ impl Default for GithubMirrorConfig {
             max_concurrent_syncs: default_max_concurrent_syncs(),
             max_concurrent_tasks: default_max_concurrent_tasks(),
             max_concurrent_requests: default_max_concurrent_requests(),
+            sync_deadline_minutes: default_sync_deadline_minutes(),
         }
     }
 }
