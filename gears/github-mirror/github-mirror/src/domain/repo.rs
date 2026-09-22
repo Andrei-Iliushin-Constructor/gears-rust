@@ -66,6 +66,13 @@ pub trait RepoRepository: Send + Sync {
         scope: &AccessScope,
         full_name: &str,
     ) -> Result<Option<Repo>, DomainError>;
+
+    /// GitHub's ids for every mirrored repository of `owner`.
+    ///
+    /// Filtered in the query rather than by the caller, so an owner is not
+    /// missed because the tenant has more repositories than one page holds.
+    async fn ids_by_owner(&self, scope: &AccessScope, owner: &str)
+    -> Result<Vec<i64>, DomainError>;
 }
 
 /// Write-side record for a mirrored issue (pull requests included).

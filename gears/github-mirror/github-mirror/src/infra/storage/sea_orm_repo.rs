@@ -216,6 +216,23 @@ impl RepoRepository for SeaOrmRepoRepository {
         let conn = self.db.conn()?;
         repo_find_by_full_name_in(&conn, scope, full_name).await
     }
+
+    async fn ids_by_owner(
+        &self,
+        scope: &AccessScope,
+        owner: &str,
+    ) -> Result<Vec<i64>, DomainError> {
+        let conn = self.db.conn()?;
+        let rows = RepoEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(sea_orm::Condition::all().add(repositories::Column::Owner.eq(owner)))
+            .all(&conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(rows.into_iter().map(|row| row.id).collect())
+    }
 }
 
 pub struct SeaOrmIssueRepository {

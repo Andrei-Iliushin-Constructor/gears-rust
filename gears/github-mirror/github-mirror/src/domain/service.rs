@@ -3315,14 +3315,7 @@ impl Service {
                     .map(|repo| repo.id)
                     .into_iter()
                     .collect(),
-                None => self
-                    .repo
-                    .list_window(&repo_scope, PageWindow::first(PageWindow::MAX_LIMIT))
-                    .await?
-                    .into_iter()
-                    .filter(|repo| repo.owner == owner)
-                    .map(|repo| repo.id)
-                    .collect(),
+                None => self.repo.ids_by_owner(&repo_scope, owner).await?,
             };
             Ok::<_, DomainError>(ids)
         }
