@@ -407,6 +407,26 @@ async fn run_bootstrap_phase_nonstrict_root_type_drift_is_fatal() {
     assert_eq!(idp.provision_call_count(), 0);
 }
 
+#[tokio::test]
+async fn run_bootstrap_phase_nonstrict_suspended_root_is_fatal() {
+    let repo = Arc::new(FakeTenantRepo::new());
+    seed_root_at_status(&repo, TenantStatus::Suspended);
+    let idp = Arc::new(FakeIdpProvisioner::new(FakeOutcome::Ok));
+
+    let error = run_bootstrap_phase(
+        Some(valid_bootstrap_cfg(false)),
+        false,
+        repo,
+        idp.clone() as Arc<dyn IdpPluginClient>,
+        stub_types_registry(),
+    )
+    .await
+    .expect_err("invalid root lifecycle must bypass bootstrap.strict=false");
+
+    assert!(error.to_string().contains("root binding mismatch"));
+    assert_eq!(idp.provision_call_count(), 0);
+}
+
 fn seed_root_at_status(repo: &FakeTenantRepo, status: TenantStatus) {
     let tenant_type_uuid = gts::GtsId::try_new(ROOT_TENANT_TYPE)
         .expect("valid root type")

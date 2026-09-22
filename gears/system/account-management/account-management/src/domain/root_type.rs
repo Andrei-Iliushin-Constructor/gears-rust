@@ -16,6 +16,16 @@ use crate::domain::tenant::model::TenantModel;
 /// Abstract AM tenant-type envelope every concrete platform root derives from.
 pub const TENANT_TYPE_BASE: &str = gts_id!("cf.core.am.tenant_type.v1~");
 
+/// Lifecycle states that can satisfy a configured platform-root binding.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootBindingLifecycle {
+    /// Fully initialized root; bootstrap may skip idempotently.
+    Active,
+    /// Incomplete root that a validated bootstrap saga will resume.
+    Provisioning,
+}
+
 /// AM-owned semantic contract for the concrete platform-root type.
 #[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -57,6 +67,8 @@ impl RootTypeConfig {
 ///
 /// `expected_root_id` is absent when bootstrap is disabled, but the durable
 /// tenant-type binding is always checked whenever a root-type contract exists.
+/// A `Provisioning` root is valid only while a validated bootstrap saga is
+/// available to resume it.
 ///
 /// # Errors
 /// Returns [`DomainError::RootBindingMismatch`] when the root ID or type UUID
@@ -65,8 +77,9 @@ impl RootTypeConfig {
 pub fn validate_root_binding(
     existing: &TenantModel,
     expected_root_id: Option<Uuid>,
+    bootstrap_will_run: bool,
     root_type: &RootTypeConfig,
-) -> Result<(), DomainError> {
+) -> Result<RootBindingLifecycle, DomainError> {
     if let Some(expected_root_id) = expected_root_id
         && existing.id != expected_root_id
     {
@@ -95,7 +108,24 @@ pub fn validate_root_binding(
         });
     }
 
-    Ok(())
+    match existing.status {
+        crate::domain::tenant::model::TenantStatus::Active => Ok(RootBindingLifecycle::Active),
+        crate::domain::tenant::model::TenantStatus::Provisioning if bootstrap_will_run => {
+            Ok(RootBindingLifecycle::Provisioning)
+        }
+        status => Err(DomainError::RootBindingMismatch {
+            detail: format!(
+                "platform root {} has lifecycle status `{}` which cannot satisfy the configured root binding; expected `active`{}; an explicit root recovery or migration is required",
+                existing.id,
+                status.as_str(),
+                if bootstrap_will_run {
+                    " or bootstrap-resumable `provisioning`"
+                } else {
+                    ""
+                }
+            ),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -150,13 +180,17 @@ mod tests {
         }
     }
 
-    fn root_model(id: Uuid, tenant_type_uuid: Uuid) -> TenantModel {
+    fn root_model(
+        id: Uuid,
+        tenant_type_uuid: Uuid,
+        status: crate::domain::tenant::model::TenantStatus,
+    ) -> TenantModel {
         let now = time::OffsetDateTime::UNIX_EPOCH;
         TenantModel {
             id,
             parent_id: None,
             name: "root".to_owned(),
-            status: crate::domain::tenant::model::TenantStatus::Active,
+            status,
             self_managed: false,
             tenant_type_uuid,
             depth: 0,
@@ -179,8 +213,18 @@ mod tests {
             .expect("valid root type")
             .to_uuid();
 
-        validate_root_binding(&root_model(id, type_uuid), Some(id), &cfg)
-            .expect("matching durable binding");
+        let lifecycle = validate_root_binding(
+            &root_model(
+                id,
+                type_uuid,
+                crate::domain::tenant::model::TenantStatus::Active,
+            ),
+            Some(id),
+            false,
+            &cfg,
+        )
+        .expect("matching durable binding");
+        assert_eq!(lifecycle, RootBindingLifecycle::Active);
     }
 
     #[test]
@@ -195,8 +239,13 @@ mod tests {
             .expect("valid root type")
             .to_uuid();
         let error = validate_root_binding(
-            &root_model(Uuid::from_u128(2), type_uuid),
+            &root_model(
+                Uuid::from_u128(2),
+                type_uuid,
+                crate::domain::tenant::model::TenantStatus::Active,
+            ),
             Some(Uuid::from_u128(1)),
+            true,
             &cfg,
         )
         .expect_err("root id drift must fail");
@@ -216,12 +265,77 @@ mod tests {
             idp_provisioning: false,
         };
         let id = Uuid::from_u128(1);
-        let error = validate_root_binding(&root_model(id, Uuid::nil()), None, &cfg)
-            .expect_err("type drift must fail even without bootstrap");
+        let error = validate_root_binding(
+            &root_model(
+                id,
+                Uuid::nil(),
+                crate::domain::tenant::model::TenantStatus::Active,
+            ),
+            None,
+            false,
+            &cfg,
+        )
+        .expect_err("type drift must fail even without bootstrap");
 
         assert!(
             matches!(error, DomainError::RootBindingMismatch { ref detail } if detail.contains("explicit root/schema migration")),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn provisioning_root_requires_runnable_bootstrap() {
+        let cfg = RootTypeConfig {
+            gts_id: gts::GtsTypeId::new(gts_id!(
+                "cf.core.am.tenant_type.v1~cf.core.am.platform.v1~"
+            )),
+            idp_provisioning: false,
+        };
+        let id = Uuid::from_u128(1);
+        let type_uuid = GtsId::try_new(cfg.gts_id.as_ref())
+            .expect("valid root type")
+            .to_uuid();
+        let provisioning = root_model(
+            id,
+            type_uuid,
+            crate::domain::tenant::model::TenantStatus::Provisioning,
+        );
+
+        let lifecycle = validate_root_binding(&provisioning, Some(id), true, &cfg)
+            .expect("runnable bootstrap must be allowed to resume provisioning");
+        assert_eq!(lifecycle, RootBindingLifecycle::Provisioning);
+        let error = validate_root_binding(&provisioning, None, false, &cfg)
+            .expect_err("provisioning without runnable bootstrap must fail");
+        assert!(
+            matches!(error, DomainError::RootBindingMismatch { ref detail } if detail.contains("lifecycle status `provisioning`")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn terminal_root_lifecycle_states_are_binding_mismatches() {
+        let cfg = RootTypeConfig {
+            gts_id: gts::GtsTypeId::new(gts_id!(
+                "cf.core.am.tenant_type.v1~cf.core.am.platform.v1~"
+            )),
+            idp_provisioning: false,
+        };
+        let id = Uuid::from_u128(1);
+        let type_uuid = GtsId::try_new(cfg.gts_id.as_ref())
+            .expect("valid root type")
+            .to_uuid();
+
+        for status in [
+            crate::domain::tenant::model::TenantStatus::Suspended,
+            crate::domain::tenant::model::TenantStatus::Deleted,
+        ] {
+            let error =
+                validate_root_binding(&root_model(id, type_uuid, status), Some(id), true, &cfg)
+                    .expect_err("terminal root lifecycle state must fail");
+            assert!(
+                matches!(error, DomainError::RootBindingMismatch { ref detail } if detail.contains(status.as_str())),
+                "{error:?}"
+            );
+        }
     }
 }

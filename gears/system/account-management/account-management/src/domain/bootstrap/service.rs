@@ -6,12 +6,12 @@
 //! The saga has three observable phases (FEATURE §3):
 //!
 //! 1. **Idempotency classification** — `find_platform_root()` validates the
-//!    configured root ID and type binding, then drives the branch decision.
+//!    configured root ID, type binding, and lifecycle, then drives the branch decision.
 //!    Active root → no-op skip; Provisioning root →
 //!    in-band synchronous compensation when age > stuck threshold
 //!    (see [`BootstrapService::attempt_stuck_row_compensation`]) and
 //!    otherwise resume the peer-wait loop; Suspended/Deleted root →
-//!    fail-fast `Internal` (illegal pre-existing state — operator
+//!    lifecycle-fatal `RootBindingMismatch` (illegal pre-existing state — operator
 //!    intervention required); no row → fresh insert.
 //! 2. **`IdP` provision with backoff** — `provision_tenant` is itself
 //!    the readiness signal. A `IdpProvisionFailure::CleanFailure` during
@@ -54,7 +54,7 @@ use serde_json::Value;
 use crate::domain::bootstrap::config::BootstrapConfig;
 use crate::domain::error::{DomainError, UnsupportedResource};
 use crate::domain::metrics::{AM_BOOTSTRAP_LIFECYCLE, MetricKind, emit_metric};
-use crate::domain::root_type::{RootTypeConfig, validate_root_binding};
+use crate::domain::root_type::{RootBindingLifecycle, RootTypeConfig, validate_root_binding};
 use crate::domain::system_actor::for_bootstrap;
 use crate::domain::tenant::TenantContext;
 use crate::domain::tenant::closure::build_activation_rows;
@@ -84,9 +84,6 @@ enum BootstrapClassification {
     /// confirm cleanup; if the bootstrap deadline expires while
     /// waiting, the branch surfaces `IdpUnavailable`.
     ProvisioningRootResume(TenantModel),
-    /// Root row in `Suspended` or `Deleted` — illegal pre-existing
-    /// state. Fail-fast.
-    InvariantViolation { observed_status: TenantStatus },
 }
 
 /// Bound on consecutive `AlreadyExists` retries during the saga's
@@ -105,8 +102,8 @@ const MAX_ALREADY_EXISTS_STREAK: u32 = 3;
 enum BootstrapState {
     /// Entry: classify before the retry loop. Decides between the
     /// idempotent terminal fast-paths (`Active` /
-    /// `InvariantViolation` / stuck-`Provisioning` that fails
-    /// in-band compensation) and entering the loop (in-flight
+    /// a root-binding validation error / stuck-`Provisioning` that
+    /// fails in-band compensation) and entering the loop (in-flight
     /// `Provisioning` resume → flag takeover; fresh `NoRoot` → run
     /// preflight first).
     InitialClassify,
@@ -186,7 +183,7 @@ impl SleepReason {
 }
 
 /// Output of `classify_with_terminal_dispatch`. Folds the idempotent
-/// terminal fast-paths (`Active` / `InvariantViolation` / stuck
+/// terminal fast-paths (`Active` / root-binding error / stuck
 /// `Provisioning` after a failed in-band compensation) plus a
 /// classify error into a single `Terminal` arm, leaving only the two
 /// context-divergent variants (`Resume`, `NoRoot`) for the call site
@@ -195,7 +192,7 @@ impl SleepReason {
 #[domain_model]
 enum ClassifyOutcome {
     /// One of the idempotent terminal fast-paths fired (`Active`
-    /// root / `InvariantViolation` / stuck `Provisioning` whose
+    /// root / root-binding validation error / stuck `Provisioning` whose
     /// in-band compensation did not confirm IdP-side cleanup) or
     /// the underlying `classify` call returned an error. The caller
     /// returns this `BootstrapState` directly.
@@ -376,16 +373,16 @@ impl<R: TenantRepo> BootstrapService<R> {
     ///   deadline elapsed while peer-waiting.
     /// * [`DomainError::UnsupportedOperation`] when the `IdP` plugin signals
     ///   it cannot perform root provisioning at all (compensated).
-    /// * [`DomainError::RootBindingMismatch`] when the durable platform-root ID
-    ///   or type UUID differs from configuration. Lifecycle wiring must never
-    ///   downgrade this through `bootstrap.strict`.
+    /// * [`DomainError::RootBindingMismatch`] when the durable platform-root ID,
+    ///   type UUID, or lifecycle state differs from configuration. Lifecycle
+    ///   wiring must never downgrade this through `bootstrap.strict`.
     /// * [`DomainError::Internal`] for ambiguous `IdP` outcomes (provisioning
-    ///   row left for reaper) and for invariant-violation root states.
+    ///   row left for reaper).
     #[tracing::instrument(skip_all, fields(root_id = %self.cfg.root_id))]
     pub async fn run(&self) -> Result<TenantModel, DomainError> {
         // Initial classification runs BEFORE any IdP work so the
-        // idempotent fast-paths (already-Active root, invariant-
-        // violation status) decide without contacting the IdP. A
+        // idempotent fast-paths (already-Active root and invalid root-binding
+        // states) decide without contacting the IdP. A
         // restart with an already-active root therefore succeeds
         // even when the IdP is down. Only `NoRoot` and
         // `ProvisioningRootResume`-in-flight enter the retry loop;
@@ -479,7 +476,7 @@ impl<R: TenantRepo> BootstrapService<R> {
     }
 
     /// Dispatches `classify` and folds the three idempotent
-    /// terminal fast-paths (`Active` / `InvariantViolation` /
+    /// terminal fast-paths (`Active` / root-binding error /
     /// stuck `Provisioning`) plus a classify error into a
     /// `Terminal` outcome the call site returns directly. Hoists
     /// the shared match shape between `step_initial_classify` and
@@ -493,11 +490,6 @@ impl<R: TenantRepo> BootstrapService<R> {
         match cls {
             BootstrapClassification::ActiveRootExists(root) => {
                 ClassifyOutcome::Terminal(BootstrapState::Terminal(Ok(handle_skip(root))))
-            }
-            BootstrapClassification::InvariantViolation { observed_status } => {
-                ClassifyOutcome::Terminal(BootstrapState::Terminal(Err(
-                    handle_invariant_violation(observed_status),
-                )))
             }
             BootstrapClassification::ProvisioningRootResume(existing) => {
                 let age = OffsetDateTime::now_utc() - existing.created_at;
@@ -966,14 +958,22 @@ impl<R: TenantRepo> BootstrapService<R> {
             return Ok(BootstrapClassification::NoRoot);
         };
 
-        validate_root_binding(&existing, Some(self.cfg.root_id), &self.root_type)?;
+        let lifecycle =
+            validate_root_binding(&existing, Some(self.cfg.root_id), true, &self.root_type)
+                .inspect_err(|_| {
+                    if matches!(
+                        existing.status,
+                        TenantStatus::Suspended | TenantStatus::Deleted
+                    ) {
+                        record_invariant_violation();
+                    }
+                })?;
 
-        Ok(match existing.status {
-            TenantStatus::Active => BootstrapClassification::ActiveRootExists(existing),
-            TenantStatus::Provisioning => BootstrapClassification::ProvisioningRootResume(existing),
-            other => BootstrapClassification::InvariantViolation {
-                observed_status: other,
-            },
+        Ok(match lifecycle {
+            RootBindingLifecycle::Active => BootstrapClassification::ActiveRootExists(existing),
+            RootBindingLifecycle::Provisioning => {
+                BootstrapClassification::ProvisioningRootResume(existing)
+            }
         })
     }
     // @cpt-end:cpt-cf-account-management-dod-platform-bootstrap-idempotency:p1:inst-dod-bootstrap-idempotency-classify
@@ -1870,7 +1870,7 @@ fn bounded_sleep(requested: Duration, deadline: Instant) -> Duration {
 }
 
 // @cpt-begin:cpt-cf-account-management-dod-platform-bootstrap-audit-and-metrics:p1:inst-dod-bootstrap-invariant-telemetry
-fn handle_invariant_violation(observed_status: TenantStatus) -> DomainError {
+fn record_invariant_violation() {
     emit_metric(
         AM_BOOTSTRAP_LIFECYCLE,
         MetricKind::Counter,
@@ -1880,9 +1880,6 @@ fn handle_invariant_violation(observed_status: TenantStatus) -> DomainError {
             ("outcome", "failure"),
         ],
     );
-    DomainError::internal(format!(
-        "bootstrap invariant violation: root tenant in unexpected state {observed_status:?}"
-    ))
 }
 // @cpt-end:cpt-cf-account-management-dod-platform-bootstrap-audit-and-metrics:p1:inst-dod-bootstrap-invariant-telemetry
 

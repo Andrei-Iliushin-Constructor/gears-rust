@@ -707,6 +707,9 @@ impl Gear for AccountManagementGear {
                 validate_root_binding(
                     &existing_root,
                     cfg.bootstrap.as_ref().map(|boot_cfg| boot_cfg.root_id),
+                    cfg.bootstrap
+                        .as_ref()
+                        .is_some_and(|boot_cfg| boot_cfg.validate().is_ok()),
                     root_cfg,
                 )?;
             }

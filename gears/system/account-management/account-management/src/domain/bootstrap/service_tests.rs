@@ -328,30 +328,34 @@ async fn classify_provisioning_root_yields_resume() {
 }
 
 #[tokio::test]
-async fn classify_suspended_root_yields_invariant_violation() {
+async fn classify_suspended_root_is_binding_mismatch() {
     let repo = Arc::new(FakeTenantRepo::new());
     seed_root(&repo, TenantStatus::Suspended);
     let (_idp, svc) = make_bootstrap(repo, FakeOutcome::Ok);
-    let cls = svc.classify(&AccessScope::allow_all()).await.unwrap();
+    let error = svc
+        .classify(&AccessScope::allow_all())
+        .await
+        .expect_err("suspended root must be lifecycle-fatal");
     assert!(matches!(
-        cls,
-        BootstrapClassification::InvariantViolation {
-            observed_status: TenantStatus::Suspended,
-        }
+        error,
+        DomainError::RootBindingMismatch { ref detail }
+            if detail.contains("lifecycle status `suspended`")
     ));
 }
 
 #[tokio::test]
-async fn classify_deleted_root_yields_invariant_violation() {
+async fn classify_deleted_root_is_binding_mismatch() {
     let repo = Arc::new(FakeTenantRepo::new());
     seed_root(&repo, TenantStatus::Deleted);
     let (_idp, svc) = make_bootstrap(repo, FakeOutcome::Ok);
-    let cls = svc.classify(&AccessScope::allow_all()).await.unwrap();
+    let error = svc
+        .classify(&AccessScope::allow_all())
+        .await
+        .expect_err("deleted root must be lifecycle-fatal");
     assert!(matches!(
-        cls,
-        BootstrapClassification::InvariantViolation {
-            observed_status: TenantStatus::Deleted,
-        }
+        error,
+        DomainError::RootBindingMismatch { ref detail }
+            if detail.contains("lifecycle status `deleted`")
     ));
 }
 
@@ -542,13 +546,13 @@ async fn run_with_active_root_skips_idempotently() {
 }
 
 #[tokio::test]
-async fn run_with_invariant_violation_root_returns_internal_without_calling_idp() {
+async fn run_with_suspended_root_returns_binding_mismatch_without_calling_idp() {
     let repo = Arc::new(FakeTenantRepo::new());
     seed_root(&repo, TenantStatus::Suspended);
     let (idp, svc) = make_bootstrap(repo, FakeOutcome::Ok);
 
     let err = svc.run().await.expect_err("Suspended root must fail-fast");
-    assert!(matches!(err, DomainError::Internal { .. }));
+    assert!(matches!(err, DomainError::RootBindingMismatch { .. }));
     assert_eq!(
         idp.provision_call_count(),
         0,
