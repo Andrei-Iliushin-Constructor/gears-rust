@@ -12,12 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::domain::service::{Service, SyncJob};
-
-/// Jobs the pool parks while every worker is busy. Matches the sync channel's
-/// own depth, so a caller starts seeing the queue-full error at roughly twice
-/// that many outstanding syncs rather than never.
-const SYNC_BACKLOG_LIMIT: usize = 64;
+use crate::domain::service::{SYNC_QUEUE_DEPTH, Service, SyncJob};
 
 /// Jobs waiting for a free worker, held one queue per tenant.
 ///
@@ -130,7 +125,7 @@ impl SyncPoolRunner {
             () = self.cancel.cancelled(), if !draining => PoolEvent::Cancelled,
             // Stop reading once as many jobs are parked as the channel itself
             // holds, so backpressure still reaches the caller.
-            received = self.jobs.recv(), if !draining && parked < SYNC_BACKLOG_LIMIT => {
+            received = self.jobs.recv(), if !draining && parked < SYNC_QUEUE_DEPTH => {
                 received.map_or(PoolEvent::QueueClosed, PoolEvent::Queued)
             }
             Some(joined) = in_flight.join_next(), if !in_flight.is_empty() => {

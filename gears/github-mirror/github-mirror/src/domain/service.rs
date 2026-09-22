@@ -411,7 +411,12 @@ impl SyncProgress {
 /// How many enqueued syncs may wait for the worker before `POST /sync` starts
 /// rejecting. One repository at a time is the current worker concurrency, so
 /// this is the depth of the backlog, not of the parallelism.
-const SYNC_QUEUE_DEPTH: usize = 64;
+///
+/// The same number twice over: the channel holds this many jobs, and the pool
+/// parks this many more once every worker is busy, so a caller first sees the
+/// queue-full error at roughly twice this many outstanding syncs. One constant
+/// so the two halves cannot drift apart.
+pub(crate) const SYNC_QUEUE_DEPTH: usize = 64;
 
 /// One unit of background work: sync `owner/name` on behalf of `ctx`, and
 /// record the outcome against the session row created at enqueue time.
