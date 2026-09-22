@@ -3076,33 +3076,7 @@ impl Service {
             )
             .await?;
 
-        let repo_scope = self
-            .policy_enforcer
-            .access_scope_with(
-                ctx,
-                &REPO_RESOURCE,
-                actions::LIST,
-                None,
-                &AccessRequest::new().resource_property(pep_properties::OWNER_TENANT_ID, tenant_id),
-            )
-            .await?;
-        let repo_ids: Vec<i64> = match name {
-            Some(name) => self
-                .repo
-                .find_by_full_name(&repo_scope, &format!("{owner}/{name}"))
-                .await?
-                .map(|repo| repo.id)
-                .into_iter()
-                .collect(),
-            None => self
-                .repo
-                .list_window(&repo_scope, PageWindow::first(PageWindow::MAX_LIMIT))
-                .await?
-                .into_iter()
-                .filter(|repo| repo.owner == owner)
-                .map(|repo| repo.id)
-                .collect(),
-        };
+        let repo_ids = self.cached_repo_ids(ctx, owner, name).await;
 
         let removed = self
             .github
@@ -3246,6 +3220,70 @@ impl Service {
             .upsert(scope, tenant_id, record)
             .await?;
         Ok(())
+    }
+
+    /// GitHub's ids for the repositories a cache clear covers, so the pages
+    /// cached under `…/repositories/{id}/...` go with the rest.
+    ///
+    /// Best effort by design: reading them needs repository-list rights,
+    /// which a caller holding only the sync right does not have, and the
+    /// clear itself is already authorised by then. Without the ids the owner
+    /// and slug prefixes still clear; only the linked later pages survive,
+    /// and a forced sync ignores the cache anyway.
+    async fn cached_repo_ids(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name: Option<&str>,
+    ) -> Vec<i64> {
+        let found = async {
+            let repo_scope = self
+                .policy_enforcer
+                .access_scope_with(
+                    ctx,
+                    &REPO_RESOURCE,
+                    actions::LIST,
+                    None,
+                    &AccessRequest::new().resource_property(
+                        pep_properties::OWNER_TENANT_ID,
+                        ctx.subject_tenant_id(),
+                    ),
+                )
+                .await?;
+            let ids: Vec<i64> = match name {
+                Some(name) => self
+                    .repo
+                    .find_by_full_name(&repo_scope, &format!("{owner}/{name}"))
+                    .await?
+                    .map(|repo| repo.id)
+                    .into_iter()
+                    .collect(),
+                None => self
+                    .repo
+                    .list_window(&repo_scope, PageWindow::first(PageWindow::MAX_LIMIT))
+                    .await?
+                    .into_iter()
+                    .filter(|repo| repo.owner == owner)
+                    .map(|repo| repo.id)
+                    .collect(),
+            };
+            Ok::<_, DomainError>(ids)
+        }
+        .await;
+
+        match found {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::info!(
+                    owner,
+                    repository = name,
+                    error = %e.public_text(),
+                    "clearing the cache without GitHub's repository ids; the pages linked under \
+                     them stay until they are re-fetched"
+                );
+                Vec::new()
+            }
+        }
     }
 
     /// The tenant's per-repository run statuses, optionally one status only.
