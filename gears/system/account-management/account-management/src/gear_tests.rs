@@ -681,7 +681,10 @@ mod no_seed_startup_tests {
             "types-registry",
             Arc::clone(&config),
             Arc::clone(&hub),
-            migrated_sqlite(types_registry::infra::storage::Migrator::migrations()).await,
+            migrated_sqlite(toolkit::contracts::DatabaseCapability::migrations(
+                &types_registry_gear,
+            ))
+            .await,
         );
         types_registry_gear
             .init(&types_registry_ctx)
