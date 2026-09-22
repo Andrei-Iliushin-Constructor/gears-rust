@@ -27,7 +27,7 @@ use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, Order};
 use toolkit_db::odata::sea_orm_filter::{LimitCfg, paginate_odata};
 use toolkit_db::secure::{
     DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureInsertManyExt,
-    SecureOnConflict, SecureUpdateExt,
+    SecureOnConflict, SecureUpdateExt, validate_tenant_in_scope,
 };
 use toolkit_db::{DBProvider, DbError};
 use toolkit_odata::{ODataQuery, Page, SortDir};
@@ -5571,6 +5571,13 @@ impl EntityFingerprintRepository for SeaOrmEntityFingerprintRepository {
         tenant_id: Uuid,
         records: Vec<EntityFingerprintRecord>,
     ) -> Result<(), DomainError> {
+        // A batch insert cannot be checked row by row the way the single-row
+        // upsert is, so the tenant is checked once here instead. Every row
+        // below is built from this one `tenant_id`, which makes the two checks
+        // equivalent, and without it a scope that does not cover the tenant
+        // would write anyway.
+        validate_tenant_in_scope(tenant_id, scope).map_err(map_scope_error)?;
+
         let conn = self.db.conn()?;
         for chunk in records.chunks(FINGERPRINT_UPSERT_CHUNK) {
             let on_conflict = SecureOnConflict::<EntityFingerprintEntity>::columns([
