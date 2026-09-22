@@ -1235,9 +1235,14 @@ mod tests {
         );
 
         for subquery in [
-            ScopeFilter::in_group(pep_properties::RESOURCE_ID, vec![ScopeValue::Uuid(uid(T1))]),
-            ScopeFilter::in_group_subtree(
+            ScopeFilter::in_group_typed(
                 pep_properties::RESOURCE_ID,
+                MEMBER_TYPE,
+                vec![ScopeValue::Uuid(uid(T1))],
+            ),
+            ScopeFilter::in_group_subtree_typed(
+                pep_properties::RESOURCE_ID,
+                MEMBER_TYPE,
                 vec![ScopeValue::Uuid(uid(T1))],
             ),
         ] {
@@ -1274,8 +1279,9 @@ mod tests {
         // `InGroup` resolves in SQL and exposes no values in memory, so this
         // answers "no" for a grant that does apply — one of the reasons it is
         // not an authorization decision.
-        let scope = AccessScope::single(ScopeConstraint::new(vec![ScopeFilter::in_group(
+        let scope = AccessScope::single(ScopeConstraint::new(vec![ScopeFilter::in_group_typed(
             pep_properties::RESOURCE_ID,
+            MEMBER_TYPE,
             vec![ScopeValue::Uuid(uid(T1))],
         )]));
         assert!(!scope.contains_uuid(pep_properties::RESOURCE_ID, uid(T1)));
