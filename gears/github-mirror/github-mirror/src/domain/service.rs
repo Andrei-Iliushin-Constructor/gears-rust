@@ -164,6 +164,22 @@ fn past_deadline(
     ))
 }
 
+/// Whether the process that was running `session` is gone.
+///
+/// The session's own heartbeat is the evidence: a live run re-stamps
+/// `updated_at` every couple of seconds, so a row that has not moved for
+/// [`ABANDONED_AFTER_SECS`] has nobody behind it. A stamp that cannot be read
+/// counts as live, so an unreadable row never costs another process its lock.
+fn abandoned(session: &SyncSessionRecord, now: DateTime<Utc>) -> bool {
+    let last_seen = session
+        .updated_at
+        .as_deref()
+        .or(session.started_at.as_deref())
+        .unwrap_or(&session.created_at);
+    DateTime::parse_from_rfc3339(last_seen)
+        .is_ok_and(|at| (now - at.with_timezone(&Utc)).num_seconds() > ABANDONED_AFTER_SECS)
+}
+
 fn stored_summary_json(session_id: Uuid, summary: &SyncSummary) -> Option<String> {
     match serde_json::to_string(summary) {
         Ok(json) => Some(json),
@@ -327,6 +343,15 @@ pub(crate) const ISSUE_TIMELINE_RESOURCE: ResourceType = ResourceType::from_stat
 const PROGRESS_STORED: u8 = 95;
 /// How often the run persists its progress while it is working.
 const HEARTBEAT_SECS: u64 = 2;
+
+/// How long a session must go without a heartbeat before start-up treats its
+/// holder as gone.
+///
+/// A running sync re-stamps `updated_at` every [`HEARTBEAT_SECS`], so a row
+/// this far behind belongs to a process that is no longer writing. The margin
+/// is wide enough for a run stalled on a slow write or a rate-limit wait to
+/// keep its lock.
+const ABANDONED_AFTER_SECS: i64 = 300;
 
 /// Most repositories one resume call will re-queue.
 const RESUME_LIMIT: u64 = 500;
@@ -3796,10 +3821,13 @@ impl Service {
             )
             .await?;
 
+        let now = Utc::now();
         let mut count = 0;
         for (tenant_id, mut session) in stale {
-            self.release_stale_sync_lock(tenant_id, &session.repo_full_name)
-                .await;
+            if abandoned(&session, now) {
+                self.release_stale_sync_lock(tenant_id, &session.repo_full_name)
+                    .await;
+            }
             if session.status == SessionStatus::Interrupted {
                 continue;
             }
@@ -3814,9 +3842,13 @@ impl Service {
         Ok(count)
     }
 
-    /// Drop the per-repo sync lock marker a dead process left for `repo`, if
-    /// one is there. Safe at start-up only: this process holds no sync lock
-    /// yet, and the file backend is used by one process per `SQLite` file.
+    /// Drop the per-repo sync lock marker left for `repo` by a run whose
+    /// process is gone.
+    ///
+    /// Only ever called for a session [`abandoned`] says is dead, because the
+    /// lock itself cannot say who holds it: during a rolling restart the
+    /// marker may belong to the outgoing process, still syncing that
+    /// repository, and taking it would let both sync it at once.
     async fn release_stale_sync_lock(&self, tenant_id: Uuid, repo: &str) {
         let Some((owner, name)) = repo.split_once('/') else {
             return;
