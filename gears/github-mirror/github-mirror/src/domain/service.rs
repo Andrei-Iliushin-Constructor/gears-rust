@@ -510,6 +510,13 @@ pub struct Service {
     sync_tx: mpsc::Sender<SyncJob>,
     sync_rx: Arc<Mutex<Option<mpsc::Receiver<SyncJob>>>>,
     in_flight: Arc<Mutex<HashMap<InFlightKey, Uuid>>>,
+    /// One gate per repository, so the look, write and claim a queue request
+    /// does serialises for that repository alone rather than for the gear.
+    ///
+    /// A gate is kept once made: it is one small allocation per repository
+    /// ever queued, and dropping one while a request still waits on it would
+    /// let the next arrival past at the same time.
+    claim_gates: Arc<std::sync::Mutex<HashMap<InFlightKey, ClaimGate>>>,
     /// The gear's shutdown token, bound when the sync pool starts. Syncs that
     /// do not come from the pool — the in-process client's — carry it too, so
     /// a shutdown reaches them as well.
@@ -518,6 +525,10 @@ pub struct Service {
 
 /// One repository of one tenant: what a queued or running sync occupies.
 type InFlightKey = (Uuid, String);
+
+/// What a request holds while it decides whether one repository already has a
+/// sync in flight.
+type ClaimGate = Arc<Mutex<()>>;
 
 /// Manual `Clone`: every field is an `Arc` (cheap refcount bump) or already
 /// `Clone` (`PolicyEnforcer`, `ServiceConfig`). A `#[derive(Clone)]` would add
@@ -567,6 +578,7 @@ impl Clone for Service {
             sync_tx: self.sync_tx.clone(),
             sync_rx: Arc::clone(&self.sync_rx),
             in_flight: Arc::clone(&self.in_flight),
+            claim_gates: Arc::clone(&self.claim_gates),
             shutdown: Arc::clone(&self.shutdown),
         }
     }
@@ -651,6 +663,7 @@ impl Service {
             sync_tx,
             sync_rx: Arc::new(Mutex::new(Some(sync_rx))),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
+            claim_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
             shutdown: Arc::new(OnceLock::new()),
         }
     }
@@ -3500,21 +3513,6 @@ impl Service {
         let scope = &scopes.session;
         let key = (tenant_id, format!("{owner}/{name}"));
         let id = Uuid::new_v4();
-        {
-            // Claimed under the lock so two concurrent requests cannot both
-            // decide they are the first.
-            let mut in_flight = self.in_flight.lock().await;
-            if let Some(running) = in_flight.get(&key) {
-                tracing::debug!(
-                    repository = %key.1,
-                    session_id = %running,
-                    "sync already in flight; collapsing into it"
-                );
-                return Ok(*running);
-            }
-            in_flight.insert(key.clone(), id);
-        }
-
         let now = now_rfc3339();
         let session = SyncSessionRecord {
             id,
@@ -3529,13 +3527,27 @@ impl Service {
             ended_at: None,
             updated_at: Some(now),
         };
-        if let Err(e) = self
-            .sync_sessions
-            .upsert(scope, tenant_id, session.clone())
-            .await
         {
-            self.release_in_flight(&key).await;
-            return Err(e);
+            // Held for this repository only, so two concurrent requests for it
+            // cannot both decide they are the first while a request for
+            // another repository waits on nothing. The row is written before
+            // the claim goes in, so the id a collapsing request is handed
+            // always names a session it can read.
+            let gate = self.claim_gate(&key);
+            let _claimed = gate.lock().await;
+
+            if let Some(running) = self.in_flight.lock().await.get(&key).copied() {
+                tracing::debug!(
+                    repository = %key.1,
+                    session_id = %running,
+                    "sync already in flight; collapsing into it"
+                );
+                return Ok(running);
+            }
+            self.sync_sessions
+                .upsert(scope, tenant_id, session.clone())
+                .await?;
+            self.in_flight.lock().await.insert(key.clone(), id);
         }
         if let Err(e) = self
             .mark_repo_status_in(
@@ -3597,6 +3609,19 @@ impl Service {
                 "a sync that could not be queued could not be marked failed either"
             );
         }
+    }
+
+    /// This repository's gate, made on first use.
+    fn claim_gate(&self, key: &InFlightKey) -> ClaimGate {
+        let mut gates = self
+            .claim_gates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(
+            gates
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
     }
 
     /// Give up a repository's claim so the next request queues a fresh sync.
