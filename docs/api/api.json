@@ -2117,6 +2117,7 @@
             ]
           },
           "completed_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -2154,6 +2155,7 @@
             "$ref": "#/components/schemas/CheckRunOutputDto"
           },
           "started_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -2550,6 +2552,7 @@
             ]
           },
           "created_at": {
+            "format": "date-time",
             "type": "string"
           },
           "html_url": {
@@ -2563,6 +2566,7 @@
             "type": "integer"
           },
           "updated_at": {
+            "format": "date-time",
             "type": "string"
           },
           "user": {
@@ -2608,6 +2612,7 @@
             "type": "string"
           },
           "created_at": {
+            "format": "date-time",
             "type": "string"
           },
           "html_url": {
@@ -2634,6 +2639,7 @@
             ]
           },
           "updated_at": {
+            "format": "date-time",
             "type": "string"
           },
           "user": {
@@ -2809,6 +2815,7 @@
             "type": "string"
           },
           "created_at": {
+            "format": "date-time",
             "type": "string"
           },
           "creator": {
@@ -2841,6 +2848,7 @@
             ]
           },
           "updated_at": {
+            "format": "date-time",
             "type": "string"
           }
         },
@@ -4735,6 +4743,7 @@
         "description": "GitHub-shaped deployment.",
         "properties": {
           "created_at": {
+            "format": "date-time",
             "type": "string"
           },
           "creator": {
@@ -4770,6 +4779,7 @@
             "type": "string"
           },
           "updated_at": {
+            "format": "date-time",
             "type": "string"
           }
         },
@@ -6279,6 +6289,7 @@
         "description": "GitHub `commit.author` / `commit.committer` object.",
         "properties": {
           "date": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -7354,6 +7365,7 @@
             ]
           },
           "closed_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -7367,6 +7379,7 @@
             ]
           },
           "created_at": {
+            "format": "date-time",
             "type": "string"
           },
           "html_url": {
@@ -7419,6 +7432,7 @@
             "type": "string"
           },
           "updated_at": {
+            "format": "date-time",
             "type": "string"
           },
           "user": {
@@ -7473,6 +7487,7 @@
             ]
           },
           "created_at": {
+            "format": "date-time",
             "type": "string"
           },
           "event": {
@@ -7518,6 +7533,7 @@
             "type": "string"
           },
           "created_at": {
+            "format": "date-time",
             "type": "string"
           },
           "id": {
@@ -8585,6 +8601,7 @@
         "description": "GitHub-shaped milestone.",
         "properties": {
           "closed_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -8595,6 +8612,7 @@
             "type": "integer"
           },
           "created_at": {
+            "format": "date-time",
             "type": "string"
           },
           "description": {
@@ -8634,6 +8652,7 @@
             "type": "string"
           },
           "updated_at": {
+            "format": "date-time",
             "type": "string"
           }
         },
@@ -13469,6 +13488,7 @@
             ]
           },
           "closed_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -13482,6 +13502,7 @@
             ]
           },
           "created_at": {
+            "format": "date-time",
             "type": "string"
           },
           "deletions": {
@@ -13520,6 +13541,7 @@
             "type": "boolean"
           },
           "merged_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -13549,6 +13571,7 @@
             "type": "string"
           },
           "updated_at": {
+            "format": "date-time",
             "type": "string"
           },
           "user": {
@@ -14993,6 +15016,7 @@
             ]
           },
           "created_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -15035,6 +15059,7 @@
             ]
           },
           "updated_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -15073,6 +15098,7 @@
             ]
           },
           "created_at": {
+            "format": "date-time",
             "type": "string"
           },
           "draft": {
@@ -15098,6 +15124,7 @@
             "type": "boolean"
           },
           "published_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -15184,6 +15211,7 @@
             "type": "boolean"
           },
           "pushed_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -15226,6 +15254,7 @@
           },
           "last_synced_at": {
             "description": "RFC3339 time of the last run that completed.",
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -16159,6 +16188,7 @@
             ]
           },
           "created_at": {
+            "format": "date-time",
             "type": "string"
           },
           "diff_hunk": {
@@ -16262,6 +16292,7 @@
             ]
           },
           "updated_at": {
+            "format": "date-time",
             "type": "string"
           },
           "user": {
@@ -16311,6 +16342,7 @@
             "type": "string"
           },
           "submitted_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -17725,6 +17757,7 @@
         "description": "One sync session, as served by `/github-mirror/v1/sessions`.",
         "properties": {
           "created_at": {
+            "format": "date-time",
             "type": "string"
           },
           "duration_ms": {
@@ -17737,6 +17770,7 @@
           },
           "ended_at": {
             "description": "Set once, when the run ends.",
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -17762,6 +17796,7 @@
             "type": "string"
           },
           "started_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -17788,6 +17823,7 @@
           },
           "updated_at": {
             "description": "Re-stamped by every write, the progress heartbeat included, so a\npoller can tell a live run from a stuck one.",
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -19977,6 +20013,7 @@
         "description": "GitHub-shaped workflow job. `steps` is replayed from the raw GitHub\nJSON the mirror stored, or an empty array when the sync never saw any.",
         "properties": {
           "completed_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -20019,6 +20056,7 @@
             ]
           },
           "started_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -20087,6 +20125,7 @@
             ]
           },
           "created_at": {
+            "format": "date-time",
             "type": "string"
           },
           "event": {
@@ -20132,6 +20171,7 @@
             ]
           },
           "updated_at": {
+            "format": "date-time",
             "type": "string"
           },
           "workflow_id": {
@@ -20176,6 +20216,7 @@
         "description": "One step of a workflow job.",
         "properties": {
           "completed_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -20198,6 +20239,7 @@
             ]
           },
           "started_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"

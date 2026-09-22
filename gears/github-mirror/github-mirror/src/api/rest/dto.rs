@@ -114,8 +114,10 @@ pub struct ReleaseAssetDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub browser_download_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(format = DateTime)]
     pub created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(format = DateTime)]
     pub updated_at: Option<String>,
 }
 
@@ -148,8 +150,10 @@ pub struct WorkflowStepDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub number: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(format = DateTime)]
     pub started_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(format = DateTime)]
     pub completed_at: Option<String>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -251,6 +255,7 @@ pub struct RepoDto {
     pub default_branch: String,
     pub stargazers_count: i64,
     pub forks_count: i64,
+    #[schema(format = DateTime)]
     pub pushed_at: Option<String>,
     /// Always present: falls back to the canonical github.com URL when the
     /// row was mirrored before the column existed.
@@ -300,8 +305,11 @@ pub struct IssueDto {
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pull_request: Option<PullRequestMarkerDto>,
+    #[schema(format = DateTime)]
     pub created_at: String,
+    #[schema(format = DateTime)]
     pub updated_at: String,
+    #[schema(format = DateTime)]
     pub closed_at: Option<String>,
     pub html_url: Option<String>,
     /// Who opened it, who it is assigned to, and the labels it carries —
@@ -348,7 +356,9 @@ pub struct CommentDto {
     pub id: i64,
     pub user: Option<ActorDto>,
     pub body: Option<String>,
+    #[schema(format = DateTime)]
     pub created_at: String,
+    #[schema(format = DateTime)]
     pub updated_at: String,
     pub html_url: Option<String>,
 }
@@ -384,9 +394,13 @@ pub struct PullRequestDto {
     pub base: PullRefDto,
     pub additions: i64,
     pub deletions: i64,
+    #[schema(format = DateTime)]
     pub created_at: String,
+    #[schema(format = DateTime)]
     pub updated_at: String,
+    #[schema(format = DateTime)]
     pub closed_at: Option<String>,
+    #[schema(format = DateTime)]
     pub merged_at: Option<String>,
     pub html_url: Option<String>,
     /// Who opened it, who it is assigned to, who was asked to review, and
@@ -450,6 +464,7 @@ pub struct ReviewDto {
     pub state: String,
     pub body: Option<String>,
     pub commit_id: Option<String>,
+    #[schema(format = DateTime)]
     pub submitted_at: Option<String>,
     pub html_url: Option<String>,
 }
@@ -479,7 +494,9 @@ pub struct ReviewCommentDto {
     pub diff_hunk: Option<String>,
     pub in_reply_to_id: Option<i64>,
     pub commit_id: Option<String>,
+    #[schema(format = DateTime)]
     pub created_at: String,
+    #[schema(format = DateTime)]
     pub updated_at: String,
     pub html_url: Option<String>,
     /// Line position in the current diff; absent once GitHub considers the
@@ -589,6 +606,7 @@ impl From<CommitFile> for PullRequestFileDto {
 #[derive(Debug)]
 #[toolkit_macros::api_dto(response)]
 pub struct GitPersonDto {
+    #[schema(format = DateTime)]
     pub date: Option<String>,
 }
 
@@ -697,7 +715,9 @@ pub struct ReleaseDto {
     pub prerelease: bool,
     pub body: Option<String>,
     pub author: Option<ActorDto>,
+    #[schema(format = DateTime)]
     pub created_at: String,
+    #[schema(format = DateTime)]
     pub published_at: Option<String>,
     pub html_url: Option<String>,
     /// The release's downloadable files; `[]` when it has none.
@@ -734,8 +754,11 @@ pub struct MilestoneDto {
     pub open_issues: i64,
     pub closed_issues: i64,
     pub due_on: Option<String>,
+    #[schema(format = DateTime)]
     pub created_at: String,
+    #[schema(format = DateTime)]
     pub updated_at: String,
+    #[schema(format = DateTime)]
     pub closed_at: Option<String>,
     pub html_url: Option<String>,
 }
@@ -798,7 +821,9 @@ pub struct WorkflowRunDto {
     pub head_branch: Option<String>,
     pub head_sha: String,
     pub actor: Option<ActorDto>,
+    #[schema(format = DateTime)]
     pub created_at: String,
+    #[schema(format = DateTime)]
     pub updated_at: String,
     pub html_url: Option<String>,
 }
@@ -1049,6 +1074,7 @@ pub struct RepoSyncStatusDto {
     /// The run that last wrote this row.
     pub last_session_id: Option<String>,
     /// RFC3339 time of the last run that completed.
+    #[schema(format = DateTime)]
     pub last_synced_at: Option<String>,
 }
 
@@ -1136,7 +1162,9 @@ pub struct CommitCommentDto {
     pub path: Option<String>,
     pub position: Option<i64>,
     pub commit_id: String,
+    #[schema(format = DateTime)]
     pub created_at: String,
+    #[schema(format = DateTime)]
     pub updated_at: String,
     pub html_url: Option<String>,
 }
@@ -1185,6 +1213,7 @@ pub struct IssueEventDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub milestone: Option<EventMilestoneDto>,
     pub commit_id: Option<String>,
+    #[schema(format = DateTime)]
     pub created_at: String,
 }
 
@@ -1211,6 +1240,7 @@ pub struct IssueReactionDto {
     pub user: Option<ActorDto>,
     /// `+1`, `-1`, `laugh`, `confused`, `heart`, `hooray`, `rocket`, `eyes`.
     pub content: String,
+    #[schema(format = DateTime)]
     pub created_at: String,
 }
 
@@ -1237,7 +1267,9 @@ pub struct DeploymentDto {
     pub task: String,
     pub description: Option<String>,
     pub creator: Option<ActorDto>,
+    #[schema(format = DateTime)]
     pub created_at: String,
+    #[schema(format = DateTime)]
     pub updated_at: String,
 }
 
@@ -1288,7 +1320,9 @@ pub struct CommitStatusDto {
     pub description: Option<String>,
     pub target_url: Option<String>,
     pub creator: Option<ActorDto>,
+    #[schema(format = DateTime)]
     pub created_at: String,
+    #[schema(format = DateTime)]
     pub updated_at: String,
 }
 
@@ -1320,7 +1354,9 @@ pub struct WorkflowJobDto {
     pub conclusion: Option<String>,
     pub head_sha: String,
     pub runner_name: Option<String>,
+    #[schema(format = DateTime)]
     pub started_at: Option<String>,
+    #[schema(format = DateTime)]
     pub completed_at: Option<String>,
     pub html_url: Option<String>,
     pub steps: Vec<WorkflowStepDto>,
@@ -1386,7 +1422,9 @@ pub struct CheckRunDto {
     pub name: String,
     pub status: Option<String>,
     pub conclusion: Option<String>,
+    #[schema(format = DateTime)]
     pub started_at: Option<String>,
+    #[schema(format = DateTime)]
     pub completed_at: Option<String>,
     pub html_url: Option<String>,
     pub details_url: Option<String>,
@@ -1483,12 +1521,16 @@ pub struct SyncSessionDto {
     /// True when the run completed but its stored summary could not be read,
     /// so `summary` is empty for a reason other than "not finished yet".
     pub summary_unreadable: bool,
+    #[schema(format = DateTime)]
     pub created_at: String,
+    #[schema(format = DateTime)]
     pub started_at: Option<String>,
     /// Set once, when the run ends.
+    #[schema(format = DateTime)]
     pub ended_at: Option<String>,
     /// Re-stamped by every write, the progress heartbeat included, so a
     /// poller can tell a live run from a stuck one.
+    #[schema(format = DateTime)]
     pub updated_at: Option<String>,
     /// Milliseconds from `started_at` to `ended_at`, or to `updated_at` while
     /// the run is still going.
