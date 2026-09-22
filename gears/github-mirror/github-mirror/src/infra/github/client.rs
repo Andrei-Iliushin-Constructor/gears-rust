@@ -139,6 +139,18 @@ fn graphql_refused(errors: &[serde_json::Value]) -> DomainError {
     ))
 }
 
+/// Whether the URL points at this machine, where plain `http` carries no token
+/// over a network. Mirrors the same check on the gear config, which catches a
+/// bad deployment; this one catches a direct caller of the constructor.
+fn is_loopback(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
 fn upstream_backoff(attempt: u32) -> std::time::Duration {
     UPSTREAM_BACKOFF.saturating_mul(1u32 << attempt.min(8))
 }
@@ -230,7 +242,8 @@ impl GithubClient {
     ///
     /// # Errors
     /// Returns `DomainError::Internal` when the underlying HTTP client cannot
-    /// be constructed.
+    /// be constructed, when `api_base_url` is not a hierarchical URL, or when
+    /// it would carry the token over plain `http` to another machine.
     pub fn with_cache(
         api_base_url: String,
         token: Option<String>,
@@ -242,9 +255,22 @@ impl GithubClient {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|e| DomainError::internal(format!("failed to build HTTP client: {e}")))?;
-        let api_origin = url::Url::parse(&api_base_url)
-            .map_err(|e| DomainError::internal(format!("invalid GitHub API base URL: {e}")))?
-            .origin();
+        let parsed = url::Url::parse(&api_base_url)
+            .map_err(|e| DomainError::internal(format!("invalid GitHub API base URL: {e}")))?;
+        if parsed.scheme() == "http" && token.is_some() && !is_loopback(&parsed) {
+            return Err(DomainError::internal(format!(
+                "the GitHub API base URL {} uses http, which would send the token in cleartext; \
+                 use https, or a loopback host for local testing",
+                redacted_word(&api_base_url)
+            )));
+        }
+        let api_origin = parsed.origin();
+        if matches!(api_origin, url::Origin::Opaque(_)) {
+            return Err(DomainError::internal(format!(
+                "the GitHub API base URL {} has no host to compare a next link against",
+                redacted_word(&api_base_url)
+            )));
+        }
         Ok(Self {
             http,
             api_base_url,
