@@ -877,7 +877,22 @@ pub struct ContributorRecord {
 }
 
 impl ContributorRecord {
+    /// Take in another view of the same person: roles union, the widest
+    /// observation window, and the profile of whichever view saw them last.
+    ///
+    /// Which side is newer is read from `last_seen_at` rather than assumed,
+    /// because callers point both ways: a listing folds a fresh sighting into
+    /// what it has, while the storage merge folds the stored row into a fresh
+    /// record. A newer view that carries no avatar or profile URL leaves the
+    /// one already held, so a sighting that knew only a login does not blank
+    /// what an earlier one learned.
     pub fn absorb(&mut self, other: Self) {
+        let theirs_is_newer = match (self.last_seen_at, other.last_seen_at) {
+            (Some(mine), Some(theirs)) => theirs > mine,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+
         for role in other.roles {
             if !self.roles.contains(&role) {
                 self.roles.push(role);
@@ -889,6 +904,19 @@ impl ContributorRecord {
             (mine, theirs) => mine.or(theirs),
         };
         self.last_seen_at = self.last_seen_at.max(other.last_seen_at);
+
+        if theirs_is_newer {
+            self.account_type = other.account_type;
+            if other.login.is_some() {
+                self.login = other.login;
+            }
+            if other.avatar_url.is_some() {
+                self.avatar_url = other.avatar_url;
+            }
+            if other.html_url.is_some() {
+                self.html_url = other.html_url;
+            }
+        }
     }
 }
 
