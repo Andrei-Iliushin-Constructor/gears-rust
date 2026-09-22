@@ -50,6 +50,25 @@ use super::validate::{repo_full_name, validate_commit_sha, validate_owner, valid
 pub const GEAR_NAME: &str = crate::gear::GithubMirrorGear::MODULE_NAME;
 
 const DEFAULT_LIST_LIMIT: u64 = 50;
+/// The most rows one keyset page may hold, the same bound `PageWindow` puts on
+/// the offset-addressed listings.
+const MAX_LIST_LIMIT: u64 = PageWindow::MAX_LIMIT;
+
+/// The page size a list request asked for.
+///
+/// # Errors
+/// `Validation` when the caller asks for more than [`MAX_LIST_LIMIT`] rows, or
+/// for none at all, rather than quietly serving a different number.
+fn list_limit(query: &ODataQuery) -> Result<u64, DomainError> {
+    let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
+    if limit == 0 || limit > MAX_LIST_LIMIT {
+        return Err(DomainError::Validation {
+            field: "limit".to_owned(),
+            message: format!("a page holds between 1 and {MAX_LIST_LIMIT} rows"),
+        });
+    }
+    Ok(limit)
+}
 const SESSIONS_ORDER: &str = "-created_at,-id";
 const REPO_STATUS_ORDER: &str = "+repository";
 
@@ -3298,7 +3317,7 @@ impl Service {
     ) -> Result<Page<RepoSyncStatusRecord>, DomainError> {
         let scope = self.repo_status_scope(ctx, actions::LIST).await?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
+        let limit = list_limit(query)?;
         let after = cursor_keys(query, REPO_STATUS_ORDER, 1)?;
         let rows = self
             .repo_sync_status
@@ -3870,7 +3889,7 @@ impl Service {
             )
             .await?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
+        let limit = list_limit(query)?;
         let after = cursor_keys(query, SESSIONS_ORDER, 2)?
             .map(|keys| {
                 let id = keys[1].parse::<Uuid>().map_err(|_| invalid_cursor())?;
