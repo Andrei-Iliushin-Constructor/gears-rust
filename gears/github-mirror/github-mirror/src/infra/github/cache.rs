@@ -103,16 +103,21 @@ pub trait HttpCache: Send + Sync {
         entry: CachedResponse,
     ) -> Result<(), DomainError>;
 
-    /// Drop every entry for the resource at `url_prefix` and everything below
-    /// it: the URL itself, `url_prefix?...` and `url_prefix/...`, so clearing
-    /// `.../repos/acme/widget` leaves `.../repos/acme/widget-fork` alone.
-    /// Returns how many went. This is `clear_cache(session, scope)` from
-    /// DESIGN §4: the prefix is how an org or a single repository is named,
-    /// since the key itself is an opaque hash.
+    /// Drop every entry for any resource in `url_prefixes` and everything
+    /// below it: the URL itself, `url_prefix?...` and `url_prefix/...`, so
+    /// clearing `.../repos/acme/widget` leaves `.../repos/acme/widget-fork`
+    /// alone. Returns how many went. This is `clear_cache(session, scope)`
+    /// from DESIGN §4: the prefix is how an org or a single repository is
+    /// named, since the key itself is an opaque hash.
+    ///
+    /// Several prefixes at once because one owner clear covers the owner's
+    /// path and one `.../repositories/{id}` path per repository mirrored under
+    /// it, and an owner with a few hundred repositories should not cost a few
+    /// hundred round trips.
     ///
     /// # Errors
     /// Storage failures.
-    async fn clear(&self, scope: &AccessScope, url_prefix: &str) -> Result<u64, DomainError>;
+    async fn clear(&self, scope: &AccessScope, url_prefixes: &[&str]) -> Result<u64, DomainError>;
 }
 
 /// A cache that stores nothing, for callers that do not want one.
@@ -142,7 +147,11 @@ impl HttpCache for NoCache {
         Ok(())
     }
 
-    async fn clear(&self, _scope: &AccessScope, _url_prefix: &str) -> Result<u64, DomainError> {
+    async fn clear(
+        &self,
+        _scope: &AccessScope,
+        _url_prefixes: &[&str],
+    ) -> Result<u64, DomainError> {
         Ok(0)
     }
 }

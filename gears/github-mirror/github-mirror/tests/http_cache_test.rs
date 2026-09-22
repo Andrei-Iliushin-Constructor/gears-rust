@@ -132,7 +132,7 @@ async fn clearing_by_prefix_drops_only_the_matching_repository() {
     let removed = cache
         .clear(
             &AccessScope::for_tenant(tenant),
-            "https://api.github.com/repos/acme/widget",
+            &["https://api.github.com/repos/acme/widget"],
         )
         .await
         .unwrap();

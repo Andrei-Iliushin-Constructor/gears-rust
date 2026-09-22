@@ -5021,25 +5021,34 @@ impl HttpCache for SeaOrmHttpCache {
         Ok(())
     }
 
-    async fn clear(&self, scope: &AccessScope, url_prefix: &str) -> Result<u64, DomainError> {
+    async fn clear(&self, scope: &AccessScope, url_prefixes: &[&str]) -> Result<u64, DomainError> {
+        // Guarded because an empty `Condition::any()` matches every row, and
+        // a clear with nothing to clear must delete nothing.
+        if url_prefixes.is_empty() {
+            return Ok(0);
+        }
+
         let conn = self.db.conn()?;
-        let escaped = url_prefix
-            .replace('!', "!!")
-            .replace('%', "!%")
-            .replace('_', "!_");
-        let below = |boundary: char| {
-            http_cache::Column::Url.like(LikeExpr::new(format!("{escaped}{boundary}%")).escape('!'))
-        };
+        let mut matching = sea_orm::Condition::any();
+        for url_prefix in url_prefixes {
+            let escaped = url_prefix
+                .replace('!', "!!")
+                .replace('%', "!%")
+                .replace('_', "!_");
+            let below = |boundary: char| {
+                http_cache::Column::Url
+                    .like(LikeExpr::new(format!("{escaped}{boundary}%")).escape('!'))
+            };
+            matching = matching
+                .add(http_cache::Column::Url.eq(*url_prefix))
+                .add(below('/'))
+                .add(below('?'));
+        }
 
         let result = HttpCacheEntity::delete_many()
             .secure()
             .scope_with(scope)
-            .filter(
-                sea_orm::Condition::any()
-                    .add(http_cache::Column::Url.eq(url_prefix))
-                    .add(below('/'))
-                    .add(below('?')),
-            )
+            .filter(matching)
             .exec(&conn)
             .await
             .map_err(map_scope_error)?;

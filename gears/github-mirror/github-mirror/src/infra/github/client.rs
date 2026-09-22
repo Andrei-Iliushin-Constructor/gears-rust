@@ -2699,13 +2699,14 @@ impl GithubPort for GithubClient {
             Some(name) => format!("{base}/repos/{owner}/{name}"),
             None => format!("{base}/repos/{owner}"),
         };
-        let mut removed = self.cache.clear(scope, &prefix).await?;
-        for id in repo_ids {
-            removed += self
-                .cache
-                .clear(scope, &format!("{base}/repositories/{id}"))
-                .await?;
-        }
-        Ok(removed)
+        let mut prefixes = vec![prefix];
+        prefixes.extend(
+            repo_ids
+                .iter()
+                .map(|id| format!("{base}/repositories/{id}")),
+        );
+        let prefixes: Vec<&str> = prefixes.iter().map(String::as_str).collect();
+
+        self.cache.clear(scope, &prefixes).await
     }
 }

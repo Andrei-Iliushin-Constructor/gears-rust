@@ -1398,7 +1398,11 @@ impl HttpCache for MemCache {
         Ok(())
     }
 
-    async fn clear(&self, _scope: &AccessScope, _url_prefix: &str) -> Result<u64, DomainError> {
+    async fn clear(
+        &self,
+        _scope: &AccessScope,
+        _url_prefixes: &[&str],
+    ) -> Result<u64, DomainError> {
         let mut entries = self.entries.lock().unwrap();
         let removed = entries.len() as u64;
         entries.clear();
