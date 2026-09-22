@@ -5296,7 +5296,7 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
         updated_at: &str,
     ) -> Result<(), DomainError> {
         let conn = self.db.conn()?;
-        SyncSessionEntity::update_many()
+        let result = SyncSessionEntity::update_many()
             .secure()
             .scope_with(scope)
             .filter(sea_orm::Condition::all().add(sync_sessions::Column::Id.eq(id)))
@@ -5308,6 +5308,15 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
             .exec(&conn)
             .await
             .map_err(map_scope_error)?;
+
+        // A heartbeat that writes no row is what the liveness check reads as a
+        // dead process, so it has to be said out loud rather than passed off as
+        // a write: the row is gone, or this scope cannot see it.
+        if result.rows_affected == 0 {
+            return Err(DomainError::internal(format!(
+                "the heartbeat for sync session {id} matched no row"
+            )));
+        }
         Ok(())
     }
 
