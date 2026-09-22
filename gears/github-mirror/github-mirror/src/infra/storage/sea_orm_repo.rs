@@ -3259,6 +3259,32 @@ async fn contributor_list_by_repo_in<C: DBRunner>(
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
+/// The stored rows for the people a write is about, so a merge reads what it
+/// is going to overwrite rather than a fixed first page of the table.
+async fn contributor_list_by_ids_in<C: DBRunner>(
+    conn: &C,
+    scope: &AccessScope,
+    repo_id: i64,
+    user_ids: &[i64],
+) -> Result<Vec<Contributor>, DomainError> {
+    if user_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = ContributorEntity::find()
+        .secure()
+        .scope_with(scope)
+        .filter(
+            sea_orm::Condition::all()
+                .add(contributors::Column::RepoId.eq(repo_id))
+                .add(contributors::Column::UserId.is_in(user_ids.iter().copied())),
+        )
+        .all(conn)
+        .await
+        .map_err(map_scope_error)?;
+
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
 async fn workflow_run_count_by_repo_in<C: DBRunner>(
     conn: &C,
     scope: &AccessScope,
@@ -4379,10 +4405,10 @@ async fn issue_timeline_list_by_issue_in<C: DBRunner>(
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
-/// How many stored contributors one merge reads back. A repository with more
-/// distinct people than this loses nothing already written — the merge simply
-/// cannot widen the rows it did not see.
-const CONTRIBUTOR_MERGE_LIMIT: u64 = 10_000;
+/// How many user ids one merge asks about at a time. The read is by id, so a
+/// repository of any size is merged in full; the chunk only keeps the `IN`
+/// list to a size every engine accepts.
+const CONTRIBUTOR_MERGE_CHUNK: usize = 500;
 
 /// One mirrored table's upsert pass: writes every fetched record and reports
 /// how many rows it wrote.
@@ -4407,15 +4433,13 @@ async fn merge_known_contributors<C: DBRunner>(
         return Ok(derived);
     }
 
-    let known = contributor_list_by_repo_in(
-        conn,
-        scope,
-        repo_id,
-        PageWindow::first(CONTRIBUTOR_MERGE_LIMIT),
-    )
-    .await?;
+    let wanted: Vec<i64> = derived.iter().map(|record| record.user_id).collect();
     let mut known: std::collections::HashMap<i64, Contributor> =
-        known.into_iter().map(|c| (c.user_id, c)).collect();
+        std::collections::HashMap::with_capacity(wanted.len());
+    for chunk in wanted.chunks(CONTRIBUTOR_MERGE_CHUNK) {
+        let rows = contributor_list_by_ids_in(conn, scope, repo_id, chunk).await?;
+        known.extend(rows.into_iter().map(|row| (row.user_id, row)));
+    }
 
     Ok(derived
         .into_iter()

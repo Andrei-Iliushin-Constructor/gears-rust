@@ -1755,10 +1755,26 @@ fn commit_file_record(repo_id: i64, commit_sha: &str, f: GhPullFile) -> CommitFi
 /// The query text is fixed; `owner`, `name` and the pull number travel as
 /// GraphQL variables so no request value is ever spliced into the query
 /// string itself.
-const REVIEW_THREADS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $first: Int!) {      repository(owner: $owner, name: $name) {      pullRequest(number: $number) { reviewThreads(first: $first) {      nodes { id isResolved isOutdated path line resolvedBy { login }      comments(first: 1) { totalCount } } } } } }";
+const REVIEW_THREADS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $first: Int!, $after: String) {      repository(owner: $owner, name: $name) {      pullRequest(number: $number) { reviewThreads(first: $first, after: $after) {      pageInfo { hasNextPage endCursor }      nodes { id isResolved isOutdated path line resolvedBy { login }      comments(first: 1) { totalCount } } } } } }";
 
-fn review_threads_variables(owner: &str, name: &str, pull_number: i64) -> serde_json::Value {
-    serde_json::json!({ "owner": owner, "name": name, "number": pull_number, "first": FIRST_PAGE_SIZE })
+/// A pull request with more review threads than one page holds is common on a
+/// busy repository, and the walk stops at [`REVIEW_THREAD_PAGES`] pages so a
+/// cursor GitHub never ends cannot keep one refinement going for ever.
+const REVIEW_THREAD_PAGES: usize = 20;
+
+fn review_threads_variables(
+    owner: &str,
+    name: &str,
+    pull_number: i64,
+    after: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "owner": owner,
+        "name": name,
+        "number": pull_number,
+        "first": FIRST_PAGE_SIZE,
+        "after": after,
+    })
 }
 
 fn review_thread_record(
@@ -2304,22 +2320,43 @@ impl GithubPort for GithubClient {
             .map(|c| pull_request_commit_record(repo_id, number, c))
             .collect();
 
-        let threads = self
-            .post_graphql(
-                REVIEW_THREADS_QUERY,
-                review_threads_variables(owner, name, number),
-                &options.cancel,
-            )
-            .await?;
-        let review_threads = threads["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
-            .as_array()
-            .map(|nodes| {
-                nodes
-                    .iter()
-                    .filter_map(|n| review_thread_record(repo_id, number, n))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut review_threads = Vec::new();
+        let mut after: Option<String> = None;
+        let mut more_to_come = false;
+        for page_number in 0..REVIEW_THREAD_PAGES {
+            let answer = self
+                .post_graphql(
+                    REVIEW_THREADS_QUERY,
+                    review_threads_variables(owner, name, number, after.as_deref()),
+                    &options.cancel,
+                )
+                .await?;
+            let page = &answer["data"]["repository"]["pullRequest"]["reviewThreads"];
+            if let Some(nodes) = page["nodes"].as_array() {
+                review_threads.extend(
+                    nodes
+                        .iter()
+                        .filter_map(|node| review_thread_record(repo_id, number, node)),
+                );
+            }
+            if !page["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false) {
+                break;
+            }
+            match page["pageInfo"]["endCursor"].as_str() {
+                Some(cursor) => after = Some(cursor.to_owned()),
+                None => break,
+            }
+            more_to_come = page_number + 1 == REVIEW_THREAD_PAGES;
+        }
+        if more_to_come {
+            tracing::warn!(
+                repository = %format!("{owner}/{name}"),
+                pull = number,
+                pages = REVIEW_THREAD_PAGES,
+                stored = review_threads.len(),
+                "the review-thread walk stopped at its page bound; later threads are missing"
+            );
+        }
 
         Ok(PullDetail {
             pull_request,
