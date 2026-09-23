@@ -2201,3 +2201,55 @@ async fn a_refused_graphql_answer_leaves_the_rest_of_the_refinement_standing() {
         "the pull must be left unrefined so the next run comes back to it"
     );
 }
+
+/// A `link` header is upstream text, so it decides where the next request
+/// goes. One pointing somewhere else would send the token to that host, and
+/// store whatever it answered as the repository's issues.
+#[tokio::test]
+async fn a_next_link_to_another_host_is_refused() {
+    let server = MockServer::start_async().await;
+    let elsewhere = "https://evil.example.com/repos/rust-lang/rust/issues?page=2";
+
+    let first_page = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/issues")
+                .query_param("sort", "updated");
+            then.status(200)
+                .header("link", format!("<{elsewhere}>; rel=\"next\""))
+                .json_body(gh_issues_json());
+        })
+        .await;
+    for tail in ["comments", "events"] {
+        let path = format!("/repos/rust-lang/rust/issues/{tail}");
+        server
+            .mock_async(move |when, then| {
+                when.method("GET").path(path);
+                then.status(200).json_body(json!([]));
+            })
+            .await;
+    }
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let walked = walk_issues(
+        &client,
+        "rust-lang",
+        "rust",
+        42,
+        None,
+        None,
+        &opts(ScopeConfig::default()),
+    )
+    .await;
+
+    let error = walked.expect_err("a next link to another host must not be followed");
+    assert!(
+        matches!(error, DomainError::Internal(_)),
+        "expected an internal error, got {error:?}"
+    );
+    assert!(
+        error.to_string().contains("refusing to follow a link off"),
+        "the walk must be stopped by the origin check, not by failing to reach \n         the other host: {error}"
+    );
+    first_page.assert_calls_async(1).await;
+}
