@@ -263,8 +263,8 @@ impl types_registry::domain::admission::OperationDispatch for NoDispatch {
         &self,
         _tx: &toolkit_db::DbTx<'_>,
         _operation_id: uuid::Uuid,
-    ) -> anyhow::Result<()> {
-        Ok(())
+    ) -> Result<toolkit_db::outbox::Wake, types_registry::domain::admission::OutboxError> {
+        Ok(toolkit_db::outbox::Wake::empty())
     }
 }
 

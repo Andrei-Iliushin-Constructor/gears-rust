@@ -239,8 +239,12 @@ struct NoDispatch;
 
 #[async_trait::async_trait]
 impl OperationDispatch for NoDispatch {
-    async fn enqueue(&self, _tx: &DbTx<'_>, _operation_id: Uuid) -> anyhow::Result<()> {
-        Ok(())
+    async fn enqueue(
+        &self,
+        _tx: &DbTx<'_>,
+        _operation_id: Uuid,
+    ) -> Result<toolkit_db::outbox::Wake, types_registry::domain::admission::OutboxError> {
+        Ok(toolkit_db::outbox::Wake::empty())
     }
 }
 
@@ -648,8 +652,13 @@ async fn an_infrastructure_failure_is_counted_but_not_warned_as_a_refusal() {
     struct FailingDispatch;
     #[async_trait::async_trait]
     impl OperationDispatch for FailingDispatch {
-        async fn enqueue(&self, _tx: &DbTx<'_>, _operation_id: Uuid) -> anyhow::Result<()> {
-            Err(anyhow::anyhow!("observability-dispatch-outage"))
+        async fn enqueue(
+            &self,
+            _tx: &DbTx<'_>,
+            _operation_id: Uuid,
+        ) -> Result<toolkit_db::outbox::Wake, types_registry::domain::admission::OutboxError>
+        {
+            Err(types_registry::domain::admission::OutboxError::NotRunning)
         }
     }
 
@@ -699,7 +708,7 @@ async fn an_infrastructure_failure_is_counted_but_not_warned_as_a_refusal() {
     );
     // Absence proves the dispatch error was not logged by `accept`.
     assert!(
-        !captured_log().contains("observability-dispatch-outage"),
+        !captured_log().contains("the admission outbox is not running"),
         "an infrastructure arm must not be logged as a refusal; captured:\n{}",
         captured_log()
     );

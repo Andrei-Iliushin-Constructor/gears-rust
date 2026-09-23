@@ -544,24 +544,28 @@ async fn accept_inner(
                 tx_stores
                     .insert_items(tx, &tx_scope, &parent, &validated.items)
                     .await?;
-                tx_dispatch
+                // Enqueue last, so any earlier failure rolls back before a wake
+                // exists: an escaped wake means the rows are about to commit.
+                let wake = tx_dispatch
                     .enqueue(tx, parent.id)
                     .await
-                    .map_err(AcceptanceError::Dispatch)?;
-                Ok(Accepted {
-                    operation_id: parent.id,
-                    replayed: false,
-                    status: parent.status,
-                })
+                    .map_err(|e| AcceptanceError::Dispatch(e.into()))?;
+                Ok((
+                    Accepted {
+                        operation_id: parent.id,
+                        replayed: false,
+                        status: parent.status,
+                    },
+                    wake,
+                ))
             })
         })
         .await;
 
     match insert {
-        Ok(accepted) => {
-            // Enqueue can wake a sequencer before this transaction commits.
-            // Request a fresh scan now that the record is visible.
-            dispatch.committed(accepted.operation_id);
+        Ok((accepted, wake)) => {
+            // The rows are durable now; wake the sequencer against them.
+            wake.fire();
             Ok(accepted)
         }
         // The unique constraint on (idempotency_scope_hash, idempotency_key) is the
@@ -569,6 +573,7 @@ async fn accept_inner(
         // row to lock, and the read above cannot close the window. The loser re-reads
         // the winner outside the rolled-back transaction; see `load_replay`.
         Err(AcceptanceError::Storage(e)) if e.is_unique_violation() => {
+            // The transaction rolled back before `enqueue`, so no wake exists to drop.
             let winner = find_operation_by_key(stores, db, scope, &validated)
                 .await?
                 .ok_or(AcceptanceError::Storage(ScopeError::Invalid(

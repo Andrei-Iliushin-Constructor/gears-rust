@@ -8,8 +8,8 @@
 use std::sync::{Arc, OnceLock, Weak};
 
 use toolkit_db::outbox::{
-    Batch, HandlerResult, LeaseConfig, LeasedHandler, MessageResult, Outbox, OutboxError,
-    OutboxHandle, OutboxMessage, OutboxProfile, Partitions, Record, WorkerTuning,
+    Batch, HandlerResult, LeaseConfig, LeasedHandler, MessageResult, Outbox, OutboxHandle,
+    OutboxMessage, OutboxProfile, Partitions, Record, Wake, WorkerTuning,
 };
 use toolkit_db::{Db, DbTx};
 use tracing::{error, info, warn};
@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::config::LEASE_HEADROOM;
 use crate::domain::admission::worker::WorkerError;
-use crate::domain::admission::{DeliveryFailure, OperationDispatch};
+use crate::domain::admission::{DeliveryFailure, OperationDispatch, OutboxError};
 use crate::domain::enums::OperationStatus;
 use crate::domain::ports::metrics::{AdmissionMetrics, DeliveryOutcome};
 use crate::domain::registry_service::{RegistryService, ServiceError};
@@ -78,16 +78,6 @@ pub enum ParsePayloadError {
     NotAUuid { text: String },
 }
 
-/// Outbox startup failures.
-#[derive(Debug, thiserror::Error)]
-pub enum StartError {
-    #[error("the admission outbox could not be started: {0}")]
-    Outbox(#[from] OutboxError),
-    /// The dispatch is already bound to a pipeline.
-    #[error("the admission dispatch is already bound to a running pipeline")]
-    AlreadyBound,
-}
-
 fn lease_config(operation_timeout: std::time::Duration) -> LeaseConfig {
     LeaseConfig {
         duration: operation_timeout.saturating_add(LEASE_HEADROOM),
@@ -96,6 +86,12 @@ fn lease_config(operation_timeout: std::time::Duration) -> LeaseConfig {
 }
 
 /// Enqueues operation UUIDs transactionally; a [`Weak`] avoids an ownership cycle.
+///
+/// `enqueue` returns the [`Wake`] for the enqueued record and acceptance fires it
+/// after its transaction commits (or drops it on rollback). The dispatch parks
+/// nothing across the commit boundary and holds no lock: the [`Outbox`] is
+/// internally thread-safe, and the [`OnceLock`] only late-binds the pipeline,
+/// which exists only after [`start`] has spawned it.
 #[derive(Debug)]
 pub struct OutboxDispatch {
     outbox: OnceLock<Weak<Outbox>>,
@@ -109,7 +105,7 @@ impl Default for OutboxDispatch {
 
 impl OutboxDispatch {
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             outbox: OnceLock::new(),
         }
@@ -118,39 +114,28 @@ impl OutboxDispatch {
     /// Attach the started pipeline once.
     ///
     /// # Errors
-    /// [`StartError::AlreadyBound`] if a pipeline is already attached.
-    pub fn bind(&self, outbox: &Arc<Outbox>) -> Result<(), StartError> {
+    /// [`OutboxError::AlreadyBound`] if a pipeline is already attached.
+    pub fn bind(&self, outbox: &Arc<Outbox>) -> Result<(), OutboxError> {
         self.outbox
             .set(Arc::downgrade(outbox))
-            .map_err(|_| StartError::AlreadyBound)
+            .map_err(|_| OutboxError::AlreadyBound)
     }
 }
 
 #[async_trait::async_trait]
 impl OperationDispatch for OutboxDispatch {
-    async fn enqueue(&self, tx: &DbTx<'_>, operation_id: Uuid) -> anyhow::Result<()> {
+    async fn enqueue(&self, tx: &DbTx<'_>, operation_id: Uuid) -> Result<Wake, OutboxError> {
         let outbox = self
             .outbox
             .get()
             .and_then(Weak::upgrade)
-            .ok_or_else(|| anyhow::anyhow!("the admission outbox is not running"))?;
+            .ok_or(OutboxError::NotRunning)?;
         let record = Record::to(QUEUE, partition(operation_id))
             .payload(payload(operation_id), PAYLOAD_TYPE)
             .build()?;
-        outbox.enqueue(tx, record).await?;
-        Ok(())
-    }
-
-    fn committed(&self, operation_id: Uuid) {
-        let Some(outbox) = self.outbox.get().and_then(Weak::upgrade) else {
-            // The record is durable; the next process's workers claim it.
-            warn!(%operation_id, "admission committed after the outbox stopped");
-            return;
-        };
-        if let Err(error) = outbox.flush_partition(QUEUE, partition(operation_id)) {
-            // A valid queue and partition make this a wiring error.
-            warn!(%operation_id, %error, "admission could not signal its outbox partition");
-        }
+        // Enqueue does not wake the sequencer; return the wake for acceptance to
+        // fire once this transaction commits.
+        Ok(outbox.enqueue(tx, record).await?)
     }
 }
 
@@ -546,13 +531,13 @@ impl LeasedHandler for AdmissionHandler {
 /// Start the admission pipeline and bind the dispatch to it.
 ///
 /// # Errors
-/// Returns [`StartError`] if the pipeline cannot start or the dispatch is already
+/// Returns [`OutboxError`] if the pipeline cannot start or the dispatch is already
 /// bound.
 pub async fn start(
     db: Db,
     registry: &Arc<RegistryService>,
     dispatch: &Arc<OutboxDispatch>,
-) -> Result<OutboxHandle, StartError> {
+) -> Result<OutboxHandle, OutboxError> {
     let handle = Outbox::builder(db)
         .table_prefix(TABLE_PREFIX)?
         .profile(OutboxProfile::low_latency())

@@ -55,8 +55,12 @@ struct NoDispatch;
 
 #[async_trait::async_trait]
 impl OperationDispatch for NoDispatch {
-    async fn enqueue(&self, _tx: &DbTx<'_>, _operation_id: Uuid) -> anyhow::Result<()> {
-        Ok(())
+    async fn enqueue(
+        &self,
+        _tx: &DbTx<'_>,
+        _operation_id: Uuid,
+    ) -> Result<toolkit_db::outbox::Wake, types_registry::domain::admission::OutboxError> {
+        Ok(toolkit_db::outbox::Wake::empty())
     }
 }
 
