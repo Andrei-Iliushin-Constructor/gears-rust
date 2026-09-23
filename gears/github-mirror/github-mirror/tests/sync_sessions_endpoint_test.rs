@@ -277,3 +277,69 @@ async fn sessions_are_tenant_scoped() {
         body_json(send(stranger_router, Method::GET, "/github-mirror/v1/sessions").await).await;
     assert!(listed["items"].as_array().expect("items").is_empty());
 }
+
+/// A cursor names the listing it came from: its sort string, how many keys it
+/// carries and which way it walks. A page request whose cursor disagrees on
+/// any of the three is refused rather than served from the wrong place.
+#[tokio::test]
+async fn a_cursor_from_another_listing_is_refused() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let service = common::service("https://api.github.com").await;
+    let router = router_for(service, ctx);
+
+    let cursor = |keys: &[&str], order: &str, direction: &str| {
+        toolkit_odata::CursorV1 {
+            k: keys.iter().map(|k| (*k).to_owned()).collect(),
+            o: toolkit_odata::SortDir::Desc,
+            s: order.to_owned(),
+            f: None,
+            d: direction.to_owned(),
+        }
+        .encode()
+        .expect("the cursor must encode")
+    };
+
+    let wrong_order = cursor(&["2026-08-20T00:00:00Z", "an-id"], "+repository", "fwd");
+    let wrong_key_count = cursor(&["2026-08-20T00:00:00Z"], "-created_at,-id", "fwd");
+    let wrong_direction = cursor(&["acme/widget"], "+repository", "bwd");
+
+    for (uri, why) in [
+        (
+            format!("/github-mirror/v1/sessions?cursor={wrong_order}"),
+            "the run-status listing's sort string is not the sessions listing's",
+        ),
+        (
+            format!("/github-mirror/v1/sessions?cursor={wrong_key_count}"),
+            "sessions page on two keys, not one",
+        ),
+        (
+            format!("/github-mirror/v1/sync-status?cursor={wrong_direction}"),
+            "this listing only walks forward",
+        ),
+    ] {
+        let response = send(router.clone(), Method::GET, &uri).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{why}: {uri} must be refused"
+        );
+        let body = body_json(response).await;
+        assert!(
+            body.to_string().contains("cursor"),
+            "the body must name the parameter at fault: {body}"
+        );
+    }
+
+    let good = cursor(&["acme/widget"], "+repository", "fwd");
+    let response = send(
+        router,
+        Method::GET,
+        &format!("/github-mirror/v1/sync-status?cursor={good}"),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a cursor that matches the listing must still be served"
+    );
+}

@@ -2030,3 +2030,116 @@ async fn a_304_on_page_one_still_walks_to_page_two() {
         "a revalidated listing must not be shorter than the fresh one"
     );
 }
+
+/// The two bounds a bounded pull sweep carries are not the same bound:
+/// `updated_after` says when to stop turning pages, `since` says which closed
+/// records to keep. Setting them to different instants is the only way to see
+/// that one is not quietly doing the other's job.
+#[tokio::test]
+async fn the_stop_bound_and_the_since_filter_are_applied_separately() {
+    let server = MockServer::start_async().await;
+    let page_two = format!("{}/repos/rust-lang/rust/pulls?page=2", server.base_url());
+    let page_three = format!("{}/repos/rust-lang/rust/pulls?page=3", server.base_url());
+
+    let pull = |id: i64, number: i64, state: &str, updated: &str| {
+        json!({
+            "id": id, "number": number, "title": "a pr", "state": state,
+            "user": { "id": 75, "login": "erin", "type": "User" },
+            "draft": false, "merged_at": null,
+            "head": { "sha": "h1", "ref": "feature" },
+            "base": { "sha": "b1", "ref": "master" },
+            "html_url": "https://github.com/rust-lang/rust/pull/1",
+            "created_at": "2026-08-01T00:00:00Z",
+            "updated_at": updated, "closed_at": null
+        })
+    };
+
+    let first_page_body = json!([
+        pull(1, 101, "closed", "2026-08-25T00:00:00Z"),
+        pull(2, 102, "closed", "2026-08-15T00:00:00Z"),
+        pull(3, 103, "open", "2026-08-12T00:00:00Z"),
+    ]);
+    let second_page_body = json!([
+        pull(4, 104, "open", "2026-08-05T00:00:00Z"),
+        pull(5, 105, "closed", "2026-08-04T00:00:00Z"),
+    ]);
+
+    let first_page = server
+        .mock_async(move |when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/pulls")
+                .query_param("sort", "updated")
+                .query_param("direction", "desc")
+                .query_param_exists("per_page");
+            then.status(200)
+                .header("link", format!("<{page_two}>; rel=\"next\""))
+                .json_body(first_page_body);
+        })
+        .await;
+    let second_page = server
+        .mock_async(move |when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/pulls")
+                .query_param("page", "2");
+            then.status(200)
+                .header("link", format!("<{page_three}>; rel=\"next\""))
+                .json_body(second_page_body);
+        })
+        .await;
+    let third_page = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/pulls")
+                .query_param("page", "3");
+            then.status(200).json_body(json!([]));
+        })
+        .await;
+    let comments = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/pulls/comments");
+            then.status(200).json_body(json!([]));
+        })
+        .await;
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let options = FetchOptions {
+        since: Some("2026-08-20T00:00:00Z".parse().expect("since must parse")),
+        ..opts(ScopeConfig::default())
+    };
+    let stop_at: chrono::DateTime<chrono::Utc> = "2026-08-10T00:00:00Z"
+        .parse()
+        .expect("the stop bound must parse");
+
+    let walked = walk_pulls(
+        &client,
+        "rust-lang",
+        "rust",
+        42,
+        Some(stop_at),
+        None,
+        &options,
+    )
+    .await
+    .expect("the bounded sweep must walk");
+
+    let mut numbers: Vec<i64> = walked.pull_requests.iter().map(|p| p.number).collect();
+    numbers.sort_unstable();
+    assert_eq!(
+        numbers,
+        [101, 103, 104],
+        "102 is closed and older than `since`, so the filter drops it even though \
+         the walk went past it; 104 is open, so `since` does not apply to it"
+    );
+
+    first_page.assert_calls_async(1).await;
+    second_page.assert_calls_async(1).await;
+    third_page.assert_calls_async(0).await;
+    comments.assert_calls_async(1).await;
+
+    assert!(
+        !walked.complete.is_complete(Listing::PullRequests),
+        "a bounded walk never saw the whole listing, so reconciliation must not \
+         treat what it stored as the full set"
+    );
+}

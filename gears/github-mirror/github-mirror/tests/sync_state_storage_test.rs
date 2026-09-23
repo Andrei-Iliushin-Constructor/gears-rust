@@ -244,3 +244,96 @@ async fn a_fingerprint_upsert_is_idempotent_and_tracks_refinement() {
         Some("2026-08-25T09:05:00Z")
     );
 }
+
+#[tokio::test]
+async fn a_heartbeat_writes_progress_and_nothing_else() {
+    let db = common::inmem_db().await;
+    let provider = Arc::new(DBProvider::<DbError>::new(db));
+    let ctx = common::caller_in(Uuid::new_v4());
+    let tenant = ctx.subject_tenant_id();
+    let scope = scope_for(&ctx).await;
+    let repo = SeaOrmSyncSessionRepository::new(Arc::clone(&provider));
+
+    let id = Uuid::new_v4();
+    let mut running = session_record(id, SessionStatus::InProgress, "2026-08-25T10:00:00Z");
+    running.repo_id = Some(42);
+    running.started_at = Some("2026-08-25T10:00:01Z".to_owned());
+    running.error = Some("a warning from the run".to_owned());
+    running.summary_json = Some(r#"{"issues_synced":2}"#.to_owned());
+    running.updated_at = Some("2026-08-25T10:00:01Z".to_owned());
+    repo.upsert(&scope, tenant, running.clone())
+        .await
+        .expect("the running session must insert");
+
+    repo.record_heartbeat(&scope, id, 40, "2026-08-25T10:00:20Z")
+        .await
+        .expect("the heartbeat must write");
+
+    let loaded = repo
+        .find_by_id(&scope, id)
+        .await
+        .expect("find must succeed")
+        .expect("session must exist");
+
+    assert_eq!(loaded.progress_percent, 40);
+    assert_eq!(loaded.updated_at.as_deref(), Some("2026-08-25T10:00:20Z"));
+    assert_eq!(
+        (
+            loaded.status,
+            loaded.repo_id,
+            loaded.error.as_deref(),
+            loaded.summary_json.as_deref(),
+            loaded.created_at.as_str(),
+            loaded.started_at.as_deref(),
+            loaded.ended_at.as_deref()
+        ),
+        (
+            running.status,
+            running.repo_id,
+            running.error.as_deref(),
+            running.summary_json.as_deref(),
+            running.created_at.as_str(),
+            running.started_at.as_deref(),
+            running.ended_at.as_deref()
+        ),
+        "a tick carries a stale copy of the row, so it must write the two \
+         columns it owns and leave the worker's writes alone"
+    );
+}
+
+#[tokio::test]
+async fn a_heartbeat_for_a_session_that_is_not_there_is_an_error() {
+    let db = common::inmem_db().await;
+    let provider = Arc::new(DBProvider::<DbError>::new(db));
+    let ctx = common::caller_in(Uuid::new_v4());
+    let tenant = ctx.subject_tenant_id();
+    let scope = scope_for(&ctx).await;
+    let repo = SeaOrmSyncSessionRepository::new(Arc::clone(&provider));
+
+    let real = Uuid::new_v4();
+    repo.upsert(
+        &scope,
+        tenant,
+        session_record(real, SessionStatus::InProgress, "2026-08-25T10:00:00Z"),
+    )
+    .await
+    .expect("the real session must insert");
+
+    let outcome = repo
+        .record_heartbeat(&scope, Uuid::new_v4(), 40, "2026-08-25T10:00:20Z")
+        .await;
+
+    assert!(
+        outcome.is_err(),
+        "a heartbeat that matched no row must say so: the liveness check reads \
+         a row that stopped moving as a dead process"
+    );
+
+    let untouched = repo
+        .find_by_id(&scope, real)
+        .await
+        .expect("find must succeed")
+        .expect("the real session must still be there");
+    assert_eq!(untouched.progress_percent, 0);
+    assert_eq!(untouched.updated_at, None);
+}

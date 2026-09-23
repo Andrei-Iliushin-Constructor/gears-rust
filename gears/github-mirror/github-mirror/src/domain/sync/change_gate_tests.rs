@@ -139,6 +139,28 @@ fn a_refinement_that_never_finished_is_retried() {
     assert_eq!(reason, Some(GateReason::Incomplete));
 }
 
+/// Both reasons apply at once: the refinement never finished, and the row is
+/// older than an open issue's backstop. The status is the one reported,
+/// because it is the one that says the entity was never fully read.
+#[test]
+fn an_unfinished_refinement_outranks_an_expired_backstop() {
+    let row = stored("a", None, REFINEMENT_PENDING, Some(Duration::hours(5)));
+    assert!(
+        Duration::hours(5) > family_ttl(Entity::Issue, false).expect("an open issue has a ttl"),
+        "the row has to be past the backstop for the two reasons to collide"
+    );
+
+    let reason = evaluate_refinement_gate(
+        Some(&row),
+        &inputs("a", None, false),
+        Entity::Issue,
+        Utc::now(),
+        false,
+    );
+
+    assert_eq!(reason, Some(GateReason::Incomplete));
+}
+
 #[test]
 fn an_open_issue_is_refined_again_once_its_backstop_expires() {
     let row = stored("a", None, REFINEMENT_COMPLETE, Some(Duration::hours(5)));
