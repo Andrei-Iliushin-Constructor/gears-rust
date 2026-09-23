@@ -431,22 +431,26 @@ async fn a_second_sync_of_a_repo_in_flight_reuses_it() {
     let mut pump = common::SyncPump::take(&service).await;
     let router = router_for(service.clone(), ctx);
 
-    let first = body_json(
-        post(
-            router.clone(),
-            "/github-mirror/v1/repos/rust-lang/rust/sync",
-        )
-        .await,
+    let first_response = post(
+        router.clone(),
+        "/github-mirror/v1/repos/rust-lang/rust/sync",
     )
     .await;
-    let second = body_json(
-        post(
-            router.clone(),
-            "/github-mirror/v1/repos/rust-lang/rust/sync",
-        )
-        .await,
+    assert_eq!(first_response.status(), StatusCode::ACCEPTED);
+    let first = body_json(first_response).await;
+
+    let second_response = post(
+        router.clone(),
+        "/github-mirror/v1/repos/rust-lang/rust/sync",
     )
     .await;
+    assert_eq!(
+        second_response.status(),
+        StatusCode::ACCEPTED,
+        "a request that joins a run already going is still accepted, not \
+         answered as though it had returned the work itself"
+    );
+    let second = body_json(second_response).await;
 
     assert_eq!(
         first["session_id"], second["session_id"],
