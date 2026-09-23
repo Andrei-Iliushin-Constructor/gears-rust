@@ -190,6 +190,11 @@ pub struct PullDetail {
     pub files: Vec<PullRequestFileRecord>,
     pub commits: Vec<PullRequestCommitRecord>,
     pub review_threads: Vec<ReviewThreadRecord>,
+    /// Whether the review-thread walk finished. Threads are the one part of a
+    /// pull that only GraphQL serves, so a refusal there leaves the rest of
+    /// the refinement usable; `false` says the pull is not fully refined and
+    /// the next run must come back to it.
+    pub review_threads_complete: bool,
     /// What GitHub says the pull request holds, when the payload reports it.
     pub declared: DeclaredCounts,
     /// People seen reviewing; the review objects do not survive the mapping

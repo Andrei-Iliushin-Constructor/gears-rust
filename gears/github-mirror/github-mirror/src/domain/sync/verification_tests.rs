@@ -71,6 +71,7 @@ fn pull(declared: DeclaredCounts, commits: usize, files: usize) -> PullDetail {
             })
             .collect(),
         review_threads: Vec::new(),
+        review_threads_complete: true,
         declared,
         contributors: Vec::new(),
     }

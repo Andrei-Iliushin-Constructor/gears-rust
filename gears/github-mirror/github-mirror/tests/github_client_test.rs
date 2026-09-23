@@ -2143,3 +2143,61 @@ async fn the_stop_bound_and_the_since_filter_are_applied_separately() {
          treat what it stored as the full set"
     );
 }
+
+/// Review threads are the one part of a pull that only GraphQL serves. A
+/// refusal there must not throw away the detail, reviews, files and commits
+/// that REST already returned, and must not fail the repository's sync.
+#[tokio::test]
+async fn a_refused_graphql_answer_leaves_the_rest_of_the_refinement_standing() {
+    let server = MockServer::start_async().await;
+
+    server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/rust-lang/rust/pulls/13");
+            then.status(200).json_body(gh_pulls_json()[0].clone());
+        })
+        .await;
+    for tail in ["reviews", "files", "commits"] {
+        let path = format!("/repos/rust-lang/rust/pulls/13/{tail}");
+        server
+            .mock_async(move |when, then| {
+                when.method("GET").path(path);
+                then.status(200).json_body(json!([]));
+            })
+            .await;
+    }
+    let graphql = server
+        .mock_async(|when, then| {
+            when.method("POST").path("/graphql");
+            then.status(200).json_body(json!({
+                "data": null,
+                "errors": [{ "type": "FORBIDDEN", "message": "no access to this repository" }]
+            }));
+        })
+        .await;
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let detail = client
+        .refine_pull_request(
+            RepoRef {
+                owner: "rust-lang",
+                name: "rust",
+                repo_id: 42,
+            },
+            13,
+            &opts(ScopeConfig::default()),
+        )
+        .await
+        .expect("a refused GraphQL answer must not fail the refinement");
+
+    graphql.assert_calls_async(1).await;
+    assert_eq!(
+        detail.pull_request.number, 13,
+        "the REST detail still stands"
+    );
+    assert!(detail.review_threads.is_empty());
+    assert!(
+        !detail.review_threads_complete,
+        "the pull must be left unrefined so the next run comes back to it"
+    );
+}

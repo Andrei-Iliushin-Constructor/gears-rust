@@ -603,6 +603,7 @@ impl MirrorWorker {
             .refine_pull_request(run.repo_ref()?, number, &run.options)
             .await?;
         let gaps = pull_gaps(&detail);
+        let threads_complete = detail.review_threads_complete;
         run.absorb_contributors(std::mem::take(&mut detail.contributors));
         let (reviews, files, commits, threads) = (
             count(&detail.reviews),
@@ -621,6 +622,14 @@ impl MirrorWorker {
         });
         for gap in &gaps {
             self.report_gap(ctx, number, gap, task.attempt);
+        }
+        if !threads_complete {
+            tracing::warn!(
+                pull = number,
+                "the pull request keeps its unrefined mark: its review threads are \
+                 short, so the next run comes back to it"
+            );
+            return Ok(());
         }
         self.mark_refined(Entity::PullRequest, &number.to_string())
             .await

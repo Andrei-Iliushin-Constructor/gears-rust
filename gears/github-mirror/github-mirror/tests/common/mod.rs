@@ -273,6 +273,7 @@ impl GithubPort for FakeGithub {
                 .filter(|r| r.pull_number == number)
                 .cloned()
                 .collect(),
+            review_threads_complete: true,
             declared: DeclaredCounts::default(),
             contributors: Vec::new(),
         })

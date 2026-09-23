@@ -2350,14 +2350,35 @@ impl GithubPort for GithubClient {
         let mut review_threads = Vec::new();
         let mut after: Option<String> = None;
         let mut more_to_come = false;
+        let mut threads_complete = true;
         for page_number in 0..REVIEW_THREAD_PAGES {
-            let answer = self
+            // Not fatal: everything above came from REST and is already in
+            // hand, and threads are the only part of a pull that GraphQL
+            // alone serves. A token without GraphQL rights would otherwise
+            // fail every pull, and with it every sync of the repository.
+            // `post_graphql` has already logged what GitHub refused.
+            let answer = match self
                 .post_graphql(
                     REVIEW_THREADS_QUERY,
                     review_threads_variables(owner, name, number, after.as_deref()),
                     &options.cancel,
                 )
-                .await?;
+                .await
+            {
+                Ok(answer) => answer,
+                Err(DomainError::Cancelled) => return Err(DomainError::Cancelled),
+                Err(e) => {
+                    tracing::warn!(
+                        repository = %format!("{owner}/{name}"),
+                        pull = number,
+                        error = %e.public_text(),
+                        "could not read the pull request's review threads; the rest of \
+                         the refinement stands and the next run tries again"
+                    );
+                    threads_complete = false;
+                    break;
+                }
+            };
             let page = &answer["data"]["repository"]["pullRequest"]["reviewThreads"];
             if let Some(nodes) = page["nodes"].as_array() {
                 review_threads.extend(
@@ -2391,6 +2412,7 @@ impl GithubPort for GithubClient {
             files,
             commits,
             review_threads,
+            review_threads_complete: threads_complete,
             declared,
             contributors: reviewers.into_records(),
         })
