@@ -154,6 +154,88 @@ async fn clearing_by_prefix_drops_only_the_matching_repository() {
     );
 }
 
+/// Every edge of the prefix match, in one pass: the prefix URL itself, a
+/// child under `/`, a query under `?`, and two siblings that merely start
+/// with the same text. Anything that matched on text alone would take the
+/// siblings with it.
+#[tokio::test]
+async fn clearing_a_prefix_stops_at_a_path_or_query_boundary() {
+    let cache = store(Compression::Gzip).await;
+    let tenant = Uuid::new_v4();
+    let scope = AccessScope::for_tenant(tenant);
+    let prefix = "https://api.github.com/repos/acme/widget";
+
+    let urls = [
+        (prefix, true),
+        ("https://api.github.com/repos/acme/widget/issues", true),
+        ("https://api.github.com/repos/acme/widget?page=2", true),
+        (
+            "https://api.github.com/repos/acme/widget-fork/issues",
+            false,
+        ),
+        ("https://api.github.com/repos/acme/widgets/issues", false),
+    ];
+
+    for (url, _) in urls {
+        let key = CacheKey::compute("GET", url, "application/json");
+        cache.put(&scope, tenant, &key, url, entry()).await.unwrap();
+    }
+
+    let removed = cache.clear(&scope, &[prefix]).await.unwrap();
+    assert_eq!(removed, 3, "the prefix itself, its child and its query");
+
+    for (url, cleared) in urls {
+        let key = CacheKey::compute("GET", url, "application/json");
+        let found = cache.get(&scope, &key).await.unwrap().is_some();
+        assert_eq!(
+            found,
+            !cleared,
+            "{url} must {} a clear of {prefix}",
+            if cleared { "not survive" } else { "survive" }
+        );
+    }
+}
+
+/// A repository name may contain `_` or `%`, which `LIKE` reads as "any one
+/// character" and "any run of characters". Unescaped, a clear of `my_repo`
+/// would take `myXrepo` with it.
+#[tokio::test]
+async fn a_metacharacter_in_a_prefix_matches_only_itself() {
+    let cache = store(Compression::Gzip).await;
+    let tenant = Uuid::new_v4();
+    let scope = AccessScope::for_tenant(tenant);
+    let prefix = "https://api.github.com/repos/acme/my_re%po";
+
+    let urls = [
+        ("https://api.github.com/repos/acme/my_re%po/issues", true),
+        ("https://api.github.com/repos/acme/myXre%po/issues", false),
+        ("https://api.github.com/repos/acme/my_reZZZpo/issues", false),
+        ("https://api.github.com/repos/acme/myXreZZZpo/issues", false),
+    ];
+
+    for (url, _) in urls {
+        let key = CacheKey::compute("GET", url, "application/json");
+        cache.put(&scope, tenant, &key, url, entry()).await.unwrap();
+    }
+
+    let removed = cache.clear(&scope, &[prefix]).await.unwrap();
+    assert_eq!(
+        removed, 1,
+        "only the repository actually named in the prefix"
+    );
+
+    for (url, cleared) in urls {
+        let key = CacheKey::compute("GET", url, "application/json");
+        let found = cache.get(&scope, &key).await.unwrap().is_some();
+        assert_eq!(
+            found,
+            !cleared,
+            "{url} must {} a clear of {prefix}",
+            if cleared { "not survive" } else { "survive" }
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_row_keeps_the_compression_it_was_written_with() {
     let db = common::inmem_db().await;
