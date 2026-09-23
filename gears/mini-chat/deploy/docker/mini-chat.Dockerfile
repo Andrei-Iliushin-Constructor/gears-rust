@@ -1,6 +1,6 @@
 # Multi-stage build for cf-gears-example-server with mini-chat + k8s features
 # Stage 1: Builder
-# Matches rust-toolchain.toml (1.97.0); a stale pin here just makes rustup
+# Should match rust-toolchain.toml; a stale pin here just makes rustup
 # download a second toolchain on every build.
 FROM rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS builder
 
@@ -15,19 +15,15 @@ RUN apt-get update && \
 
 WORKDIR /build
 
-# Copy workspace files
-COPY Cargo.toml Cargo.lock Gears.toml ./
-COPY rust-toolchain.toml ./
-COPY .cargo ./.cargo
-COPY tools ./tools
-
-# Copy all workspace members
-COPY apps/cf-gears-example-server ./apps/cf-gears-example-server
-COPY libs ./libs
-COPY gears ./gears
-COPY examples ./examples
-COPY config ./config
-COPY proto ./proto
+# Copy the whole workspace rather than enumerating members.
+#
+# Enumerating is exactly what rotted this file in #4798: the hand-picked list
+# silently drifted out of sync and dropped tools/, .cargo/config.toml and
+# Gears.toml, breaking the build without anything noticing.
+#
+# The repo-root .dockerignore already keeps target/, .git and other build
+# noise out of the context.
+COPY . .
 
 # Build the cf-gears-example-server binary.
 # BUILD_PROFILE: "dev" (default, fast compile) or "release" (optimized).

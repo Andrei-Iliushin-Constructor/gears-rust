@@ -104,10 +104,17 @@ jobs:
   # subject here, not a performance subject.
   e2e-docker:
     needs: docker-changes
+    # A `needs:` job that is skipped or fails would otherwise skip this job too,
+    # silently taking the nightly and manual runs with it - the filter is only
+    # meant to gate the pull_request case. `!cancelled()` keeps the expression
+    # being evaluated in that situation, while still honouring a cancelled run
+    # (which a bare `always()` would not).
     if: >-
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      needs.docker-changes.outputs.docker == 'true'
+      !cancelled() && (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        needs.docker-changes.outputs.docker == 'true'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -125,8 +132,20 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Python dependencies
-        run: pip install -r testing/e2e/requirements.txt
+      # docker-changes' paths-filter matches `**/*.Dockerfile`, so editing any
+      # Dockerfile triggers this job - but until now the job only ever built
+      # testing/docker/cf-gears.Dockerfile and http-mock.Dockerfile. A change
+      # to mini-chat.Dockerfile got a green check here without ever being
+      # built (#4798). Build-only: the runtime behavior is covered by
+      # cf-gears.Dockerfile above; this just proves the image builds.
+      #
+      # BuildKit is explicit because this Dockerfile uses `RUN --mount=type=cache`,
+      # which the legacy builder rejects outright. It is the default on current
+      # runner images, but this job must not silently depend on that.
+      - name: Build mini-chat Docker image
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: docker build -f gears/mini-chat/deploy/docker/mini-chat.Dockerfile --build-arg BUILD_PROFILE=dev .
 
       - name: Run E2E tests in Docker
         run: make e2e-docker-smoke
