@@ -45050,6 +45050,10 @@
             "name": "status",
             "required": false,
             "schema": {
+              "enum": [
+                "in_progress",
+                "complete"
+              ],
               "type": "string"
             }
           },

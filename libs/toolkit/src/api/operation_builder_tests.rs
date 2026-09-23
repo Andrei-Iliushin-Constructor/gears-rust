@@ -827,3 +827,31 @@ fn response_content_types_must_not_contain_parameters() {
         );
     }
 }
+
+#[test]
+fn an_enum_query_param_carries_its_values_and_leaves_the_others_alone() {
+    let builder = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/test")
+        .query_param_enum("status", false, "which ones", ["open", "closed"])
+        .query_param_typed("limit", false, "how many", "integer")
+        .query_param("cursor", false, "where from");
+
+    let by_name = |name: &str| {
+        builder
+            .spec
+            .params
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("{name} must be declared"))
+            .param_type
+            .clone()
+    };
+
+    assert_eq!(
+        enum_param_values(&by_name("status")),
+        Some(vec!["open", "closed"])
+    );
+    assert_eq!(by_name("limit"), "integer");
+    assert_eq!(enum_param_values(&by_name("limit")), None);
+    assert_eq!(by_name("cursor"), "string");
+    assert_eq!(enum_param_values(&by_name("cursor")), None);
+}

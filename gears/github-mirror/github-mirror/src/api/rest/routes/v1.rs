@@ -149,7 +149,12 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
-        .query_param("status", false, "Only `in_progress` or only `complete`")
+        .query_param_enum(
+            "status",
+            false,
+            "Only `in_progress` or only `complete`",
+            ["in_progress", "complete"],
+        )
         .query_param_typed(
             "limit",
             false,

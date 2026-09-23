@@ -135,6 +135,27 @@ impl<S> HandlerSlot<S> for Present {
 
 pub use state::{AuthNotSet, AuthSet, LicenseNotSet, LicenseSet, Missing, Present};
 
+/// What marks a [`ParamSpec::param_type`] as a string with a closed set of
+/// values rather than a plain JSON Schema type. The values follow, separated
+/// by [`ENUM_PARAM_SEPARATOR`].
+///
+/// A marker inside the existing field rather than a new one: `ParamSpec` has
+/// public fields that gears build with struct literals, and adding a field
+/// would break every one of them.
+pub const ENUM_PARAM_PREFIX: &str = "enum:";
+
+/// What separates the values after [`ENUM_PARAM_PREFIX`].
+pub const ENUM_PARAM_SEPARATOR: &str = ",";
+
+/// The values an `enum:`-marked `param_type` carries, or `None` for any other
+/// `param_type`.
+#[must_use]
+pub fn enum_param_values(param_type: &str) -> Option<Vec<&str>> {
+    param_type
+        .strip_prefix(ENUM_PARAM_PREFIX)
+        .map(|values| values.split(ENUM_PARAM_SEPARATOR).collect())
+}
+
 /// Parameter specification for API operations
 #[derive(Clone, Debug)]
 pub struct ParamSpec {
@@ -767,6 +788,42 @@ where
             required,
             Some(description.into()),
             param_type.into(),
+        ));
+        self
+    }
+
+    /// Add a string query parameter that only accepts `values`.
+    ///
+    /// The values reach the document as the parameter's `enum`, so a client
+    /// generated from the spec gets a closed set rather than a bare string,
+    /// and a caller reading the document can see what the endpoint takes
+    /// without trying one.
+    ///
+    /// Carried in [`ParamSpec::param_type`] behind the [`ENUM_PARAM_PREFIX`]
+    /// marker, so no caller of the other `query_param_*` methods and no
+    /// `ParamSpec` a gear builds itself has to change.
+    pub fn query_param_enum<V, I>(
+        mut self,
+        name: impl Into<String>,
+        required: bool,
+        description: impl Into<String>,
+        values: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: AsRef<str>,
+    {
+        let joined = values
+            .into_iter()
+            .map(|value| value.as_ref().to_owned())
+            .collect::<Vec<_>>()
+            .join(ENUM_PARAM_SEPARATOR);
+        self.spec.params.push(ParamSpec::scalar(
+            name.into(),
+            ParamLocation::Query,
+            required,
+            Some(description.into()),
+            format!("{ENUM_PARAM_PREFIX}{joined}"),
         ));
         self
     }
