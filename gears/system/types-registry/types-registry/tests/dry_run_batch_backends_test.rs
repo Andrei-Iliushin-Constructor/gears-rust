@@ -1,5 +1,4 @@
 //! Whole-batch parity, snapshot coherence and atomic publication on all backends.
-//! Use `SQLite` WAL and PostgreSQL/MySQL `REPEATABLE READ` to commit a concurrent
 //! writer while prediction retains its original snapshot.
 //!
 //! Run dry run before commit on the same database, checking unchanged entity
@@ -124,7 +123,7 @@ async fn submit(
         },
         &dispatch,
         &SubmitRequest {
-            idempotency_key: key.to_owned(),
+            idempotency_key: Some(key.to_owned()),
             kind,
             dry_run,
             candidates,

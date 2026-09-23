@@ -1,4 +1,3 @@
-//! Deletion and dry-run checks on PostgreSQL and MySQL (T20).
 //! Cover dependant rechecks under the write-order claim, unchanged dry-run entity
 //! state and sequence, and publication accepted by `ck_tr_operation_item_state`.
 
@@ -85,7 +84,7 @@ async fn pass(
         },
         &(Arc::new(NoDispatch) as Arc<dyn OperationDispatch>),
         &SubmitRequest {
-            idempotency_key: key.to_owned(),
+            idempotency_key: Some(key.to_owned()),
             kind,
             dry_run,
             candidates: vec![candidate],
@@ -335,7 +334,7 @@ async fn assert_batch_order(db: &Arc<DBProvider<DbError>>, backend: &str) {
         },
         &(Arc::new(NoDispatch) as Arc<dyn OperationDispatch>),
         &SubmitRequest {
-            idempotency_key: "batch-del".to_owned(),
+            idempotency_key: Some("batch-del".to_owned()),
             kind: OperationKind::Deletion,
             dry_run: false,
             candidates: vec![removal(BATCH_BASE, 1), removal(BATCH_HOLDER, 1)],

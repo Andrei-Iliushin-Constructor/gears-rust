@@ -4,7 +4,7 @@
 # testing/docker/docker-compose.yml. The build context is the repository root.
 #
 # Stage 1: Builder
-FROM rust:1.97.0-bookworm@sha256:8fa55b2f3ddf97471ab6a767bfa3f37e6bad0986ba823e75fea57e2a2a5c3073 AS builder
+FROM rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS builder
 
 # Cargo features for the composed binary. ci.py forwards --features here;
 # empty means `default = []`, i.e. a server with no optional gears.
@@ -48,7 +48,7 @@ RUN set -eux; \
 # runners where this repo already needs jlumbroso/free-disk-space elsewhere.
 
 # Stage 2: Runtime — must match the builder's base OS.
-FROM debian:13.6-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+FROM debian:13.7-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \

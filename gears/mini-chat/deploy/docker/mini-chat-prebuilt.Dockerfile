@@ -2,7 +2,7 @@
 # Used by `make mini-chat-docker` on linux when the host cargo target is reusable.
 ARG BINARY_PATH=target/debug/cf-gears-example-server
 
-FROM debian:13.6-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+FROM debian:13.7-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \

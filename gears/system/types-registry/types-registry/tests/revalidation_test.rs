@@ -36,9 +36,7 @@ use types_registry::domain::policy::RegistrationPolicy;
 use types_registry::domain::ports::{
     CurrentSchemaCas, CurrentTypeSchemaRow, EntityRow, NewCurrentTypeSchema, Stores, commit_write,
 };
-use types_registry::domain::registry_service::{
-    AdmissionMode, EntityKey, RegistryService, ServiceError,
-};
+use types_registry::domain::registry_service::{EntityKey, RegistryService, ServiceError};
 use types_registry::infra::storage::repo::{
     CoordinationStateRepo, EntityRepo, OperationRepo, TypeSchemaRepo,
 };
@@ -158,7 +156,7 @@ async fn submit(
         },
         &dispatch,
         &SubmitRequest {
-            idempotency_key: key.to_owned(),
+            idempotency_key: Some(key.to_owned()),
             kind: domain_enums::OperationKind::Registration,
             dry_run: false,
             candidates: vec![Candidate {
@@ -1334,7 +1332,6 @@ fn service(db: &Provider) -> RegistryService {
         RegistrationPolicy::default(),
         TypesRegistryConfig::default(),
         dispatch,
-        AdmissionMode::Inline,
         common::metrics(),
     )
 }

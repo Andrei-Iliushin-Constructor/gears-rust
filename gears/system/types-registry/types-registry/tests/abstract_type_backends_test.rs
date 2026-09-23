@@ -63,7 +63,7 @@ async fn submit(db: &Provider, id: &str, content: Value, version: Option<i64>) -
         },
         &(Arc::new(NoDispatch) as Arc<dyn OperationDispatch>),
         &SubmitRequest {
-            idempotency_key: Uuid::new_v4().to_string(),
+            idempotency_key: Some(Uuid::new_v4().to_string()),
             kind: OperationKind::Registration,
             dry_run: false,
             candidates: vec![Candidate {

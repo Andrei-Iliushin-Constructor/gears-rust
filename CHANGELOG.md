@@ -9,6 +9,12 @@ release-plz updates this file in the Release PR.
 
 ## [Unreleased]
 
+## [0.2.7](https://github.com/constructorfabric/gears-rust/compare/cf-gears-file-storage-v0.2.6...cf-gears-file-storage-v0.2.7) - 2026-09-21
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [0.1.14](https://github.com/constructorfabric/gears-rust/compare/cf-gears-noop-usage-collector-plugin-v0.1.13...cf-gears-noop-usage-collector-plugin-v0.1.14) - 2026-09-20
 
 ### Other
