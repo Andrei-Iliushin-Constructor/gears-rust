@@ -85,7 +85,11 @@ pub fn validate_commit_sha(sha: &str) -> Result<(), DomainError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
 mod tests {
     use super::*;
 

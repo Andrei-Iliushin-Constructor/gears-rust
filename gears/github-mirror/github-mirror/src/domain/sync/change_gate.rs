@@ -258,5 +258,9 @@ fn evaluate_refinement_gate(
 
 #[cfg(test)]
 #[path = "change_gate_tests.rs"]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
 mod change_gate_tests;

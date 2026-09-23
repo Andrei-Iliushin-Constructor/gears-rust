@@ -923,3 +923,44 @@ async fn a_shorter_timeline_does_not_leave_the_previous_tail_behind() {
         "re-syncing a shorter timeline must not keep the old tail"
     );
 }
+
+#[tokio::test]
+async fn a_run_status_filter_this_build_does_not_know_is_refused() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let db = common::inmem_db().await;
+    let service = common::service_with_github(
+        db,
+        "https://api.github.com",
+        Arc::new(common::FakeGithub { result: None }),
+    );
+    let router = router_for(service, ctx);
+
+    let response = get(
+        router.clone(),
+        "/github-mirror/v1/sync-status?status=in-progress",
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "a status this build cannot parse must be refused, not quietly ignored"
+    );
+    let body = body_json(response).await;
+    assert!(
+        body.to_string().contains("status"),
+        "the body must name the parameter at fault: {body}"
+    );
+
+    for accepted in ["in_progress", "complete"] {
+        let response = get(
+            router.clone(),
+            &format!("/github-mirror/v1/sync-status?status={accepted}"),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "`{accepted}` is one of the two values the endpoint documents"
+        );
+    }
+}

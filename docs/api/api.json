@@ -44708,7 +44708,7 @@
     },
     "/github-mirror/v1/repos/{owner}/{name}/sync": {
       "post": {
-        "description": "Queues a sync of the repository and answers immediately with a session id.              The background worker fetches the repository plus the first page of its              entities from GitHub and upserts them into the caller's tenant mirror;              poll the session for the outcome. No pagination, conditional requests, or              rate-limit budgeting yet.",
+        "description": "Queues a sync of the repository and answers immediately with a session id.              The background worker pages through the repository and every object type in              scope, replays the `ETag` it stored last time so GitHub can answer `304`              instead of resending a page, and waits out a rate limit before carrying              on. What it fetches is upserted into the caller's tenant mirror; poll the              session for the outcome.",
         "operationId": "github_mirror.v1.sync_repository",
         "parameters": [
           {
@@ -44769,6 +44769,15 @@
             "description": "`all`, `open` or `none` for timeline events",
             "in": "query",
             "name": "timeline_scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "RFC3339 instant; closed issues and pull requests older than this are not collected",
+            "in": "query",
+            "name": "since",
             "required": false,
             "schema": {
               "type": "string"

@@ -61,7 +61,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .operation_id("github_mirror.v1.sync_repository")
         .summary("Sync a repository from GitHub into the mirror")
         .description(
-            "Queues a sync of the repository and answers immediately with a session id.              The background worker fetches the repository plus the first page of its              entities from GitHub and upserts them into the caller's tenant mirror;              poll the session for the outcome. No pagination, conditional requests, or              rate-limit budgeting yet.",
+            "Queues a sync of the repository and answers immediately with a session id.              The background worker pages through the repository and every object type in              scope, replays the `ETag` it stored last time so GitHub can answer `304`              instead of resending a page, and waits out a rate limit before carrying              on. What it fetches is upserted into the caller's tenant mirror; poll the              session for the outcome.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -77,6 +77,11 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .query_param("actions_scope", false, "`all`, `open` or `none` for CI results")
         .query_param("reactions_scope", false, "`all`, `open` or `none` for reactions")
         .query_param("timeline_scope", false, "`all`, `open` or `none` for timeline events")
+        .query_param(
+            "since",
+            false,
+            "RFC3339 instant; closed issues and pull requests older than this are not collected",
+        )
         .handler(handlers::sync_repository)
         .json_response_with_schema::<dto::SyncAcceptedDto>(
             openapi,

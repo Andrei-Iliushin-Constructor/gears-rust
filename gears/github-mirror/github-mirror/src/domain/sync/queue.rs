@@ -281,7 +281,10 @@ impl TaskQueue {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
 mod tests {
     use super::*;
     use crate::domain::sync::task::{Entity, RunIdentity, TaskPriority};

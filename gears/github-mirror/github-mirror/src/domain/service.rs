@@ -3097,15 +3097,6 @@ impl Service {
         self.issue_timeline.upsert(&scope, tenant_id, record).await
     }
 
-    /// Run one sync of `owner/name` and record it as a session: a durable
-    /// `gm_sync_sessions` row that survives the request and is readable via
-    /// [`Self::get_session`]. The sync itself still runs inline — slice 3 of
-    /// gears-rust#4632 moves it to a background task and this method starts
-    /// answering before the work finishes.
-    ///
-    /// # Errors
-    /// Whatever [`Self::sync_repository`] returns; the session row records
-    /// the failure before the error propagates.
     /// Drop cached GitHub responses for one owner or one repository.
     ///
     /// DESIGN §4's `clear_cache(session, scope)`. The mirrored rows are left
@@ -3113,7 +3104,8 @@ impl Service {
     /// rather than revalidating.
     ///
     /// # Errors
-    /// `Forbidden`/`Database` as usual.
+    /// `DomainError::Validation` when `owner`, or `owner/name`, is not a
+    /// usable GitHub path; `Forbidden`/`Database` as usual.
     pub async fn clear_cache(
         &self,
         ctx: &SecurityContext,
@@ -3401,9 +3393,10 @@ impl Service {
     /// Re-run every repository this tenant still has marked `in_progress`.
     ///
     /// This is PRD §5.2's resume operation. Resume is a re-run, not a restore:
-    /// nothing about the interrupted run is replayed, and re-running is cheap
-    /// only once the `ETag` cache and change-detection state exist (#4630 and
-    /// #4632 slice 6) — until then it costs a full sync.
+    /// nothing about the interrupted run is replayed. What keeps the re-run
+    /// cheap is the state the previous one left behind — a stored `ETag` lets
+    /// GitHub answer `304` for a page that has not changed, and a stored
+    /// fingerprint keeps an unchanged entity from being fetched again.
     ///
     /// Resume takes no per-run scope: `ALGORITHMS.md` §8 has it resolve scope
     /// from configuration only, so a resumed run collects whatever the gear

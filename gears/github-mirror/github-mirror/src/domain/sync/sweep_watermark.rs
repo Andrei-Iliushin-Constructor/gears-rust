@@ -190,5 +190,9 @@ impl SweepWatermark {
 
 #[cfg(test)]
 #[path = "sweep_watermark_tests.rs"]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
 mod sweep_watermark_tests;

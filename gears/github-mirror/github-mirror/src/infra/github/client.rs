@@ -232,8 +232,8 @@ pub struct GithubClient {
 
 impl GithubClient {
     /// # Errors
-    /// Returns `DomainError::Internal` when the underlying HTTP client cannot
-    /// be constructed.
+    /// Whatever [`Self::with_cache`] returns: this is that call with a cache
+    /// that stores nothing.
     pub fn new(api_base_url: String, token: Option<String>) -> Result<Self, DomainError> {
         Self::with_cache(api_base_url, token, Arc::new(NoCache))
     }
@@ -242,8 +242,9 @@ impl GithubClient {
     ///
     /// # Errors
     /// Returns `DomainError::Internal` when the underlying HTTP client cannot
-    /// be constructed, when `api_base_url` is not a hierarchical URL, or when
-    /// it would carry the token over plain `http` to another machine.
+    /// be constructed, when `api_base_url` does not parse, when it would carry
+    /// the token over plain `http` to another machine, or when it has no host
+    /// for a `next` link to be compared against.
     pub fn with_cache(
         api_base_url: String,
         token: Option<String>,

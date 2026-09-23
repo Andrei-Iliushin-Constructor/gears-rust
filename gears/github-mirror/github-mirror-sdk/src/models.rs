@@ -215,8 +215,9 @@ pub struct Commit {
     pub deletions: i64,
 }
 
-/// One count gap verification gave up on: GitHub declared more children for
-/// a pull request than it served, `passes` fetches running.
+/// One count gap verification gave up on: GitHub declared more children for a
+/// pull request than it ever served, and `passes` re-fetches of that pull
+/// request did not close the gap.
 #[domain_model]
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CountDrift {
