@@ -341,6 +341,32 @@ async fn fetch_tenant_groups(
                 Ok(Ok(p)) => p,
             };
 
+        // Narrowing to roots in memory rather than in the `$filter` is not a
+        // throughput concern, because the list this walks is almost always
+        // empty and is bounded when it is not:
+        //
+        // * `delete_tenant` refuses to soft-delete a tenant that still owns any
+        //   RG group (`count_ownership_links`, `tenant_id eq T`, no type
+        //   filter), so a tenant normally reaches hard-delete owning none.
+        // * Groups can still appear in the window between soft- and
+        //   hard-delete, and that window is real: RG's `create_group` sets no
+        //   `tenant_status` on its `AccessRequest`, and the tenant-resolver
+        //   authz default (`VisibleAll`) excludes only `Provisioning`, so
+        //   nothing stops a group being created in a `Deleted` tenant during
+        //   retention.
+        // * Even then the listing is paginated at `CASCADE_PAGE_SIZE`, bounded
+        //   by the tenant's own group count, and the whole cascade runs under
+        //   `CASCADE_BUDGET`. Each non-root row costs one `is_none()` check.
+        //
+        // The defect this narrowing replaced was never about group count: the
+        // `$filter` it removed was rejected by RG's validator before storage
+        // was touched, so EVERY due tenant deferred forever — including
+        // tenants owning zero groups.
+        //
+        // Teaching `$filter` a null literal or an `is null` operator is worth
+        // doing, but it belongs in `toolkit-odata` alongside the validator that
+        // rejects them, as its own change rather than a precondition for
+        // unblocking the sweep.
         all_ids.extend(
             page.items
                 .into_iter()
