@@ -337,3 +337,61 @@ async fn a_heartbeat_for_a_session_that_is_not_there_is_an_error() {
     assert_eq!(untouched.progress_percent, 0);
     assert_eq!(untouched.updated_at, None);
 }
+
+/// Three sessions queued in the same second. `created_at` alone cannot order
+/// them, so the id is the tie-break: without it the second page's filter
+/// would ask for rows strictly older than a timestamp two rows still carry,
+/// and those rows would never be served.
+#[tokio::test]
+async fn sessions_sharing_a_created_at_page_without_repeating_or_skipping() {
+    let db = common::inmem_db().await;
+    let provider = Arc::new(DBProvider::<DbError>::new(db));
+    let ctx = common::caller_in(Uuid::new_v4());
+    let tenant = ctx.subject_tenant_id();
+    let scope = scope_for(&ctx).await;
+    let repo = SeaOrmSyncSessionRepository::new(Arc::clone(&provider));
+
+    let same_instant = "2026-08-25T10:00:00Z";
+    let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+    for id in &ids {
+        repo.upsert(
+            &scope,
+            tenant,
+            session_record(*id, SessionStatus::Queued, same_instant),
+        )
+        .await
+        .expect("each session must insert");
+    }
+
+    let first = repo
+        .list_recent(&scope, None, 2)
+        .await
+        .expect("the first page must list");
+    assert_eq!(first.len(), 2);
+
+    let last = first.last().expect("the first page has rows");
+    let second = repo
+        .list_recent(&scope, Some((last.created_at.as_str(), last.id)), 2)
+        .await
+        .expect("the second page must list");
+    assert_eq!(
+        second.len(),
+        1,
+        "the third session shares the timestamp the cursor carries, so only \
+         the id can tell the reader it has not been served yet"
+    );
+
+    let mut served: Vec<Uuid> = first.iter().chain(second.iter()).map(|s| s.id).collect();
+    let mut expected = ids.clone();
+    served.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(
+        served, expected,
+        "every session must appear exactly once across the two pages"
+    );
+
+    assert!(
+        first[0].id > first[1].id && first[1].id > second[0].id,
+        "within one timestamp the order is by id, newest first"
+    );
+}
