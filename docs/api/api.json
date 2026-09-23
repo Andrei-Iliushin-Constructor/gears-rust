@@ -17743,7 +17743,7 @@
           },
           "status": {
             "$ref": "#/components/schemas/SessionStatusDto",
-            "description": "Always `queued` — the status the session starts in."
+            "description": "What the session is doing: `queued` for one this request created,\nwhatever it had reached for a run this request joined."
           }
         },
         "required": [

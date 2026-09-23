@@ -30,8 +30,8 @@ use super::dto::{
     DeploymentDto, GithubMirrorHealthDto, IssueDto, IssueEventDto, IssueReactionDto,
     IssueTimelineEventDto, LabelDto, MilestoneDto, PullRequestDto, PullRequestFileDto, ReleaseDto,
     RepoDto, RepoSyncStatusDto, ResumeAcceptedDto, ReviewCommentDto, ReviewDto, ReviewThreadDto,
-    SessionStatusDto, SyncAcceptedDto, SyncSessionDto, TagDto, WorkflowJobDto, WorkflowJobsPageDto,
-    WorkflowRunDto, WorkflowRunsPageDto,
+    SyncAcceptedDto, SyncSessionDto, TagDto, WorkflowJobDto, WorkflowJobsPageDto, WorkflowRunDto,
+    WorkflowRunsPageDto,
 };
 
 const DEFAULT_PER_PAGE: u64 = 30;
@@ -418,7 +418,7 @@ pub async fn sync_repository(
     validate_repo_path(&owner, &name)?;
     let scope = query.scope(svc.default_scope())?;
     let since = query.since()?;
-    let session_id = svc
+    let queued = svc
         .enqueue_sync(
             &ctx,
             &owner,
@@ -431,9 +431,9 @@ pub async fn sync_repository(
     Ok((
         StatusCode::ACCEPTED,
         Json(SyncAcceptedDto {
-            session_id: session_id.to_string(),
+            session_id: queued.session_id.to_string(),
             repository: format!("{owner}/{name}"),
-            status: SessionStatusDto::Queued,
+            status: queued.status.into(),
         }),
     ))
 }

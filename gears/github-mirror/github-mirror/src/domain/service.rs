@@ -418,6 +418,18 @@ impl SyncProgress {
 /// so the two halves cannot drift apart.
 pub(crate) const SYNC_QUEUE_DEPTH: usize = 64;
 
+/// What a sync request got: the session to poll, and what that session is
+/// doing right now.
+///
+/// The status is read rather than assumed, because a request that collapsed
+/// into a run already going is handed that run's session, which may have left
+/// `queued` some time ago.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueuedSync {
+    pub session_id: Uuid,
+    pub status: SessionStatus,
+}
+
 /// One unit of background work: sync `owner/name` on behalf of `ctx`, and
 /// record the outcome against the session row created at enqueue time.
 ///
@@ -3435,7 +3447,7 @@ impl Service {
                 .enqueue_sync_scoped(ctx, &scopes, owner, name, None, force, None)
                 .await
             {
-                Ok(session_id) => resumed.push(session_id),
+                Ok(queued) => resumed.push(queued.session_id),
                 Err(e) => tracing::warn!(
                     repository = %repo.repo_full_name,
                     error = %e,
@@ -3457,7 +3469,9 @@ impl Service {
     /// caller gets its session id back instead of a second session, so a
     /// double-click, a retry and a resume of the same repository cost one
     /// sync. `force` does not split the two — the run in flight is already
-    /// fetching the repository.
+    /// fetching the repository. The status that comes back says which of the
+    /// two happened: `queued` for a session this call created, whatever the
+    /// existing session holds for one it joined.
     ///
     /// # Errors
     /// `Forbidden`/`Database` as usual, or `Internal` when the queue is full
@@ -3471,7 +3485,7 @@ impl Service {
         sync_scope: Option<ScopeConfig>,
         force: bool,
         since: Option<DateTime<Utc>>,
-    ) -> Result<Uuid, DomainError> {
+    ) -> Result<QueuedSync, DomainError> {
         let scopes = self.enqueue_scopes(ctx).await?;
         self.enqueue_sync_scoped(ctx, &scopes, owner, name, sync_scope, force, since)
             .await
@@ -3497,7 +3511,7 @@ impl Service {
         sync_scope: Option<ScopeConfig>,
         force: bool,
         since: Option<DateTime<Utc>>,
-    ) -> Result<Uuid, DomainError> {
+    ) -> Result<QueuedSync, DomainError> {
         let sync_scope = sync_scope.unwrap_or(self.config.scope);
         sync_scope.validate()?;
         let tenant_id = ctx.subject_tenant_id();
@@ -3536,7 +3550,18 @@ impl Service {
                     session_id = %running,
                     "sync already in flight; collapsing into it"
                 );
-                return Ok(running);
+                // Read rather than assumed: the row is written before the
+                // claim goes in, so it is there, and a worker may already have
+                // moved it on from `queued`.
+                let status = self
+                    .sync_sessions
+                    .find_by_id(scope, running)
+                    .await?
+                    .map_or(SessionStatus::InProgress, |session| session.status);
+                return Ok(QueuedSync {
+                    session_id: running,
+                    status,
+                });
             }
             self.sync_sessions
                 .upsert(scope, tenant_id, session.clone())
@@ -3577,7 +3602,10 @@ impl Service {
             return Err(DomainError::internal(reason));
         }
 
-        Ok(id)
+        Ok(QueuedSync {
+            session_id: id,
+            status: SessionStatus::Queued,
+        })
     }
 
     /// Close a queued session out as failed, so a caller polling it is not

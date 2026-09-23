@@ -1037,7 +1037,8 @@ pub struct SyncAcceptedDto {
     pub session_id: String,
     /// `owner/name` slug the session will sync.
     pub repository: String,
-    /// Always `queued` — the status the session starts in.
+    /// What the session is doing: `queued` for one this request created,
+    /// whatever it had reached for a run this request joined.
     pub status: SessionStatusDto,
 }
 

@@ -471,7 +471,7 @@ async fn a_refinement_left_pending_is_finished_by_the_next_sync_even_when_the_li
         .expect("the first sync must queue");
     assert_eq!(pump.drain(&service).await, 1);
     let failed = service
-        .get_session(&ctx, first)
+        .get_session(&ctx, first.session_id)
         .await
         .expect("the first session must exist");
     assert_eq!(
@@ -486,7 +486,7 @@ async fn a_refinement_left_pending_is_finished_by_the_next_sync_even_when_the_li
         .expect("the second sync must queue");
     assert_eq!(pump.drain(&service).await, 1);
     let finished = service
-        .get_session(&ctx, second)
+        .get_session(&ctx, second.session_id)
         .await
         .expect("the second session must exist");
     assert_eq!(finished.status, SessionStatus::Complete);
