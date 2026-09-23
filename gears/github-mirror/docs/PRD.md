@@ -311,11 +311,11 @@ so the unchecked boxes below read as "not yet", not "abandoned".
 
 - [ ] `p1` - **ID**: `cpt-cf-github-mirror-fr-session-init`
 
-The system **MUST** accept a session configuration struct (provided by the caller) containing: GitHub token (or token pool reference), database connection credentials, telemetry log file path, cache configuration, and synchronization scope. The system **MUST** validate the GitHub token(s) and their scopes where possible, open the selected storage backend, create a synchronization session record, and load the repository's watermarks and entity fingerprints from prior runs (see `cpt-cf-github-mirror-fr-session-resume`). The library **MUST NOT** read environment variables or configuration files — all inputs come from the caller (see §5.20).
+The system **MUST** accept a session configuration struct (provided by the caller) containing: GitHub token (or token pool reference), database connection credentials, telemetry log file path, cache configuration, and synchronization scope. The system **MUST** validate the GitHub token(s) and their scopes where possible, open the selected storage backend, and create a synchronization session record. The library **MUST NOT** read environment variables or configuration files — all inputs come from the caller (see §5.20).
 
 Multiple synchronization sessions **MUST** be able to run in parallel, each with its own configuration. Sessions that share the same GitHub token **MUST** share rate-limit budgets. The global request semaphore and per-token rate-limit controllers are managed by the engine singleton.
 
-Synchronization **MUST** always run at the repository level: `sync_repo(session, repo, options)` is the sole entry point. Each call independently drives one repository through the synchronization phases. Multiple calls run concurrently with no cross-repo phase barrier. Global concurrency is controlled solely by the engine's request semaphore.
+Synchronization **MUST** always run at the repository level: `sync_repo(session, repo, options)` is the sole entry point. Each call **MUST** load that repository's watermarks and entity fingerprints from prior runs before it starts (see `cpt-cf-github-mirror-fr-session-resume`), then independently drive the repository through the synchronization phases. Multiple calls run concurrently with no cross-repo phase barrier. Global concurrency is controlled solely by the engine's request semaphore.
 
 - **Rationale**: Every synchronization operation depends on a correctly initialized session; invalid tokens or misconfigured backends must be caught before any API calls are made.
 - **Actors**: `cpt-cf-github-mirror-actor-lib-consumer`, `cpt-cf-github-mirror-actor-cli-operator`, `cpt-cf-github-mirror-actor-python-consumer`

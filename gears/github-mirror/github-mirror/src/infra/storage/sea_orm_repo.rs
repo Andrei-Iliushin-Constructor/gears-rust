@@ -4515,8 +4515,8 @@ async fn reconcile_stale<C: DBRunner>(
     Ok(deleted)
 }
 
-/// Writes one sync task's result — a listing, one entity's detail, or the
-/// deletion pass — as a single transaction, so a task lands whole or not at
+/// Writes one sync task's result - a listing, one entity's detail, or the
+/// deletion pass - as a single transaction, so a task lands whole or not at
 /// all.
 pub struct SeaOrmSyncWriter {
     db: Arc<DbProvider>,
