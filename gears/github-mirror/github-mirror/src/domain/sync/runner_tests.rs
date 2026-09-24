@@ -522,3 +522,56 @@ async fn a_cancelled_run_stops_claiming_and_lets_running_tasks_finish() {
         "a cancelled run never reaches verification"
     );
 }
+
+struct PanickingDiscovery;
+
+#[async_trait]
+impl Worker for PanickingDiscovery {
+    fn handles(&self, kind: TaskKind) -> bool {
+        kind == TaskKind::Discover
+    }
+
+    async fn execute(
+        &self,
+        _ctx: &WorkerContext,
+        _task: &ExtractionTask,
+    ) -> Result<(), DomainError> {
+        panic!("a worker fell over");
+    }
+}
+
+/// A task that panics never reaches its own bookkeeping: the queue entry is
+/// left `Running` and the join handle comes back as a bare `JoinError` that
+/// does not say which task it was. The side map is what puts both right, so
+/// the run ends instead of waiting for a task nobody will finish.
+#[tokio::test(start_paused = true)]
+async fn a_task_that_panics_is_accounted_for_and_the_run_still_ends() {
+    let runner = RepoPhaseRunner::new(
+        vec![Arc::new(PanickingDiscovery)],
+        RunIdentity {
+            session_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+        },
+        NonZeroUsize::MIN,
+        CancellationToken::new(),
+        Arc::new(AtomicU8::new(0)),
+    );
+
+    let report = runner.run().await;
+
+    assert_eq!(report.tasks_done, 0);
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(
+        report.failures[0].kind,
+        Some(TaskKind::Discover),
+        "without the side map a JoinError cannot say which task died"
+    );
+    assert!(
+        report.failures[0]
+            .error
+            .to_string()
+            .contains("did not finish cleanly"),
+        "{}",
+        report.failures[0].error
+    );
+}

@@ -44,7 +44,6 @@ pub mod z_pull_request_file_patch_036;
 pub mod z_release_assets_031;
 pub mod z_review_comment_anchors_035;
 pub mod z_review_comment_review_id_033;
-pub mod z_sync_sessions_updated_at_039;
 
 pub struct Migrator;
 
@@ -95,7 +94,6 @@ impl MigratorTrait for Migrator {
             Box::new(z_pull_request_file_patch_036::Migration),
             Box::new(z_review_comment_anchors_035::Migration),
             Box::new(z_review_comment_review_id_033::Migration),
-            Box::new(z_sync_sessions_updated_at_039::Migration),
         ]
     }
 }

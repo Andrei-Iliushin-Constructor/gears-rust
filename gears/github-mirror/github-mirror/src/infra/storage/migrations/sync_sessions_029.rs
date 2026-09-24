@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS gm_sync_sessions (
     created_at VARCHAR(64) NOT NULL,
     started_at VARCHAR(64),
     ended_at VARCHAR(64),
+    updated_at VARCHAR(64),
     PRIMARY KEY (tenant_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_gm_sync_sessions_tenant_created
@@ -45,6 +46,7 @@ CREATE TABLE IF NOT EXISTS gm_sync_sessions (
     created_at VARCHAR(64) NOT NULL,
     started_at VARCHAR(64),
     ended_at VARCHAR(64),
+    updated_at VARCHAR(64),
     PRIMARY KEY (tenant_id, id),
     KEY idx_gm_sync_sessions_tenant_created (tenant_id, created_at)
 );
@@ -64,6 +66,7 @@ CREATE TABLE IF NOT EXISTS gm_sync_sessions (
     created_at TEXT NOT NULL,
     started_at TEXT,
     ended_at TEXT,
+    updated_at TEXT,
     PRIMARY KEY (tenant_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_gm_sync_sessions_tenant_created

@@ -243,13 +243,20 @@ so the unchecked boxes below read as "not yet", not "abandoned".
 - Multi-tenant isolation via SecureORM scoping on every query
 - `github-mirror-sdk` client crate
 
+**Delivered by the sync engine increment**
+([gears-rust#4632](https://github.com/constructorfabric/gears-rust/issues/4632) and
+[gears-rust#4630](https://github.com/constructorfabric/gears-rust/issues/4630)):
+
+- Sync sessions, resume, background execution, scope configuration and per-repo run
+  status, with a per-run deadline
+- `ETag`/`Last-Modified` conditional requests, upstream pagination cache, cache
+  clearing and compression
+- Two concurrency settings beside the request semaphore: `max_concurrent_syncs`
+  (repositories the pool runs at once) and `max_concurrent_tasks` (tasks inside one
+  repository's run)
+
 **Deferred to tracked follow-ups**:
 
-- Sync sessions, resume, background execution, scope configuration, per-repo run
-  status: [gears-rust#4632](https://github.com/constructorfabric/gears-rust/issues/4632)
-- ETag/Last-Modified conditional requests, upstream pagination cache, cache eviction
-  and compression:
-  [gears-rust#4630](https://github.com/constructorfabric/gears-rust/issues/4630)
 - Credstore-backed per-tenant credentials and token pools:
   [gears-rust#4534](https://github.com/constructorfabric/gears-rust/issues/4534)
 - Write-back operations, Python bindings, CLI tool, state-change events: later
@@ -313,9 +320,9 @@ so the unchecked boxes below read as "not yet", not "abandoned".
 
 The system **MUST** accept a session configuration struct (provided by the caller) containing: GitHub token (or token pool reference), database connection credentials, telemetry log file path, cache configuration, and synchronization scope. The system **MUST** validate the GitHub token(s) and their scopes where possible, open the selected storage backend, and create a synchronization session record. The library **MUST NOT** read environment variables or configuration files — all inputs come from the caller (see §5.20).
 
-Multiple synchronization sessions **MUST** be able to run in parallel, each with its own configuration. Sessions that share the same GitHub token **MUST** share rate-limit budgets. The global request semaphore and per-token rate-limit controllers are managed by the engine singleton.
+Multiple synchronization sessions **MUST** be able to run in parallel, each with its own configuration. Sessions that share the same GitHub token **MUST** share rate-limit budgets. The global request semaphore and per-token rate-limit controllers are managed by the engine singleton, and two configured limits sit beside it: how many repositories the pool runs at once, and how many tasks one repository's run keeps in flight.
 
-Synchronization **MUST** always run at the repository level: `sync_repo(session, repo, options)` is the sole entry point. Each call **MUST** load that repository's watermarks and entity fingerprints from prior runs before it starts (see `cpt-cf-github-mirror-fr-session-resume`), then independently drive the repository through the synchronization phases. Multiple calls run concurrently with no cross-repo phase barrier. Global concurrency is controlled solely by the engine's request semaphore.
+Synchronization **MUST** always run at the repository level: `sync_repo(session, repo, options)` is the sole entry point. Each call **MUST** load that repository's watermarks and entity fingerprints from prior runs before it starts (see `cpt-cf-github-mirror-fr-session-resume`), then independently drive the repository through the synchronization phases. Multiple calls run concurrently with no cross-repo phase barrier. Global concurrency is bounded by the engine's request semaphore together with the configured repository and task limits.
 
 - **Rationale**: Every synchronization operation depends on a correctly initialized session; invalid tokens or misconfigured backends must be caught before any API calls are made.
 - **Actors**: `cpt-cf-github-mirror-actor-lib-consumer`, `cpt-cf-github-mirror-actor-cli-operator`, `cpt-cf-github-mirror-actor-python-consumer`

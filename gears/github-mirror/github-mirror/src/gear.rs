@@ -64,6 +64,11 @@ impl Gear for GithubMirrorGear {
         // letting every later fetch build garbage requests from it.
         cfg.resolved_api_base_url()
             .map_err(|e| anyhow::anyhow!("invalid github-mirror config: {e}"))?;
+        // Same reason for the default scope: a deployment that collects nothing
+        // should fail to start, not fail the first sync someone asks for.
+        cfg.scope
+            .validate()
+            .map_err(|e| anyhow::anyhow!("invalid github-mirror config: {e}"))?;
         info!(gear = Self::MODULE_NAME, api_base_url = %cfg.api_base_url, "Initializing gear");
 
         let db = Arc::new(ctx.db_required()?);
@@ -334,6 +339,6 @@ mod tests {
     fn gear_provides_all_migrations() {
         use toolkit::contracts::DatabaseCapability;
         let gear = GithubMirrorGear::default();
-        assert_eq!(gear.migrations().len(), 44);
+        assert_eq!(gear.migrations().len(), 43);
     }
 }

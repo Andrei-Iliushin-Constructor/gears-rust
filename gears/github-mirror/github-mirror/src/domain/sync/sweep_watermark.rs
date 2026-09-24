@@ -37,6 +37,14 @@ pub fn is_stale(updated_at: Option<&str>, threshold: Option<DateTime<Utc>>) -> b
 /// bound rather than the watermark it started from. Promoting it as it comes
 /// would walk the watermark five minutes back on every idle sweep, widening
 /// the window each time.
+///
+/// A stamp that will not parse counts as older than one that will, so an
+/// unreadable stored value is replaced by a readable candidate. When neither
+/// parses the stored value stays: the next sweep is the one that can fix it,
+/// and writing an equally unreadable candidate over it would only move the
+/// problem. What the sweep does in the meantime is unaffected, because an
+/// unreadable watermark is treated as no watermark and the walk covers
+/// everything.
 fn later_watermark(stored: Option<&str>, candidate: String) -> String {
     let instant = |raw: &str| {
         DateTime::parse_from_rfc3339(raw)

@@ -526,9 +526,10 @@ pub struct Service {
     config: ServiceConfig,
     sync_tx: mpsc::Sender<SyncJob>,
     sync_rx: Arc<Mutex<Option<mpsc::Receiver<SyncJob>>>>,
-    in_flight: Arc<Mutex<HashMap<InFlightKey, Uuid>>>,
-    /// One gate per repository, so the look, write and claim a queue request
-    /// does serialises for that repository alone rather than for the gear.
+    in_flight: Arc<Mutex<HashMap<InFlightKey, Claim>>>,
+    /// One gate per repository, so the look, the write and the claim that a
+    /// queue request makes are serialised for that repository alone rather than
+    /// for the whole gear.
     ///
     /// A gate is kept once made: it is one small allocation per repository
     /// ever queued, and dropping one while a request still waits on it would
@@ -542,6 +543,20 @@ pub struct Service {
 
 /// One repository of one tenant: what a queued or running sync occupies.
 type InFlightKey = (Uuid, String);
+
+/// The sync holding a repository, and what it was asked to collect.
+///
+/// The terms travel with the claim because a second request that wants
+/// something else must not be handed this one's session: it would be told a
+/// sync ran for terms it never asked for. `force` is deliberately not part of
+/// them — a forced request and a plain one collect the same things, and the
+/// run in flight is already fetching the repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Claim {
+    session_id: Uuid,
+    scope: ScopeConfig,
+    since: Option<DateTime<Utc>>,
+}
 
 /// What a request holds while it decides whether one repository already has a
 /// sync in flight.
@@ -602,7 +617,12 @@ impl Clone for Service {
 }
 
 impl Service {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one argument per repository the service owns; the gear wires them \
+                  in one place and a holder struct would only move the same list \
+                  there"
+    )]
     pub fn new(
         db: Arc<DbProvider>,
         repo: Arc<dyn RepoRepository>,
@@ -3158,7 +3178,13 @@ impl Service {
     }
 
     /// Hand the service the token the gear cancels on shutdown. Called once,
-    /// when the sync pool starts; a later call is ignored.
+    /// when the sync pool starts.
+    ///
+    /// A second, different token is logged and dropped rather than returned as
+    /// an error: the pool that is already running is cancelled by the first
+    /// one, and swapping it would leave that pool with no way to be stopped.
+    /// The caller has nothing useful to do about it, which is why nothing is
+    /// handed back.
     pub fn bind_shutdown(&self, token: CancellationToken) {
         if self.shutdown.set(token).is_err() {
             tracing::warn!("the shutdown token is already bound; keeping the first one");
@@ -3465,18 +3491,23 @@ impl Service {
     /// happens later, on the gear's background task. Poll
     /// [`Self::get_session`] with the returned id to watch it finish.
     ///
-    /// A repository already queued or running collapses into that run: the
-    /// caller gets its session id back instead of a second session, so a
-    /// double-click, a retry and a resume of the same repository cost one
-    /// sync. `force` does not split the two — the run in flight is already
-    /// fetching the repository. The status that comes back says which of the
-    /// two happened: `queued` for a session this call created, whatever the
-    /// existing session holds for one it joined.
+    /// A repository already queued or running on the same terms collapses into
+    /// that run: the caller gets its session id back instead of a second
+    /// session, so a double-click, a retry and a resume of the same repository
+    /// cost one sync. `force` does not split the two — the run in flight is
+    /// already fetching the repository. The status that comes back says which
+    /// of the two happened: `queued` for a session this call created, whatever
+    /// the existing session holds for one it joined.
+    ///
+    /// A request that asks for a different scope or a different `since` is
+    /// refused instead, because collapsing it would report a sync of terms it
+    /// never asked for.
     ///
     /// # Errors
+    /// `Conflict` when a sync of this repository is running on other terms,
     /// `Forbidden`/`Database` as usual, or `Internal` when the queue is full
-    /// or the background worker is not running; in both cases the session is
-    /// left behind in `failed` rather than silently dropped.
+    /// or the background worker is not running; in the last case the session
+    /// is left behind in `failed` rather than silently dropped.
     pub async fn enqueue_sync(
         &self,
         ctx: &SecurityContext,
@@ -3501,7 +3532,12 @@ impl Service {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the request's own terms, one per argument; they are what the claim \
+                  is compared on, so hiding them in a struct would make that \
+                  comparison harder to read, not easier"
+    )]
     async fn enqueue_sync_scoped(
         &self,
         ctx: &SecurityContext,
@@ -3542,31 +3578,28 @@ impl Service {
             // the claim goes in, so the id a collapsing request is handed
             // always names a session it can read.
             let gate = self.claim_gate(&key);
-            let _claimed = gate.lock().await;
+            let claimed = gate.lock().await;
 
             if let Some(running) = self.in_flight.lock().await.get(&key).copied() {
-                tracing::debug!(
-                    repository = %key.1,
-                    session_id = %running,
-                    "sync already in flight; collapsing into it"
-                );
-                // Read rather than assumed: the row is written before the
-                // claim goes in, so it is there, and a worker may already have
-                // moved it on from `queued`.
-                let status = self
-                    .sync_sessions
-                    .find_by_id(scope, running)
-                    .await?
-                    .map_or(SessionStatus::InProgress, |session| session.status);
-                return Ok(QueuedSync {
-                    session_id: running,
-                    status,
-                });
+                // Released first: the claim is already copied out, and reading
+                // the running session's status is a database round trip no
+                // other request for this repository needs to wait behind.
+                drop(claimed);
+                return self
+                    .join_or_refuse(scope, &key.1, running, sync_scope, since)
+                    .await;
             }
             self.sync_sessions
                 .upsert(scope, tenant_id, session.clone())
                 .await?;
-            self.in_flight.lock().await.insert(key.clone(), id);
+            self.in_flight.lock().await.insert(
+                key.clone(),
+                Claim {
+                    session_id: id,
+                    scope: sync_scope,
+                    since,
+                },
+            );
         }
         if let Err(e) = self
             .mark_repo_status_in(
@@ -3631,6 +3664,57 @@ impl Service {
                 "a sync that could not be queued could not be marked failed either"
             );
         }
+    }
+
+    /// Answer a request for a repository a sync already holds: its session
+    /// when the terms match, a refusal when they do not.
+    ///
+    /// Refused rather than queued behind the run: the repository's lock is
+    /// held for the whole of it, so a second job would take a session, reach
+    /// that lock and end failed. Saying so now lets the caller watch the run
+    /// it was told about and ask again after.
+    ///
+    /// # Errors
+    /// `Conflict` when the terms differ; `Database` when the running
+    /// session's row cannot be read.
+    async fn join_or_refuse(
+        &self,
+        scope: &AccessScope,
+        repo_full_name: &str,
+        running: Claim,
+        sync_scope: ScopeConfig,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<QueuedSync, DomainError> {
+        if running.scope != sync_scope || running.since != since {
+            tracing::debug!(
+                repository = repo_full_name,
+                session_id = %running.session_id,
+                "a sync of this repository is running on other terms"
+            );
+            return Err(DomainError::Conflict(format!(
+                "a sync of {repo_full_name} is already running on different terms; \
+                 session {} is the one in flight",
+                running.session_id
+            )));
+        }
+
+        tracing::debug!(
+            repository = repo_full_name,
+            session_id = %running.session_id,
+            "sync already in flight; collapsing into it"
+        );
+        // Read rather than assumed: the row is written before the claim goes
+        // in, so it is there, and a worker may already have moved it on from
+        // `queued`.
+        let status = self
+            .sync_sessions
+            .find_by_id(scope, running.session_id)
+            .await?
+            .map_or(SessionStatus::InProgress, |session| session.status);
+        Ok(QueuedSync {
+            session_id: running.session_id,
+            status,
+        })
     }
 
     /// This repository's gate, made on first use.
@@ -4064,6 +4148,12 @@ impl Service {
         progress: &SyncProgress,
         cancel: &CancellationToken,
     ) -> Result<SyncSummary, DomainError> {
+        // Checked here and not only in the REST handler: the SDK's `LocalClient`
+        // and the tests call this directly, and `owner`/`name` reach a log line
+        // below, where a newline would forge a record of its own.
+        validate_repo_path(owner, name)?;
+        options.scope.validate()?;
+
         let tenant_id = ctx.subject_tenant_id();
 
         let scope = self
@@ -4222,3 +4312,12 @@ impl Service {
         Ok(summary)
     }
 }
+
+#[cfg(test)]
+#[path = "service_tests.rs"]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
+mod service_tests;

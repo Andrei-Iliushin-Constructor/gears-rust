@@ -2253,3 +2253,49 @@ async fn a_next_link_to_another_host_is_refused() {
     );
     first_page.assert_calls_async(1).await;
 }
+
+/// A token sent over plain `http` to another machine is readable by anything
+/// on the way. Loopback is the exception: nothing leaves the host, and local
+/// testing needs it.
+#[test]
+fn a_token_may_not_travel_over_plain_http_to_another_host() {
+    let refused = GithubClient::new(
+        "http://github.internal/api".to_owned(),
+        Some("tok".to_owned()),
+    );
+    let Err(error) = refused else {
+        panic!("http plus a token must be refused");
+    };
+    assert!(
+        error.to_string().contains("cleartext"),
+        "the error must say why: {error}"
+    );
+
+    for (url, token, why) in [
+        (
+            "http://127.0.0.1:8080",
+            Some("tok"),
+            "loopback carries the token nowhere",
+        ),
+        (
+            "http://localhost:8080",
+            Some("tok"),
+            "localhost is loopback too",
+        ),
+        (
+            "http://github.internal/api",
+            None,
+            "without a token there is nothing to leak",
+        ),
+        (
+            "https://github.internal/api",
+            Some("tok"),
+            "https is what the token is for",
+        ),
+    ] {
+        assert!(
+            GithubClient::new(url.to_owned(), token.map(ToOwned::to_owned)).is_ok(),
+            "{url} must be allowed: {why}"
+        );
+    }
+}

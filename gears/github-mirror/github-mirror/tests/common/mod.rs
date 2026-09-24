@@ -457,6 +457,23 @@ pub fn service_with_enforcer(
     github: Arc<dyn GithubPort>,
     policy_enforcer: PolicyEnforcer,
 ) -> Arc<ConcreteService> {
+    service_with_deadline(
+        db,
+        api_base_url,
+        github,
+        policy_enforcer,
+        std::time::Duration::from_mins(5),
+    )
+}
+
+/// The same service with a deadline a test can drive past.
+pub fn service_with_deadline(
+    db: Db,
+    api_base_url: &str,
+    github: Arc<dyn GithubPort>,
+    policy_enforcer: PolicyEnforcer,
+    sync_deadline: std::time::Duration,
+) -> Arc<ConcreteService> {
     let db = Arc::new(DBProvider::new(db));
     Arc::new(Service::new(
         Arc::clone(&db),
@@ -498,7 +515,7 @@ pub fn service_with_enforcer(
             scope: github_mirror::domain::scope::ScopeConfig::default(),
             max_concurrent_syncs: std::num::NonZeroUsize::MIN,
             max_concurrent_tasks: std::num::NonZeroUsize::MIN,
-            sync_deadline: std::time::Duration::from_mins(5),
+            sync_deadline,
         },
     ))
 }

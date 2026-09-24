@@ -17787,7 +17787,7 @@
             "type": "string"
           },
           "progress_percent": {
-            "description": "0-100, monotonically non-decreasing while the run works.",
+            "description": "0-100, never going down while the run works, and 100 once the run is\nover whatever its outcome. A failed or interrupted session reads 100\ntoo, so `status` and `error` are what say how it ended.",
             "format": "int32",
             "type": "integer"
           },

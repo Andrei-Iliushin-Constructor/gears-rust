@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 
-use super::{SWEEP_OVERLAP, high_water, is_stale, stop_threshold};
+use super::{SWEEP_OVERLAP, high_water, is_stale, later_watermark, stop_threshold};
 use crate::domain::repo::SyncWatermarkRecord;
 
 fn stored(last_seen: Option<&str>) -> SyncWatermarkRecord {
@@ -37,6 +37,22 @@ fn the_threshold_steps_back_by_the_overlap() {
     assert_eq!(
         stop_threshold(Some(&row), false),
         Some(at("2026-09-01T10:00:00Z") - SWEEP_OVERLAP)
+    );
+}
+
+/// Neither side can be read, so there is nothing to choose between them: the
+/// stored value stays, and the run does not write a second unreadable stamp
+/// over the first.
+#[test]
+fn two_unreadable_stamps_leave_the_stored_one_alone() {
+    assert_eq!(
+        later_watermark(Some("not a date"), "also not a date".to_owned()),
+        "not a date"
+    );
+    assert_eq!(
+        later_watermark(Some("not a date"), "2026-08-25T10:00:00Z".to_owned()),
+        "2026-08-25T10:00:00Z",
+        "a readable candidate still replaces an unreadable stored value"
     );
 }
 

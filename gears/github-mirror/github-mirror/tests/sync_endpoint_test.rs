@@ -968,3 +968,70 @@ async fn a_run_status_filter_this_build_does_not_know_is_refused() {
         );
     }
 }
+
+/// A repeat of a request in flight is handed its session; a request for
+/// something else is not, because that session will never hold what it asked
+/// for. It cannot simply be queued either: the repository's lock is held for
+/// the whole run, so a second job would end failed.
+#[tokio::test]
+async fn a_sync_asking_for_other_terms_is_refused_rather_than_collapsed() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let db = common::inmem_db().await;
+    let service = common::service_with_github(
+        db,
+        "https://api.github.com",
+        Arc::new(common::FakeGithub {
+            result: Some(common::fetched_repository()),
+        }),
+    );
+    let _pump = common::SyncPump::take(&service).await;
+    let router = router_for(service.clone(), ctx);
+
+    let first = post(
+        router.clone(),
+        "/github-mirror/v1/repos/rust-lang/rust/sync?include=issues",
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    let first = body_json(first).await;
+
+    let same = post(
+        router.clone(),
+        "/github-mirror/v1/repos/rust-lang/rust/sync?include=issues",
+    )
+    .await;
+    assert_eq!(same.status(), StatusCode::ACCEPTED);
+    let same = body_json(same).await;
+    assert_eq!(
+        first["session_id"], same["session_id"],
+        "the same terms must still collapse into the run in flight"
+    );
+
+    let narrower = post(
+        router.clone(),
+        "/github-mirror/v1/repos/rust-lang/rust/sync?include=commits",
+    )
+    .await;
+    assert_eq!(
+        narrower.status(),
+        StatusCode::CONFLICT,
+        "a request for other terms must not be answered with a session that \
+         will never hold what it asked for"
+    );
+    let body = body_json(narrower).await.to_string();
+    assert!(
+        body.contains(first["session_id"].as_str().expect("session_id")),
+        "the refusal must name the run the caller can watch: {body}"
+    );
+
+    let since = post(
+        router,
+        "/github-mirror/v1/repos/rust-lang/rust/sync?include=issues&since=2026-01-01T00:00:00Z",
+    )
+    .await;
+    assert_eq!(
+        since.status(),
+        StatusCode::CONFLICT,
+        "a different `since` is a different request too"
+    );
+}

@@ -23,7 +23,7 @@ use github_mirror_sdk::{
 };
 use sea_orm::prelude::DateTimeUtc;
 use sea_orm::sea_query::{Expr, LikeExpr};
-use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, Order};
+use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, Order, QuerySelect};
 use toolkit_db::odata::sea_orm_filter::{LimitCfg, paginate_odata};
 use toolkit_db::secure::{
     DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureInsertManyExt,
@@ -222,12 +222,25 @@ impl RepoRepository for SeaOrmRepoRepository {
         scope: &AccessScope,
         owner: &str,
     ) -> Result<Vec<i64>, DomainError> {
+        #[derive(sea_orm::FromQueryResult)]
+        struct RepoId {
+            id: i64,
+        }
+
         let conn = self.db.conn()?;
-        let rows = RepoEntity::find()
+        // Only the column the caller wants: a repository row carries its
+        // description and URLs, and an owner-wide cache clear reads every row
+        // the owner has.
+        let rows: Vec<RepoId> = RepoEntity::find()
             .secure()
             .scope_with(scope)
             .filter(sea_orm::Condition::all().add(repositories::Column::Owner.eq(owner)))
-            .all(&conn)
+            .project_all(&conn, |select| {
+                select
+                    .select_only()
+                    .column(repositories::Column::Id)
+                    .into_model::<RepoId>()
+            })
             .await
             .map_err(map_scope_error)?;
 

@@ -1512,7 +1512,9 @@ pub struct SyncSessionDto {
     pub repository: String,
     /// `queued`, `in_progress`, `complete`, `failed`, or `interrupted`.
     pub status: SessionStatusDto,
-    /// 0-100, monotonically non-decreasing while the run works.
+    /// 0-100, never going down while the run works, and 100 once the run is
+    /// over whatever its outcome. A failed or interrupted session reads 100
+    /// too, so `status` and `error` are what say how it ended.
     pub progress_percent: i32,
     /// Failure detail when `status = failed`.
     pub error: Option<String>,

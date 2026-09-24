@@ -114,7 +114,13 @@ impl ChangeGate {
     /// # Errors
     /// `Database`/`Internal` when the fingerprint rows cannot be read or
     /// written.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the gate needs the whole request to answer: who is asking, which \
+                  repository and family, the page itself, the clock and the force \
+                  flag. Bundling them into a struct would move the same list one \
+                  call up"
+    )]
     pub async fn evaluate_page(
         &self,
         scope: &AccessScope,

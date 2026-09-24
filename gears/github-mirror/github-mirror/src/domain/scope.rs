@@ -24,7 +24,12 @@ use crate::domain::error::DomainError;
 #[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-#[allow(clippy::struct_excessive_bools)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "one flag per object family is the shape of the request; a struct of \
+              named sub-structs would make every caller spell out a path to say \
+              `issues: true`"
+)]
 pub struct SyncScope {
     /// Issues, their comments, events, timeline and reactions.
     pub issues: bool,
