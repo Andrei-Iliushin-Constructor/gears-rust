@@ -4229,6 +4229,7 @@ impl Service {
             Arc::clone(&self.sync_writer),
             Arc::clone(&self.change_gate),
             Arc::clone(&self.sweep_watermark),
+            Arc::clone(&self.pull_requests),
             Arc::clone(run),
         ));
         let runner = RepoPhaseRunner::new(

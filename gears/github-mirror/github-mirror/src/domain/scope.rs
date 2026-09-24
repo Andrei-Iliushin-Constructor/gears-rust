@@ -147,11 +147,13 @@ impl CollectionMode {
     /// Whether to collect for an entity in the given open/closed state.
     #[must_use]
     pub fn includes(self, is_open: bool) -> bool {
-        match self {
-            Self::All => true,
-            Self::Open => is_open,
-            Self::None => false,
+        if self == Self::None {
+            return false;
         }
+        if self == Self::Open && !is_open {
+            return false;
+        }
+        true
     }
 
     /// Parse `all` / `open` / `none`, with the reference's aliases.

@@ -454,6 +454,37 @@ impl PullRequestRepository for SeaOrmPullRequestRepository {
         let conn = self.db.conn()?;
         pull_request_find_by_number_in(&conn, scope, repo_id, number).await
     }
+
+    async fn open_head_shas(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+    ) -> Result<Vec<String>, DomainError> {
+        #[derive(sea_orm::FromQueryResult)]
+        struct HeadSha {
+            head_sha: Option<String>,
+        }
+
+        let conn = self.db.conn()?;
+        let rows: Vec<HeadSha> = PullRequestEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(pull_requests::Column::RepoId.eq(repo_id))
+                    .add(pull_requests::Column::State.eq("open")),
+            )
+            .project_all(&conn, |select| {
+                select
+                    .select_only()
+                    .column(pull_requests::Column::HeadSha)
+                    .into_model::<HeadSha>()
+            })
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(rows.into_iter().filter_map(|row| row.head_sha).collect())
+    }
 }
 
 pub struct SeaOrmCommitRepository {

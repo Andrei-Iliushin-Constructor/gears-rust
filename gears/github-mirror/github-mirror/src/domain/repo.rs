@@ -477,6 +477,11 @@ pub trait PullRequestRepository: Send + Sync {
         repo_id: i64,
         number: i64,
     ) -> Result<Option<PullRequest>, DomainError>;
+    async fn open_head_shas(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+    ) -> Result<Vec<String>, DomainError>;
     /// Hard-delete this repo's rows whose `extracted_at` predates
     /// `extracted_before` — rows the sync that set the watermark did not
     /// see. Only called for a listing fetched to completion; a truncated or

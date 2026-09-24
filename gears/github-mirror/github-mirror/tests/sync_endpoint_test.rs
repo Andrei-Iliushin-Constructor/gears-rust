@@ -57,7 +57,7 @@ async fn sync_fills_all_twenty_six_tables_and_reads_serve_them() {
 
     let response = post(
         router.clone(),
-        "/github-mirror/v1/repos/rust-lang/rust/sync?timeline_scope=all",
+        "/github-mirror/v1/repos/rust-lang/rust/sync?timeline_scope=all&actions_scope=all",
     )
     .await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);

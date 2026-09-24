@@ -28,7 +28,8 @@ use crate::domain::ports::github::{
     FetchOptions, GithubPort, IssueDetailWants, ListCursor, ListingCompleteness, RepoRef,
 };
 use crate::domain::repo::{
-    CommitRecord, ContributorRecord, IssueRecord, PullRequestRecord, SyncWriter, WorkflowRunRecord,
+    CommitRecord, ContributorRecord, IssueRecord, PullRequestRecord, PullRequestRepository,
+    SyncWriter, WorkflowRunRecord,
 };
 use crate::domain::scope::CollectionMode;
 
@@ -229,6 +230,7 @@ pub struct MirrorWorker {
     writer: Arc<dyn SyncWriter>,
     gate: Arc<ChangeGate>,
     watermark: Arc<SweepWatermark>,
+    pull_requests: Arc<dyn PullRequestRepository>,
     run: Arc<RunState>,
 }
 
@@ -239,6 +241,7 @@ impl MirrorWorker {
         writer: Arc<dyn SyncWriter>,
         gate: Arc<ChangeGate>,
         watermark: Arc<SweepWatermark>,
+        pull_requests: Arc<dyn PullRequestRepository>,
         run: Arc<RunState>,
     ) -> Self {
         Self {
@@ -246,6 +249,7 @@ impl MirrorWorker {
             writer,
             gate,
             watermark,
+            pull_requests,
             run,
         }
     }
@@ -430,7 +434,15 @@ impl MirrorWorker {
                     continue;
                 }
                 let open = issue.state == "open";
-                if !(collection.reactions.includes(open) || collection.timeline.includes(open)) {
+                let modes = [collection.reactions, collection.timeline];
+                let mut wanted = false;
+                if open {
+                    wanted = modes.iter().any(|mode| *mode == CollectionMode::Open);
+                }
+                if !open {
+                    wanted = modes.iter().any(|mode| *mode != CollectionMode::Open);
+                }
+                if !wanted {
                     continue;
                 }
                 candidates.push(RefinementCandidate {
@@ -479,9 +491,20 @@ impl MirrorWorker {
         let number = entity_number(task)?;
         let open = task.priority.is_open_tier();
         let collection = run.options.scope.collection;
+
+        let mut reactions = collection.reactions != CollectionMode::None;
+        if collection.reactions == CollectionMode::Open && !open {
+            reactions = false;
+        }
+
+        let mut timeline = collection.timeline != CollectionMode::None;
+        if collection.timeline == CollectionMode::Open && !open {
+            timeline = false;
+        }
+
         let wants = IssueDetailWants {
-            reactions: collection.reactions.includes(open),
-            timeline: collection.timeline.includes(open),
+            reactions,
+            timeline,
         };
         let detail = self
             .github
@@ -620,6 +643,7 @@ impl MirrorWorker {
             s.pull_request_commits_synced += commits;
             s.review_threads_synced += threads;
         });
+
         for gap in &gaps {
             self.report_gap(ctx, number, gap, task.attempt);
         }
@@ -689,7 +713,7 @@ impl MirrorWorker {
             .start_sweep(&run.scope, repo_id, Family::Commits, run.options.force)
             .await?;
         let updated_after = start.updated_after;
-        let with_ci = run.options.scope.collection.actions != CollectionMode::None;
+        let with_ci = run.options.scope.collection.actions == CollectionMode::All;
         let mut high = updated_after;
         let mut page1_etag: Option<String> = None;
         let mut swept: HashSet<String> = HashSet::new();
@@ -769,7 +793,7 @@ impl MirrorWorker {
             .entity_id
             .as_deref()
             .ok_or_else(|| DomainError::internal("commit task without a SHA"))?;
-        let with_ci = run.options.scope.collection.actions != CollectionMode::None;
+        let with_ci = run.options.scope.collection.actions == CollectionMode::All;
         let detail = self
             .github
             .refine_commit(run.repo_ref()?, sha, with_ci, &run.options)
@@ -824,19 +848,30 @@ impl MirrorWorker {
             .list_actions(run.repo_ref()?, &run.options)
             .await?;
 
-        if run.options.scope.collection.actions != CollectionMode::None {
-            let candidates = listing
-                .workflow_runs
-                .iter()
-                .map(|workflow_run| RefinementCandidate {
-                    entity_id: workflow_run.id.to_string(),
-                    inputs: workflow_run_inputs(workflow_run),
-                    priority: TaskPriority::NORMAL,
-                })
+        let mode = run.options.scope.collection.actions;
+        let mut open_heads: HashSet<String> = HashSet::new();
+        if mode == CollectionMode::Open {
+            open_heads = self
+                .pull_requests
+                .open_head_shas(&run.scope, run.repo_id()?)
+                .await?
+                .into_iter()
                 .collect();
-            self.seed_refinements(ctx, Entity::WorkflowRun, candidates)
-                .await?;
         }
+        let candidates = listing
+            .workflow_runs
+            .iter()
+            .filter(|workflow_run| {
+                mode == CollectionMode::All || open_heads.contains(&workflow_run.head_sha)
+            })
+            .map(|workflow_run| RefinementCandidate {
+                entity_id: workflow_run.id.to_string(),
+                inputs: workflow_run_inputs(workflow_run),
+                priority: TaskPriority::NORMAL,
+            })
+            .collect();
+        self.seed_refinements(ctx, Entity::WorkflowRun, candidates)
+            .await?;
 
         let (runs, deployments) = (count(&listing.workflow_runs), count(&listing.deployments));
         self.writer
