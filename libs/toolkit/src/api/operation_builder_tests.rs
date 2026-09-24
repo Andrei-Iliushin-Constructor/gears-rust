@@ -842,16 +842,21 @@ fn an_enum_query_param_carries_its_values_and_leaves_the_others_alone() {
             .iter()
             .find(|p| p.name == name)
             .unwrap_or_else(|| panic!("{name} must be declared"))
-            .param_type
             .clone()
     };
 
+    let status = by_name("status");
+    assert_eq!(status.enum_values, ["open", "closed"]);
     assert_eq!(
-        enum_param_values(&by_name("status")),
-        Some(vec!["open", "closed"])
+        status.param_type, "string",
+        "a closed set is still a string; the values are what narrow it"
     );
-    assert_eq!(by_name("limit"), "integer");
-    assert_eq!(enum_param_values(&by_name("limit")), None);
-    assert_eq!(by_name("cursor"), "string");
-    assert_eq!(enum_param_values(&by_name("cursor")), None);
+
+    let limit = by_name("limit");
+    assert_eq!(limit.param_type, "integer");
+    assert!(limit.enum_values.is_empty());
+
+    let cursor = by_name("cursor");
+    assert_eq!(cursor.param_type, "string");
+    assert!(cursor.enum_values.is_empty());
 }
