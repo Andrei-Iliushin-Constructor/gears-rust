@@ -950,8 +950,8 @@ async fn a_run_status_filter_this_build_does_not_know_is_refused() {
         "a status this build cannot parse must be refused, not quietly ignored"
     );
     let body = body_json(response).await;
-    assert!(
-        body.to_string().contains("status"),
+    assert_eq!(
+        body["context"]["field_violations"][0]["field"], "status",
         "the body must name the parameter at fault: {body}"
     );
 
@@ -1033,5 +1033,63 @@ async fn a_sync_asking_for_other_terms_is_refused_rather_than_collapsed() {
         since.status(),
         StatusCode::CONFLICT,
         "a different `since` is a different request too"
+    );
+}
+
+#[tokio::test]
+async fn open_actions_scope_fetches_jobs_only_for_runs_on_an_open_pull_head() {
+    let mut result = common::fetched_repository();
+    let mut on_open_head = result.workflow_runs[0].clone();
+    on_open_head.id = 82;
+    on_open_head.head_sha = "h1".to_owned();
+    result.workflow_runs.push(on_open_head);
+    let mut job = result.workflow_jobs[0].clone();
+    job.id = 911;
+    job.run_id = 82;
+    result.workflow_jobs.push(job);
+
+    let service = common::service_with_github(
+        common::inmem_db().await,
+        "https://api.github.com",
+        Arc::new(common::FakeGithub {
+            result: Some(result),
+        }),
+    );
+    let mut pump = common::SyncPump::take(&service).await;
+    let router = router_for(service.clone(), common::caller_in(Uuid::new_v4()));
+
+    let pulls = post(
+        router.clone(),
+        "/github-mirror/v1/repos/rust-lang/rust/sync?include=pull_requests",
+    )
+    .await;
+    assert_eq!(pulls.status(), StatusCode::ACCEPTED);
+    assert_eq!(pump.drain(&service).await, 1);
+
+    let actions = post(
+        router.clone(),
+        "/github-mirror/v1/repos/rust-lang/rust/sync?include=github_actions&actions_scope=open",
+    )
+    .await;
+    assert_eq!(actions.status(), StatusCode::ACCEPTED);
+    let session_id = body_json(actions).await["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_owned();
+    assert_eq!(pump.drain(&service).await, 1);
+
+    let session = body_json(
+        get(
+            router.clone(),
+            &format!("/github-mirror/v1/sessions/{session_id}"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(session["status"], "complete", "{session}");
+    assert_eq!(session["summary"]["workflow_runs_synced"], 2);
+    assert_eq!(
+        session["summary"]["workflow_jobs_synced"], 1,
+        "only run 82 sits on the head of open pull 12; run 81 is on c2"
     );
 }

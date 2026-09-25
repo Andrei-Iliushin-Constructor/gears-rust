@@ -44757,7 +44757,7 @@
     },
     "/github-mirror/v1/repos/{owner}/{name}/sync": {
       "post": {
-        "description": "Queues a sync of the repository and answers immediately with a session id.              The background worker pages through the repository and every object type in              scope, replays the `ETag` it stored last time so GitHub can answer `304`              instead of resending a page, and waits out a rate limit before carrying              on. What it fetches is upserted into the caller's tenant mirror; poll the              session for the outcome.",
+        "description": "Queues a sync of the repository and answers immediately with a session id. The background worker pages through the repository and every object type in scope, replays the `ETag` it stored last time so GitHub can answer `304` instead of resending a page, and waits out a rate limit before carrying on. What it fetches is upserted into the caller's tenant mirror; poll the session for the outcome. While a sync of the repository is queued or running, a request on the same terms joins it and one with a different scope or `since` is refused with `409`.",
         "operationId": "github_mirror.v1.sync_repository",
         "parameters": [
           {
@@ -44842,7 +44842,7 @@
                 }
               }
             },
-            "description": "Sync queued; the body carries the session id to poll. A repeat call for a repository whose sync is still queued or running answers with that existing session instead of starting another"
+            "description": "Sync queued; the body carries the session id to poll. A repeat call on the same terms for a repository whose sync is still queued or running answers with that existing session instead of starting another"
           },
           "400": {
             "content": {
@@ -44883,6 +44883,16 @@
               }
             },
             "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "500": {
             "content": {

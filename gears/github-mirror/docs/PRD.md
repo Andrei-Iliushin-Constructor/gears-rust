@@ -333,6 +333,8 @@ Synchronization **MUST** always run at the repository level: `sync_repo(session,
 
 Synchronization **MUST** be re-enterable: the whole job is orchestrated in memory and individual tasks are NOT persisted. Re-running **MUST** rescan the full repository and rely on (a) the HTTP ETag/Last-Modified cache to avoid re-fetching unchanged data and (b) durable change-detection state (watermarks + entity fingerprints) to skip unchanged entities. The system **MUST** record a per-repo run status (`in_progress`/`complete`) and provide a resume operation that re-runs every repository still marked `in_progress`. A force mode **MUST** bypass the cache entirely.
 
+The session statuses (`queued`, `in_progress`, `complete`, `failed`, `interrupted`) and the per-repo run statuses (`in_progress`, `complete`) are stored and returned under the same names. A published name **MUST NOT** be renamed or given another meaning, and new statuses are only ever added. A stored status the running build does not know **MUST** fail the read as an internal error rather than be read as some other status.
+
 - **Rationale**: Large-repo synchronization can take hours; re-entrancy via caching is simpler than persisting per-task state.
 - **Actors**: `cpt-cf-github-mirror-actor-lib-consumer`, `cpt-cf-github-mirror-actor-cli-operator`, `cpt-cf-github-mirror-actor-python-consumer`
 

@@ -3374,13 +3374,23 @@ impl Service {
 
         match found {
             Ok(ids) => ids,
-            Err(e) => {
+            Err(e @ DomainError::Forbidden(_)) => {
                 tracing::info!(
                     owner,
                     repository = name,
                     error = %e.public_text(),
                     "clearing the cache without GitHub's repository ids; the pages linked under \
                      them stay until they are re-fetched"
+                );
+                Vec::new()
+            }
+            Err(e) => {
+                tracing::warn!(
+                    owner,
+                    repository = name,
+                    error = %e.public_text(),
+                    "could not read GitHub's repository ids for the cache clear; the pages \
+                     linked under them stay until they are re-fetched"
                 );
                 Vec::new()
             }
@@ -3731,11 +3741,18 @@ impl Service {
         // Read rather than assumed: the row is written before the claim goes
         // in, so it is there, and a worker may already have moved it on from
         // `queued`.
-        let status = self
+        let session = self
             .sync_sessions
             .find_by_id(scope, running.session_id)
-            .await?
-            .map_or(SessionStatus::InProgress, |session| session.status);
+            .await?;
+        if session.is_none() {
+            tracing::warn!(
+                repository = repo_full_name,
+                session_id = %running.session_id,
+                "the running sync's session row is missing; reporting it as in progress"
+            );
+        }
+        let status = session.map_or(SessionStatus::InProgress, |session| session.status);
         Ok(QueuedSync {
             session_id: running.session_id,
             status,

@@ -4744,7 +4744,9 @@ impl SyncWriter for SeaOrmSyncWriter {
                     // about its children: a file, commit, review or thread
                     // GitHub no longer reports is gone, not merely unchanged.
                     review_delete_by_pull_in(tx, &scope, repo_id, pull_number).await?;
-                    review_thread_delete_by_pull_in(tx, &scope, repo_id, pull_number).await?;
+                    if detail.review_threads_complete {
+                        review_thread_delete_by_pull_in(tx, &scope, repo_id, pull_number).await?;
+                    }
                     pull_request_file_delete_by_pull_in(tx, &scope, repo_id, pull_number).await?;
                     pull_request_commit_delete_by_pull_in(tx, &scope, repo_id, pull_number).await?;
 

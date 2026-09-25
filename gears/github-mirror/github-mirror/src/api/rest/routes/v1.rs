@@ -61,7 +61,14 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .operation_id("github_mirror.v1.sync_repository")
         .summary("Sync a repository from GitHub into the mirror")
         .description(
-            "Queues a sync of the repository and answers immediately with a session id.              The background worker pages through the repository and every object type in              scope, replays the `ETag` it stored last time so GitHub can answer `304`              instead of resending a page, and waits out a rate limit before carrying              on. What it fetches is upserted into the caller's tenant mirror; poll the              session for the outcome.",
+            "Queues a sync of the repository and answers immediately with a session id. \
+             The background worker pages through the repository and every object type in \
+             scope, replays the `ETag` it stored last time so GitHub can answer `304` \
+             instead of resending a page, and waits out a rate limit before carrying \
+             on. What it fetches is upserted into the caller's tenant mirror; poll the \
+             session for the outcome. While a sync of the repository is queued or \
+             running, a request on the same terms joins it and one with a different \
+             scope or `since` is refused with `409`.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -86,14 +93,15 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .json_response_with_schema::<dto::SyncAcceptedDto>(
             openapi,
             StatusCode::ACCEPTED,
-            "Sync queued; the body carries the session id to poll. A repeat call for a \
-             repository whose sync is still queued or running answers with that existing \
-             session instead of starting another",
+            "Sync queued; the body carries the session id to poll. A repeat call on the \
+             same terms for a repository whose sync is still queued or running answers \
+             with that existing session instead of starting another",
         )
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)
+        .error_409(openapi)
         .error_500(openapi)
         .register(router, openapi);
 

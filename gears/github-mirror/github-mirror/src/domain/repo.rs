@@ -921,7 +921,45 @@ impl ContributorRecord {
             if other.html_url.is_some() {
                 self.html_url = other.html_url;
             }
+            return;
         }
+        self.login = self.login.take().or(other.login);
+        self.avatar_url = self.avatar_url.take().or(other.avatar_url);
+        self.html_url = self.html_url.take().or(other.html_url);
+    }
+}
+
+#[cfg(test)]
+mod contributor_record_tests {
+    use chrono::{Duration, Utc};
+
+    use super::ContributorRecord;
+
+    fn sighting(profile: Option<&str>, seen_hours_ago: i64) -> ContributorRecord {
+        let seen = Utc::now() - Duration::hours(seen_hours_ago);
+        ContributorRecord {
+            repo_id: 42,
+            user_id: 7,
+            login: Some("alice".to_owned()),
+            account_type: "User".to_owned(),
+            avatar_url: profile.map(|_| "https://avatars.example/alice".to_owned()),
+            html_url: profile.map(str::to_owned),
+            roles: vec!["author".to_owned()],
+            first_seen_at: Some(seen),
+            last_seen_at: Some(seen),
+        }
+    }
+
+    #[test]
+    fn a_newer_record_without_urls_keeps_the_stored_ones() {
+        let mut fresh = sighting(None, 0);
+        fresh.absorb(sighting(Some("https://github.com/alice"), 48));
+
+        assert_eq!(
+            fresh.avatar_url.as_deref(),
+            Some("https://avatars.example/alice")
+        );
+        assert_eq!(fresh.html_url.as_deref(), Some("https://github.com/alice"));
     }
 }
 

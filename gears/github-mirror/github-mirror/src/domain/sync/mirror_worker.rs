@@ -435,10 +435,7 @@ impl MirrorWorker {
                 }
                 let open = issue.state == "open";
                 let modes = [collection.reactions, collection.timeline];
-                if open && !modes.contains(&CollectionMode::Open) {
-                    continue;
-                }
-                if !open && !modes.iter().any(|mode| *mode != CollectionMode::Open) {
+                if !modes.iter().any(|mode| mode.includes(open)) {
                     continue;
                 }
                 candidates.push(RefinementCandidate {
@@ -667,7 +664,7 @@ impl MirrorWorker {
                     ctx,
                     TaskKind::Verify(Entity::PullRequest),
                     Some(number.to_string()),
-                    TaskPriority::NORMAL,
+                    TaskPriority::HIGH,
                     attempt + 1,
                 );
             }

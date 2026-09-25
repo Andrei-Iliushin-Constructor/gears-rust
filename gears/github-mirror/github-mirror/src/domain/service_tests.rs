@@ -77,7 +77,7 @@ fn an_unreadable_stamp_counts_as_alive() {
 /// moment it was queued. A session that never started is judged on the time
 /// it was created, or a queue nobody drains would hold its lock for ever.
 #[test]
-fn the_freshest_stamp_the_row_has_is_the_one_read() {
+fn the_first_stamp_the_row_has_is_the_one_read() {
     let now = Utc::now();
 
     let mut heartbeat_wins = session(at(ABANDONED_AFTER_SECS * 10, now));
@@ -99,5 +99,18 @@ fn the_freshest_stamp_the_row_has_is_the_one_read() {
     assert!(
         abandoned(&queued_long_ago, now),
         "a session that never started is judged on when it was queued"
+    );
+}
+
+#[test]
+fn an_unreadable_heartbeat_is_not_passed_over_for_an_older_start() {
+    let now = Utc::now();
+    let mut row = session(at(ABANDONED_AFTER_SECS * 10, now));
+    row.started_at = Some(at(ABANDONED_AFTER_SECS * 5, now));
+    row.updated_at = Some("not a date".to_owned());
+
+    assert!(
+        !abandoned(&row, now),
+        "the heartbeat is present, so it is the stamp read, and an unreadable one counts as alive"
     );
 }
