@@ -2202,6 +2202,82 @@ async fn a_refused_graphql_answer_leaves_the_rest_of_the_refinement_standing() {
     );
 }
 
+#[tokio::test]
+async fn a_partial_graphql_answer_keeps_its_threads_and_marks_them_incomplete() {
+    let server = MockServer::start_async().await;
+
+    server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/rust-lang/rust/pulls/13");
+            then.status(200).json_body(gh_pulls_json()[0].clone());
+        })
+        .await;
+    for tail in ["reviews", "files", "commits"] {
+        let path = format!("/repos/rust-lang/rust/pulls/13/{tail}");
+        server
+            .mock_async(move |when, then| {
+                when.method("GET").path(path);
+                then.status(200).json_body(json!([]));
+            })
+            .await;
+    }
+    let graphql = server
+        .mock_async(|when, then| {
+            when.method("POST").path("/graphql");
+            then.status(200).json_body(json!({
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                                "nodes": [
+                                    {
+                                        "id": "PRRT_kept",
+                                        "isResolved": true,
+                                        "isOutdated": false,
+                                        "path": "src/lib.rs",
+                                        "line": 7,
+                                        "resolvedBy": { "login": "octocat" },
+                                        "comments": { "totalCount": 2 }
+                                    },
+                                    null
+                                ]
+                            }
+                        }
+                    }
+                },
+                "errors": [{
+                    "type": "INTERNAL",
+                    "message": "a thread could not be loaded",
+                    "path": ["repository", "pullRequest", "reviewThreads", "nodes", 1]
+                }]
+            }));
+        })
+        .await;
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let detail = client
+        .refine_pull_request(
+            RepoRef {
+                owner: "rust-lang",
+                name: "rust",
+                repo_id: 42,
+            },
+            13,
+            &opts(ScopeConfig::default()),
+        )
+        .await
+        .expect("a partial GraphQL answer must not fail the refinement");
+
+    graphql.assert_calls_async(1).await;
+    let ids: Vec<&str> = detail.review_threads.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(ids, ["PRRT_kept"], "the thread GitHub did send is kept");
+    assert!(
+        !detail.review_threads_complete,
+        "the missing thread leaves the pull unrefined so the next run comes back to it"
+    );
+}
+
 /// A `link` header is upstream text, so it decides where the next request
 /// goes. One pointing somewhere else would send the token to that host, and
 /// store whatever it answered as the repository's issues.
