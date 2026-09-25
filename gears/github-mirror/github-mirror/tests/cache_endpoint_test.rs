@@ -8,10 +8,11 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use github_mirror::api::rest::routes::{ConcreteService, register_routes};
+use github_mirror::domain::repo::{PageWindow, RepoRecord, RepoRepository};
 use github_mirror::infra::github::cache::{CacheKey, CachedResponse, HttpCache};
 use github_mirror::infra::github::client::GithubClient;
 use github_mirror::infra::github::compression::Compression;
-use github_mirror::infra::storage::sea_orm_repo::SeaOrmHttpCache;
+use github_mirror::infra::storage::sea_orm_repo::{SeaOrmHttpCache, SeaOrmRepoRepository};
 use toolkit::api::OpenApiRegistryImpl;
 use toolkit_db::{DBProvider, DbError};
 use toolkit_security::{AccessScope, SecurityContext};
@@ -108,6 +109,48 @@ async fn clearing_one_repository_leaves_its_neighbours_alone() {
         cached(&cache, &scope, &urls[2]).await,
         "another owner's entries stay"
     );
+}
+
+fn repo_record(id: i64, owner: &str) -> RepoRecord {
+    RepoRecord {
+        node_id: None,
+        id,
+        owner: owner.to_owned(),
+        name: format!("repo-{id}"),
+        full_name: format!("{owner}/repo-{id}"),
+        default_branch: "main".to_owned(),
+        private: false,
+        pushed_at: None,
+        stars: 0,
+        forks: 0,
+        description: None,
+        clone_url: None,
+    }
+}
+
+#[tokio::test]
+async fn an_owner_past_the_first_page_of_repositories_is_still_found() {
+    let tenant = Uuid::new_v4();
+    let scope = AccessScope::for_tenant(tenant);
+    let db = common::inmem_db().await;
+    let repos = SeaOrmRepoRepository::new(Arc::new(DBProvider::<DbError>::new(db)));
+    let page = i64::try_from(PageWindow::MAX_LIMIT).unwrap();
+    for id in 1..=page {
+        repos
+            .upsert(&scope, tenant, repo_record(id, "other"))
+            .await
+            .unwrap();
+    }
+    for id in [page + 1, page + 2] {
+        repos
+            .upsert(&scope, tenant, repo_record(id, "acme"))
+            .await
+            .unwrap();
+    }
+
+    let mut ids = repos.ids_by_owner(&scope, "acme").await.unwrap();
+    ids.sort_unstable();
+    assert_eq!(ids, [page + 1, page + 2]);
 }
 
 #[tokio::test]
