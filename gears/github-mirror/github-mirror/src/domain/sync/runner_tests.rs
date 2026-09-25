@@ -546,10 +546,11 @@ impl Worker for PanickingDiscovery {
 /// the run ends instead of waiting for a task nobody will finish.
 #[tokio::test(start_paused = true)]
 async fn a_task_that_panics_is_accounted_for_and_the_run_still_ends() {
+    let session_id = Uuid::new_v4();
     let runner = RepoPhaseRunner::new(
         vec![Arc::new(PanickingDiscovery)],
         RunIdentity {
-            session_id: Uuid::new_v4(),
+            session_id,
             tenant_id: Uuid::new_v4(),
         },
         NonZeroUsize::MIN,
@@ -573,5 +574,12 @@ async fn a_task_that_panics_is_accounted_for_and_the_run_still_ends() {
             .contains("did not finish cleanly"),
         "{}",
         report.failures[0].error
+    );
+    assert_eq!(
+        runner
+            .queue
+            .remaining_count_for_phase(session_id, TaskPhase::Discovery),
+        0,
+        "the panicked task's queue entry must be failed, not left running"
     );
 }
