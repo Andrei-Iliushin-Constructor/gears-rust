@@ -229,9 +229,8 @@ async fn migrations_apply_and_roll_back_on_a_clean_database() {
     // so there is nothing further to assert for the individual columns.
 }
 
-/// The ten `z_`-prefixed migrations only add columns, and the runner applies
-/// migrations in name order, so they are the last ten to run and the first
-/// ten to roll back. Undoing exactly those leaves every table in place, which
+/// The last ten migrations are the cache table and the nine that only add
+/// columns, so they are the first ten to roll back. Undoing exactly those leaves every table in place, which
 /// is what makes their `down()` bodies observable: replace one with `Ok(())`
 /// and its column survives here.
 #[tokio::test]

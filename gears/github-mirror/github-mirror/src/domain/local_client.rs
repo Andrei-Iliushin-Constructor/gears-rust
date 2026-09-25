@@ -5,10 +5,9 @@ use github_mirror_sdk::{GithubMirrorClientV1, MirrorStatus, Repo, SyncSummary};
 use toolkit_canonical_errors::CanonicalError;
 use toolkit_macros::domain_model;
 use toolkit_odata::{ODataQuery, Page};
-use toolkit_security::{AccessScope, SecurityContext};
+use toolkit_security::SecurityContext;
 
-use crate::domain::ports::github::FetchOptions;
-use crate::domain::service::{Service, SyncProgress};
+use crate::domain::service::Service;
 
 #[domain_model]
 pub struct LocalClient {
@@ -45,23 +44,8 @@ impl GithubMirrorClientV1 for LocalClient {
         owner: &str,
         name: &str,
     ) -> Result<SyncSummary, CanonicalError> {
-        let cancel = self.service.shutdown_token();
         self.service
-            .sync_repository(
-                ctx,
-                owner,
-                name,
-                &FetchOptions {
-                    tenant_id: ctx.subject_tenant_id(),
-                    access_scope: AccessScope::default(),
-                    scope: self.service.default_scope(),
-                    force: false,
-                    since: None,
-                    cancel: cancel.clone(),
-                },
-                &SyncProgress::new(),
-                &cancel,
-            )
+            .sync_now(ctx, owner, name)
             .await
             .map_err(CanonicalError::from)
     }

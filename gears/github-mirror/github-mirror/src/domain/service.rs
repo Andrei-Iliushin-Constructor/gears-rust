@@ -549,6 +549,14 @@ pub struct Service {
 /// One repository of one tenant: what a queued or running sync occupies.
 type InFlightKey = (Uuid, String);
 
+enum PreparedSync {
+    Joined(QueuedSync),
+    Claimed {
+        job: Box<SyncJob>,
+        session: Box<SyncSessionRecord>,
+    },
+}
+
 type InFlight = Arc<std::sync::Mutex<HashMap<InFlightKey, Claim>>>;
 
 pub(crate) struct ClaimRelease {
@@ -3613,6 +3621,76 @@ impl Service {
         force: bool,
         since: Option<DateTime<Utc>>,
     ) -> Result<QueuedSync, DomainError> {
+        let (job, session) = match self
+            .prepare_sync(ctx, scopes, owner, name, sync_scope, force, since)
+            .await?
+        {
+            PreparedSync::Joined(running) => return Ok(running),
+            PreparedSync::Claimed { job, session } => (job, session),
+        };
+        let id = session.id;
+        let key = (ctx.subject_tenant_id(), session.repo_full_name.clone());
+        if let Err(e) = self.sync_tx.try_send(*job) {
+            self.release_in_flight(&key);
+            let reason = format!("sync could not be queued: {e}");
+            self.fail_session(&scopes.session, key.0, *session, reason.clone())
+                .await;
+            return Err(DomainError::internal(reason));
+        }
+
+        Ok(QueuedSync {
+            session_id: id,
+            status: SessionStatus::Queued,
+        })
+    }
+
+    /// Sync `owner/name` on the caller's own task and hand back what it
+    /// collected. It takes the claim, the session row and the repository
+    /// status a queued sync takes, so it shows in `/sessions`, keeps its lock
+    /// alive with a heartbeat and stops at the deadline; only the queue and
+    /// the pool are skipped.
+    ///
+    /// # Errors
+    /// `Conflict` when a sync of this repository is already in flight, the
+    /// sync's own error when it fails, and `Cancelled` when the gear stops it.
+    pub async fn sync_now(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name: &str,
+    ) -> Result<SyncSummary, DomainError> {
+        validate_repo_path(owner, name)?;
+        let scopes = self.enqueue_scopes(ctx).await?;
+        let job = match self
+            .prepare_sync(ctx, &scopes, owner, name, None, false, None)
+            .await?
+        {
+            PreparedSync::Joined(running) => {
+                return Err(DomainError::Conflict(format!(
+                    "a sync of {owner}/{name} is already in flight; session {} is the one \
+                     running",
+                    running.session_id
+                )));
+            }
+            PreparedSync::Claimed { job, .. } => job,
+        };
+        self.run_and_record(&job, &self.shutdown_token()).await?
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the request's own terms, one per argument, as in `enqueue_sync_scoped`"
+    )]
+    async fn prepare_sync(
+        &self,
+        ctx: &SecurityContext,
+        scopes: &EnqueueScopes,
+        owner: &str,
+        name: &str,
+        sync_scope: Option<ScopeConfig>,
+        force: bool,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<PreparedSync, DomainError> {
         let sync_scope = sync_scope.unwrap_or(self.config.scope);
         sync_scope.validate()?;
         let tenant_id = ctx.subject_tenant_id();
@@ -3658,7 +3736,8 @@ impl Service {
                 drop(claimed);
                 return self
                     .join_or_refuse(scope, &key.1, running, sync_scope, since)
-                    .await;
+                    .await
+                    .map(PreparedSync::Joined);
             }
             self.sync_sessions
                 .upsert(scope, tenant_id, session.clone())
@@ -3702,21 +3781,13 @@ impl Service {
             since,
             claim: Some(ClaimRelease {
                 in_flight: Arc::clone(&self.in_flight),
-                key: key.clone(),
+                key,
                 session_id: id,
             }),
         };
-        if let Err(e) = self.sync_tx.try_send(job) {
-            self.release_in_flight(&key);
-            let reason = format!("sync could not be queued: {e}");
-            self.fail_session(scope, tenant_id, session, reason.clone())
-                .await;
-            return Err(DomainError::internal(reason));
-        }
-
-        Ok(QueuedSync {
-            session_id: id,
-            status: SessionStatus::Queued,
+        Ok(PreparedSync::Claimed {
+            job: Box::new(job),
+            session: Box::new(session),
         })
     }
 
@@ -3856,6 +3927,14 @@ impl Service {
         job: &SyncJob,
         cancel: &CancellationToken,
     ) -> Result<(), DomainError> {
+        self.run_and_record(job, cancel).await.map(|_| ())
+    }
+
+    async fn run_and_record(
+        &self,
+        job: &SyncJob,
+        cancel: &CancellationToken,
+    ) -> Result<Result<SyncSummary, DomainError>, DomainError> {
         let tenant_id = job.ctx.subject_tenant_id();
         let scope = self.session_scope(&job.ctx, actions::UPSERT).await?;
 
@@ -3875,10 +3954,10 @@ impl Service {
         let outcome = self.sync_within_deadline(job, &progress, cancel).await;
 
         let completed = outcome.is_ok();
-        match outcome {
+        match &outcome {
             Ok(summary) => {
                 session.status = SessionStatus::Complete;
-                session.summary_json = stored_summary_json(job.session_id, &summary);
+                session.summary_json = stored_summary_json(job.session_id, summary);
             }
             Err(e) => {
                 tracing::error!(
@@ -3920,7 +3999,7 @@ impl Service {
             .await?;
         }
 
-        Ok(())
+        Ok(outcome)
     }
 
     /// Run the sync, stopping it if it passes the configured deadline.
@@ -4233,9 +4312,9 @@ impl Service {
         progress: &SyncProgress,
         cancel: &CancellationToken,
     ) -> Result<SyncSummary, DomainError> {
-        // Checked here and not only in the REST handler: the SDK's `LocalClient`
-        // and the tests call this directly, and `owner`/`name` reach a log line
-        // below, where a newline would forge a record of its own.
+        // Checked here and not only in the REST handler: the tests call this
+        // directly, and `owner`/`name` reach a log line below, where a newline
+        // would forge a record of its own.
         validate_repo_path(owner, name)?;
         options.scope.validate()?;
 
