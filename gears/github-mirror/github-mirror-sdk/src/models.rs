@@ -231,6 +231,7 @@ pub struct CountDrift {
 /// Result of one sync pass.
 #[domain_model]
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct SyncSummary {
     pub repository: String,
     pub issues_synced: u64,
