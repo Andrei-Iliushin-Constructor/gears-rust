@@ -25,6 +25,7 @@ use crate::domain::repo::{
     WorkflowRunRecord,
 };
 use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache, NoCache};
+use crate::infra::github::compression::MAX_BODY_BYTES;
 use crate::infra::github::pagination::parse_link_next;
 use crate::redact::redacted_word;
 
@@ -137,6 +138,24 @@ fn graphql_refused(errors: &[serde_json::Value]) -> DomainError {
         errors.len(),
         kinds.join(", ")
     ))
+}
+
+async fn read_capped(mut response: reqwest::Response) -> Result<Vec<u8>, DomainError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| DomainError::internal(format!("GitHub response read failed: {e}")))?
+    {
+        let size = body.len().saturating_add(chunk.len());
+        if u64::try_from(size).unwrap_or(u64::MAX) > MAX_BODY_BYTES {
+            return Err(DomainError::internal(format!(
+                "GitHub response is larger than {MAX_BODY_BYTES} bytes"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// Whether the URL points at this machine, where plain `http` carries no token
@@ -494,10 +513,9 @@ impl GithubClient {
         let etag = header_string(response.headers(), "etag");
         let last_modified = header_string(response.headers(), "last-modified");
         let next_page = next_link(response.headers());
+        let body = read_capped(response).await?;
         let entry = CachedResponse {
-            body: response
-                .text()
-                .await
+            body: String::from_utf8(body)
                 .map_err(|e| DomainError::internal(format!("GitHub response read failed: {e}")))?,
             etag,
             last_modified,
@@ -732,26 +750,29 @@ impl GithubClient {
             )));
         }
 
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| DomainError::internal(format!("GitHub GraphQL decode failed: {e}")))?;
-
-        if let Some(errors) = body.get("errors").and_then(serde_json::Value::as_array)
-            && !errors.is_empty()
-        {
-            if body.get("data").is_none_or(serde_json::Value::is_null) {
-                return Err(graphql_refused(errors));
-            }
-            tracing::warn!(
-                count = errors.len(),
-                answer = ?errors,
-                "GitHub answered a GraphQL query in part; keeping the data it sent"
-            );
-        }
-
-        Ok(body)
+        graphql_answer(response).await
     }
+}
+
+async fn graphql_answer(response: reqwest::Response) -> Result<serde_json::Value, DomainError> {
+    let bytes = read_capped(response).await?;
+    let body: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| DomainError::internal(format!("GitHub GraphQL decode failed: {e}")))?;
+
+    if let Some(errors) = body.get("errors").and_then(serde_json::Value::as_array)
+        && !errors.is_empty()
+    {
+        if body.get("data").is_none_or(serde_json::Value::is_null) {
+            return Err(graphql_refused(errors));
+        }
+        tracing::warn!(
+            count = errors.len(),
+            answer = ?errors,
+            "GitHub answered a GraphQL query in part; keeping the data it sent"
+        );
+    }
+
+    Ok(body)
 }
 
 #[derive(Debug, Deserialize)]

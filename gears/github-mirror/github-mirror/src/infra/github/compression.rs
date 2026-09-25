@@ -15,9 +15,10 @@ use aws_lc_rs::digest::{self, SHA256};
 
 use crate::domain::error::DomainError;
 
-/// The most a stored body may expand to. GitHub pages are a few megabytes
-/// at most, so anything past this is a corrupt or hostile entry, not data.
-pub const MAX_DECOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
+/// The most a body may be, read from GitHub or restored from the cache.
+/// GitHub pages are a few megabytes at most, so anything past this is a
+/// corrupt or hostile body, not data.
+pub const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 
 /// How a cached body is stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -80,21 +81,28 @@ impl Compression {
     /// Restore a stored body.
     ///
     /// # Errors
-    /// `Internal` when the stored bytes do not decode or expand past
-    /// [`MAX_DECOMPRESSED_BYTES`], which means the entry is corrupt and should
-    /// be treated as a miss.
+    /// `Internal` when the stored bytes do not decode or come to more than
+    /// [`MAX_BODY_BYTES`], which means the entry is corrupt and should be
+    /// treated as a miss.
     pub fn decompress(self, stored: &[u8]) -> Result<Vec<u8>, DomainError> {
         match self {
-            Self::None => Ok(stored.to_vec()),
+            Self::None => {
+                if u64::try_from(stored.len()).unwrap_or(u64::MAX) > MAX_BODY_BYTES {
+                    return Err(DomainError::internal(format!(
+                        "cached body is larger than {MAX_BODY_BYTES} bytes"
+                    )));
+                }
+                Ok(stored.to_vec())
+            }
             Self::Gzip => {
                 let mut body = Vec::new();
                 flate2::read::GzDecoder::new(stored)
-                    .take(MAX_DECOMPRESSED_BYTES + 1)
+                    .take(MAX_BODY_BYTES + 1)
                     .read_to_end(&mut body)
                     .map_err(|e| DomainError::internal(format!("gzip read failed: {e}")))?;
-                if u64::try_from(body.len()).unwrap_or(u64::MAX) > MAX_DECOMPRESSED_BYTES {
+                if u64::try_from(body.len()).unwrap_or(u64::MAX) > MAX_BODY_BYTES {
                     return Err(DomainError::internal(format!(
-                        "cached body expands past {MAX_DECOMPRESSED_BYTES} bytes"
+                        "cached body expands past {MAX_BODY_BYTES} bytes"
                     )));
                 }
                 Ok(body)

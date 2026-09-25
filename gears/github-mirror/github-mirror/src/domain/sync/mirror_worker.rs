@@ -435,14 +435,10 @@ impl MirrorWorker {
                 }
                 let open = issue.state == "open";
                 let modes = [collection.reactions, collection.timeline];
-                let mut wanted = false;
-                if open {
-                    wanted = modes.iter().any(|mode| *mode == CollectionMode::Open);
+                if open && !modes.contains(&CollectionMode::Open) {
+                    continue;
                 }
-                if !open {
-                    wanted = modes.iter().any(|mode| *mode != CollectionMode::Open);
-                }
-                if !wanted {
+                if !open && !modes.iter().any(|mode| *mode != CollectionMode::Open) {
                     continue;
                 }
                 candidates.push(RefinementCandidate {
@@ -492,19 +488,9 @@ impl MirrorWorker {
         let open = task.priority.is_open_tier();
         let collection = run.options.scope.collection;
 
-        let mut reactions = collection.reactions != CollectionMode::None;
-        if collection.reactions == CollectionMode::Open && !open {
-            reactions = false;
-        }
-
-        let mut timeline = collection.timeline != CollectionMode::None;
-        if collection.timeline == CollectionMode::Open && !open {
-            timeline = false;
-        }
-
         let wants = IssueDetailWants {
-            reactions,
-            timeline,
+            reactions: collection.reactions.includes(open),
+            timeline: collection.timeline.includes(open),
         };
         let detail = self
             .github
@@ -841,6 +827,18 @@ impl MirrorWorker {
         Ok(())
     }
 
+    async fn open_pull_heads(&self, mode: CollectionMode) -> Result<HashSet<String>, DomainError> {
+        if mode != CollectionMode::Open {
+            return Ok(HashSet::new());
+        }
+        let run = &self.run;
+        let heads = self
+            .pull_requests
+            .open_head_shas(&run.scope, run.repo_id()?)
+            .await?;
+        Ok(heads.into_iter().collect())
+    }
+
     async fn index_actions(&self, ctx: &WorkerContext) -> Result<(), DomainError> {
         let run = &self.run;
         let listing = self
@@ -849,15 +847,7 @@ impl MirrorWorker {
             .await?;
 
         let mode = run.options.scope.collection.actions;
-        let mut open_heads: HashSet<String> = HashSet::new();
-        if mode == CollectionMode::Open {
-            open_heads = self
-                .pull_requests
-                .open_head_shas(&run.scope, run.repo_id()?)
-                .await?
-                .into_iter()
-                .collect();
-        }
+        let open_heads = self.open_pull_heads(mode).await?;
         let candidates = listing
             .workflow_runs
             .iter()
