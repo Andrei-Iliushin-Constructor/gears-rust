@@ -9,6 +9,7 @@ use github_mirror::domain::repo::ContributorRecord;
 use github_mirror::domain::scope::{CollectionMode, ScopeConfig};
 use github_mirror::infra::github::cache::{CacheKey, CachedResponse, HttpCache};
 use github_mirror::infra::github::client::GithubClient;
+use github_mirror::infra::github::compression::MAX_BODY_BYTES;
 use httpmock::MockServer;
 use serde_json::json;
 use toolkit_security::AccessScope;
@@ -2270,11 +2271,91 @@ async fn a_partial_graphql_answer_keeps_its_threads_and_marks_them_incomplete() 
         .expect("a partial GraphQL answer must not fail the refinement");
 
     graphql.assert_calls_async(1).await;
-    let ids: Vec<&str> = detail.review_threads.iter().map(|t| t.id.as_str()).collect();
+    let ids: Vec<&str> = detail
+        .review_threads
+        .iter()
+        .map(|t| t.id.as_str())
+        .collect();
     assert_eq!(ids, ["PRRT_kept"], "the thread GitHub did send is kept");
     assert!(
         !detail.review_threads_complete,
         "the missing thread leaves the pull unrefined so the next run comes back to it"
+    );
+}
+
+#[tokio::test]
+async fn an_enterprise_base_sends_graphql_to_its_api_graphql_path() {
+    let server = MockServer::start_async().await;
+
+    server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/api/v3/repos/rust-lang/rust/pulls/13");
+            then.status(200).json_body(gh_pulls_json()[0].clone());
+        })
+        .await;
+    for tail in ["reviews", "files", "commits"] {
+        let path = format!("/api/v3/repos/rust-lang/rust/pulls/13/{tail}");
+        server
+            .mock_async(move |when, then| {
+                when.method("GET").path(path);
+                then.status(200).json_body(json!([]));
+            })
+            .await;
+    }
+    let graphql = server
+        .mock_async(|when, then| {
+            when.method("POST").path("/api/graphql");
+            then.status(200).json_body(gh_review_threads_json());
+        })
+        .await;
+
+    let client = GithubClient::new(format!("{}/api/v3", server.base_url()), None)
+        .expect("client must build");
+    let detail = client
+        .refine_pull_request(
+            RepoRef {
+                owner: "rust-lang",
+                name: "rust",
+                repo_id: 42,
+            },
+            13,
+            &opts(ScopeConfig::default()),
+        )
+        .await
+        .expect("the refinement must succeed against an enterprise base");
+
+    graphql.assert_calls_async(1).await;
+    let ids: Vec<&str> = detail
+        .review_threads
+        .iter()
+        .map(|t| t.id.as_str())
+        .collect();
+    assert_eq!(ids, ["PRRT_thread1"]);
+    assert!(detail.review_threads_complete);
+}
+
+#[tokio::test]
+async fn a_rest_answer_past_the_body_cap_is_refused() {
+    let server = MockServer::start_async().await;
+    let too_big = usize::try_from(MAX_BODY_BYTES).expect("the cap fits in usize") + 1;
+    let repo = server
+        .mock_async(move |when, then| {
+            when.method("GET").path("/repos/acme/huge");
+            then.status(200).body(vec![b' '; too_big]);
+        })
+        .await;
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let error = client
+        .fetch_repository_metadata("acme", "huge", &opts(ScopeConfig::default()))
+        .await
+        .expect_err("a body past the cap must be refused");
+
+    repo.assert_calls_async(1).await;
+    assert!(
+        matches!(&error, DomainError::Internal(message) if message.contains("larger than")),
+        "{error:?}"
     );
 }
 

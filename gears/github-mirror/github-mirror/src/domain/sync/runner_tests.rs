@@ -244,6 +244,62 @@ async fn a_cancelled_run_does_not_retry_a_transient_error() {
     assert!(report.cancelled);
 }
 
+struct FlakyRepair {
+    seen: Mutex<Vec<(u32, u32)>>,
+}
+
+#[async_trait]
+impl Worker for FlakyRepair {
+    fn handles(&self, kind: TaskKind) -> bool {
+        matches!(kind, TaskKind::Discover | TaskKind::Verify(_))
+    }
+
+    async fn execute(&self, ctx: &WorkerContext, task: &ExtractionTask) -> Result<(), DomainError> {
+        if task.kind == TaskKind::Discover {
+            ctx.queue.enqueue_task(&NewTask {
+                run: task.run,
+                kind: TaskKind::Verify(Entity::PullRequest),
+                entity_id: Some("13".to_owned()),
+                priority: TaskPriority::HIGH,
+                attempt: 2,
+            });
+            return Ok(());
+        }
+        self.seen.lock().unwrap().push((task.attempt, task.retries));
+        if task.retries < 2 {
+            return Err(locked());
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_transient_retry_of_a_repair_pass_keeps_its_attempt_and_counts_its_retries() {
+    let worker = Arc::new(FlakyRepair {
+        seen: Mutex::new(Vec::new()),
+    });
+    let runner = RepoPhaseRunner::new(
+        vec![Arc::clone(&worker) as Arc<dyn Worker>],
+        RunIdentity {
+            session_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+        },
+        NonZeroUsize::MIN,
+        CancellationToken::new(),
+        Arc::new(AtomicU8::new(0)),
+    );
+
+    let report = runner.run().await;
+
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!(report.tasks_done, 2);
+    assert_eq!(
+        *worker.seen.lock().unwrap(),
+        [(2, 0), (2, 1), (2, 2)],
+        "the repair pass stays 2 while its retries go up"
+    );
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Event {
     Started {

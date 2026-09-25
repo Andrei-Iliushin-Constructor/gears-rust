@@ -3714,7 +3714,7 @@ impl Service {
         self.release_lock_left_by_a_dead_run(scopes, tenant_id, &key.1)
             .await;
 
-        {
+        let claim = {
             // Held for this repository only, so two concurrent requests for it
             // cannot both decide they are the first while a request for
             // another repository waits on nothing. The row is written before
@@ -3753,7 +3753,12 @@ impl Service {
                         since,
                     },
                 );
-        }
+            ClaimRelease {
+                in_flight: Arc::clone(&self.in_flight),
+                key,
+                session_id: id,
+            }
+        };
         if let Err(e) = self
             .mark_repo_status_in(
                 &scopes.repo_status,
@@ -3765,7 +3770,7 @@ impl Service {
             )
             .await
         {
-            self.release_in_flight(&key);
+            drop(claim);
             self.fail_session(scope, tenant_id, session, e.public_text())
                 .await;
             return Err(e);
@@ -3779,11 +3784,7 @@ impl Service {
             scope: sync_scope,
             force,
             since,
-            claim: Some(ClaimRelease {
-                in_flight: Arc::clone(&self.in_flight),
-                key,
-                session_id: id,
-            }),
+            claim: Some(claim),
         };
         Ok(PreparedSync::Claimed {
             job: Box::new(job),
