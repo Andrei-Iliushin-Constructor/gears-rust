@@ -436,7 +436,7 @@ pub struct QueuedSync {
 /// The caller's [`SecurityContext`] travels with the job because the work
 /// outlives the request that asked for it, and every write it makes is still
 /// tenant-scoped through the same policy enforcer.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SyncJob {
     pub session_id: Uuid,
     pub ctx: SecurityContext,
@@ -451,6 +451,11 @@ pub struct SyncJob {
     pub force: bool,
     /// Oldest closed entity worth collecting, from the request.
     pub since: Option<DateTime<Utc>>,
+    #[expect(
+        dead_code,
+        reason = "held for its drop: a job that goes away, run or not, gives its claim back"
+    )]
+    pub(crate) claim: Option<ClaimRelease>,
 }
 
 pub(crate) const REPO_SYNC_STATUS_RESOURCE: ResourceType = ResourceType::from_static(
@@ -531,9 +536,9 @@ pub struct Service {
     /// queue request makes are serialised for that repository alone rather than
     /// for the whole gear.
     ///
-    /// A gate is kept once made: it is one small allocation per repository
-    /// ever queued, and dropping one while a request still waits on it would
-    /// let the next arrival past at the same time.
+    /// A gate lives while a request holds it: the last request to let go
+    /// removes it, so the map holds only repositories a request is deciding
+    /// about right now.
     claim_gates: Arc<std::sync::Mutex<HashMap<InFlightKey, ClaimGate>>>,
     /// The gear's shutdown token, bound when the sync pool starts. Syncs that
     /// do not come from the pool — the in-process client's — carry it too, so
@@ -546,17 +551,51 @@ type InFlightKey = (Uuid, String);
 
 type InFlight = Arc<std::sync::Mutex<HashMap<InFlightKey, Claim>>>;
 
-struct ClaimRelease {
+pub(crate) struct ClaimRelease {
     in_flight: InFlight,
     key: InFlightKey,
+    session_id: Uuid,
+}
+
+impl std::fmt::Debug for ClaimRelease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaimRelease")
+            .field("key", &self.key)
+            .field("session_id", &self.session_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for ClaimRelease {
     fn drop(&mut self) {
-        self.in_flight
+        let mut in_flight = self
+            .in_flight
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.key);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if in_flight
+            .get(&self.key)
+            .is_some_and(|claim| claim.session_id == self.session_id)
+        {
+            in_flight.remove(&self.key);
+        }
+    }
+}
+
+struct GateLease {
+    gates: Arc<std::sync::Mutex<HashMap<InFlightKey, ClaimGate>>>,
+    key: InFlightKey,
+    gate: ClaimGate,
+}
+
+impl Drop for GateLease {
+    fn drop(&mut self) {
+        let mut gates = self
+            .gates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if Arc::strong_count(&self.gate) == 2 {
+            gates.remove(&self.key);
+        }
     }
 }
 
@@ -3603,8 +3642,8 @@ impl Service {
             // another repository waits on nothing. The row is written before
             // the claim goes in, so the id a collapsing request is handed
             // always names a session it can read.
-            let gate = self.claim_gate(&key);
-            let claimed = gate.lock().await;
+            let lease = self.claim_gate(&key);
+            let claimed = lease.gate.lock().await;
 
             let running = self
                 .in_flight
@@ -3661,6 +3700,11 @@ impl Service {
             scope: sync_scope,
             force,
             since,
+            claim: Some(ClaimRelease {
+                in_flight: Arc::clone(&self.in_flight),
+                key: key.clone(),
+                session_id: id,
+            }),
         };
         if let Err(e) = self.sync_tx.try_send(job) {
             self.release_in_flight(&key);
@@ -3741,35 +3785,48 @@ impl Service {
         // Read rather than assumed: the row is written before the claim goes
         // in, so it is there, and a worker may already have moved it on from
         // `queued`.
-        let session = self
-            .sync_sessions
-            .find_by_id(scope, running.session_id)
+        let status = self
+            .running_status(scope, repo_full_name, running.session_id)
             .await?;
-        if session.is_none() {
-            tracing::warn!(
-                repository = repo_full_name,
-                session_id = %running.session_id,
-                "the running sync's session row is missing; reporting it as in progress"
-            );
-        }
-        let status = session.map_or(SessionStatus::InProgress, |session| session.status);
         Ok(QueuedSync {
             session_id: running.session_id,
             status,
         })
     }
 
+    async fn running_status(
+        &self,
+        scope: &AccessScope,
+        repo_full_name: &str,
+        session_id: Uuid,
+    ) -> Result<SessionStatus, DomainError> {
+        let session = self.sync_sessions.find_by_id(scope, session_id).await?;
+        if session.is_none() {
+            tracing::warn!(
+                repository = repo_full_name,
+                session_id = %session_id,
+                "the running sync's session row is missing; reporting it as in progress"
+            );
+        }
+        Ok(session.map_or(SessionStatus::InProgress, |session| session.status))
+    }
+
     /// This repository's gate, made on first use.
-    fn claim_gate(&self, key: &InFlightKey) -> ClaimGate {
+    fn claim_gate(&self, key: &InFlightKey) -> GateLease {
         let mut gates = self
             .claim_gates
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Arc::clone(
+        let gate = Arc::clone(
             gates
                 .entry(key.clone())
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
-        )
+        );
+        GateLease {
+            gates: Arc::clone(&self.claim_gates),
+            key: key.clone(),
+            gate,
+        }
     }
 
     /// Give up a repository's claim so the next request queues a fresh sync.
@@ -3795,22 +3852,6 @@ impl Service {
     /// # Errors
     /// Only failures to *persist* the outcome, which the caller logs.
     pub async fn run_sync_job(
-        &self,
-        job: &SyncJob,
-        cancel: &CancellationToken,
-    ) -> Result<(), DomainError> {
-        let _release = ClaimRelease {
-            in_flight: Arc::clone(&self.in_flight),
-            key: (
-                job.ctx.subject_tenant_id(),
-                format!("{}/{}", job.owner, job.name),
-            ),
-        };
-        self.run_sync_job_inner(job, cancel).await
-    }
-
-    /// The body of [`Self::run_sync_job`], minus the in-flight bookkeeping.
-    async fn run_sync_job_inner(
         &self,
         job: &SyncJob,
         cancel: &CancellationToken,

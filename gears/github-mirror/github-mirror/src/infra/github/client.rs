@@ -2779,4 +2779,8 @@ impl GithubPort for GithubClient {
 
 #[cfg(test)]
 #[path = "client_tests.rs"]
+#[allow(
+    clippy::unwrap_used,
+    reason = "a panic in these tests is the failure report"
+)]
 mod client_tests;

@@ -129,19 +129,17 @@ fn repo_record(id: i64, owner: &str) -> RepoRecord {
 }
 
 #[tokio::test]
-async fn an_owner_past_the_first_page_of_repositories_is_still_found() {
+async fn every_repository_of_an_owner_with_more_than_a_page_is_found() {
     let tenant = Uuid::new_v4();
     let scope = AccessScope::for_tenant(tenant);
     let db = common::inmem_db().await;
     let repos = SeaOrmRepoRepository::new(Arc::new(DBProvider::<DbError>::new(db)));
     let page = i64::try_from(PageWindow::MAX_LIMIT).unwrap();
-    for id in 1..=page {
-        repos
-            .upsert(&scope, tenant, repo_record(id, "other"))
-            .await
-            .unwrap();
-    }
-    for id in [page + 1, page + 2] {
+    repos
+        .upsert(&scope, tenant, repo_record(page + 2, "other"))
+        .await
+        .unwrap();
+    for id in 1..=page + 1 {
         repos
             .upsert(&scope, tenant, repo_record(id, "acme"))
             .await
@@ -150,7 +148,7 @@ async fn an_owner_past_the_first_page_of_repositories_is_still_found() {
 
     let mut ids = repos.ids_by_owner(&scope, "acme").await.unwrap();
     ids.sort_unstable();
-    assert_eq!(ids, [page + 1, page + 2]);
+    assert_eq!(ids, (1..=page + 1).collect::<Vec<_>>());
 }
 
 #[tokio::test]

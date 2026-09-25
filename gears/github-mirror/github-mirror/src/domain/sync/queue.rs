@@ -496,6 +496,29 @@ mod tests {
     }
 
     #[test]
+    fn a_high_priority_repair_is_claimed_before_normal_work() {
+        let queue = TaskQueue::new();
+        let session = Uuid::new_v4();
+        let verify = |number: &str, priority, attempt| NewTask {
+            run: RunIdentity {
+                session_id: session,
+                tenant_id: Uuid::nil(),
+            },
+            kind: TaskKind::Verify(Entity::PullRequest),
+            entity_id: Some(number.to_owned()),
+            priority,
+            attempt,
+        };
+        queue.enqueue_task(&verify("12", TaskPriority::NORMAL, 0));
+        queue.enqueue_task(&verify("13", TaskPriority::HIGH, 1));
+
+        let first = queue
+            .claim_next_task_in(session, &[TaskPhase::Verification])
+            .expect("claim");
+        assert_eq!(first.entity_id.as_deref(), Some("13"));
+    }
+
+    #[test]
     fn sessions_do_not_see_each_other() {
         let queue = TaskQueue::new();
         let mine = Uuid::new_v4();

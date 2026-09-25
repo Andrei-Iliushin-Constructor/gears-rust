@@ -58,7 +58,7 @@ enum PoolEvent {
     /// The gear is stopping.
     Cancelled,
     /// A caller queued another sync.
-    Queued(SyncJob),
+    Queued(Box<SyncJob>),
     /// The job channel closed; no more syncs will arrive.
     QueueClosed,
     /// A running sync ended.
@@ -126,7 +126,7 @@ impl SyncPoolRunner {
             // Stop reading once as many jobs are parked as the channel itself
             // holds, so backpressure still reaches the caller.
             received = self.jobs.recv(), if !draining && parked < SYNC_QUEUE_DEPTH => {
-                received.map_or(PoolEvent::QueueClosed, PoolEvent::Queued)
+                received.map_or(PoolEvent::QueueClosed, |job| PoolEvent::Queued(Box::new(job)))
             }
             Some(joined) = in_flight.join_next(), if !in_flight.is_empty() => {
                 PoolEvent::Finished(joined)
@@ -144,7 +144,7 @@ impl SyncPoolRunner {
         match event {
             PoolEvent::Cancelled => Self::report_stopping(in_flight),
             PoolEvent::Queued(job) => {
-                queue.enqueue(job);
+                queue.enqueue(*job);
                 draining
             }
             PoolEvent::QueueClosed => Self::report_queue_closed(),
@@ -222,6 +222,7 @@ mod tests {
             scope: ScopeConfig::default(),
             force: false,
             since: None,
+            claim: None,
         }
     }
 

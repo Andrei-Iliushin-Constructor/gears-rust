@@ -434,8 +434,7 @@ impl MirrorWorker {
                     continue;
                 }
                 let open = issue.state == "open";
-                let modes = [collection.reactions, collection.timeline];
-                if !modes.iter().any(|mode| mode.includes(open)) {
+                if !collection.wants_issue_detail(open) {
                     continue;
                 }
                 candidates.push(RefinementCandidate {

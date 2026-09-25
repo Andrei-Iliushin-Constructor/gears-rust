@@ -231,7 +231,7 @@ gears:
       server: "sqlite_users"
       file: "github_mirror.db"
       pool:
-        max_conns: 16
+        max_conns: 20
     config:
       api_base_url: "https://api.github.com"
       github_token: "${GITHUB_TOKEN}"

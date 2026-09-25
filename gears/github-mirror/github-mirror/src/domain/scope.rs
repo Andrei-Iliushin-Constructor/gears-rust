@@ -199,6 +199,15 @@ impl Default for CollectionScope {
     }
 }
 
+impl CollectionScope {
+    #[must_use]
+    pub fn wants_issue_detail(self, is_open: bool) -> bool {
+        [self.reactions, self.timeline]
+            .iter()
+            .any(|mode| mode.includes(is_open))
+    }
+}
+
 /// Everything one sync needs to know about what to collect.
 #[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -271,5 +280,31 @@ mod tests {
         assert_eq!(CollectionScope::default().timeline, CollectionMode::None);
         assert_eq!(CollectionScope::default().actions, CollectionMode::Open);
         assert_eq!(CollectionScope::default().reactions, CollectionMode::Open);
+    }
+
+    #[test]
+    fn an_issue_is_refined_when_either_of_its_scopes_wants_it() {
+        let scope = |reactions, timeline| CollectionScope {
+            actions: CollectionMode::None,
+            reactions,
+            timeline,
+        };
+        let cases = [
+            (CollectionMode::All, CollectionMode::None, true, true),
+            (CollectionMode::All, CollectionMode::None, false, true),
+            (CollectionMode::Open, CollectionMode::None, true, true),
+            (CollectionMode::Open, CollectionMode::None, false, false),
+            (CollectionMode::None, CollectionMode::All, false, true),
+            (CollectionMode::None, CollectionMode::Open, false, false),
+            (CollectionMode::None, CollectionMode::None, true, false),
+            (CollectionMode::None, CollectionMode::None, false, false),
+        ];
+        for (reactions, timeline, open, wanted) in cases {
+            assert_eq!(
+                scope(reactions, timeline).wants_issue_detail(open),
+                wanted,
+                "reactions {reactions:?}, timeline {timeline:?}, open {open}"
+            );
+        }
     }
 }
