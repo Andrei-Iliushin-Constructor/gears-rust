@@ -526,7 +526,7 @@ pub struct Service {
     config: ServiceConfig,
     sync_tx: mpsc::Sender<SyncJob>,
     sync_rx: Arc<Mutex<Option<mpsc::Receiver<SyncJob>>>>,
-    in_flight: Arc<Mutex<HashMap<InFlightKey, Claim>>>,
+    in_flight: InFlight,
     /// One gate per repository, so the look, the write and the claim that a
     /// queue request makes are serialised for that repository alone rather than
     /// for the whole gear.
@@ -543,6 +543,22 @@ pub struct Service {
 
 /// One repository of one tenant: what a queued or running sync occupies.
 type InFlightKey = (Uuid, String);
+
+type InFlight = Arc<std::sync::Mutex<HashMap<InFlightKey, Claim>>>;
+
+struct ClaimRelease {
+    in_flight: InFlight,
+    key: InFlightKey,
+}
+
+impl Drop for ClaimRelease {
+    fn drop(&mut self) {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.key);
+    }
+}
 
 /// The sync holding a repository, and what it was asked to collect.
 ///
@@ -699,7 +715,7 @@ impl Service {
             config,
             sync_tx,
             sync_rx: Arc::new(Mutex::new(Some(sync_rx))),
-            in_flight: Arc::new(Mutex::new(HashMap::new())),
+            in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
             claim_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
             shutdown: Arc::new(OnceLock::new()),
         }
@@ -3580,7 +3596,13 @@ impl Service {
             let gate = self.claim_gate(&key);
             let claimed = gate.lock().await;
 
-            if let Some(running) = self.in_flight.lock().await.get(&key).copied() {
+            let running = self
+                .in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&key)
+                .copied();
+            if let Some(running) = running {
                 // Released first: the claim is already copied out, and reading
                 // the running session's status is a database round trip no
                 // other request for this repository needs to wait behind.
@@ -3592,14 +3614,17 @@ impl Service {
             self.sync_sessions
                 .upsert(scope, tenant_id, session.clone())
                 .await?;
-            self.in_flight.lock().await.insert(
-                key.clone(),
-                Claim {
-                    session_id: id,
-                    scope: sync_scope,
-                    since,
-                },
-            );
+            self.in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    key.clone(),
+                    Claim {
+                        session_id: id,
+                        scope: sync_scope,
+                        since,
+                    },
+                );
         }
         if let Err(e) = self
             .mark_repo_status_in(
@@ -3612,7 +3637,7 @@ impl Service {
             )
             .await
         {
-            self.release_in_flight(&key).await;
+            self.release_in_flight(&key);
             self.fail_session(scope, tenant_id, session, e.public_text())
                 .await;
             return Err(e);
@@ -3628,7 +3653,7 @@ impl Service {
             since,
         };
         if let Err(e) = self.sync_tx.try_send(job) {
-            self.release_in_flight(&key).await;
+            self.release_in_flight(&key);
             let reason = format!("sync could not be queued: {e}");
             self.fail_session(scope, tenant_id, session, reason.clone())
                 .await;
@@ -3731,8 +3756,11 @@ impl Service {
     }
 
     /// Give up a repository's claim so the next request queues a fresh sync.
-    async fn release_in_flight(&self, key: &InFlightKey) {
-        self.in_flight.lock().await.remove(key);
+    fn release_in_flight(&self, key: &InFlightKey) {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(key);
     }
 
     /// Take sole ownership of the job stream. The gear's background task calls
@@ -3754,15 +3782,14 @@ impl Service {
         job: &SyncJob,
         cancel: &CancellationToken,
     ) -> Result<(), DomainError> {
-        let outcome = self.run_sync_job_inner(job, cancel).await;
-        // Released on every path, including the error ones: a claim that
-        // outlived its job would block the repository until restart.
-        self.release_in_flight(&(
-            job.ctx.subject_tenant_id(),
-            format!("{}/{}", job.owner, job.name),
-        ))
-        .await;
-        outcome
+        let _release = ClaimRelease {
+            in_flight: Arc::clone(&self.in_flight),
+            key: (
+                job.ctx.subject_tenant_id(),
+                format!("{}/{}", job.owner, job.name),
+            ),
+        };
+        self.run_sync_job_inner(job, cancel).await
     }
 
     /// The body of [`Self::run_sync_job`], minus the in-flight bookkeeping.

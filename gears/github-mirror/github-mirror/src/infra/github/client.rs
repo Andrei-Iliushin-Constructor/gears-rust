@@ -740,7 +740,14 @@ impl GithubClient {
         if let Some(errors) = body.get("errors").and_then(serde_json::Value::as_array)
             && !errors.is_empty()
         {
-            return Err(graphql_refused(errors));
+            if body.get("data").is_none_or(serde_json::Value::is_null) {
+                return Err(graphql_refused(errors));
+            }
+            tracing::warn!(
+                count = errors.len(),
+                answer = ?errors,
+                "GitHub answered a GraphQL query in part; keeping the data it sent"
+            );
         }
 
         Ok(body)
@@ -2379,6 +2386,13 @@ impl GithubPort for GithubClient {
                     break;
                 }
             };
+            let partial = answer
+                .get("errors")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|errors| !errors.is_empty());
+            if partial {
+                threads_complete = false;
+            }
             let page = &answer["data"]["repository"]["pullRequest"]["reviewThreads"];
             if let Some(nodes) = page["nodes"].as_array() {
                 review_threads.extend(
