@@ -322,18 +322,18 @@ impl RepoPhaseRunner {
                     }
                     Err(e)
                         if e.is_transient()
-                            && task.attempt < TRANSIENT_RETRIES
+                            && task.retries < TRANSIENT_RETRIES
                             && !ctx.cancel.is_cancelled() =>
                     {
-                        task.attempt += 1;
+                        task.retries += 1;
                         tracing::warn!(
                             kind = %task.kind,
                             entity_id = ?task.entity_id,
-                            attempt = task.attempt,
+                            retry = task.retries,
                             error = %e,
                             "sync task hit a transient database error; retrying"
                         );
-                        tokio::time::sleep(TRANSIENT_RETRY_DELAY * task.attempt).await;
+                        tokio::time::sleep(TRANSIENT_RETRY_DELAY * task.retries).await;
                     }
                     Err(e) => {
                         queue.fail_task(task.id);

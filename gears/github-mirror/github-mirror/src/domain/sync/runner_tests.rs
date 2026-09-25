@@ -142,11 +142,11 @@ impl Worker for FlakyDiscovery {
         _ctx: &WorkerContext,
         task: &ExtractionTask,
     ) -> Result<(), DomainError> {
-        self.attempts.lock().unwrap().push(task.attempt);
+        self.attempts.lock().unwrap().push(task.retries);
         if let Some(cancel) = &self.cancel_on_first_call {
             cancel.cancel();
         }
-        if task.attempt < self.transient_failures {
+        if task.retries < self.transient_failures {
             return Err(locked());
         }
         if self.then_permanent {

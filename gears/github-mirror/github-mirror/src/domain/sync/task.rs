@@ -272,6 +272,7 @@ pub struct ExtractionTask {
     pub entity_id: Option<String>,
     pub priority: TaskPriority,
     pub attempt: u32,
+    pub retries: u32,
     pub status: TaskStatus,
     pub created_at: DateTime<Utc>,
 }

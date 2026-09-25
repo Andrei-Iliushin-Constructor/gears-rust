@@ -143,6 +143,7 @@ impl TaskQueue {
             entity_id: task.entity_id.clone(),
             priority: task.priority,
             attempt: task.attempt,
+            retries: 0,
             status: TaskStatus::Pending,
             created_at: Utc::now(),
         };

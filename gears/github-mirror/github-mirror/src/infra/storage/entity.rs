@@ -882,8 +882,9 @@ pub mod sync_sessions {
         /// GitHub repository id, filled once the repository row exists.
         pub repo_id: Option<i64>,
         /// `queued`, `in_progress`, `complete`, `failed`, or `interrupted`.
-        /// The middle three are DESIGN §3.7's vocabulary; `queued` and
-        /// `interrupted` are additions the background worker needs.
+        /// The last four are the reference DESIGN §3.7 `extraction_sessions`
+        /// states, `running` and `completed` spelled as the run status spells
+        /// them; `queued` is the one addition, for the background worker.
         pub status: String,
         /// 0-100, monotonically non-decreasing, written by the run's
         /// heartbeat (DESIGN §4 "Progress").

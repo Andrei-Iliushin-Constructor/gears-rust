@@ -109,6 +109,14 @@ const RATE_LIMIT_RETRIES: u32 = 30;
 const UPSTREAM_RETRIES: u32 = 3;
 const UPSTREAM_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
 
+fn graphql_url(api_base_url: &str) -> String {
+    let base = api_base_url.trim_end_matches('/');
+    if let Some(host) = base.strip_suffix("/api/v3") {
+        return format!("{host}/api/graphql");
+    }
+    format!("{base}/graphql")
+}
+
 /// The error a refused GraphQL query ends on.
 ///
 /// Only the count and GitHub's own `type` vocabulary (`NOT_FOUND`,
@@ -686,7 +694,7 @@ impl GithubClient {
         variables: serde_json::Value,
         cancel: &CancellationToken,
     ) -> Result<serde_json::Value, DomainError> {
-        let url = format!("{}/graphql", self.api_base_url.trim_end_matches('/'));
+        let url = graphql_url(&self.api_base_url);
 
         let mut attempt: u32 = 0;
         let mut upstream_attempt: u32 = 0;
@@ -2768,3 +2776,7 @@ impl GithubPort for GithubClient {
         self.cache.clear(scope, &prefixes).await
     }
 }
+
+#[cfg(test)]
+#[path = "client_tests.rs"]
+mod client_tests;

@@ -1566,8 +1566,10 @@ pub trait RepoSyncStatusRepository: Send + Sync {
 ///
 /// `status` holds one of `queued`, `in_progress`, `complete`, `failed`,
 /// `interrupted`; the sync engine owns the transitions (gears-rust#4632).
-/// The middle three come from DESIGN §3.7's `sync_sessions` table; the
-/// other two are additions the background worker needs.
+/// The last four are the reference DESIGN §3.7 `extraction_sessions` states,
+/// with its `running` and `completed` spelled `in_progress` and `complete` to
+/// match the per-repository run status; `queued` is the one addition, for a
+/// job waiting on the background worker.
 #[domain_model]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumString, strum::IntoStaticStr,

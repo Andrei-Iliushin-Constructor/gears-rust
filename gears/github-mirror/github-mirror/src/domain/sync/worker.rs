@@ -103,6 +103,7 @@ mod tests {
             entity_id: None,
             priority: TaskPriority::NORMAL,
             attempt: 0,
+            retries: 0,
             status: TaskStatus::Running,
             created_at: Utc::now(),
         }
